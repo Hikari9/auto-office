@@ -683,6 +683,41 @@ def _dismissed(con, run: dict, scope_id: str, kind: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+MIN_REVIEWED_HEX = 7
+
+
+def reviewed_commit(text: str) -> str | None:
+    """The sha a convergence reply states on its last REVIEWED_COMMIT line, or None."""
+    stated = None
+    for raw in text.splitlines():
+        m = re.match(r"^REVIEWED_COMMIT\s*[:=]?\s*(\S+)", review_parse._clean(raw), re.I)
+        if m:
+            stated = m.group(1).strip("`'\"*.,;")
+    return stated
+
+
+def commit_problem(commit: str, stated: str | None) -> str | None:
+    """Why `stated` is not the composed `commit` (a prefix of at least MIN_REVIEWED_HEX hex characters), else None."""
+    if not stated:
+        return "the reply has no REVIEWED_COMMIT line"
+    if not re.fullmatch(r"[0-9a-f]+", stated.lower()) or len(stated) < MIN_REVIEWED_HEX:
+        return f"REVIEWED_COMMIT {stated!r} is not a commit sha of at least {MIN_REVIEWED_HEX} hex characters"
+    if not commit.lower().startswith(stated.lower()):
+        return f"REVIEWED_COMMIT {stated} is not the composed commit {commit[:12]}"
+    return None
+
+
+def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
+    """Record on a completed reviewer outcome the commit its reply states, so `ingest`
+    can reject a review of another commit. Returns the problem, or None when it matches."""
+    if outcome.get("status") != contract.COMPLETED or not outcome.get("dispatch_id"):
+        return None
+    reply = paths.run_dir(run["id"]) / "dispatches" / outcome["dispatch_id"] / "reply.txt"
+    text = reply.read_text(encoding="utf-8", errors="replace") if reply.is_file() else ""
+    outcome["reviewed_commit"] = reviewed_commit(text)
+    return commit_problem(commit, outcome["reviewed_commit"])
+
+
 def job_convergence_review(con, run: dict, job: dict) -> dict:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
@@ -744,10 +779,22 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
         away = job["payload"].get("exclude_routes")
         # A review-only re-run starts a new reviewer, never the earlier session.
-        outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                     exclude=exclude or None,
-                                     resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
-                                     review_override=pinned, prefer_not=away)
+        resume = resume if not (exclude or job["payload"].get("review_only")) else None
+        reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
+        for attempt in range(reprompts + 1):
+            outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
+                                         exclude=exclude or None, resume_from=resume, review_override=pinned,
+                                         prefer_not=away)
+            problem = _stamp_reviewed_commit(run, commit, outcome)
+            if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
+                break  # ingest turns a still-wrong commit into INVALID_RESULT
+            # The same reviewer is asked again, in its own session when the harness can resume it: a stale
+            # checkout path or commit from an earlier round is the usual cause (#706).
+            resume = outcome["dispatch_id"]
+            role_line, _, rest = brief.partition("\n")
+            brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
+                     f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
+                     f"REVIEWED_COMMIT {commit}.\n{rest}")
     finally:
         gates.remove_checkout(run, checkout)
     with db.transaction(con):
@@ -1007,6 +1054,12 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     if gates._already_decided(con, run, gate, outcome):
         return  # one round, one result (#403)
+    if gate["kind"] == "convergence_review" and "reviewed_commit" in outcome and outcome.get("status") == contract.COMPLETED:
+        problem = commit_problem(gate["input_key"].partition(":")[2], outcome["reviewed_commit"])
+        if problem:
+            # A review of another commit is no review of this one: no verdict, no finding, no round spent (#706).
+            outcome = {**outcome, "status": contract.INVALID_RESULT, "verdict": None, "parsed": None,
+                       "summary": f"{problem}; the reply was not ingested"}
     status = outcome.get("status") or contract.UNAVAILABLE
     verdict = outcome.get("verdict") if status == contract.COMPLETED else None
     parsed = outcome.get("parsed")

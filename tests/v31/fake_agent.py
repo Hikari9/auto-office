@@ -186,6 +186,12 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
     if "-o" in args and harness == "codex":  # codex: -o <file>; gemini: -o <format>
         out_file = args[args.index("-o") + 1]
     reply = action.get("reply")
+    if reply and role == "convergence_reviewer" and "REVIEWED_COMMIT" not in reply and action.get("stamp", True):
+        # A scripted lane review states the commit it was asked to review, as a real reviewer does (#706).
+        # "stamp": false omits the line; "stamp_chars": n states only the first n characters of the sha.
+        m = re.search(r"^REVIEWED_COMMIT ([0-9a-f]{7,64}) is the commit under review", prompt, re.M)
+        if m:
+            reply = f"REVIEWED_COMMIT {m.group(1)[:action.get('stamp_chars') or 64]}\n{reply}"
     if reply == "auto" and role == "probe":
         # A route that can see: actually decode the probe PNG's pixels.
         images = [m.lstrip("@") for m in re.findall(r"(@?\S+probe\.png)", prompt + " " + " ".join(args))]
