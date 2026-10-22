@@ -208,3 +208,112 @@ def test_route_payload_records_unknown_quota_and_status_shows_it():
     note = guide._quota_unknown_note(con, {"id": "T1", "current_dispatch_id": "D1"})
     assert note == "T1 routed on unknown quota: claude: command timed out after 20 seconds"
     assert guide._quota_unknown_note(con, {"id": "T2", "current_dispatch_id": None}) is None
+
+
+_FAMILIES = {
+    "gemini": {"status": "ok", "tightest_remaining_percent": 0, "reset_time": "g"},
+    "claude": {"status": "ok", "tightest_remaining_percent": 80, "reset_time": "c"},
+}
+
+
+def _probe_stdout(monkeypatch, payload):
+    candidates._QUOTA_CACHE.clear()
+    monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", "0")
+    monkeypatch.setattr(candidates.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps(payload)))
+    return candidates.probe_quota(_adapter(["probe"], harness="agy"))
+
+
+def test_probe_keeps_per_family_result(monkeypatch):
+    result = _probe_stdout(monkeypatch, {"tightest_remaining_percent": 0,
+                                         "families": {**_FAMILIES, "x": {"status": "unknown"}}})
+    assert result["families"]["claude"] == {"status": "ok", "tightest_remaining_percent": 80.0, "reset_time": "c"}
+    assert result["families"]["x"]["status"] == "unknown" and result["families"]["x"]["cause"]
+
+
+def test_probe_without_families_stays_harness_wide(monkeypatch):
+    assert _probe_stdout(monkeypatch, {"tightest_remaining_percent": 42}) == {
+        "status": "ok", "tightest_remaining_percent": 42.0}
+
+
+def _agy(model, quota):
+    return {"adapter_id": "agy", "harness": "agy", "model_id": model, "quota": quota}
+
+
+def test_quota_for_candidate_is_per_family_for_agy_only():
+    quota = {"status": "ok", "tightest_remaining_percent": 50.0, "families": candidates._normalize_probe_result(
+        {"tightest_remaining_percent": 50, "families": _FAMILIES}, None)["families"]}
+    assert candidates.quota_for_candidate(_agy("gemini-3.8-flash", quota), quota)["tightest_remaining_percent"] == 0
+    assert candidates.quota_for_candidate(_agy("claude-opus-5-5", quota), quota)["tightest_remaining_percent"] == 80
+    assert candidates.quota_for_candidate(_agy("gpt-oss-120b", quota), quota)["tightest_remaining_percent"] == 80
+    # a family the probe did not report, and a probe with no families, stay harness-wide
+    assert candidates.quota_for_candidate(_agy("mystery-1", quota), quota) is quota
+    plain = {"status": "ok", "tightest_remaining_percent": 42.0}
+    assert candidates.quota_for_candidate(_agy("gemini-3.8-flash", plain), plain) is plain
+    other = {"adapter_id": "codex", "harness": "codex", "model_id": "gemini-x", "quota": quota}
+    assert candidates.quota_for_candidate(other, quota) is quota
+
+
+def _routable(harness, model, quota):
+    return {
+        "harness": harness, "adapter_id": harness, "harness_version": "2.0", "model_id": model,
+        "invocation_model_id": model, "effort": "high", "capabilities": ["builder"],
+        "benchmark_indexes": {"Artificial Analysis Intelligence Index v4.3.2": 45},
+        "price_fields": {"output_per_mtok": 2.0, "input_per_mtok": 0.5},
+        "speed_fields": {"output_tok_per_s": 100.0, "ttft_ms": 1000},
+        "cost": {"money_estimate": 2.0}, "quota": quota,
+    }
+
+
+def _route(cands):
+    from office import routing
+    return routing.route({
+        "role": "worker", "playbook": "Change", "candidates": cands,
+        "policy": {"cost_policy": "balanced", "required_capabilities": ["builder"], "quota_reserve_percent": 5},
+        "evidence": {"routes": {}, "pooling": {"prior_strength": 8}},
+        "routing_seed": "family-quota", "adaptive_config": {"exploration": {"rate": 0}},
+    })
+
+
+def _agy_family_quota():
+    return {"status": "ok", "tightest_remaining_percent": 50.0, "families": candidates._normalize_probe_result(
+        {"tightest_remaining_percent": 50, "families": _FAMILIES}, None)["families"]}
+
+
+def test_zero_gemini_family_is_rejected_even_when_other_candidates_are_unknown():
+    unknown = {"status": "unknown", "tightest_remaining_percent": None}
+    cands = [_routable("agy", "gemini-3.8-flash", _agy_family_quota()), _routable("claude", "opus", unknown)]
+    result = _route(cands)  # the agy candidate keeps the harness-wide quota: resolved in-router
+    assert result["status"] == "selected"
+    assert result["selected"].startswith("claude@")
+    assert any(r["stage"] == 6 and "gemini-3.8-flash" in r["candidate"] for r in result["rejected"])
+
+
+def test_zero_gemini_family_still_leaves_agy_claude_eligible():
+    quota = _agy_family_quota()
+    result = _route([_routable("agy", "gemini-3.8-flash", quota), _routable("agy", "claude-sonnet-5-5", quota)])
+    assert result["selected"].startswith("agy@") and "claude-sonnet-5-5" in result["selected"]
+    assert any(r["stage"] == 6 and "gemini-3.8-flash" in r["candidate"] for r in result["rejected"])
+    rows = {r["route"]: r for r in result["routing"]["candidates"]}
+    claude_row = next(r for k, r in rows.items() if "claude-sonnet-5-5" in k)
+    assert claude_row["quota"]["state"] == "80% left"
+
+
+def test_zero_claude_family_rejects_agy_claude_and_leaves_gemini_eligible():
+    quota = _agy_family_quota()
+    fam = quota["families"]
+    fam["gemini"], fam["claude"] = fam["claude"], fam["gemini"]  # claude 0%, gemini 80%
+    result = _route([_routable("agy", "gemini-3.8-flash", quota), _routable("agy", "claude-sonnet-5-5", quota)])
+    assert result["selected"].startswith("agy@") and "gemini-3.8-flash" in result["selected"]
+    assert any(r["stage"] == 6 and "claude-sonnet-5-5" in r["candidate"] for r in result["rejected"])
+    rows = {r["route"]: r for r in result["routing"]["candidates"]}
+    assert next(r for k, r in rows.items() if "gemini-3.8-flash" in k)["quota"]["state"] == "80% left"
+
+
+def test_unknown_top_level_keeps_family_quota():
+    result = candidates._normalize_probe_result(
+        {"tightest_remaining_percent": None, "cause": "gemini family quota not reported",
+         "families": {"gemini": {"status": "unknown", "tightest_remaining_percent": None},
+                      "claude": {"status": "ok", "tightest_remaining_percent": 80}}}, lambda c: {"status": "unknown", "tightest_remaining_percent": None, "cause": c})
+    assert result["status"] == "unknown" and result["cause"] == "gemini family quota not reported"
+    assert result["families"]["claude"]["tightest_remaining_percent"] == 80.0

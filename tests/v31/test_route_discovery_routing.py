@@ -539,9 +539,10 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     # Benchmark-only and ineligible rows are never offered for discovery.
     cat = {s["candidate"]: s["category"] for s in skipped}
     assert cat["codex/gpt-6-luna@none"] == "not-eligible"
-    agy_sonnet = [c for c in pool if c["harness"] == "agy" and c["model_id"] == "claude-sonnet-5-5"]
-    assert {label(c) for c in agy_sonnet} == {
-        f"agy/claude-sonnet-5-5@{effort}" for effort in ("low", "medium", "high")}
+    # Sonnet and the other Opus rows launched with banner evidence and are plain candidates; Opus low
+    # never showed its banner, so it stays a discovery row.
+    agy_claude = [c for c in pool if c["harness"] == "agy" and c["model_id"].startswith("claude-")]
+    assert {label(c) for c in agy_claude} == {"agy/claude-opus-5-5@low"}
     assert not [c for c in pool if c["model_id"] == "gpt-6-luna"]
 
 

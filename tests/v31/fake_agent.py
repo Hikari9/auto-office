@@ -156,8 +156,9 @@ def _act(argv, prompt, env, cwd, in_process, out, err):
         return 0
     if not prompt.strip() and args:
         prompt = args[-1]
-        if prompt.startswith("--prompt="):
-            prompt = prompt[len("--prompt="):]
+        for flag in ("--prompt=", "--print="):  # agy's executor binds the prompt to --print=
+            if prompt.startswith(flag):
+                prompt = prompt[len(flag):]
     first = prompt.strip().splitlines()[0] if prompt.strip() else ""
     role = _role(first)
     scenario_file = Path(env["FAKE_SCENARIO"])

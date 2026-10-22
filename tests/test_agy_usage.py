@@ -106,3 +106,132 @@ def test_unreadable_json_names_file(agy, tmp_path):
 def test_docstring_names_both_paths(agy):
     assert "~/.gemini/antigravity-cli/antigravity-oauth-token" in agy.__doc__
     assert "~/.gemini/jetski-standalone-oauth-token" in agy.__doc__
+
+
+def test_process_quota_reports_independent_model_families(agy):
+    result = agy.process_quota({
+        "buckets": [
+            {
+                "modelId": "gemini-3.8-flash-high",
+                "remainingFraction": 0.73,
+                "resetTime": "2026-10-21T10:00:00Z",
+            },
+            {
+                "modelId": "claude-sonnet-5-5-medium",
+                "remainingFraction": 0.0,
+                "resetTime": "2026-10-21T16:00:00Z",
+            },
+        ]
+    })
+
+    assert result["families"] == {
+        "gemini": {
+            "tightest_remaining_percent": 73,
+            "reset_time": "2026-10-21T10:00:00Z",
+            "status": "ok",
+        },
+        "claude": {
+            "tightest_remaining_percent": 0,
+            "reset_time": "2026-10-21T16:00:00Z",
+            "status": "ok",
+        },
+    }
+    assert result["tightest_remaining_percent"] == 73
+
+
+SUMMARY = {"groups": [
+    {"displayName": "Gemini Models", "buckets": [
+        {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.9668508,
+         "resetTime": "2026-10-22T03:07:25Z"},
+        {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 1,
+         "resetTime": "2026-10-21T09:52:36Z"},
+    ]},
+    {"displayName": "Claude and GPT models", "buckets": [
+        {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.9922192,
+         "resetTime": "2026-10-28T04:44:18Z"},
+        {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.0,
+         "resetTime": "2026-10-21T09:44:18Z"},
+    ]},
+]}
+
+
+def test_summary_families_take_the_tightest_window_per_group(agy):
+    assert agy.summary_families(SUMMARY) == {
+        "gemini": {"tightest_remaining_percent": 96, "reset_time": "2026-10-22T03:07:25Z", "status": "ok"},
+        "claude": {"tightest_remaining_percent": 0, "reset_time": "2026-10-21T09:44:18Z", "status": "ok"},
+    }
+
+
+@pytest.mark.parametrize("summary", [None, {}, {"groups": "x"}, {"groups": [{"displayName": "Other", "buckets": []}]},
+                                     {"groups": [{"displayName": "Gemini Models", "buckets": [{"bucketId": "g"}]}]}])
+def test_summary_families_unusable_input_yields_nothing(agy, summary):
+    assert agy.summary_families(summary) == {}
+
+
+def _main_json(agy, monkeypatch, capsys, summary):
+    raw = {"buckets": [
+        {"modelId": "gemini-3.8-flash-high", "remainingFraction": 0.5, "resetTime": "g"},
+        {"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.8, "resetTime": "c"},
+    ]}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, summary, None))
+    assert agy.main(["--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_main_prefers_account_summary_for_families(agy, monkeypatch, capsys):
+    out = _main_json(agy, monkeypatch, capsys, SUMMARY)
+    assert out["family_source"] == "retrieveUserQuotaSummary"
+    assert out["families"]["gemini"]["tightest_remaining_percent"] == 96
+    assert out["families"]["claude"]["tightest_remaining_percent"] == 0
+    assert out["tightest_remaining_percent"] == 96  # legacy number is the Gemini family result
+
+
+@pytest.mark.parametrize("flags", [[], ["--claude"], ["--all"], ["--all", "--claude"]])
+def test_legacy_number_is_gemini_family_for_every_flag_combination(agy, monkeypatch, capsys, flags):
+    raw = {"buckets": [
+        {"modelId": "gemini-3.8-flash-high", "remainingFraction": 0.5, "resetTime": "g"},
+        {"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.1, "resetTime": "c"},
+        {"modelId": "other-model", "remainingFraction": 0.0, "resetTime": "o"},
+    ]}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None))
+    assert agy.main(["--json", *flags]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["families"]["gemini"]["tightest_remaining_percent"] == 50
+    assert out["tightest_remaining_percent"] == 50
+
+
+def test_legacy_number_is_unknown_when_gemini_family_has_no_source(agy, monkeypatch, capsys):
+    raw = {"buckets": [{"modelId": "claude-sonnet-5-5-high", "remainingFraction": 0.8, "resetTime": "c"}]}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None))
+    assert agy.main(["--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["tightest_remaining_percent"] is None and out["cause"]
+    assert out["families"]["gemini"]["status"] == "unknown" and out["families"]["gemini"]["cause"]
+    assert out["families"]["claude"]["tightest_remaining_percent"] == 80
+    assert agy.main(["--percent"]) == 2
+
+
+def test_bucket_without_fraction_is_unknown_not_full(agy):
+    result = agy.process_quota({"buckets": [{"modelId": "gemini-3.8-flash-high", "resetTime": "g"}]})
+    assert result["tightest_remaining_percent"] is None
+    assert result["families"]["gemini"]["status"] == "unknown"
+
+
+def test_main_falls_back_to_per_model_buckets_without_summary(agy, monkeypatch, capsys):
+    out = _main_json(agy, monkeypatch, capsys, None)
+    assert out["family_source"] == "retrieveUserQuota"
+    assert out["families"]["gemini"]["tightest_remaining_percent"] == 50
+    assert out["families"]["claude"]["tightest_remaining_percent"] == 80
+
+
+def test_summary_failure_does_not_fail_the_probe(agy, monkeypatch):
+    monkeypatch.setattr(agy, "get_refreshed_access_token", lambda: ("tok", None))
+    calls = []
+
+    def post(url, token):
+        calls.append(url)
+        return ({"buckets": []}, None) if url == agy.QUOTA_URL else (None, "boom")
+
+    monkeypatch.setattr(agy, "_post_quota", post)
+    assert agy.fetch_agy_quota() == ({"buckets": []}, None, None)
+    assert calls == [agy.QUOTA_URL, agy.SUMMARY_URL]

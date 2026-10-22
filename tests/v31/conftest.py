@@ -225,8 +225,15 @@ class Env:
         if not restored:
             self._init_repo()
         _use_source()
-        from office import dispatch
+        from office import candidates, dispatch
         from office.util import claim_identity
+        # The scripted fakes assume the default executor is not agy: its worker profile has a wall cap, so
+        # an agy executor runs as a real process that no in-process patch reaches. The Claude rows agy
+        # launches with banner evidence are dispatchable in the seed; a test hides them from routing here.
+        seed_rows = candidates.catalog_rows
+        monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+            {**r, "dispatchable": False} if r.get("invocation_harness") == "agy"
+            and str(r.get("model_id", "")).startswith("claude-") else r for r in seed_rows()])
         # A disposable state home: reporters working it are reclaimed when this
         # owner process ends, even if the directory survives an interrupted
         # teardown (#501).
