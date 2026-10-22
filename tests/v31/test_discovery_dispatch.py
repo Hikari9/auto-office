@@ -519,11 +519,23 @@ def test_a_recorded_route_is_never_traded_for_a_trial_or_probed(cold):
     assert _audit(cold)["dispatch"]["source"] == "plan" and _audit(cold)["discovery"]["blocked"] == "pinned-route"
 
 
+def test_an_unquoted_cold_route_cannot_bypass_admission_as_a_user_declaration(cold):
+    with pytest.raises(state.Refused, match="no qualifying executor route"):
+        dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high")
+    assert not cold.dispatches() and not cold.leases()
+    assert not cold.trials() and not cold.events() and not cold.cache()
+    assert not cold.con.execute("SELECT 1 FROM outbox WHERE kind='launch_agent'").fetchone()
+
+
 def test_a_declared_route_is_dispatched_as_asked_without_a_probe_or_a_trial(cold):
-    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high")
+    quote = f"Use codex/{SOL}@high for this task."
+    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high", quote=quote)
     (d,) = cold.dispatches()
     assert d["triple"] == cold.sol["high"] and not cold.trials() and not cold.events() and not cold.cache()
-    assert json.loads(d["override_json"])["declared"] is True and "discovery" not in _route_json(d)
+    assert json.loads(d["override_json"]) == {"by": "user", "declared": True, "triple": d["triple"], "quote": quote}
+    assert "discovery" not in _route_json(d)
+    assert _route_json(d)["route_authority"]["actor"] == "user"
+    assert _route_json(d)["route_authority"]["quote"] == quote
 
 
 def test_an_external_or_stacked_dispatch_is_never_probed(cold):
@@ -802,9 +814,15 @@ def test_an_ignored_generated_file_alone_is_not_work(cold):
     assert cold.trials()[0]["status"] == "fell-back" and len(cold.dispatches()) == 2
 
 
-def test_a_submitted_revision_is_work(cold):
+def test_a_submitted_revision_is_work(cold, monkeypatch):
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
+    # This fixture records a launch without starting a process. Isolate that
+    # precondition so a host /proc race cannot hide the revision-work guard;
+    # live-worker and unreadable-process tests exercise the real scanners.
+    assert state.get_dispatch(cold.con, d["id"])["pid"] is None
+    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path: set())
+    monkeypatch.setattr(dispatch, "_process_table", lambda: [])
     with db.transaction(cold.con):
         cold.con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
                          "requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
@@ -882,13 +900,17 @@ def test_the_launch_job_failing_for_good_recovers_a_trial_and_still_blocks_an_or
 
 
 def test_a_declared_route_that_fails_surfaces_as_it_does_today(cold):
-    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high")
+    quote = f"Use codex/{SOL}@high for this task."
+    dispatch.dispatch(cold.con, state.get_run(cold.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high", quote=quote)
     (d,) = cold.dispatches()
     launched(cold, d)
     dispatch._finish(d["id"], 1, None, "nonzero", 0.1)
     assert "trial_recovery" not in _kinds(cold) and not cold.trials()
     relaunch = cold.dispatches()[-1]  # the existing environment-retry relaunch, on the route the user declared
     assert relaunch["id"] != d["id"] and relaunch["triple"] == cold.sol["high"]
+    assert _route_json(relaunch)["route_authority"]["actor"] == "user"
+    assert _route_json(relaunch)["route_authority"]["quote"] == quote
+    assert json.loads(relaunch["override_json"])["quote"] == quote
 
 
 def test_amending_a_trial_dispatchs_route_ends_the_trial_and_its_fallback(cold):

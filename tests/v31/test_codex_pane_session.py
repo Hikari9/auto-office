@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import PLAN_ONE, start_inline
-from test_herdr_agent_launch import BUSY, _calls, _fake, _live_dispatch
+from conftest import PLAN_ONE, approved_run, start_inline
+from test_herdr_agent_launch import BUSY, _calls, _fake
 
 SID = "019ff3a4-fbe0-73c0-bf5f-727665d09f20"
 OLD = "00000000-1111-2222-3333-444444444444"
@@ -102,15 +102,22 @@ def _session(env, did):
 def _codex_launch(env, monkeypatch, role="worker", **settings):
     """T1's dispatch, routed to codex (no id assigned at launch), launched into a fake herdr pane."""
     state_file = _fake(env, monkeypatch, reads=[BUSY])
-    run, d = _live_dispatch(env, monkeypatch)
+    from office import db, dispatch, paths, state
+    approved_run(env)
+    # Use the real route admission and persistence path. Relabelling a Claude
+    # dispatch as Codex leaves its recorded candidate inconsistent with the
+    # session, which must fail the resume invocation guard (#707).
+    env.office("dispatch", "T1", "--as", "codex/gpt-5.5@high", "--quote",
+               "Use Codex gpt-5.5 for this test session.",
+               env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    d = state.get_dispatch(con, con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0])
     for key, value in {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:pQ", "OFFICE_LAUNCHER": "herdr", "OFFICE_HERDR_LAND_TIMEOUT": "0",
                        "OFFICE_HERDR_KEY_DELAY": "0", "OFFICE_HERDR_SESSION_WAIT": "0", **settings}.items():
         monkeypatch.setenv(key, value)
-    from office import db, dispatch, paths, state
-    con = env.con()
     with db.transaction(con):
-        con.execute("UPDATE dispatches SET adapter_id='codex', harness='codex', model='gpt-5.5', effort='high', "
-                    "session_id=NULL, role=?, kind=? WHERE id=?",
+        con.execute("UPDATE dispatches SET session_id=NULL, role=?, kind=? WHERE id=?",
                     ("code_reviewer" if role == "reviewer" else "executor",) * 2 + (d["id"],))
     d = state.get_dispatch(con, d["id"])
     con.close()
@@ -175,6 +182,9 @@ def _end_and_close(env, did):
 def test_rerun_resume_continues_a_banner_captured_codex_executor_after_its_pane_closed(env, monkeypatch):
     state_file, run, d, ddir, res = _codex_launch(env, monkeypatch, FAKE_HERDR_BANNER=codex_banner(SID))
     _end_and_close(env, d["id"])
+    # Inspect the queued native resume; the closed-pane stub cannot launch a
+    # second agent, whose headless fallback would deliberately start fresh.
+    monkeypatch.setenv("OFFICE_JOBS", "manual")
     _, out = env.office("inspect", "task", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"})
     assert f"session {SID}" in out and "unavailable" not in out, out
     from office import rerun, state
@@ -218,6 +228,7 @@ def test_an_id_herdr_and_the_banner_missed_is_backfilled_from_the_sessions_own_t
     state_file, run, d, ddir, res = _codex_launch(env, monkeypatch)
     assert _session(env, d["id"]) is None
     _end_and_close(env, d["id"])
+    monkeypatch.setenv("OFFICE_JOBS", "manual")
     brief = str(ddir / "brief.md")
     _rollout(env, OLD, env.repo, f"Read the brief at {brief}", role="assistant")  # only quoted by an agent: no
     _rollout(env, OLD, env.tmp, f"Read and carry out the brief at {brief}")  # another cwd: no

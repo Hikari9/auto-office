@@ -82,10 +82,10 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   (`office dispatch T1 T3`). Dispatch runs each task's declared primary route or names the fallback it took and why; when every
   planned route is out, it stops: `office dispatch <task> --reroute`. The effective route (harness, model, effort) is recorded at
   dispatch; `office status` lists it and `office inspect route <task>` adds every change (old/new, reason, actor, time). To change a
-  pending or running task's route: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`. Office follows the
+  pending, running, or accepted task's future route: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`. Office follows the
   recorded route on redispatch and rerun, never swaps it silently, and waives only unverified trust for a declared one; every later routing stage applies. Builder discovery and failed-trial recovery: `docs/route-discovery.md`; explicit pins skip discovery.
-- When the user names a model, dispatch with `--as <harness>/<model>[@effort]` (`--cli "<argv>"` for an exact command, `--external` to
-  only print how to start it). `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
+- When the user names an executor model, dispatch or rerun with `--as <harness>/<model>[@effort] --quote "<user's words>"`; unquoted `--as` is an orchestrator choice under ordinary routing gates. `--cli "<argv>"` selects an exact command; `--external` only prints how to start it.
+  `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
   fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on (another route needs `--fresh`).
 - Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files. User denial blocks automatic and convenience manual routes; scoped user overkill affects matching automatic choices only. Probe passes, learned quality and adapter trust stay separate; only bounded builders trial, never reviewers or final gate roles. Policy, caps, inspect and rollback: `docs/route-discovery.md`.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`

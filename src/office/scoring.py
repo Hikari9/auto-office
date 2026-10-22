@@ -226,13 +226,15 @@ def ensure_trust_schema(con: sqlite3.Connection) -> None:
     """Creates `adapter_trust_acts` if it is not already present on `con`. `runs.db`'s
     `init_db` (owned by T2, `scripts/office_runtime.py`) does not create this table, so
     the write/read paths below ensure it defensively rather than editing that file."""
+    was_in_transaction = con.in_transaction
     con.execute(
         "CREATE TABLE IF NOT EXISTS adapter_trust_acts("
         "id TEXT PRIMARY KEY, triple TEXT NOT NULL, target_state TEXT NOT NULL, "
         "actor_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_reference TEXT, "
         "recorded_at TEXT NOT NULL)"
     )
-    con.commit()
+    if not was_in_transaction:
+        con.commit()
 
 
 def record_trust_act(

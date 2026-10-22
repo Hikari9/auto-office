@@ -121,7 +121,7 @@ def test_a_sticky_rerun_keeps_the_recorded_route_and_adds_no_change(env):
 
 def test_a_first_dispatch_with_as_records_the_deviation_and_stays_declared(env):
     _approve(env)
-    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", env=EXTERNAL)
+    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", env=EXTERNAL)
     assert code == 0, out
     (event,) = _events(env)
     assert (event["before"], event["after"], event["kind"], event["actor"]) == (
@@ -143,7 +143,7 @@ def _trust(monkeypatch, triple, trust_state="valid-unverified"):
 def test_a_redispatch_follows_a_declared_unverified_route_on_the_users_authority(env, monkeypatch):
     _approve(env)
     _trust(monkeypatch, CODEX)
-    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", env=EXTERNAL)
+    code, out = env.office("dispatch", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", env=EXTERNAL)
     assert code == 0, out
     env.office("revoke", "T1", env=EXTERNAL, check=0)
     code, out = env.office("dispatch", "T1", env=_quota(env))
