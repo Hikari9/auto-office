@@ -558,7 +558,8 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
                              checks_summary: str, carried: list[dict], checkout: str, round_no: int,
                              requirements: dict | None = None, evidence: dict | None = None,
                              max_rounds: int | None = None, used_codes: list[str] | None = None,
-                             self_reviews: dict | None = None) -> str:
+                             self_reviews: dict | None = None, plan: dict | None = None,
+                             dismissed: list[dict] | None = None, requirements_quote: str | None = None) -> str:
     """One independent convergence review of a composed lane or shared scope (#337)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
@@ -568,13 +569,22 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         f"ROUND {round_no} of {max_rounds or contract.MAX_ROUNDS} substantive rounds",
     ]
     if requirements:
+        out.append(f"REQUIREMENTS r{run.get('requirements_version', '?')} (current user-owned requirements)")
         out += _lines("REQUIREMENTS done criteria:", requirements.get("done_criteria"))
         out += _lines("non-goals:", requirements.get("non_goals"))
+        if requirements.get("user_changes"):
+            out += _lines("USER REQUIREMENTS AMENDMENTS (later clarifications govern earlier wording):",
+                          requirements["user_changes"])
+        if requirements_quote:
+            out.append(f"Latest requirements authority quote: {requirements_quote!r}")
     for t in tasks:
         out.append(f"TASK {t['id']} {t['title']} | envelope {', '.join(t.get('scope') or []) or 'none'}"
                    + (f" | depends {', '.join(t['depends'])}" if t.get("depends") else "")
                    + (f" | interfaces {'; '.join(t['interfaces'])}" if t.get("interfaces") else ""))
         out += [f"  accept: {a}" for a in (t.get("accept") or [])]
+        if t.get("accepted_revision_id"):
+            out.append(f"  accepted revision: {t['accepted_revision_id']}; contract v{t.get('contract_version')}; "
+                       f"acceptance v{t.get('acceptance_version')}")
     out += [f"REVISION {revision['id']} commit {revision['commit_sha'][:12]}; a read-only checkout is at {checkout}",
             f"DETERMINISTIC CHECKS {checks_summary}",
             "Each executor already ran its checks and a four-lens self-review (security, edge cases, platform/build, "
@@ -586,6 +596,17 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         for f in carried:
             out.append(f"- {f['code']} [{f.get('level') or f.get('severity')}, "
                        f"{'blocking' if f.get('blocking') else 'non-blocking'}] {f.get('location') or ''} {f['summary']}")
+    if dismissed:
+        out.append("DISMISSED FINDINGS (settled for the recorded rationale; do not repeat the same finding under a new "
+                   "ID. If new evidence materially changes it, explain that difference):")
+        for f in dismissed:
+            out.append(f"- {f['code']} {f.get('location') or ''} {f['summary']} | dismissed by "
+                       f"{f.get('disposition_by') or 'orchestrator'} | rationale: {f.get('disposition_note')!r}")
+            if f.get("authority_quote"):
+                out.append(f"  User authority quote: {f['authority_quote']!r}")
+    if plan:
+        out += ["", f"CURRENT PLAN p{plan['version']} (implementation context; the user requirements above retain authority):",
+                plan["body"]]
     out += used_codes_line(used_codes)
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",

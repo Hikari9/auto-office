@@ -589,6 +589,10 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
         return False
     new = composed["commit"]
     latest = _latest(con, run, scope["id"], old)
+    if any(gate_members(g) is not None and gate_members(g) != scope["tasks"] for g in latest.values()):
+        # The same bytes do not prove an expanded task contract. A new lane
+        # member needs a fresh packet/review even when it changes no file (#687).
+        return False
     if prior in CONVERGED and not all(_satisfied(con, run, scope["id"], g, new, tree=composed["tree"])
                                       for g in latest.values()):
         return False
@@ -668,6 +672,17 @@ def _carried(con, run: dict, scope_id: str, kind: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _dismissed(con, run: dict, scope_id: str, kind: str) -> list[dict]:
+    rows = con.execute("SELECT code, location, summary, disposition_by, disposition_note, "
+                       "(SELECT quote FROM authorizations a WHERE a.run_id=findings.run_id AND a.kind='dismissal' "
+                       "AND a.target=findings.scope || ':' || findings.code AND a.revoked_at IS NULL "
+                       "ORDER BY a.created_at DESC LIMIT 1) AS authority_quote FROM findings "
+                       "WHERE run_id=? AND scope=? AND gate_kind=? AND disposition='dismissed' "
+                       "GROUP BY code, fingerprint ORDER BY MIN(disposition_at)",
+                       (run["id"], scope_id, kind)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def job_convergence_review(con, run: dict, job: dict) -> dict:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
@@ -675,7 +690,9 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
     run = state.get_run(con, run["id"])
     scope = find_scope(con, run, gate["scope"])
     st = scope_state(run, gate["scope"])
-    if scope is None or gate["input_key"] != f"{gate['scope']}:{st.get('commit')}":
+    if (scope is None or gate["input_key"] != f"{gate['scope']}:{st.get('commit')}"
+            or _key(con, run, scope) != st.get("key")
+            or (gate_members(gate) is not None and gate_members(gate) != scope["tasks"])):
         with db.transaction(con):
             con.execute("UPDATE gates SET status='stale', stale_reason='scope recomposed', finished_at=? WHERE id=?",
                         (now_iso(), gate["id"]))
@@ -711,11 +728,15 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                 rev = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()
                 ev = briefs.evidence_path(run, rev["dispatch_id"], t["accepted_revision_id"]) if rev else None
                 evidence[t["id"]] = ev.read_text(encoding="utf-8", errors="replace") if ev and ev.is_file() else None
+        requirements = state.current_requirements(con, run["id"])
         brief = briefs.convergence_review_brief(
-            run, scope, tasks, _rev(scope["id"], commit), diff, "; ".join(checks), _carried(con, run, scope["id"],
+            {**run, "requirements_version": requirements["version"]}, scope, tasks, _rev(scope["id"], commit), diff,
+            "; ".join(checks), _carried(con, run, scope["id"],
                                                                                          "convergence_review"),
-            str(checkout), int(gate["round"] or 1), state.current_requirements(con, run["id"])["frozen"],
+            str(checkout), int(gate["round"] or 1), requirements["frozen"],
             evidence=evidence, self_reviews=self_reviews, max_rounds=contract.round_cap(run),
+            plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
+            dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
         exclude = list(st.get("exclude_routes") or [])
         resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
@@ -901,19 +922,27 @@ def _visual_blocked(con, run: dict, gate: dict, evidence_status: str, cause: str
 # ------------------------------------------------------------------ ingest
 
 def _owners(con, run: dict, scope: dict, f: dict) -> list[str]:
+    location = (f.get("location") or "").strip()
+    path = location.split(":")[0].strip().strip("`").removeprefix("./")
+    # A concrete file outside every lane member's envelope is an orchestrator
+    # scope gap. Reviewer-declared owners cannot grant write authority (#720).
+    # Area-only visual findings retain the existing coordinated repair path.
+    file_path = bool(path and ("/" in path or re.search(r"\.[\w-]+$", path) or re.search(r":\d+(?:\D|$)", location)))
+    hit = [tid for tid in scope["tasks"]
+           if planfile.path_in_scope(path, (state.get_task(con, run["id"], tid) or {}).get("scope") or [])] if path else []
+    other_owner = any(t["status"] != "cancelled" and t["id"] not in scope["tasks"]
+                      and planfile.path_in_scope(path, t.get("scope") or []) for t in state.tasks(con, run["id"])) if path else False
+    if not hit and (file_path or other_owner):
+        return []
     named = [o for o in (f.get("owners") or []) if o in scope["tasks"]]
-    if named:
+    if named and (not file_path or any(o in hit for o in named)):
         return named
     named = [t for t in re.findall(r"\bT\d+\b", (f.get("location") or "") + " " + (f.get("summary") or ""))
              if t in scope["tasks"]]
-    if named:
+    if named and (not file_path or any(o in hit for o in named)):
         return sorted(set(named), key=_tid_key)
-    path = (f.get("location") or "").split(":")[0].strip()
-    if path:
-        hit = [tid for tid in scope["tasks"]
-               if planfile.path_in_scope(path, (state.get_task(con, run["id"], tid) or {}).get("scope") or [])]
-        if hit:
-            return hit
+    if hit:
+        return hit
     return list(scope["tasks"])  # nobody can tell: every producer in the scope repairs it
 
 
@@ -950,8 +979,8 @@ def _record_finding(con, run: dict, scope: dict, gate: dict, f: dict, reviewer: 
                 (now_iso(), run["id"], scope["id"], gate["kind"], f["code"]))
     fp = gates._fingerprint(f)
     first = None
-    for tid in owners:
-        t = state.get_task(con, run["id"], tid) or {}
+    for tid in owners or [None]:
+        t = (state.get_task(con, run["id"], tid) or {}) if tid else {}
         producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (t.get("accepted_revision_id"),)).fetchone()
         fid = "F" + uuid.uuid4().hex[:10]
         con.execute("INSERT INTO findings(id, dispatch_id, reviewer_dispatch_id, status, severity, summary, evidence_hash, "
@@ -1072,6 +1101,20 @@ def settle(con, run: dict, scope: dict) -> None:
     blocking = [dict(r) for r in con.execute(
         "SELECT * FROM findings WHERE run_id=? AND scope=? AND state='open' ORDER BY created_at",
         (run["id"], scope["id"])).fetchall()]
+    gaps = [f for f in blocking if not f.get("task_id")]
+    if gaps:
+        descriptions = []
+        for f in gaps:
+            path = (f.get("location") or "").split(":")[0].strip().strip("`").removeprefix("./")
+            owning_tasks = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"
+                            and planfile.path_in_scope(path, t.get("scope") or [])]
+            descriptions.append(f"{f['code']} {path} (owning tasks: {', '.join(owning_tasks) or 'none'})")
+        detail = ("scope gap: " + "; ".join(descriptions)
+                  + "; coordinate the owning lane's repair or amend the ownership contract before another review")
+        _set_scope(con, run, scope["id"], status="attention", fallback_available=False, detail=detail)
+        state.emit(con, run, "convergence.scope_gap", f"{scope['id']} {detail}",
+                   payload={"scope": scope["id"], "findings": [f["code"] for f in gaps]})
+        return
     cap = contract.round_cap(run)
     if round_no >= cap:
         esc = _escalation(con, run, scope, blocking, latest)
@@ -1372,6 +1415,7 @@ def retry_blocked(con, run: dict) -> list[str]:
                 out.append(s["id"])
             continue
         latest = _latest(con, run, s["id"], st["commit"])
+        retries_before = len(out)
         for kind, g in latest.items():
             if g["status"] == "done" and g.get("review_status") != contract.COMPLETED:
                 gid, _ = _new_gate(con, run, s, _rev(s["id"], st["commit"]), kind, int(g["round"] or 1),
@@ -1379,7 +1423,7 @@ def retry_blocked(con, run: dict) -> list[str]:
                 state.enqueue(con, run, "convergence_review" if kind == "convergence_review" else "lane_visual",
                               {"gate_id": gid, "scope": s["id"]}, dedup_key=f"{kind}:{gid}", max_attempts=2)
                 out.append(f"{s['id']}:{kind}")
-        if out:
+        if len(out) > retries_before:
             _set_scope(con, run, s["id"], status="reviewing", detail="retrying the unavailable review")
     return out
 

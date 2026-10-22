@@ -307,6 +307,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: add a done criterion")
+    s.add_argument("--drop-non-goal", action="append", default=[], metavar="TEXT",
+                   help="requirements: remove the frozen non-goal this names (needs --quote)")
+    s.add_argument("--add-non-goal", action="append", default=[], metavar="TEXT",
+                   help="requirements: add a non-goal (needs --quote)")
     s.add_argument("--add-accept", action="append", default=[], metavar="TEXT",
                    help="add an acceptance criterion to the named task's contract")
     s.add_argument("--drop-accept", action="append", default=[], metavar="TEXT", help="drop a task acceptance criterion")
@@ -973,6 +977,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return amend.amend(con, run, args.scope, delta, contract=args.contract, requirements=args.requirements,
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
+                           drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
                            no_review=args.no_review, reason=args.reason, edits=edits)
     if cmd == "ack":
         from office import amend

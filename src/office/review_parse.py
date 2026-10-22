@@ -107,11 +107,11 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
             else:
                 out.verdict = v
             continue
-        m = re.match(r"^EVIDENCE_STATUS\s*[:=]\s*([A-Z_]+)", line, re.I)
+        m = re.match(r"^EVIDENCE_STATUS\s*[:=]\s*(\S+)", line, re.I)
         if m:
             status = m.group(1).upper()
             if status not in EVIDENCE_STATUSES:
-                out.errors.append(f"unknown evidence status {status}")
+                out.errors.append(f"unknown EVIDENCE_STATUS {status}: use {', '.join(EVIDENCE_STATUSES)}")
             out.evidence_status = status
             continue
         m = re.match(r"^FINDING\s+" + _ID + r"\s*\|(.*)$", line, re.I)
@@ -174,7 +174,7 @@ def parse(text: str, *, plan_review: bool = False, visual: bool = False, contrac
         if not out.defects:
             out.errors.append("PLAN_DEFECT without a DEFECT line")
     if visual and out.evidence_status is None:
-        out.errors.append("no EVIDENCE_STATUS line")
+        out.errors.append(f"no EVIDENCE_STATUS value: use {', '.join(EVIDENCE_STATUSES)}")
     return out
 
 
@@ -218,11 +218,11 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
             else:
                 out.verdict = word
             continue
-        m = re.match(r"^EVIDENCE_STATUS\s*[:=]\s*([A-Z_]+)", line, re.I)
+        m = re.match(r"^EVIDENCE_STATUS\s*[:=]\s*(\S+)", line, re.I)
         if m:
             status = m.group(1).upper()
             if status not in EVIDENCE_STATUSES:
-                out.errors.append(f"unknown evidence status {status}")
+                out.errors.append(f"unknown EVIDENCE_STATUS {status}: use {', '.join(EVIDENCE_STATUSES)}")
             out.evidence_status = status
             continue
         m = re.match(r"^(NEXT|DECISION|WHY|AFFECTS)\s*[:=]?\s+(.+)$", line, re.I)
@@ -256,7 +256,7 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
                               "FINDING F1 | <severity> | <blocking|non-blocking> | <where> | <what> | <fix>")
     not_comparable = visual and out.evidence_status == "INVALID_COMPARISON"
     if visual and out.evidence_status is None:
-        out.errors.append("no EVIDENCE_STATUS line")
+        out.errors.append(f"no EVIDENCE_STATUS value: use {', '.join(EVIDENCE_STATUSES)}")
     if out.verdict is None and not not_comparable:
         out.errors.append("no VERDICT line")
     if out.verdict is not None and not out.next_action:
