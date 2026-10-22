@@ -155,12 +155,24 @@ EMPTY = "> composer empty"
 PRE = [EMPTY, EMPTY]
 
 
-def _fake(env, monkeypatch, gets=(), reads=()) -> Path:
+def _idle_before_busy(reads) -> list:
+    """A busy footer already on the pre-prompt screen proves nothing landed. A script that is just
+    BUSY, or startup screens then BUSY, is the screen after the prompt: the agent's idle composer
+    (PRE, the agent-UI wait and the ctx baseline) comes first."""
+    from office import dispatch
+    reads = list(reads)
+    if reads and reads[-1] == BUSY and all(dispatch._startup_screen(r) for r in reads[:-1]):
+        return [*reads[:-1], *PRE, BUSY]
+    return reads
+
+
+def _fake(env, monkeypatch, gets=(), reads=(), *, launch=True) -> Path:
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
     herdr.chmod(0o755)
     state = env.tmp / "herdr-state.json"
-    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets), "reads": list(reads)}))
+    reads = _idle_before_busy(reads) if launch else list(reads)
+    state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets), "reads": reads}))
     monkeypatch.setenv("FAKE_HERDR_STATE", str(state))
     # No real waiting: the fake answers at once, so session capture and the pause before Enter only cost time.
     monkeypatch.setenv("OFFICE_HERDR_SESSION_WAIT", "0")
@@ -471,7 +483,8 @@ def test_external_dispatch_writes_agent_env_for_a_manual_launch(env, monkeypatch
 
 @pytest.mark.approved
 def test_stable_output_does_not_settle_while_the_pane_is_busy(env, monkeypatch):
-    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY],
+                       launch=False)
     run, d = _live_dispatch(env, monkeypatch)
     from office import dispatch
     out = env.tmp / "reply.txt"
@@ -558,7 +571,8 @@ def test_unreadable_pane_past_the_limit_accepts_stable_output(env, monkeypatch):
 def test_recovered_busy_pane_is_not_settled_by_the_blind_limit(env, monkeypatch):
     monkeypatch.setenv("OFFICE_HERDR_UNKNOWN_LIMIT", "3")
     # Two unreadable samples, then the pane reads busy (resetting the count), then the agent exits.
-    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY])
+    state_file = _fake(env, monkeypatch, gets=["working", "working", "working", "gone"], reads=[BUSY],
+                       launch=False)
     run, d = _live_dispatch(env, monkeypatch)
     from office import dispatch
     samples = iter([{"status": "unknown", "content_hash": None, "busy": None}] * 2)

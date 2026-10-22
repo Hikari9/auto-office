@@ -502,11 +502,45 @@ def _stranded_amendments(con, run: dict) -> list[dict]:
             and not dispatch.scope_holder(con, run, by_id[row["task_id"]])]
 
 
+def _undelivered_amendments(con, run: dict) -> list[dict]:
+    """Unacked deliveries bound to the task's live executor for longer than `idle_stall_s()` (#738).
+
+    Age runs from the latest of the delivery's creation, its first delivery and its
+    recipient's start: a relaunch rebinds old deliveries to the new dispatch, and that
+    dispatch has had no chance to show them yet."""
+    from datetime import timezone
+    from office.util import now_iso, parse_iso
+
+    def moment(value: str):
+        at = parse_iso(value)
+        return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+    rows = con.execute(
+        "SELECT dl.task_id, dl.amendment_id, dl.dispatch_id, dl.created_at, dl.delivered_at, d.started_at, d.launcher "
+        "FROM deliveries dl "
+        "JOIN tasks t ON t.run_id=dl.run_id AND t.id=dl.task_id AND t.current_dispatch_id=dl.dispatch_id "
+        "JOIN dispatches d ON d.id=dl.dispatch_id AND d.role='executor' "
+        "WHERE dl.run_id=? AND dl.status IN ('queued','delivered') AND d.ended_at IS NULL "
+        "AND t.status NOT IN ('accepted','cancelled') ORDER BY dl.created_at", (run["id"],)).fetchall()
+    now, threshold, out = moment(now_iso()), idle_stall_s(), []
+    for row in rows:
+        since = max(moment(v) for v in (row["created_at"], row["delivered_at"], row["started_at"]) if v)
+        if (now - since).total_seconds() >= threshold:
+            out.append({**dict(row), "age": int((now - since).total_seconds())})
+    return out
+
+
 def _amendment_stalls(con, run: dict) -> list[str]:
     from office import rerun
-    return [f"{a['task_id']} amendment {a['amendment_id']} awaits ack from ended executor {a['dispatch_id']}; "
-            f"next: {rerun.recovery_hint(con, run, a['task_id'], fresh=True)} to deliver/ack it"
-            for a in _stranded_amendments(con, run)]
+    out = [f"{a['task_id']} amendment {a['amendment_id']} awaits ack from ended executor {a['dispatch_id']}; "
+           f"next: {rerun.recovery_hint(con, run, a['task_id'], fresh=True)} to deliver/ack it"
+           for a in _stranded_amendments(con, run)]
+    for a in _undelivered_amendments(con, run):
+        prompt = (f'office prompt {a["dispatch_id"]} -- "apply amendment {a["amendment_id"]}, then office ack '
+                  f'{a["amendment_id"]}", or ' if a["launcher"] == "herdr" else "")
+        out.append(f"{a['task_id']} amendment {a['amendment_id']} is unacked by live executor {a['dispatch_id']} "
+                   f"after {a['age']}s; next: {prompt}{rerun.recovery_hint(con, run, a['task_id'])} to deliver/ack it")
+    return out
 
 
 def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:

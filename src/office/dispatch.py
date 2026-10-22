@@ -2751,19 +2751,36 @@ def _agent_up(pane: str, name: str | None = None) -> bool:
     return status in ("idle", "working", "blocked", "done")
 
 
-def _landed_in(text: str | None, baseline_ctx: float | None) -> bool:
+def _screen_shape(text: str | None) -> str:
+    """The screen's words, with what ticks on an unchanged screen (spinner glyphs,
+    timers, counters) removed, so two reads compare equal until the text changes."""
+    return " ".join(re.sub(r"[^A-Za-z]+", " ", _strip_ansi(text)).split())
+
+
+def _landed_in(text: str | None, baseline_ctx: float | None, baseline_screen: str | None = None,
+               prompt: str | None = None) -> bool:
+    """A busy footer proves the prompt landed only when it was not already on the
+    pre-prompt screen (`baseline_screen`): a live executor mid-turn shows one anyway,
+    so the screen must also have changed, and not merely by the prompt sitting typed
+    in the composer (`prompt`). Without a baseline the footer alone counts."""
     if text is None or _startup_screen(text):
         return False
     if _pane_busy(text):
-        return True
+        if baseline_screen is None or not _pane_busy(baseline_screen):
+            return True
+        if (_screen_shape(text) != _screen_shape(baseline_screen)
+                and not (prompt and _composer_holds(text, prompt))):
+            return True
     ctx = _ctx_k(text)
     return ctx is not None and ctx > (baseline_ctx or 0)
 
 
-def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = None, seen=None) -> str:
-    """'landed' once the pane shows a busy footer, the Claude status line's ctx
-    rises above its pre-prompt value, or the harness transcript logs the
-    prompt (`seen`); 'trust' when a folder-trust dialog holds the composer;
+def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = None,
+                   baseline_screen: str | None = None, prompt: str | None = None, seen=None) -> str:
+    """'landed' once the pane shows a busy footer (a screen that already had one
+    before the prompt must also have changed from `baseline_screen`), the Claude
+    status line's ctx rises above its pre-prompt value, or the harness transcript
+    logs the prompt (`seen`); 'trust' when a folder-trust dialog holds the composer;
     else '' at the deadline. `agent prompt` returning without error proves
     nothing, and neither does a `working` status: codex reports it while the
     trust dialog holds the composer empty, and agy reads `idle` mid-turn."""
@@ -2772,7 +2789,7 @@ def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = No
         text = _pane_view(name)
         if _startup_screen(text):
             return "trust"
-        if _landed_in(text, baseline_ctx):
+        if _landed_in(text, baseline_ctx, baseline_screen, prompt):
             return "landed"
         if seen is not None and seen():
             return "landed"
@@ -3042,7 +3059,7 @@ def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
 
 
 def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, baseline_ctx: float | None = None,
-                 seen=None, herdr=_herdr_quiet) -> str:
+                 baseline_screen: str | None = None, seen=None, herdr=_herdr_quiet) -> str:
     """Submit a prompt left typed in the composer with Enter, never by sending
     the text again (that would submit it twice). `agent prompt` writes the text
     and Enter together; a TUI that is not ready to submit yet, or that takes the
@@ -3062,7 +3079,8 @@ def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, ba
             return "landed" if n else "absent"
         time.sleep(delay)
         _press_enter(name, pane, herdr)
-        if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, seen=seen) == "landed":
+        if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, baseline_screen=baseline_screen,
+                          prompt=prompt, seen=seen) == "landed":
             return "landed"
     view = _pane_view(name)
     if view is None:
@@ -3078,11 +3096,13 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) 
     `guard` (a fenced pane's `.guard`, taken from `pane` when it is one) wraps each send; it may raise PaneMismatch."""
     timeout = _land_timeout()
     herdr = _guarded_herdr(guard or getattr(pane, "guard", None))
-    baseline = _ctx_k(_pane_view(name))
+    screen = _pane_view(name)
+    baseline = _ctx_k(screen)
     herdr("agent", "prompt", name, text)
-    if _prompt_landed(name, timeout, baseline_ctx=baseline) == "landed":
+    if _prompt_landed(name, timeout, baseline_ctx=baseline, baseline_screen=screen,
+                      prompt=text) == "landed":
         return "landed"
-    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, herdr=herdr)
+    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, baseline_screen=screen, herdr=herdr)
     return "" if got in ("absent", "unknown") else got
 
 
@@ -3098,9 +3118,10 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
     if ui == "trust":
         return False
-    baseline = _ctx_k(_pane_view(name))
+    screen = _pane_view(name)
+    baseline = _ctx_k(screen)
     herdr("agent", "prompt", name, pointer)
-    got = _prompt_landed(name, timeout, baseline_ctx=baseline, seen=seen)
+    got = _prompt_landed(name, timeout, baseline_ctx=baseline, baseline_screen=screen, prompt=pointer, seen=seen)
     if got == "landed":
         return True
     if got == "trust":
@@ -3111,11 +3132,13 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
         if _await_agent_ui(name, pane, timeout, answer_trust=False, herdr=herdr) != "ready":
             return False
         herdr("agent", "prompt", name, pointer)
-        if _prompt_landed(name, timeout, baseline_ctx=baseline, seen=seen) == "landed":
+        if _prompt_landed(name, timeout, baseline_ctx=baseline, baseline_screen=screen, prompt=pointer,
+                          seen=seen) == "landed":
             return True
     if not _agent_up(pane, name):
         return False
-    held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, seen=seen, herdr=herdr)
+    held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, baseline_screen=screen,
+                        seen=seen, herdr=herdr)
     if held != "absent":
         return held == "landed"
     # Look again right before typing: a pointer held in any form, or a pane
@@ -3131,7 +3154,8 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     for _ in range(2):
         time.sleep(delay)
         herdr("pane", "send-keys", pane, "Enter")
-        if _prompt_landed(name, timeout / 2, baseline_ctx=baseline, seen=seen) == "landed":
+        if _prompt_landed(name, timeout / 2, baseline_ctx=baseline, baseline_screen=screen,
+                          prompt=pointer, seen=seen) == "landed":
             return True
     return False
 
