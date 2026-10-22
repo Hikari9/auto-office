@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from conftest import PLAN_ONE
+from conftest import PLAN_ONE, start_inline
 
 from test_adaptive_dispatch import EXTERNAL, _approve, _quota
 from office import candidates, state
@@ -56,6 +56,31 @@ def test_apply_routing_repins_roles_and_later_dispatches_use_them(env):
     assert config_drift(run) is None, "the re-pinned roles no longer differ from the files"
     (event,) = [json.loads(r[0]) for r in env.con().execute("SELECT payload_json FROM events WHERE kind='run.routing_applied'")]
     assert event["quote"] == "use astra for this run" and event["changed"] == ["roles"]
+
+
+LIST_SEED = "[{model_id: gpt-6-astra, harness: codex, effort: low}]"
+
+
+def test_apply_routing_rebaselines_when_the_files_resolve_to_the_pinned_roles(env):
+    env.trust()
+    start_inline(env, plan=PLAN_ONE, extra=("--set", f"roles.executor.preferred_seed={LIST_SEED}"))
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    pinned = _seed(_run(env))
+    assert pinned == [{"model_id": "gpt-6-astra", "harness": "codex", "effort": "low"}], pinned
+    env.office("config", "roles.executor.preferred_seed", LIST_SEED, env=EXTERNAL, check=0)
+    run = _run(env)
+    assert _seed(run) == pinned
+    assert config_drift(run) and "roles differ" in config_drift(run), config_drift(run)
+    rid = run["id"]
+    code, out = env.office("config", "--run", rid[:8], "--apply-routing", "--quote", "keep it",
+                           env=EXTERNAL)
+    assert code == 0, out
+    assert "re-recorded its drift baseline" in out and "nothing changed" not in out, out
+    run = _run(env)
+    assert _seed(run) == pinned
+    assert config_drift(run) is None
+    (event,) = [json.loads(r[0]) for r in env.con().execute("SELECT payload_json FROM events WHERE kind='run.routing_applied'")]
+    assert event["quote"] == "keep it" and event["changed"] == []
 
 
 def test_apply_routing_repins_the_routing_block_too(env):
