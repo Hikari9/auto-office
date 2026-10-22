@@ -189,4 +189,3 @@ def test_retrying_an_unavailable_sibling_review_preserves_the_scope_gap(env):
     assert _scope(env, "L-T1")["status"] == "approved"
     assert _scope(env, "L-T2")["status"] == "attention"
     assert len([g for g in _gates(env, "convergence_review") if g["scope"] == "L-T2"]) == 1
-
