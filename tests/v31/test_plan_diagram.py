@@ -160,7 +160,16 @@ def test_dispatch_reports_drift_from_the_preview(env):
     env.trust()
     start_inline(env)
     env.office("approve", "plan", "--quote", "approved", check=0)
+    quote = "Use claude/some-future-model@low for this task."
     code, out = env.office("dispatch", "T1", "--as", "claude/some-future-model@low",
+                           "--quote", quote,
                            env={"OFFICE_WORKER_LAUNCHER": "external"})
     assert code == 0, out
     assert "T1 route differs from the plan preview: " in out and "some-future-model@low" in out, out
+    con = env.con()
+    try:
+        did = con.execute("SELECT current_dispatch_id FROM tasks WHERE id='T1'").fetchone()[0]
+        authority = state.get_dispatch(con, did)["route"]["route_authority"]
+        assert authority["actor"] == "user" and authority["quote"] == quote
+    finally:
+        con.close()
