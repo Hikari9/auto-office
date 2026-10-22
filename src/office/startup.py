@@ -44,6 +44,8 @@ _KEYS = {"esc": "esc", "escape": "esc", "enter": "Enter", "up": "up", "down": "d
          "right": "right", "tab": "tab", "space": "space", **{str(n): str(n) for n in range(1, 10)}}
 _OPTION = re.compile(r"^\s*(?:[›❯>▸*]\s*)?(\d{1,2})[.)]\s+(\S.*)$")
 _CURSOR = re.compile(r"^[›❯>▸*]\s*")
+# A viewport that is the tail of a dialog: a selection cursor or a key footer ("Enter to confirm").
+_DIALOG_TAIL = re.compile(r"(?im)^\s*[›❯▸]|\b(?:enter|esc|return)\b.{0,20}\b(?:to|or)\b")
 USER_DECISION = "trust, login, credential, permission and update choices are the user's decision"
 
 
@@ -75,11 +77,38 @@ def _sleep(seconds: float) -> None:
 
 # ------------------------------------------------------------------ screen
 
-def screen_text(pane: str) -> str:
+RECENT_LINES = 12  # how far back a short viewport may borrow context from the recent read
+
+
+def _clean(raw: str, keep: int) -> list[str]:
+    from office import dispatch
+    lines = [ln.rstrip() for ln in dispatch._strip_ansi(raw).splitlines()]
+    return [ln for ln in lines if ln.strip()][-keep:]
+
+
+def _squash(lines: list[str]) -> str:
+    return re.sub(r"\s+", "", "".join(lines))
+
+
+def visible_text(pane: str) -> str:
     """The pane's visible screen, ANSI stripped, last 40 non-empty lines."""
     from office import dispatch
-    lines = [ln.rstrip() for ln in dispatch._strip_ansi(dispatch._pane_visible(pane)).splitlines()]
-    return "\n".join([ln for ln in lines if ln.strip()][-40:])
+    return "\n".join(_clean(dispatch._pane_visible(pane), 40))
+
+
+def screen_text(pane: str) -> str:
+    """The startup screen: the visible read, or, when that carries no recognised marker (a pane
+    shorter than the dialog shows only its options), the last RECENT_LINES of a recent read that
+    does. Only a viewport that looks like a dialog's tail borrows, and the recent read must end
+    with it, so a dialog since answered and scrolled away is never mistaken for the screen up now."""
+    from office import dispatch
+    shown = visible_text(pane)
+    if not shown or label(shown) != UNRECOGNIZED or not _DIALOG_TAIL.search(shown):
+        return shown
+    recent = _clean(dispatch._pane_read(pane), RECENT_LINES)
+    if label("\n".join(recent)) == UNRECOGNIZED or not _squash(recent).endswith(_squash(shown.splitlines())):
+        return shown
+    return "\n".join(recent)
 
 
 def fingerprint(text: str) -> str:
@@ -171,7 +200,7 @@ def _ended(dispatch_id: str) -> bool:
 
 
 def answer_command(dispatch_id: str, opts: list[dict], fp: str) -> str:
-    pick = f"--choice <1-{len(opts)}>" if opts else "--keys <esc|enter|up|down|1-9>"
+    pick = f"--choice <1-{len(opts)}>" if opts else "--keys <esc|enter|up|down>"
     return f"office answer {dispatch_id} {pick} --expect {fp} (or --keys esc --expect {fp})"
 
 
