@@ -58,7 +58,7 @@ LOCK_WAIT_SECONDS = 2.0
 
 
 def _handlers():
-    from office import convergence, dispatch, gates, plans, prs, visual, integration, land
+    from office import convergence, dispatch, gates, plans, prs, visual, integration, land, landing_recovery
     return {
         "converge": convergence.job_converge,
         "convergence_review": convergence.job_convergence_review,
@@ -74,6 +74,7 @@ def _handlers():
         "visual_review": visual.job_visual_review,
         "integrate": integration.job_integrate,
         "auto_rebase": land.job_auto_rebase,
+        "landing_verify": landing_recovery.job_verify,
     }
 
 

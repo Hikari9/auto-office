@@ -154,8 +154,16 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 - Office rewrites only the block above the PR body's `<!-- office:pr ... -->` line; put criteria that report data below it.
 - With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR with `Closes #<issue>`, and
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
-- Landed through a PR Office did not open: `office close --landed-externally <merged-pr-url>`; if that merge lacks an accepted
-  revision, ask the user and add `--quote "<words>"`.
+- If `office land` stops after the task PRs merge, retry it: recorded merges are skipped, default-branch verification resumes,
+  and a recorded successful deploy is not repeated. After it succeeds, run `office close`.
+- `office close --landed-externally <merged-pr-url>` also recovers squash merges. Without original-commit ancestry, Office requires
+  the current accepted integration and review gates, a fresh fetch proving the supplied merge is on the pinned default branch, and
+  either every task's owned PR merged with its accepted head or exact equality with the reviewed integration tree. Historical Office
+  restack/recovery heads need the same independent tree proof. A different tree never qualifies through an unchecked path subset.
+  Office re-runs the approved run and task checks on the merged commit, records their output and the proof in the archive receipt,
+  and refuses if checks fail or the accepted work, requirements, or gates change. Squash proof is separate from commit ancestry;
+  it creates no authorization and does not merge, deploy, or close the issue. If neither proof applies, ask the user and add
+  `--quote "<words>"` only for their explicit confirmation that the PR landed this run's work.
 - Deploys run in a fresh checkout of the landed commit. Each deploy and verify step reports its cwd (`deploy ok: <cmd> (cwd <path>)`),
   and a failure names the same cwd, so a path a command expects is checked against that checkout.
 - Before removing a deploy checkout, Office copies and verifies all untracked and ignored output into a private
