@@ -190,10 +190,10 @@ def test_status_warns_when_quota_config_drifted_since_run_start(env, where):
     assert code == 0 and "config edited" not in out, out
     _write_reserve(user if where == "user" else repo, 3)
     code, out = env.office("status")
-    assert "config edited since run start; not applied to running run" in out, out
+    assert "config differs from files pinned at run start; not applied to running run" in out, out
     assert "quota.reserve_percent pinned 7" in out and "live 3" in out, out
     code, out = env.office("doctor")
-    assert "config edited since run start" in out, out
+    assert "config differs from files pinned at run start" in out, out
 
 
 # ------------------------------------------------------------------ review follow-ups
@@ -238,7 +238,7 @@ def test_start_overrides_are_not_drift_but_file_edits_are(env):
     assert "config edited" not in out, out
     _write_reserve(user, 20)
     code, out = env.office("status")
-    assert "config edited since run start" in out, out
+    assert "config differs from files pinned at run start" in out, out
 
 
 def _make_legacy(env):
@@ -282,7 +282,7 @@ def test_new_run_ignores_a_change_in_shipped_defaults_but_not_a_file_edit(env, m
     assert code == 0 and "config edited" not in out and "config differs" not in out, out
     _write_reserve(env.tmp / "user-config.yaml", 3)
     code, out = env.office("status")
-    assert "config edited since run start" in out, out
+    assert "config differs from files pinned at run start" in out, out
 
 
 def test_session_id_collision_across_harnesses_is_not_an_executor(env):

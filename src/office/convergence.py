@@ -1324,6 +1324,17 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             return (f"{sid}: a review is unavailable ({s['detail']}); re-run only the review on a fallback reviewer: office "
                     f"review {sid} [--as <route>]; or office resume retries it; a waiver is the last resort")
         if s["status"] == "evidence_blocked":
+            # A missing browser is an environment repair, not a contract edit
+            # or another specialist review. Read the full gate summary: the
+            # scope's bounded status detail may cut off the install command.
+            from office import visual
+            capture = _latest(con, run, sid, s["commit"]).get("visual") or {}
+            install = (visual.missing_browser_install(capture.get("summary") or "")
+                       if capture.get("evidence_status") == "CAPTURE_BLOCKED" else None)
+            if install:
+                return (f"{sid} evidence_blocked: {install}, then office resume re-captures. "
+                        "office doctor verifies the browser can launch; the required screenshots are still missing, "
+                        "so a review fallback cannot approve this evidence")
             # No valid visual evidence means a review fallback cannot inspect
             # the required screenshots. Retrying the same deterministic capture
             # will loop; the orchestrator must correct the visual contract (#573).

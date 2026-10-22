@@ -26,6 +26,25 @@ def draft(root: Path, run: dict) -> Path:
     return Path(root) / rel(run)
 
 
+def display(run: dict) -> str:
+    """An inline planner can follow this path even from a linked checkout."""
+    root = Path(run["repo_root"])
+    return rel(run) if root == Path.cwd() else str(draft(root, run))
+
+
+def orchestrator_root(run: dict, identity: tuple[Path, Path]) -> Path | None:
+    """Inline drafts follow their run's root across linked caller checkouts.
+
+    Dedicated planners keep their dispatch worktree. Choosing a run from
+    another repository does not select that caller's unrelated default draft;
+    an explicit --plan remains the way to choose a file outside the run repo.
+    """
+    checkout, common = identity
+    if run.get("planner_mode") == "dedicated":
+        return checkout
+    return Path(run["repo_root"]) if common == Path(run["git_common_dir"]) else None
+
+
 def relocate_legacy(con, root: Path) -> str | None:
     """Move a legacy .office/PLAN.md out of the shared path. Returns a warning
     line when it moved something."""

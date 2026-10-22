@@ -105,19 +105,19 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     if ident is None:
         raise Usage("no-repository", "office start must run inside a git repository",
                     next_step="cd into the repository, then office start")
-    top, common = ident
+    caller_top, common = ident
     # One read of the config files feeds both the pinned policy and the raw
     # file blocks recorded as its drift baseline (no defaults, no --set), so an
     # edit during start cannot pin one value and record another; a later drift
     # check compares files to files, and neither a launch override nor a
     # changed shipped default reads as an edit.
-    files = cfg.read_files(top)
+    files = cfg.read_files(caller_top)
     try:
-        config, warnings = cfg.resolve(top, sets, files=files)
+        config, warnings = cfg.resolve(caller_top, sets, files=files)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}",
                     next_step="fix ~/.config/auto-office/config.yaml or .auto-office/config.yaml, then retry")
-    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(top, files)}
+    pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(caller_top, files)}
     risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
@@ -143,7 +143,13 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                         "pins the v3.1 contract", next_step="drop --review-rounds")
         gates["convergence_max_rounds"] = contract.check_round_cap(review_rounds)
         gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]
-    base_sha = _safe_start_base(top, base)
+    # HEAD and relative refs belong to the caller, even when its linked
+    # checkout is disposable. All later Git work uses the durable anchor.
+    base_sha = _safe_start_base(caller_top, base)
+    top = paths.repository_anchor(common, checkout=caller_top)
+    if top is None:
+        raise Usage("repository-unavailable", f"cannot locate a durable repository root for {common}",
+                    next_step="restore the main checkout or shared Git directory, then retry office start")
     run_id = new_run_id()
     sdir = paths.run_dir(run_id)
     sdir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +245,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
         if source:
             res.add(f"derived from {short(source['id'])}: requirements carried over; "
-                    + (f"its plan p{source['plan']['version']} is the draft at {planpath.rel(run)} (review it, then "
+                    + (f"its plan p{source['plan']['version']} is the draft at {planpath.display(run)} (review it, then "
                        "office submit)" if source.get("plan") else "no plan to carry"))
         from office import candidates
         report_con = db.connect()
@@ -251,6 +257,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             res.add(line)
         if planner_problem:
             res.notices.append(planner_problem)
+        if top != caller_top:
+            res.notices.append(f"run repository: {top}; the caller's selected base and configuration are pinned")
         moved = planpath.relocate_legacy(con, top)
         if moved:
             res.notices.append(moved)
@@ -264,7 +272,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         if planner_mode == "dedicated":
             res.next = "no action; the plan will return here (office status)"
         else:
-            res.next = f"write the plan to {planpath.rel(run)} (office submit --help shows the format), then office submit"
+            res.next = f"write the plan to {planpath.display(run)} (office submit --help shows the format), then office submit"
         res.data = {"run_id": run_id, "office_version": ver, "gear": gear, "risk": risk, "gates": gates,
                     "planner_mode": planner_mode, "bound": [f"{h}:{s}" for h, s in bound], "warnings": warnings}
         res.verbose = [f"office_version {ver} (created by {exact})", f"state {sdir}", f"base {base_sha[:12]}",
@@ -295,6 +303,10 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
         if by_session:
             raise discovery.refuse_executor_binding(by_session[0], by_session[1], "this session")
     with root_wake.rebind_fence(con, [] if worker else keys), db.transaction(con):
+        # Binding writes repository-local indexes. Verify/recover the Git
+        # root before those writes can recreate a deleted directory (#704).
+        reconcile(con, run)
+        run = state.get_run(con, run["id"])
         if not worker:
             # Only `office resume <run>` is an explicit choice that wins across repositories;
             # a bare resume binds by cwd and yields like an `office start` binding.
@@ -302,7 +314,6 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
             bound, how = discovery._binding(con, keys)
             kept = target.source == "session" and bound is not None and bound["id"] == run["id"] and how == "resume"
             discovery.bind(con, run, keys, "resume" if target.source == "flag" or kept else "resume-cwd")
-        reconcile(con, run)
         if not worker:
             # An explicit resume is the retry for an integration that failed on
             # something fixed outside Office (a stray worktree, missing deps).
@@ -330,6 +341,10 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
 def reconcile(con, run: dict) -> list[str]:
     """Repair runtime-owned state after an interruption. Caller holds the tx."""
     notes = []
+    repository_note = reconcile_repository(con, run)
+    if repository_note:
+        notes.append(repository_note)
+        run = state.get_run(con, run["id"])
     for d in con.execute("SELECT * FROM dispatches WHERE run_id=? AND status IN ('launching','running')",
                          (run["id"],)).fetchall():
         d = dict(d)
@@ -353,6 +368,29 @@ def reconcile(con, run: dict) -> list[str]:
         jobs.on_permanent_failure(con, run, job, job.get("error") or "worker process died")
         notes.append(f"{g['task_id']} {g['kind']} gate {g['id']}: its job had failed; gate settled")
     return notes
+
+
+def reconcile_repository(con, run: dict) -> str | None:
+    """Recover a removed caller without repinning. Caller holds the transaction."""
+    root = Path(run["repo_root"])
+    common = Path(run["git_common_dir"])
+    # An index writer can recreate .office/ after the checkout disappeared;
+    # that directory alone does not make the repository usable again.
+    if state.is_terminal(run) or (root.is_dir() and ((root / ".git").exists()
+                                                    or root == common and (common / "HEAD").is_file())):
+        return None
+    anchor = paths.repository_anchor(common)
+    if anchor is None:
+        raise Refused("repository-unavailable", f"recorded run repository {root} is missing; "
+                      f"no available root matches its shared Git directory {common}",
+                      scope=f"run {short(run['id'])}", preserved="run state, pinned base, evidence and reviews",
+                      next_step=f"restore the repository at {root} or its shared Git directory at {common}, "
+                                f"then office resume {short(run['id'])}")
+    state.update_run(con, run["id"], repo_root=str(anchor))
+    note = f"run repository recovered: {root} was removed; using {anchor} with the same shared Git directory"
+    state.emit(con, run, "run.repository_reanchored", note,
+               payload={"before": str(root), "after": str(anchor), "git_common_dir": str(common)})
+    return note
 
 
 def close(con, run: dict, *, handoff: str | None = None) -> Result:

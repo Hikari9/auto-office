@@ -139,3 +139,27 @@ def repo_identity(cwd: Path | str | None = None) -> tuple[Path, Path] | None:
 def primary_checkout(common_dir: Path) -> Path:
     """The main worktree for a git common dir (`<repo>/.git` -> `<repo>`)."""
     return common_dir.parent if common_dir.name == ".git" else common_dir
+
+
+def repository_anchor(common_dir: Path, *, checkout: Path | None = None) -> Path | None:
+    """A durable Git cwd, verified against the run's common directory (#704).
+
+    A linked checkout has its own git dir under the shared one; do not retain
+    that caller-owned checkout as a run root. A primary checkout using
+    --separate-git-dir is already durable and keeps its actual working root.
+    Without a caller (recovery), only the common directory's primary root may
+    replace a missing recorded path, and only if Git proves the same identity.
+    """
+    common_dir = common_dir.resolve()
+    try:
+        if checkout is not None:
+            git_dir = git(checkout, "rev-parse", "--absolute-git-dir")
+            if Path(git_dir).resolve() == common_dir:
+                return checkout.resolve()
+        anchor = primary_checkout(common_dir)
+        actual = git(anchor, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if actual and Path(actual).resolve() == common_dir:
+            return anchor
+    except (GitError, OSError):
+        pass
+    return None

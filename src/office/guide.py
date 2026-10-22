@@ -88,7 +88,7 @@ def next_action(con, run: dict) -> str:
     if not run["plan_version"]:
         if run.get("planner_mode") == "dedicated":
             return "no action; the planner is working (office status)"
-        return f"write {planpath.rel(run)} (office submit --help shows the format), then office submit"
+        return f"write {planpath.display(run)} (office submit --help shows the format), then office submit"
     plan = state.current_plan(con, run["id"])
     from office import planfile
     if planfile.parse(plan["body"]).questions and not plans._answered(con, run):

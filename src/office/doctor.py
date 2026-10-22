@@ -33,10 +33,10 @@ def _visual_capture_status() -> tuple[str, bool]:
             browser.close()
     except Exception as error:
         reason = (str(error).splitlines() or [type(error).__name__])[0][:240]
-        if "Executable doesn't exist" in str(error):
-            install = f"{shlex.quote(sys.executable)} -m playwright install chromium-headless-shell"
+        install = visual.missing_browser_install(error)
+        if install:
             return (f"visual capture: Chromium headless shell missing ({reason}); "
-                    f"install the matching browser: {install}", True)
+                    f"{install}", True)
         return (f"visual capture: Chromium headless shell cannot launch ({reason}); "
                 "check Playwright browser installation and system dependencies", True)
     return "visual capture: playwright and Chromium headless shell available", False

@@ -194,8 +194,9 @@ def config_drift(run: dict) -> str | None:
     live values never reach that run.
 
     A run that recorded its files' raw quota/roles blocks at start compares
-    files to files, so only a real file edit warns (a --set at start or a
-    changed shipped default does not). An older run has no such baseline: its
+    files to files, so a --set at start or a changed shipped default does not
+    warn. A durable root may have different files from the original linked
+    caller, so a difference alone does not prove an edit. An older run has no such baseline: its
     pinned quota/roles are compared to the live resolved values, and the
     notice does not claim a cause."""
     pinned = run.get("policy") or {}
@@ -220,7 +221,7 @@ def config_drift(run: dict) -> str | None:
             if not differ:
                 return None
             diffs = [d for d in diffs if d[0].split(".", 1)[0] in differ]
-            return (f"config edited since run start; not applied to running run {short} "
+            return (f"config differs from files pinned at run start; not applied to running run {short} "
                     f"({', '.join(differ)} differ{': ' + _describe(diffs) if diffs else ''})")
     except OSError as e:
         return _unreadable(short, e.filename or "the config files", e)
