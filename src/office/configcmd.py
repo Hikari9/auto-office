@@ -465,27 +465,37 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
         changed.append("routing")
     short = run["id"][:8]
-    if not changed:
-        return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
-    policy.update({b: live.get(b) for b in blocks})
-    policy[route_policy.PROVENANCE_KEY] = live[route_policy.PROVENANCE_KEY]
-    policy[route_policy.DIGEST_KEY] = route_policy.policy_digest(policy)
     recorded = policy.get(cfg.FILE_BLOCKS_KEY)
-    if recorded is not None:
+    now = cfg.file_blocks(repo, files) if recorded is not None else None
+    # The roles baseline is stale when a file edit resolves to the same roles (e.g. the pinned seed
+    # written back): nothing re-pins, but config_drift still reads the file as drift until re-recorded.
+    rebaseline = recorded is not None and any(
+        (now.get(t) or {}).get("roles") != (recorded.get(t) or {}).get("roles") for t in ("user", "repo"))
+    if not changed and not rebaseline:
+        return Result(lines=[f"run {short} already routes from the current config files; nothing changed"])
+    if changed:
+        policy.update({b: live.get(b) for b in blocks})
+        policy[route_policy.PROVENANCE_KEY] = live[route_policy.PROVENANCE_KEY]
+        policy[route_policy.DIGEST_KEY] = route_policy.policy_digest(policy)
+    if rebaseline:
         # The drift baseline for roles follows the re-pin, so a later edit still reads as drift.
-        now = cfg.file_blocks(repo, files)
         for tier in ("user", "repo"):
             base = {k: v for k, v in (recorded.get(tier) or {}).items() if k != "roles"}
             if "roles" in now.get(tier, {}):
                 base["roles"] = now[tier]["roles"]
             recorded[tier] = base
+    if changed:
+        msg = f"run {short} re-pinned {' and '.join(changed)} from the config files"
+        line = f"run {short} re-pinned {' and '.join(changed)} from the config files (\"{quote.strip()}\")"
+    else:
+        msg = f"run {short} re-recorded its drift baseline from the config files; nothing re-pinned"
+        line = f"run {short} re-recorded its drift baseline from the config files; its routing already matches (\"{quote.strip()}\")"
     with db.transaction(con):
         state.update_run(con, run["id"], policy=policy)
-        state.emit(con, run, "run.routing_applied",
-                   f"run {short} re-pinned {' and '.join(changed)} from the config files",
+        state.emit(con, run, "run.routing_applied", msg,
                    payload={"quote": quote.strip(), "changed": changed})
-    return Result(lines=[f"run {short} re-pinned {' and '.join(changed)} from the config files (\"{quote.strip()}\")"],
-                  next="later dispatches of this run route from the re-pinned policy",
+    return Result(lines=[line],
+                  next="later dispatches of this run route from the re-pinned policy" if changed else None,
                   data={"run": run["id"], "changed": changed})
 
 
