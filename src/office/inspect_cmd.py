@@ -115,6 +115,8 @@ def _task(con, run, tid) -> Result:
                          "ORDER BY started_at",
                          (run["id"], tid)).fetchall():
         ov = json.loads(d["override_json"] or "{}")
+        from office import dispatch as dispatch_mod
+        harness = dispatch_mod.cli_harness(ov.get("cli")) or d["harness"]  # a dispatch recorded before the row did
         lines.append(f"dispatch {d['id']} {d['role']} {d['triple']} {d['status']} {d['terminal_classification'] or ''} "
                      f"applied p{d['applied_plan_version'] or '-'} via {d['launcher'] or '-'}"
                      + (" | user override" + (f" --cli {ov['cli']}" if ov.get("cli") else "") if ov.get("by") else "")
@@ -122,7 +124,7 @@ def _task(con, run, tid) -> Result:
                         if (d["resumed_from"] or ov.get("resumed_from")) else "")
                      + (f" | pane {d['pane_id']}" if d['pane_id'] else "")
                      + (f" | session {d['session_id']}" if d["session_id"]
-                        else f" | session unavailable: {d['harness'] or 'harness'} exposes none"))
+                        else f" | session unavailable: {harness or 'harness'} exposes none"))
     for d in con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? ORDER BY started_at",
                          (run["id"], tid)).fetchall():
         launch_file = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "launch.json"

@@ -996,6 +996,23 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
 
 # ------------------------------------------------------------------ launch request
 
+def cli_harness(cli: str | None) -> str | None:
+    """The known harness a `--cli` argv launches: its executable matched against adapter ids,
+    adapter executables and Herdr kinds. None when the argv names no known harness."""
+    try:
+        argv = shlex.split(cli or "")
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    exe = Path(argv[0]).name
+    for aid, adapter in adapters.load_all().items():
+        kinds = {p.get("herdr_kind") for p in (adapter.get("office_profiles") or {}).values() if isinstance(p, dict)}
+        if exe in {aid, Path(adapters.executable(adapter) or "").name, *kinds} - {""}:
+            return aid
+    return None
+
+
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
                    base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
                    replaces: str | None = None) -> str:
@@ -1030,6 +1047,8 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         _record_routing(con, run, decision)
         note_route(con, run, task, decision)
     cand = decision["candidate"]
+    # A --cli override runs its own argv: record the harness that executable is, not the routed one.
+    executing = cli_harness((decision.get("launch") or {}).get("cli")) or cand["harness"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     lease = acquire_lease(con, run, task, dispatch_id, role)
     executor = role == "executor"
@@ -1050,8 +1069,8 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
         (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
          (decision.get("selection_disclosure") or {}).get("reason"), run.get("playbook"), now_iso(), task_id, role,
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
-         lease["id"], cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
-         applied, dumps(_route_payload(decision)),
+         lease["id"], executing, cand.get("invocation_model_id"), cand.get("effort"),
+         executing if executing != cand["harness"] else cand.get("adapter_id"), applied, dumps(_route_payload(decision)),
          (task.get("descriptor") or {}).get("task_size") if executor else None, predecessor))
     if task.get("descriptor"):
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
