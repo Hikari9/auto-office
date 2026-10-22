@@ -422,7 +422,8 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
         # quarantine or a known exhausted reserve on a later automatic launch.
         if scoring.evaluate_trust_state(con, triple)[1] == "quarantined":
             raise Refused("route-unavailable", f"{triple} is quarantined", scope=task["id"])
-        quota = candidates.probe_quota(adapters.load_all()[cand["harness"]])
+        quota = candidates.quota_for_candidate(
+            decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
         decision["candidate"]["quota"] = quota
         reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
         if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None

@@ -17,6 +17,10 @@ DISPLAY = {
 }
 
 
+# Launch evidence is recorded per row; a row whose banner never named it stays gated.
+UNVERIFIED_LAUNCH = {("claude-opus-5-5", "low")}
+
+
 def _seed():
     return yaml.safe_load((paths.resources_root() / "catalog/seed.yaml").read_text())
 
@@ -34,9 +38,13 @@ def test_agy_claude_rows_use_local_display_names_and_match_benchmarks():
     for key, display_name in DISPLAY.items():
         row = agy[key]
         assert row["invocation_model_id"] == display_name
-        assert row["invocation_source"] == "local-evidence:agy models"
-        assert row["dispatchable"] is False
-        assert row["discovery"] == "eligible"
+        if key in UNVERIFIED_LAUNCH:
+            assert row["invocation_source"] == "local-evidence:agy models"
+            assert row["dispatchable"] is False
+            assert row["discovery"] == "eligible"
+        else:  # dispatchable only with a launch whose banner named this exact model (see the row comment)
+            assert row["invocation_source"].startswith("local-evidence:agy 1.4.3 startup banner")
+            assert row["dispatchable"] is True
         if key == ("claude-sonnet-5-5", "low"):
             assert row["benchmark_indexes"] == {}
             assert "no published" in row["source_snapshot_metadata"]["notes"].lower()
@@ -87,21 +95,22 @@ def test_unknown_model_refusal_lists_catalog_add_remediation(request):
 
 
 def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(request):
+    # claude-opus-5-5@low is the one Agy Claude row still gated, so its trust act reports the remaining gate.
     env = request.getfixturevalue("env")
     approved_run(env, executor=[{"write": {"calc.py": "def add(a, b):\n    return a + b\n"},
                                   "submit": False}] * 3)
 
-    route = "agy@1/claude-sonnet-5-5@medium"
-    alias = "agy/claude-sonnet-5-5@medium"
+    route = "agy@1/claude-opus-5-5@low"
+    alias = "agy/claude-opus-5-5@low"
     con = env.con()
     canonical_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
     alias_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
-    code, output = env.office("approve", "trust", "agy/claude-sonnet-5-5@medium",
+    code, output = env.office("approve", "trust", "agy/claude-opus-5-5@low",
                               "--quote", "Approve this cataloged Agy route")
     assert code == 0, output
     assert f"{route} trust recorded as proven" in output
     assert "remaining gate: conformance probe required" in output
-    assert "remedy: office doctor --probe-route agy/claude-sonnet-5-5@medium" in output
+    assert "remedy: office doctor --probe-route agy/claude-opus-5-5@low" in output
     canonical_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
     alias_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
     assert canonical_after == canonical_before + 1

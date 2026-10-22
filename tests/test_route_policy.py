@@ -112,9 +112,8 @@ def test_shipped_discovery_catalog_exactly_matches_locked_choices():
     expected = {(h, m, e) for h, m in (("codex", "gpt-6.1-sol"), ("claude", "claude-haiku-5-5"))
                 for e in ("low", "medium", "high", "xhigh", "max")}
     expected.add(("agy", "gemini-3.8-flash", "high"))
-    expected.update(("agy", model, effort)
-                    for model in ("claude-sonnet-5-5", "claude-opus-5-5")
-                    for effort in ("low", "medium", "high"))
+    # The other five Agy Claude rows are dispatchable with launch evidence; Opus low never showed its banner.
+    expected.add(("agy", "claude-opus-5-5", "low"))
     assert actual == expected
     for row in rows:
         if row.get("dispatchable") is False:

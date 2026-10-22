@@ -120,6 +120,86 @@ class TestAdapterConformance(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn('Token file not found', res.stderr)
 
+    def test_agy_family_quota_routes_each_model_family_independently(self):
+        from unittest.mock import patch
+        from office import adaptive, candidates, routing
+
+        rows = [
+            {
+                'model_id': 'gemini-3.8-flash',
+                'invocation_model_id': 'gemini-3.8-flash-high',
+                'invocation_harness': 'agy',
+                'invocation_source': 'local-evidence:test',
+                'effort': 'high',
+                'dispatchable': True,
+            },
+            {
+                'model_id': 'claude-sonnet-5-5',
+                'invocation_model_id': 'Claude Sonnet 5.5 (High)',
+                'invocation_harness': 'agy',
+                'invocation_source': 'local-evidence:test',
+                'effort': 'high',
+                'dispatchable': True,
+            },
+        ]
+        quota = {
+            'status': 'ok',
+            'tightest_remaining_percent': 0,
+            'families': {
+                'gemini': {
+                    'status': 'ok',
+                    'tightest_remaining_percent': 0,
+                    'reset_time': '2026-10-21T10:00:00Z',
+                },
+                'claude': {
+                    'status': 'ok',
+                    'tightest_remaining_percent': 80,
+                    'reset_time': '2026-10-21T16:00:00Z',
+                },
+            },
+        }
+        with patch.object(candidates, 'catalog_rows', return_value=rows), \
+                patch.object(candidates.adapters, 'installed', return_value=True), \
+                patch.object(candidates.adapters, 'route_version', return_value='1.4.3'):
+            built, skipped = candidates.build_candidates(
+                None,
+                'worker',
+                probe=False,
+                quota_snapshot={'agy': quota},
+                user_policies=[],
+            )
+
+        self.assertEqual(skipped, [])
+        by_family = {candidates.model_family(c['model_id']): c for c in built}
+        self.assertEqual(by_family['gemini']['quota']['tightest_remaining_percent'], 0)
+        self.assertEqual(by_family['claude']['quota']['tightest_remaining_percent'], 80)
+        self.assertEqual(adaptive._quota_component(by_family['claude'], 5)[1], '80% left')
+
+        result = routing.route({
+            'role': 'worker',
+            'playbook': 'Change',
+            'policy': {'quota_reserve_percent': 5},
+            'candidates': built,
+        })
+        self.assertIn('/claude-sonnet-5-5@high', result['selected'])
+        self.assertTrue(any(
+            rejection['stage'] == 6 and '/gemini-3.8-flash@high' in rejection['candidate']
+            for rejection in result['rejected']
+        ))
+
+        legacy = {'status': 'ok', 'tightest_remaining_percent': 42}
+        with patch.object(candidates, 'catalog_rows', return_value=rows), \
+                patch.object(candidates.adapters, 'installed', return_value=True), \
+                patch.object(candidates.adapters, 'route_version', return_value='1.4.3'):
+            legacy_built, _ = candidates.build_candidates(
+                None,
+                'worker',
+                probe=False,
+                quota_snapshot={'agy': legacy},
+                user_policies=[],
+            )
+        self.assertTrue(all(c['quota'] == legacy for c in legacy_built))
+
 import pytest as _pytest  # noqa: E402
 
 pytestmark = _pytest.mark.legacy  # tests the 3.0 scripts/ surface
