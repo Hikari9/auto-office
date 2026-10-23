@@ -121,7 +121,12 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(result['selected'], fallback_id)
         refusal = next(r for r in result['rejected'] if r['candidate'] == target_id)
         self.assertEqual(refusal['stage'], 6)
+        self.assertEqual(refusal['category'], 'concurrency')
         self.assertIn('concurrency cap reached (2/2)', refusal['reason'])
+        self.assertEqual(target['quota'], {
+            'status': 'ok', 'tightest_remaining_percent': 0, 'projected_burn_percent': 1,
+            'cause': 'concurrency-cap', 'concurrency': {'count': 2, 'cap': 2},
+        })
         self.assertEqual(request['concurrency_snapshot'][target_id], 2)
         self.assertEqual(request['concurrency_snapshot'][other_id], 0)
         replay = current_routing.route(request)
