@@ -42,6 +42,11 @@ def candidate_id(c):
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
 
 
+def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
+    """Stable quota cooldown identity shared by effort variants of one invocation."""
+    return f"{harness or ''}/{invocation_model_id or ''}"
+
+
 def preferred_rank(c, preferred_seed):
     """Index of the first roles.<role>.preferred_seed entry c matches, or None.
 
@@ -477,20 +482,22 @@ def route(request: dict, discovery_input: dict | None = None, *,
             _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
 
-        # A dispatch-reported quota wall temporarily blocks only the exact route
-        # that hit it. Cooldowns live in the shared runs.db across runs/processes.
+        # A dispatch-reported quota wall blocks the same harness invocation across
+        # effort variants. Cooldowns live in shared runs.db across runs/processes.
         now = datetime.now(timezone.utc).isoformat()
-        routes = [(candidate_id(c), c) for c in stage]
+        routes = [(candidate_id(c), cooldown_key(c.get("harness"),
+                                                 c.get("invocation_model_id") or c.get("model_id")), c)
+                  for c in stage]
         rate_limited = set()
         if con and routes:
-            ids = [cid for cid, _ in routes]
+            ids = list(dict.fromkeys(key for _, key, _ in routes))
             placeholders = ",".join("?" for _ in ids)
             rate_limited = {row[0] for row in con.execute(
                 f"SELECT route FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
                 (now, *ids))}
         available = []
-        for cid, c in routes:
-            if cid in rate_limited:
+        for cid, key, c in routes:
+            if key in rate_limited:
                 rejected.append({"candidate": cid, "stage": 6, "category": "rate-limited", "reason": "rate-limited"})
             else:
                 available.append(c)

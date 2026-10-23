@@ -176,10 +176,13 @@ class DerivedRoutingTests(unittest.TestCase):
         from datetime import datetime, timezone
 
         target = cand('opencode', 'muse-free')
+        target_low = {**target, 'effort': 'low'}
         alternate = cand('opencode', 'deepseek-free')
         target_id = current_routing.candidate_id(target)
+        target_low_id = current_routing.candidate_id(target_low)
         alternate_id = current_routing.candidate_id(alternate)
         scoring.record_trust_act(self.db_path, target_id, 'proven', 'rico', 'verified route')
+        scoring.record_trust_act(self.db_path, target_low_id, 'proven', 'rico', 'verified route')
         scoring.record_trust_act(self.db_path, alternate_id, 'proven', 'rico', 'verified route')
         office_db.connect(Path(self.db_path)).close()
 
@@ -202,20 +205,23 @@ class DerivedRoutingTests(unittest.TestCase):
         con = office_db.connect(Path(self.db_path))
         cooldown_columns = {row[1] for row in con.execute("PRAGMA table_info(route_cooldowns)")}
         self.assertNotIn('reason', cooldown_columns)
-        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (target_id,)).fetchone()[0]
+        cooldown_key = 'opencode/muse-free'
+        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (cooldown_key,)).fetchone()[0]
         self.assertEqual(expires, '2026-10-23T09:15:00+00:00')
         con.close()
 
         request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
-                   'candidates': [target, alternate]}
+                   'candidates': [target, target_low, alternate]}
         result = current_routing.route(request)
         self.assertEqual(result['selected'], alternate_id)
         rejected = next(row for row in result['rejected'] if row['candidate'] == target_id)
         self.assertEqual(rejected['category'], 'rate-limited')
         self.assertEqual(rejected['reason'], 'rate-limited')
+        low_rejected = next(row for row in result['rejected'] if row['candidate'] == target_low_id)
+        self.assertEqual(low_rejected['category'], 'rate-limited')
 
         con = office_db.connect(Path(self.db_path))
-        con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (target_id,))
+        con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (cooldown_key,))
         con.close()
         result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
                                         'candidates': [target]})
@@ -223,7 +229,7 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(target['quota']['status'], 'ok')
 
         con = office_db.connect(Path(self.db_path))
-        con.execute("UPDATE route_cooldowns SET expires_at='9999-01-01T00:00:00+00:00' WHERE route=?", (target_id,))
+        con.execute("UPDATE route_cooldowns SET expires_at='9999-01-01T00:00:00+00:00' WHERE route=?", (cooldown_key,))
         con.execute("INSERT INTO runs(id, phase, status) VALUES ('run-success', 'executing', 'running')")
         con.execute("INSERT INTO dispatches(id, run_id, role, kind, status, triple) "
                     "VALUES ('dispatch-success', 'run-success', 'observer', 'observer', 'running', ?)",
@@ -232,8 +238,8 @@ class DerivedRoutingTests(unittest.TestCase):
         with unittest.mock.patch.object(dispatch.db, 'connect', lambda: real_connect(Path(self.db_path))):
             dispatch._finish('dispatch-success', 0, None, 'success', 1.0)
         result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
-                                        'candidates': [target]})
-        self.assertEqual(result['selected'], target_id)
+                                        'candidates': [target_low]})
+        self.assertEqual(result['selected'], target_low_id)
 
     def test_usage_limit_reset_time_overrides_configured_cooldown(self):
         from office import db as office_db, dispatch
@@ -247,7 +253,8 @@ class DerivedRoutingTests(unittest.TestCase):
         dispatch_row = {'id': 'dispatch-reset', 'triple': route, 'log_path': str(log)}
         con = office_db.connect(Path(self.db_path))
         dispatch._record_route_cooldown(con, run, dispatch_row, now=now)
-        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (route,)).fetchone()[0]
+        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?",
+                              ('opencode/muse-free',)).fetchone()[0]
         con.close()
         self.assertEqual(expires, '2026-10-23T13:30:00+00:00')
 
