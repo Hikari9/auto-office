@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -174,6 +175,8 @@ def _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review
             current = state.current_plan(con, run["id"])
             if current is None:
                 raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
+            if plan_text is not None:
+                _check_draft_edit_source(con, run, plan_text, scope_ids, edits)
             plan_text = _apply_edits(plan_text if plan_text is not None else current["body"], scope_ids, edits)
             if plan_path:
                 plan_path.write_text(plan_text, encoding="utf-8")
@@ -209,6 +212,53 @@ def _apply_edits(text: str, scope_ids: list[str], edits: dict) -> str:
     except ValueError as exc:
         raise Usage("bad-contract-edit", str(exc), next_step=EDIT_FORM) from exc
     return text
+
+
+def _check_draft_edit_source(con, run: dict, text: str, scope_ids: list[str], edits: dict) -> None:
+    """Do not match a stored-contract selector against an already changed draft."""
+    fields = {key for key in ("accept", "checks")
+              if edits.get(f"add_{key}") or edits.get(f"drop_{key}")}
+    fields.update((edits.get("set_fields") or {}).keys())
+    drafted = {task["id"]: task for task in planfile.parse(text).tasks}
+    for tid in scope_ids:
+        stored = state.get_task(con, run["id"], tid)
+        changed = sorted(key for key in fields if (drafted.get(tid) or {}).get(key) != stored.get(key))
+        if changed:
+            raise Refused("draft-contract-drift", f"PLAN.md already changes {tid}'s {', '.join(changed)} "
+                          "relative to the stored task contract; structured edits cannot choose between those sources",
+                          scope=tid, preserved="PLAN.md and stored task contract unchanged",
+                          next_step=f'office amend {tid} --contract -- "<apply the draft change>", '
+                          "or restore those draft fields and retry the structured edit")
+
+
+def _authority_command_text(command: str) -> str:
+    """Local build configuration values do not grant release authority.
+
+    Inspect actual argv in each shell segment. Other verbs, later commands,
+    malformed shell text and unknown tools still undergo the authority scan.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return command
+    starts = [0] + [i + 1 for i, token in enumerate(tokens) if token and set(token) <= set(";&|")]
+    changed = False
+    for start, end in zip(starts, starts[1:] + [len(tokens) + 1]):
+        argv = tokens[start:end - 1]
+        if len(argv) < 2 or Path(argv[0]).name != "dotnet" or argv[1] not in ("build", "test"):
+            continue
+        for i, token in enumerate(argv[2:], start=2):
+            if token in ("-c", "--configuration") and i + 1 < len(argv):
+                if argv[i + 1].lower() == "release":
+                    tokens[start + i + 1] = "<build-configuration>"
+                    changed = True
+            elif token.lower() == "--configuration=release":
+                tokens[start + i] = "--configuration=<build-configuration>"
+                changed = True
+    return " ".join(tokens) if changed else command
 
 
 def _scope_ids(con, run: dict, scope: str) -> list[str]:
@@ -319,6 +369,12 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     # delta-only amendment by its delta, which becomes plan text.
     old_lines = set(current["body"].splitlines())
     added = "\n".join(line for line in new_text.splitlines() if line not in old_lines)
+    commands = set()
+    for version in (planfile.parse(current["body"]), parsed):
+        commands.update(version.run_checks)
+        commands.update(command for task in version.tasks for command in task.get("checks") or [])
+    for command in sorted(commands, key=len, reverse=True):
+        added = added.replace(command, _authority_command_text(command))
     authority = AUTHORITY_TERMS.search(added)
     if authority:
         raise Refused("contract-level-change", f"this delta names authority action {authority.group(0)!r} "

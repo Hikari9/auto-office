@@ -22,7 +22,7 @@ ERROR_HEAD = 60
 ROUTINE_REFUSALS = frozenset({
     "not-ready", "user-quote-required", "quote-required", "authorization-required", "usage", "quota",
     "orchestrator-quota-exhausted", "invalid-override", "no-task", "no-run", "no-active-run", "no-such-run",
-    "ambiguous-run", "close-blocked", "unknown-task",
+    "ambiguous-run", "close-blocked", "unknown-task", "plan-invalid", "draft-contract-drift", "bad-contract-edit",
 })
 # Flags that only choose the output format, so they never make a refused command differ from the one `next:` names.
 OUTPUT_FLAGS = frozenset({"--json"})

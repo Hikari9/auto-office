@@ -108,6 +108,7 @@ def parse(text: str) -> ParsedPlan:
     text = strip_generated(text)
     plan = ParsedPlan()
     section = None
+    requirements_section = False
     task: dict | None = None
     list_key: str | None = None
     in_visual = False
@@ -119,6 +120,7 @@ def parse(text: str) -> ParsedPlan:
         m = SECTION.match(line)
         if m and not line.startswith("###"):
             section = m.group(1).strip().lower()
+            requirements_section = requirements_section or section == "requirements"
             task, list_key, in_visual = None, None, False
             continue
         m = TASK_HEADING.match(line)
@@ -233,6 +235,8 @@ def parse(text: str) -> ParsedPlan:
                     req[key] = value
             continue
     plan.requirements = _requirements(req, plan)
+    if requirements_section and not plan.requirements["done_criteria"]:
+        plan.errors.append("run-level Requirements: missing non-empty `done:` list; state the run's acceptance criteria")
     for t in plan.tasks:
         if t["visual"] == {}:
             t["visual"] = None
@@ -322,9 +326,10 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
-    if _unsafe_force_push_requirement(plan):
+    forbidden_requirement = _unsafe_force_push_requirement(plan)
+    if forbidden_requirement:
         plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
-                           "use the Office-owned task PR workflow")
+                           f"offending text: {forbidden_requirement[:200]!r}; use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `scope:` (paths this task may write)")
@@ -339,7 +344,7 @@ def _validate(plan: ParsedPlan) -> None:
         forbidden_push = _unsafe_force_push_in_plan(t)
         if forbidden_push:
             plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
-                               "remove it and use the Office-owned task PR workflow")
+                               f"offending text: {forbidden_push[:200]!r}; remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")
         if t["checks"] is None:

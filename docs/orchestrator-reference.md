@@ -89,6 +89,16 @@ policy maps, shared mocks) go under each task's `shared:`. Tasks that must land 
 outcome, a `converge:`; acceptance needing another lane's result, `accept_needs: T2`; a risky composition,
 `integration_risk: high` (each adds one integrated review).
 
+The Requirements block needs a non-empty `done:` list. Quoted arguments in `checks:` are program data;
+inline `node -e`, `python -c` and read-only `gh api --jq` checks are supported. Shell substitutions are
+still checked, and manual Git pushes, computed executables and unsafe wrapper operands remain refused.
+A refusal identifies the offending text. Fix the draft before resubmitting it.
+
+Structured `--add-check`/`--drop-check` and acceptance edits use the recorded task contract. If PLAN.md
+already changes the same field, apply that draft with `--contract` or restore it before using selectors.
+Local `dotnet build`/`dotnet test` configuration values such as `-c Release` are ordinary checks; an
+actual release or deployment command still requires the appropriate authority.
+
 ## Herdr agents
 
 Inside Herdr, Office starts each dispatch as a real interactive agent in a pane beside yours and confirms the brief pointer

@@ -52,7 +52,7 @@ _KNOWN_GIT_COMMANDS = frozenset({
 
 _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "command", "time"})
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
-_SEPARATORS = frozenset({";", "&", "|", "(", ")"})
+_SEPARATORS = frozenset({";", "&", "|", "(", ")", "\n"})
 
 # Prose words that make a following `git` read as the English noun ("from git
 # for one SHA", "a temp git repo"). Only these relax the unknown-subcommand
@@ -93,9 +93,72 @@ def unsafe_manual_push(command: str, *, prose: bool = False) -> bool:
             if re.match(r"\s*git\s", span.group(2)) and _scan(span.group(2), 0):
                 return True
         command = _INLINE_CODE.sub(lambda match: match.group(2), command)
-        # An apostrophe inside a word ("41806c9's") is English, not a shell quote.
-        command = re.sub(r"(?<=\w)'(?=\w)", "", command)
+        command = _prose_apostrophes(command)
     return _scan(command, 0, prose=prose)
+
+
+def _prose_apostrophes(text: str) -> str:
+    """Keep English possessives out of shell quoting without unquoting commands."""
+    out: list[str] = []
+    quoted = False
+    for i, char in enumerate(text):
+        if char == "'":
+            before = text[i - 1] if i else ""
+            after = text[i + 1] if i + 1 < len(text) else ""
+            if before.isalnum() and after.isalnum():
+                continue
+            if not quoted and before.lower() == "s" and (not after or after.isspace() or after in ".,;:!?)"):
+                continue
+            quoted = not quoted
+        out.append(char)
+    return "".join(out)
+
+
+def _substitutions(text: str):
+    """Yield shell command substitutions, respecting literal single-quoted data.
+
+    Quoted JavaScript/Python/jq arguments are not shell programs. Only actual
+    substitutions and explicit shell/eval operands may be recursively parsed.
+    Nested parentheses are retained for the next scan; escaped delimiters do
+    not start a substitution.
+    """
+    i, quote = 0, ""
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if char == "'" and quote != '"':
+            quote = "" if quote == "'" else "'"
+        elif quote != "'" and char == '"':
+            quote = "" if quote == '"' else '"'
+        elif quote != "'" and (char == "`" or text.startswith("$(", i)):
+            start = i + (1 if char == "`" else 2)
+            j, level, inner_quote = start, 1, ""
+            while j < len(text):
+                ch = text[j]
+                if ch == "\\" and inner_quote != "'":
+                    j += 2
+                    continue
+                if char == "`":
+                    if ch == "`":
+                        break
+                elif ch in ("'", '"'):
+                    if not inner_quote:
+                        inner_quote = ch
+                    elif inner_quote == ch:
+                        inner_quote = ""
+                elif not inner_quote:
+                    if ch == "(":
+                        level += 1
+                    elif ch == ")":
+                        level -= 1
+                        if not level:
+                            break
+                j += 1
+            yield i, min(j + 1, len(text)), text[start:j]
+            i = j
+        i += 1
 
 
 def _is_prohibition(text: str) -> bool:
@@ -129,22 +192,30 @@ def _negated_prose_unsafe(command: str) -> bool:
     """
     text = _INLINE_CODE.sub(lambda m: m.group(2), command.strip())
     if not _PUSH_MENTION.search(text):
-        return _scan(re.sub(r"(?<=\w)'(?=\w)", "", text), 0, prose=True)
+        return _scan(_prose_apostrophes(text), 0, prose=True)
     return not _is_prohibition(text)
 
 
 def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
     if depth > 5:
         return True
-    # For executable shell fields, scan backtick substitution bodies before
-    # shlex tokenizes them; a non-leading substitution can otherwise be missed.
-    if any(_scan(span.group(2), depth + 1, prose=prose) for span in _INLINE_CODE.finditer(command)):
-        return True
+    # Substitutions execute even inside a double-quoted argument. Ordinary
+    # quoted arguments stay data; reparsing every string loses that boundary.
+    parts, cursor = [], 0
+    for start, end, body in _substitutions(command):
+        if _scan(body, depth + 1):
+            return True
+        parts.extend((command[cursor:start], "$_office_substitution"))
+        cursor = end
+    parts.append(command[cursor:])
+    command = "".join(parts)
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
         lexer.whitespace_split = True
+        lexer.whitespace = " \t\r"
         lexer.commenters = ""
-        tokens = list(lexer)
+        tokens = [part for token in lexer for part in
+                  (list(token) if token and set(token) <= set(";&|()<>\n") else [token])]
     except ValueError:
         if prose:
             # Unbalanced quotes are common in descriptions. Only an explicit
@@ -153,10 +224,6 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
-    for token in tokens:
-        # Shell -c, eval and quoted substitutions carry a nested command string.
-        if any(ch.isspace() for ch in token) and _scan(token, depth + 1, prose=prose):
-            return True
     if _scan_wrappers(tokens, depth, prose=prose):
         return True
     starts = set(_command_starts(tokens))
@@ -172,7 +239,7 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
                 j += 1
             else:
                 break
-        if j < len(tokens):
+        if j < len(tokens) and tokens[j] not in _SEPARATORS:
             # In prose, "git" mid-sentence ("from git for one SHA") is an English
             # word, so an unknown word after it is not an alias; `git push` still is.
             english = (prose and i not in starts and i > 0 and not tokens[i + 1].startswith("-")
@@ -219,6 +286,12 @@ def _command_starts(tokens: list[str]) -> list[int]:
 
 def _resolve_at(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
     """Return True if the command at pos is an unsafe (unverifiable/push) one."""
+    # Assignment RHS expansions do not select an executable or undergo field
+    # splitting. Their command substitutions were already scanned above.
+    while pos < len(tokens) and _ASSIGN.match(tokens[pos]):
+        pos += 1
+    if pos >= len(tokens) or tokens[pos] in _SEPARATORS:
+        return False
     seen_wrappers = 0
     while pos < len(tokens):
         name = PurePosixPath(tokens[pos]).name
@@ -241,6 +314,11 @@ def _resolve_at(tokens: list[str], pos: int, depth: int, *, prose: bool = False)
     if pos >= len(tokens):
         return False
     head = tokens[pos]
+    if head in ("[", "[["):
+        return False  # shell test builtins, not computed executable names
+    if head == "eval":
+        # eval joins its arguments and executes the resulting shell program.
+        return _scan(" ".join(tokens[pos + 1:]), depth + 1)
     if _is_dynamic(head):
         # A bare computed token in descriptive plan prose can be TypeScript
         # syntax (room?, {year}, Map<T>), not a shell command. Still refuse
