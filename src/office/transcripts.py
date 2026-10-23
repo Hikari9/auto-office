@@ -16,12 +16,18 @@ as the reviewer's. Only files modified since the dispatch started are read.
   last `type: assistant` entry with text content.
 - Codex: $CODEX_HOME (default ~/.codex)/sessions/YYYY/MM/DD/rollout-*.jsonl,
   last `payload.type: message, role: assistant` entry.
+- opencode: its SQLite store, $XDG_DATA_HOME (default ~/.local/share)/opencode/opencode.db,
+  opened read-only: `session_v2` (id, directory, time_created) and `session_message`
+  (type `user`, JSON `data.text`). Only the landing probe and the session id read
+  it. There is no opencode `final_reply`: an opencode reviewer writes its reply
+  file (its agent may edit that file), and a review is read from that file only.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +42,10 @@ def claude_home() -> Path:
 
 def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def opencode_db() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "opencode" / "opencode.db"
 
 
 def claude_slug(cwd: str | Path) -> str:
@@ -185,6 +195,40 @@ def _codex_candidates(since: float) -> list[Path]:
     return _recent(files, since)
 
 
+def _opencode_sessions(marker: str, cwd, since: float) -> list[str]:
+    """Ids of opencode sessions, newest first, whose user prompt carries `marker`.
+
+    A session counts when it started since the dispatch (with the usual slack), its
+    recorded directory is `cwd` when one is given, and a `user` message's text (never
+    an assistant or tool entry) names the marker. The store is opened read-only; one
+    that is missing, locked or of another shape reads as no session."""
+    db = opencode_db()
+    if not db.is_file():
+        return []
+    escaped = json.dumps(marker)[1:-1]  # how the marker sits inside the message's JSON
+    try:
+        con = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT s.id, s.directory, m.data FROM session_message m JOIN session_v2 s ON s.id = m.session_id "
+                "WHERE m.type = 'user' AND m.time_created >= ? AND instr(m.data, ?) > 0 "
+                "ORDER BY m.time_created DESC", (int((since - SLACK_SECONDS) * 1000), escaped)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    found: list[str] = []
+    for sid, directory, data in rows:
+        try:
+            text = json.loads(data).get("text")
+        except (ValueError, AttributeError):
+            continue
+        if (isinstance(text, str) and marker in text and isinstance(sid, str) and sid not in found
+                and (not cwd or not directory or _same_dir(cwd, directory))):
+            found.append(sid)
+    return found
+
+
 def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = None, since=None) -> str | None:
     """The final assistant reply of the session that was sent `marker` (the
     brief path), or None when no transcript for it is found."""
@@ -237,6 +281,8 @@ def session_id(harness: str | None, *, marker: str, cwd: str | Path | None = Non
     if h in ("codex", ""):
         files += _codex_candidates(t)
     found = {_transcript_session(f) for f in files if _mentions(f, marker) and _prompted(f, marker, cwd)}
+    if h == "opencode":
+        found.update(_opencode_sessions(marker, cwd, t))
     found.discard(None)
     return found.pop() if len(found) == 1 else None
 
@@ -256,4 +302,5 @@ def prompt_seen(harness: str | None, *, marker: str, cwd: str | Path | None = No
         files += _claude_candidates(cwd, t)
     if h in ("codex", ""):
         files += _codex_candidates(t)
-    return any(_mentions(f, marker) and _prompted(f, marker, cwd) for f in files)
+    return (any(_mentions(f, marker) and _prompted(f, marker, cwd) for f in files)
+            or (h == "opencode" and bool(_opencode_sessions(marker, cwd, t))))
