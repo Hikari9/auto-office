@@ -279,7 +279,16 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
     for c in candidates:
         cap = c.get("max_concurrent")
         if cap is not None:
-            c["concurrency"] = {"count": int(snapshot.get(candidate_id(c), 0)), "cap": int(cap)}
+            concurrency = {"count": int(snapshot.get(candidate_id(c), 0)), "cap": int(cap)}
+            c["concurrency"] = concurrency
+            if concurrency["count"] >= concurrency["cap"]:
+                c["quota"] = {
+                    **(c.get("quota") or {}),
+                    "status": "ok",
+                    "tightest_remaining_percent": 0,
+                    "cause": "concurrency-cap",
+                    "concurrency": concurrency,
+                }
 
 
 def route(request: dict, discovery_input: dict | None = None, *,
@@ -495,11 +504,19 @@ def route(request: dict, discovery_input: dict | None = None, *,
         from office import candidates as candidate_builder
         safe = []; unknown = []; unsafe = []
         for c in stage:
+            gate = _quota_gate(c, reserve)
+            if gate and gate[2] == "concurrency-cap":
+                rejected.append({"candidate": candidate_id(c), "stage": gate[0], "category": "concurrency",
+                                 "reason": gate[1]})
+                continue
             q = candidate_builder.quota_for_candidate(c); status = q.get("status", "unknown")
             if status != "ok" or q.get("tightest_remaining_percent") is None:
                 unknown.append(c); continue
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
             (safe if remaining - burn >= reserve else unsafe).append(c)
+        if not (safe or unknown or unsafe):
+            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
+            return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
                 rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
@@ -641,6 +658,10 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tup
 
 def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
     q = c.get("quota", {})
+    if q.get("cause") == "concurrency-cap":
+        concurrency = q.get("concurrency") or {}
+        return (6, f"concurrency cap reached ({concurrency.get('count')}/{concurrency.get('cap')})",
+                "concurrency-cap")
     if q.get("status", "unknown") == "ok" and q.get("tightest_remaining_percent") is not None:
         remaining, burn = float(q["tightest_remaining_percent"]), float(q.get("projected_burn_percent") or 0)
         if remaining - burn < reserve:
