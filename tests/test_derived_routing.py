@@ -225,16 +225,25 @@ class TestDerivedRouting(unittest.TestCase):
         rejected = next(row for row in result['rejected'] if row['candidate'] == target_id)
         self.assertEqual(rejected['category'], 'rate-limited')
         self.assertEqual(rejected['reason'], 'rate-limited')
+        self.assertEqual({key: target['quota'][key] for key in
+                          ('status', 'tightest_remaining_percent', 'cause', 'expires_at')}, {
+                              'status': 'ok', 'tightest_remaining_percent': 0,
+                              'cause': 'rate-limited', 'expires_at': expires,
+                          })
+        self.assertEqual(current_routing._quota_gate(target, 20),
+                         (6, 'rate-limited', 'rate-limited'))
         low_rejected = next(row for row in result['rejected'] if row['candidate'] == target_low_id)
         self.assertEqual(low_rejected['category'], 'rate-limited')
+        self.assertEqual(target_low['quota']['cause'], 'rate-limited')
 
         con = office_db.connect(Path(self.db_path))
         con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (cooldown_key,))
         con.close()
+        target_after_expiry = cand('opencode', 'muse-free')
         result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
-                                        'candidates': [target]})
+                                        'candidates': [target_after_expiry]})
         self.assertEqual(result['selected'], target_id)
-        self.assertEqual(target['quota']['status'], 'ok')
+        self.assertEqual(target_after_expiry['quota']['status'], 'ok')
 
         con = office_db.connect(Path(self.db_path))
         con.execute("UPDATE route_cooldowns SET expires_at='9999-01-01T00:00:00+00:00' WHERE route=?", (cooldown_key,))
@@ -245,8 +254,9 @@ class TestDerivedRouting(unittest.TestCase):
         con.close()
         with unittest.mock.patch.object(dispatch.db, 'connect', lambda: real_connect(Path(self.db_path))):
             dispatch._finish('dispatch-success', 0, None, 'success', 1.0)
+        target_low_after_success = cand('opencode', 'muse-free', effort='low')
         result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
-                                        'candidates': [target_low]})
+                                        'candidates': [target_low_after_success]})
         self.assertEqual(result['selected'], target_low_id)
 
     def test_usage_limit_reset_time_overrides_configured_cooldown(self):
