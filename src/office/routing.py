@@ -265,8 +265,11 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
                 if not all(key) or key in counts:
                     continue
                 counts[key] = con.execute(
-                    "SELECT COUNT(*) FROM dispatches WHERE harness=? AND model=? AND ended_at IS NULL "
-                    "AND status IN ('launching','running')", key,
+                    "SELECT COUNT(*) FROM dispatches d JOIN runs r ON r.id=d.run_id "
+                    "WHERE d.harness=? AND d.model=? AND d.ended_at IS NULL "
+                    "AND d.status IN ('launching','running') "
+                    "AND COALESCE(r.phase,'') NOT IN ('closed','abandoned','landed') "
+                    "AND COALESCE(r.status,'') NOT IN ('closed','abandoned','landed')", key,
                 ).fetchone()[0]
         for c in candidates:
             if c.get("max_concurrent") is not None:
@@ -463,6 +466,28 @@ def route(request: dict, discovery_input: dict | None = None, *,
         stage = available
         if not stage:
             _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
+            return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
+
+        # A dispatch-reported quota wall temporarily blocks only the exact route
+        # that hit it. Cooldowns live in the shared runs.db across runs/processes.
+        now = datetime.now(timezone.utc).isoformat()
+        routes = [(candidate_id(c), c) for c in stage]
+        rate_limited = set()
+        if con and routes:
+            ids = [cid for cid, _ in routes]
+            placeholders = ",".join("?" for _ in ids)
+            rate_limited = {row[0] for row in con.execute(
+                f"SELECT route FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
+                (now, *ids))}
+        available = []
+        for cid, c in routes:
+            if cid in rate_limited:
+                rejected.append({"candidate": cid, "stage": 6, "category": "rate-limited", "reason": "rate-limited"})
+            else:
+                available.append(c)
+        stage = available
+        if not stage:
+            _reject_pool(pool, rejected, "all qualifying routes are temporarily rate-limited")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
 
         # 6 quota safety: unknown quota is scored conservatively downstream, not

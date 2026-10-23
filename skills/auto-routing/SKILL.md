@@ -29,6 +29,8 @@ and up to two fallbacks, each with a reason, one strength and one weakness.
 
 **Planner and reviewer routes** still use the advisory `preferred_seed` anchor and the `cost_policy` order (including `balanced_money_band_percent`) after qualification, until their routing is redesigned.
 
+Quota-wall cooldowns block only the exact route that hit the wall, across runs and Office processes. A provider reset time sets the expiry; otherwise `quota.cooldown_minutes` applies (15 minutes by default). A successful dispatch on that route clears the cooldown early.
+
 ## Who decides what
 
 - **Planner:** accepts the slate by default; may set `route: <primary>, <fallback>, <fallback>` and `route_why:`

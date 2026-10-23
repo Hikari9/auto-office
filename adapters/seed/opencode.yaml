@@ -48,6 +48,8 @@ shallow_review:
 agentic_capability:
   default: unknown
 failure_signatures:
+  - {id: free-usage-limit-reached, attribution: harness, pattern: "Free usage limit reached"}
+  - {id: rate-limit-exceeded, attribution: harness, pattern: "Rate limit exceeded"}
   - {id: unknown-variant-fails-resolution, attribution: adapter, pattern: "Variant unavailable for"}
   - {id: unknown-model-fails-resolution, attribution: harness, pattern: "Model unavailable:"}
   - {id: permission-prompt-blocks-headless, attribution: harness, pattern: "permission prompt with no --auto in a headless run blocks instead of auto-approving"}

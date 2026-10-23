@@ -4311,10 +4311,16 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
     try:
         with db.transaction(con):
             d = state.get_dispatch(con, dispatch_id)
+            if classification == "success" and d.get("triple"):
+                _clear_route_cooldown(con, d["triple"])
             status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
             run = state.get_run(con, d["run_id"])
+            if classification != "success" and d.get("triple"):
+                d["terminal_classification"] = classification
+                if _quota_wall(run, d):
+                    _record_route_cooldown(con, run, d)
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
                        + (f" (exit {code})" if code not in (None, 0) else ""), audience="runtime",
                        task_id=d["task_id"], dispatch_id=dispatch_id,
@@ -5005,6 +5011,25 @@ def _quota_wall(run: dict, d: dict) -> str | None:
         if not line.startswith("[office]") and gates._quota_signature(line):
             return line[:200]
     return None
+
+
+def _clear_route_cooldown(con, route: str) -> None:
+    con.execute("DELETE FROM route_cooldowns WHERE route=?", (route,))
+
+
+def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = None) -> None:
+    """Persist a quota wall for this exact route across Office runs and processes."""
+    cfg = state.pinned_config(run)
+    minutes = max(0.0, float((cfg.get("quota") or {}).get("cooldown_minutes", 15)))
+    now = now or datetime.now(timezone.utc)
+    log_path = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    from office import gates
+    limit = _usage_limit(gates._log_text(d, log_path), now=now)
+    expires = limit.get("resets_at") if limit else None
+    expires = expires or (now + timedelta(minutes=minutes))
+    con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                (d["triple"], expires.astimezone(timezone.utc).isoformat(), now.isoformat()))
 
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:

@@ -106,6 +106,7 @@ class DerivedRoutingTests(unittest.TestCase):
         import sqlite3
         con = sqlite3.connect(self.db_path)
         for i, effort in enumerate(('low', 'medium')):
+            con.execute("INSERT INTO runs(id, phase, status) VALUES (?, 'executing', 'running')", (f'run-{i}',))
             con.execute(
                 "INSERT INTO dispatches(id, run_id, role, holder_id, triple, status, harness, model, effort) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -139,12 +140,17 @@ class DerivedRoutingTests(unittest.TestCase):
         import sqlite3
         con = sqlite3.connect(self.db_path)
         rows = [
-            ('live', 'run-live', 'running', None),
-            ('ended', 'run-ended', 'running', '2026-10-22T00:00:00Z'),
-            ('failed', 'run-failed', 'failed', '2026-10-22T00:00:00Z'),
-            ('superseded', 'run-superseded', 'superseded', None),
+            ('live', 'run-live', 'executing', 'running', 'running', None),
+            ('closed-phase', 'run-closed-phase', 'closed', 'running', 'running', None),
+            ('abandoned-status', 'run-abandoned-status', 'executing', 'abandoned', 'running', None),
+            ('landed-phase', 'run-landed-phase', 'landed', 'running', 'running', None),
+            ('closed-status', 'run-closed-status', 'executing', 'closed', 'running', None),
+            ('ended', 'run-ended', 'executing', 'running', 'running', '2026-10-22T00:00:00Z'),
+            ('failed', 'run-failed', 'executing', 'running', 'failed', '2026-10-22T00:00:00Z'),
+            ('superseded', 'run-superseded', 'executing', 'running', 'superseded', None),
         ]
-        for did, rid, status, ended_at in rows:
+        for did, rid, phase, run_status, status, ended_at in rows:
+            con.execute("INSERT INTO runs(id, phase, status) VALUES (?,?,?)", (rid, phase, run_status))
             con.execute(
                 "INSERT INTO dispatches(id, run_id, role, holder_id, triple, status, harness, model, effort, ended_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -158,6 +164,102 @@ class DerivedRoutingTests(unittest.TestCase):
         self.assertEqual(result['selected'], triple)
         self.assertEqual(target['concurrency'], {'count': 1, 'cap': 2})
         self.assertEqual(result['routing']['candidates'][0]['components']['cost'], 1.0)
+
+    def test_opencode_quota_wall_cooldown_is_route_local_and_success_clears_it(self):
+        import json
+        from office import db as office_db, dispatch
+        from datetime import datetime, timezone
+
+        target = cand('opencode', 'muse-free')
+        alternate = cand('opencode', 'deepseek-free')
+        target_id = current_routing.candidate_id(target)
+        alternate_id = current_routing.candidate_id(alternate)
+        scoring.record_trust_act(self.db_path, target_id, 'proven', 'rico', 'verified route')
+        scoring.record_trust_act(self.db_path, alternate_id, 'proven', 'rico', 'verified route')
+        office_db.connect(Path(self.db_path)).close()
+
+        now = datetime(2026, 10, 23, 9, 0, tzinfo=timezone.utc)
+        log = Path(self.db_path).with_suffix('.log')
+        log.write_text('Free usage limit reached\n', encoding='utf-8')
+        con = office_db.connect(Path(self.db_path))
+        con.execute("INSERT INTO runs(id, phase, status, policy_json) VALUES (?,?,?,?)",
+                    ('run-cooldown', 'executing', 'running', json.dumps({'quota': {'cooldown_minutes': 15}})))
+        con.execute("INSERT INTO dispatches(id, run_id, role, kind, status, triple, log_path) "
+                    "VALUES ('dispatch-cooldown', 'run-cooldown', 'observer', 'observer', 'running', ?, ?)",
+                    (target_id, str(log)))
+        real_connect = office_db.connect
+        con.close()
+        with unittest.mock.patch.object(dispatch.db, 'connect', lambda: real_connect(Path(self.db_path))), \
+                unittest.mock.patch.object(dispatch, 'datetime') as clock:
+            clock.now.return_value = now
+            dispatch._finish('dispatch-cooldown', 1, None, 'nonzero', 1.0)
+
+        con = office_db.connect(Path(self.db_path))
+        cooldown_columns = {row[1] for row in con.execute("PRAGMA table_info(route_cooldowns)")}
+        self.assertNotIn('reason', cooldown_columns)
+        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (target_id,)).fetchone()[0]
+        self.assertEqual(expires, '2026-10-23T09:15:00+00:00')
+        con.close()
+
+        request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                   'candidates': [target, alternate]}
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], alternate_id)
+        rejected = next(row for row in result['rejected'] if row['candidate'] == target_id)
+        self.assertEqual(rejected['category'], 'rate-limited')
+        self.assertEqual(rejected['reason'], 'rate-limited')
+
+        con = office_db.connect(Path(self.db_path))
+        con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (target_id,))
+        con.close()
+        result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                                        'candidates': [target]})
+        self.assertEqual(result['selected'], target_id)
+        self.assertEqual(target['quota']['status'], 'ok')
+
+        con = office_db.connect(Path(self.db_path))
+        con.execute("UPDATE route_cooldowns SET expires_at='9999-01-01T00:00:00+00:00' WHERE route=?", (target_id,))
+        con.execute("INSERT INTO runs(id, phase, status) VALUES ('run-success', 'executing', 'running')")
+        con.execute("INSERT INTO dispatches(id, run_id, role, kind, status, triple) "
+                    "VALUES ('dispatch-success', 'run-success', 'observer', 'observer', 'running', ?)",
+                    (target_id,))
+        con.close()
+        with unittest.mock.patch.object(dispatch.db, 'connect', lambda: real_connect(Path(self.db_path))):
+            dispatch._finish('dispatch-success', 0, None, 'success', 1.0)
+        result = current_routing.route({'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                                        'candidates': [target]})
+        self.assertEqual(result['selected'], target_id)
+
+    def test_usage_limit_reset_time_overrides_configured_cooldown(self):
+        from office import db as office_db, dispatch
+        from datetime import datetime, timezone
+
+        route = 'opencode@1/muse-free@high'
+        now = datetime(2026, 10, 23, 9, 0, tzinfo=timezone.utc)
+        log = Path(self.db_path).with_suffix('.reset.log')
+        log.write_text('Free usage limit reached · resets 9:30pm (Asia/Manila)\n', encoding='utf-8')
+        run = {'id': 'run-reset', 'policy': {'quota': {'cooldown_minutes': 15}}}
+        dispatch_row = {'id': 'dispatch-reset', 'triple': route, 'log_path': str(log)}
+        con = office_db.connect(Path(self.db_path))
+        dispatch._record_route_cooldown(con, run, dispatch_row, now=now)
+        expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (route,)).fetchone()[0]
+        con.close()
+        self.assertEqual(expires, '2026-10-23T13:30:00+00:00')
+
+    def test_opencode_failure_signatures_cover_usage_and_rate_limit_text(self):
+        import yaml
+        from office import dispatch
+        adapter = yaml.safe_load((ROOT / 'adapters/seed/opencode.yaml').read_text())
+        default_config = yaml.safe_load((ROOT / 'config/config.default.yaml').read_text())
+        self.assertEqual(default_config['quota']['cooldown_minutes'], 15)
+        patterns = {signature['pattern'] for signature in adapter['failure_signatures']}
+        self.assertIn('Free usage limit reached', patterns)
+        self.assertIn('Rate limit exceeded', patterns)
+        log = Path(self.db_path).with_suffix('.signature.log')
+        d = {'id': 'dispatch-signature', 'terminal_classification': 'nonzero', 'log_path': str(log)}
+        for text in ('Free usage limit reached', 'Rate limit exceeded'):
+            log.write_text(text + '\n', encoding='utf-8')
+            self.assertEqual(dispatch._quota_wall({'id': 'run-signature'}, d), text)
 
     def test_catalog_cap_overrides_free_adapter_default_and_other_routes_are_uncapped(self):
         adapter = {'free_model_max_concurrent': 2}
