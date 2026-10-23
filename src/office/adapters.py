@@ -417,6 +417,27 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     return argv, prof
 
 
+def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
+                 include_dirs: list[Path] | None = None) -> dict[str, str]:
+    """Environment a reviewer launch needs for its per-dispatch permissions, from the
+    profile's `agent_file` (`{format: opencode, name, env}`); {} when it declares none.
+    opencode takes no permission flag, so the reviewer agent is written into the
+    dispatch dir and `env` (OPENCODE_CONFIG_DIR) points the harness at it. The same
+    env serves the pane and headless forms. Raises AdapterError when the file cannot
+    be written, so the launch stops with a reason instead of running unfenced."""
+    spec = (profile(adapter, kind) or {}).get("agent_file") or {}
+    if not spec or not output or kind not in read_scope.READER_KINDS:
+        return {}
+    if spec.get("format") != "opencode":
+        raise AdapterError(f"adapter {adapter.get('id')} {kind} agent_file format {spec.get('format')!r} is unknown")
+    try:
+        config_dir = read_scope.write_opencode_agent(spec["name"], Path(cwd), Path(output), include_dirs)
+    except (OSError, KeyError) as exc:
+        raise AdapterError(f"the {adapter.get('id')} {kind} agent file could not be written under "
+                           f"{Path(output).parent}: {exc}") from exc
+    return {spec.get("env") or "OPENCODE_CONFIG_DIR": str(config_dir)}
+
+
 def headless_resume_args(adapter: dict, kind: str, session_id: str) -> list[str] | None:
     """Args appended to the headless argv to continue `session_id`, from the
     profile's `headless_resume_argv`; None when the harness declares no such form."""

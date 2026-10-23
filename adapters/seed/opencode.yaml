@@ -76,15 +76,20 @@ source_notes: >-
   `auth list` exit status is not sign-in evidence or a launch gate; onboarding
   reads its output to recognize authentication. It reports a listed `-free`
   model as the named credential-free usable path, while
-  signed-in OpenCode is usable through its authenticated path. No reviewer or
-  vision profile is declared: opencode has no verified read-only isolation, so it is not a code
-  or visual reviewer, and its quota is always unknown (no probe; never treated
-  as unlimited). Session identity is not declared; opencode keeps its own
+  signed-in OpenCode is usable through its authenticated path. A reviewer
+  profile is declared (no vision profile). opencode has no permission flag, but
+  agent permissions fence a reviewer to reading plus one reply file: Office
+  writes that agent per dispatch (see the reviewer profile), and the result is
+  read only from the reply file. Its quota is always unknown (no probe; never
+  treated as unlimited). Session identity is not declared; opencode keeps its own
   sessions (opencode.db, --session exists) which Office does not read, so no
   headless resume form exists yet. A pane-hosted interactive form is declared
   for Herdr delegation (herdr_kind opencode, `mini --model` with the same trust
   posture and pinned model/effort; mini is the interactive surface that accepts
-  --model, verified to require a TTY rather than reject the flag). Conformance
+  --model, verified to require a TTY rather than reject the flag; it also takes
+  --standalone and --agent, which the reviewer pane uses so the per-dispatch
+  agent in OPENCODE_CONFIG_DIR applies, since a background service would not
+  see that environment). Conformance
   stays pending and variant names stay model-specific: an unknown variant fails
   fast at launch, never silently.
 session:
@@ -104,4 +109,22 @@ office_profiles:
       argv: [mini, --model, "{model}#{effort}"]
     # opencode run has no timeout of its own, so the supervisor's wall cap
     # stops a stuck dispatch instead of holding the task open forever.
+    max_minutes: 60
+  # Pane-hosted reviewer. opencode has no permission flag, so Office writes the
+  # per-dispatch `office-reviewer` agent into <dispatch dir>/opencode/agents/
+  # (agent_file) and sets OPENCODE_CONFIG_DIR to it for both the pane and the
+  # headless launch. The generated permissions, verified against opencode 2.0.29:
+  #   deny `*`; allow read/glob/grep `*`; deny read `*.env`, `*.env.*`;
+  #   external_directory `<dir>/*` for the checkout (cwd), include_dirs, shared
+  #   read roots and the dispatch dir (each also as its realpath);
+  #   edit on the exact reply file only (absolute, realpath, cwd-relative).
+  # No --auto anywhere: a permission nobody granted is denied, never approved.
+  reviewer:
+    argv: [run, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
+    prompt: argv
+    output: stdout
+    herdr_kind: opencode
+    agent_file: {format: opencode, name: office-reviewer, env: OPENCODE_CONFIG_DIR}
+    interactive:
+      argv: [mini, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
     max_minutes: 60
