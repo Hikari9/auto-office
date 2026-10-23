@@ -89,6 +89,21 @@ class TestDerivedRouting(unittest.TestCase):
         self.assertEqual(result['selected'], triple)
         self.assertEqual(result['status'], 'selected')
 
+    def test_route_without_cooldown_table_remains_routable(self):
+        triple = 'agy@1/m@high'
+        scoring.record_trust_act(self.db_path, triple, 'proven', 'rico', 'operator-verified rollout')
+        import sqlite3
+        with sqlite3.connect(self.db_path) as con:
+            self.assertFalse(con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_cooldowns'"
+            ).fetchone())
+
+        result = current_routing.route({
+            'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [cand('agy')],
+        })
+
+        self.assertEqual(result['selected'], triple)
+
     def test_concurrency_cap_refuses_full_model_across_runs_and_falls_back(self):
         target = cand('opencode', 'glm-5.3-flash-free', effort='high', money=0)
         target.update(invocation_model_id='opencode/glm-5.3-flash-free', max_concurrent=2)

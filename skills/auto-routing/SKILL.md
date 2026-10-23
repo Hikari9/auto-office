@@ -33,18 +33,16 @@ Quota-wall cooldowns block only the exact route that hit the wall, across runs a
 
 ## Who decides what
 
-- **Planner:** accepts the slate by default; may set `route: <primary>, <fallback>, <fallback>` and `route_why:`
-  on a task in PLAN.md. A primary outside the close-call band needs a concrete `route_why`, or the ranked slate
-  stands.
+- **Planner:** accepts the slate by default; may set `route: <primary>, <fallback>, <fallback>` and `route_why:` on
+  a task in PLAN.md. A primary outside the close-call band needs a concrete `route_why`, or the ranked slate stands.
 - **Dispatch:** re-checks live quota, trust and learned eligibility, runs the planned primary, and falls back in
   the recorded order only when fresh evidence rules a route out, naming why. It never runs an unplanned route: an
   exhausted slate stops, and `office dispatch <task> --reroute` routes from current evidence.
 - **Trial recovery:** use only the recorded known-working fallback after confirmed failed-worker process-tree exit and lease/session release; unconfirmed exit blocks replacement. Preserve started work and manual pins; never run a second live writer.
 - **Route authority (#707):** `dispatch --as` and `rerun --as` without `--quote` record an orchestrator choice with ordinary trust, capability, quota and user-policy gates. Add `--quote "<user's words>"` only for an actual user override; preserve those words in the audit trail.
 - **Rerun and effective route (#426, #721):** the task records the route it runs; a rerun or redispatch keeps it, and `office rerun <task> --fresh --reroute` routes again. Any swap logs a `route.changed` event (old, new, reason, actor, time); `office amend route <task> --as <h>/<m>[@e] --quote ".."` declares a pending or accepted task's future route or re-records a live one. Accepted producers stay immutable; the future pin applies on the next legal reopen. Declared-route redispatch waives only unverified adapter trust; quarantine and every later routing stage, floors included, still apply. See `protocol/routing.md`.
-- **Learner:** attributes failures (route, plan, environment, reviewer, mixed, unknown) before learning, decays
-  stale evidence, and changes learned eligibility only after maturity plus a held-out replay. It cannot change
-  success definitions, attribution rules, factual gates or trust acts.
+- **Learner:** attributes failures (route, plan, environment, reviewer, mixed, unknown) before learning, decays stale evidence,
+  and changes learned eligibility only after maturity plus a held-out replay. It cannot change success definitions, attribution rules, factual gates or trust acts.
 
 ## Reading a decision
 - The plan diagram shows each task's Inline Slate. Show it to the user as printed.

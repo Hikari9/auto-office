@@ -474,11 +474,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
                   for c in stage]
         rate_limited = {}
         if con and routes:
-            ids = list(dict.fromkeys(key for key, _ in routes))
-            placeholders = ",".join("?" for _ in ids)
-            rate_limited = {row[0]: row[1] for row in con.execute(
-                f"SELECT route, expires_at FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
-                (now, *ids))}
+            has_cooldowns = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_cooldowns'"
+            ).fetchone()
+            if has_cooldowns:
+                ids = list(dict.fromkeys(key for key, _ in routes))
+                placeholders = ",".join("?" for _ in ids)
+                rate_limited = {row[0]: row[1] for row in con.execute(
+                    f"SELECT route, expires_at FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
+                    (now, *ids))}
         for key, c in routes:
             if key in rate_limited:
                 c["quota"] = {
