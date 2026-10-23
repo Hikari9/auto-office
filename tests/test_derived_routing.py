@@ -40,7 +40,7 @@ def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,
     }
 
 
-class DerivedRoutingTests(unittest.TestCase):
+class TestDerivedRouting(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
@@ -120,19 +120,27 @@ class DerivedRoutingTests(unittest.TestCase):
         result = current_routing.route(request)
 
         self.assertEqual(result['selected'], fallback_id)
-        refusal = next(r for r in result['rejected'] if r['candidate'] == target_id)
-        self.assertEqual(refusal['stage'], 6)
-        self.assertEqual(refusal['category'], 'concurrency')
-        self.assertIn('concurrency cap reached (2/2)', refusal['reason'])
-        self.assertEqual(target['quota'], {
-            'status': 'ok', 'tightest_remaining_percent': 0, 'projected_burn_percent': 1,
-            'cause': 'concurrency-cap', 'concurrency': {'count': 2, 'cap': 2},
-        })
+        def assert_quota_gate_rejects(route_result):
+            refusal = next(r for r in route_result['rejected'] if r['candidate'] == target_id)
+            self.assertEqual(refusal['stage'], 6)
+            self.assertEqual(refusal['category'], 'concurrency')
+            self.assertEqual(refusal['reason'], 'concurrency cap reached (2/2)')
+            self.assertEqual(target['quota'], {
+                'status': 'ok', 'tightest_remaining_percent': 0, 'projected_burn_percent': 1,
+                'cause': 'concurrency-cap', 'concurrency': {'count': 2, 'cap': 2},
+            })
+            self.assertEqual(current_routing._quota_gate(target, 20),
+                             (6, 'concurrency cap reached (2/2)', 'concurrency-cap'))
+
+        # The first call derives its overlay from live dispatches. Its replay uses
+        # the recorded snapshot, so both inputs must reach the same quota gate.
+        assert_quota_gate_rejects(result)
         self.assertEqual(request['concurrency_snapshot'][target_id], 2)
         self.assertEqual(request['concurrency_snapshot'][other_id], 0)
         replay = current_routing.route(request)
         self.assertEqual(replay['selected'], result['selected'])
         self.assertEqual(replay['rejected'], result['rejected'])
+        assert_quota_gate_rejects(replay)
 
     def test_one_live_dispatch_below_cap_keeps_route_and_cost_score(self):
         target = cand('opencode', 'glm-5.3-flash-free', effort='high', money=0)
