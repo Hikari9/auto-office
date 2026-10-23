@@ -7,6 +7,7 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -211,7 +212,9 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     # task HEAD after a successful earlier merge (#580).
     if paths.git(wt, "status", "--porcelain", "--untracked-files=no").strip():
         raise Refused("restack-dirty-worktree", f"{task['id']} has uncommitted changes",
-                      preserved="the task worktree", next_step="commit or stash changes first")
+                      preserved="the task worktree",
+                      next_step=f"office rerun {task['id']} --fresh --stash-wip "
+                                "(Office preserves and reapplies WIP; revoke a failed pending relaunch first)")
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
     with tempfile.TemporaryDirectory(prefix="office-restack-") as tmp:
@@ -256,6 +259,46 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                            capture_output=True)
     return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
             "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged), note) if x)}
+
+
+@contextlib.contextmanager
+def _stash_wip(wt: Path, tid: str):
+    """Office-owned, opt-in preservation of dirty tracked/untracked WIP for a restack.
+
+    Apply by the immutable stash commit, not the moving stash@{0} alias.
+    Retain the stash on any restore conflict so WIP is never silently dropped.
+    """
+    if not (wt / ".git").exists() or not paths.git(wt, "status", "--porcelain").strip():
+        yield
+        return
+    before = subprocess.run(["git", "-C", str(wt), "rev-parse", "-q", "--verify", "refs/stash"],
+                            capture_output=True, text=True)
+    previous = before.stdout.strip() if before.returncode == 0 else None
+    save = subprocess.run(["git", "-C", str(wt), "stash", "push", "--include-untracked",
+                           "-m", f"office: preserve {tid} WIP before restack"],
+                          capture_output=True, text=True)
+    if save.returncode:
+        raise Refused("restack-wip-save-failed", f"Office could not stash {tid}'s WIP: {save.stderr[:160]}",
+                      preserved="task worktree", next_step=f"inspect {tid}'s worktree before retrying")
+    after = paths.git(wt, "rev-parse", "refs/stash").strip()
+    if after == previous:
+        raise Refused("restack-wip-save-failed", f"Office did not record a new WIP stash for {tid}",
+                      preserved="task worktree", next_step="inspect the worktree before retrying")
+    try:
+        yield
+    finally:
+        restore = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", after],
+                                 capture_output=True, text=True)
+        if restore.returncode:
+            raise Refused("restack-wip-restore-conflict",
+                          f"{tid} WIP could not be reapplied cleanly after restack; saved stash {after[:12]} "
+                          f"remains available; {restore.stderr[:130]}",
+                          preserved=f"stash {after} and current task worktree",
+                          next_step=f"resolve the worktree conflict using saved stash {after[:12]} before rerunning")
+        current = paths.git(wt, "rev-parse", "refs/stash").strip()
+        if current == after:
+            subprocess.run(["git", "-C", str(wt), "stash", "drop", "-q", "stash@{0}"],
+                           capture_output=True, text=True)
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
@@ -338,7 +381,11 @@ def _mode_required(tid: str) -> Usage:
 
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
           as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
-          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
+          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+          stash_wip: bool = False) -> Result:
+    if stash_wip and not fresh:
+        raise Usage("stash-wip-needs-fresh", "--stash-wip requires --fresh",
+                    next_step=f"{_fresh_cmd(tid)} --stash-wip")
     if resume == fresh and review_as is None:
         raise _mode_required(tid)
     if reroute and resume:
@@ -428,7 +475,11 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
                       scope=tid, next_step=f"{_fresh_cmd(tid)} --as <harness>/<model>[@effort]")
     if launch and launch_prefs:
         launch = {**launch, "launch": launch_prefs}
-    restack = _restack(con, run, task, parent.get("worktree"))
+    if stash_wip and parent.get("worktree"):
+        with _stash_wip(Path(parent["worktree"]), tid):
+            restack = _restack(con, run, task, parent["worktree"])
+    else:
+        restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:

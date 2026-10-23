@@ -1647,7 +1647,7 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | N
 
 # ------------------------------------------------------------------ launch job
 
-def ensure_worktree(run: dict, dispatch: dict) -> Path:
+def ensure_worktree(run: dict, dispatch: dict, *, restack_existing: bool = False) -> Path:
     wt = Path(dispatch["worktree"])
     repo = Path(run["repo_root"])
     if (wt / ".git").exists():
@@ -1657,8 +1657,9 @@ def ensure_worktree(run: dict, dispatch: dict) -> Path:
     if branches.strip():
         from office import integration
         head = paths.git(repo, "rev-parse", f"refs/heads/{dispatch['branch']}")
-        if not integration.contains(run, head, dispatch["base_commit"]):
-            # An existing branch is reused as it is: it must hold the base this dispatch recorded.
+        if not restack_existing and not integration.contains(run, head, dispatch["base_commit"]):
+            # The launch job may restack an Office-owned predecessor branch after checkout.
+            # Every other caller still refuses a mismatched base before a worker can start.
             raise Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "
                           f"{dispatch['base_commit'][:12]} dispatch {dispatch['id']} recorded", scope=dispatch.get("task_id"),
                           preserved="the branch and its commits",
@@ -1757,9 +1758,36 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     dispatch = state.get_dispatch(con, payload["dispatch_id"])
     if dispatch["status"] not in ("launching",):
         return {"skipped": dispatch["status"]}
-    created = not (Path(dispatch["worktree"]) / ".git").exists()
-    wt = ensure_worktree(run, dispatch)
     role = payload["role"]
+    predecessor = role == "executor" and dispatch.get("predecessor_dispatch_id")
+    created = not (Path(dispatch["worktree"]) / ".git").exists()
+    wt = ensure_worktree(run, dispatch, restack_existing=bool(predecessor))
+    if predecessor:
+        # An amendment or manual dispatch reuses the old task branch. Its recorded base
+        # can be stale after depends changes / dependency re-acceptance (#696).
+        # Restack in this launch job (outside the amendment DB transaction), before
+        # writing the packet or starting any worker. Rerun may already have done it.
+        from office import rerun
+        task = state.get_task(con, run["id"], dispatch["task_id"])
+        restack = rerun._restack(con, run, task, str(wt))
+        if restack and restack.get("reopened"):
+            blocked = ", ".join(r["task"] for r in restack["reopened"])
+            raise Refused("dependency-not-ready", f"{task['id']} cannot relaunch: {blocked} is not accepted",
+                          scope=task["id"], preserved="task worktree and revisions",
+                          next_step=f"wait for {blocked} to be accepted; office revoke {task['id']}; "
+                                    f"office rerun {task['id']} --fresh")
+        if restack:
+            if restack.get("base"):
+                with db.transaction(con):
+                    con.execute("UPDATE dispatches SET base_commit=? WHERE id=? AND status='launching'",
+                                (restack["base"], dispatch["id"]))
+                dispatch = state.get_dispatch(con, dispatch["id"])
+            if restack.get("merged") or restack.get("conflict"):
+                payload["restack"] = {k: restack.get(k)
+                                    for k in ("merged", "conflict", "unmerged", "reopened")}
+                with db.transaction(con):
+                    state.emit(con, run, "task.restacked", f"{task['id']} {restack['line']}",
+                               task_id=task["id"], dispatch_id=dispatch["id"])
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     setup = None

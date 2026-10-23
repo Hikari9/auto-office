@@ -40,7 +40,7 @@ Auto Office {ver}
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
+  office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
@@ -490,6 +490,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s.add_argument("--stash-wip", action="store_true", help="with --fresh: let Office stash and restore uncommitted WIP around dependency restack")
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
@@ -1053,7 +1054,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute,
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, stash_wip=args.stash_wip, reroute=args.reroute,
                            as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external, review_as=args.review_as,
                            review_cli=args.review_cli, review_external=args.review_external)
     if cmd == "dismiss":
