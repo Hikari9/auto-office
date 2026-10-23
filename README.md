@@ -405,7 +405,7 @@ flowchart TD
     M --> N["Record slate, scores, seed, planner choice, dispatched route"]
 ```
 
-**Figure 3 — Routing and benchmarks.** Cost is deliberately late. A cheap route cannot undercut hard exclusions, derived trust, required capabilities, the role/benchmark floor, task-shape compatibility, or the protected quota reserve. For executors and workers (#300), cost is one weighted term, measured as expected cost to a successful task rather than token price, so a cheap route that needs many retries does not win by default.
+**Figure 3 — Routing and benchmarks.** Cost is deliberately late. A cheap route cannot undercut hard exclusions, derived trust, required capabilities, the role/benchmark floor, task-shape compatibility, or the protected quota reserve. For executors and workers (#300), cost is one weighted term, measured as expected cost to a successful task rather than token price, so a cheap route that needs many retries does not win by default. A route with a `max_concurrent` cap (catalog row, or an adapter's `free_model_max_concurrent` default) counts as quota-exhausted while that many dispatches on it are live across all active runs, and a route that just hit a 429 or usage wall stays exhausted for a short cooldown (#770). Both are refused at stage 6, so a free route that is busy or rate-limited falls to the next candidate instead of being re-picked.
 
 ### Default role policy examples
 
