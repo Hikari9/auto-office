@@ -27,6 +27,10 @@ Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, 
 
 ## Policy and config
 
+### Concurrent free-model routes
+
+Catalog rows may set `max_concurrent` to cap simultaneous dispatches for a harness/model pair. That row value takes precedence over an adapter's `free_model_max_concurrent`, which applies to free-model rows only. Effort variants share the same count. Routing counts only unended `launching` or `running` dispatches across runs; ended, failed and superseded dispatches do not consume capacity. A full route is refused at stage 6 with its live count and cap, and a recorded concurrency snapshot keeps replay deterministic. Uncapped routes perform no dispatch-count query.
+
 Config precedence is explicit run/prompt > repo > user > shipped defaults. The run pins the effective values, their provenance and a policy digest at start. Read and set keys with `office config` (`office config <key>`, `--show-origin` for the source tier, `--repo` for the repo file, `--edit` for list values such as the denial list). Do not create another preference store.
 
 | Key | Shipped value and meaning |

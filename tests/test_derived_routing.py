@@ -21,6 +21,7 @@ import office_routing as routing
 import office_runtime
 import office_scoring as scoring
 from office import routing as current_routing
+from office import candidates as candidate_builder
 
 
 def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,
@@ -39,7 +40,7 @@ def cand(harness, model_id='m', effort='high', money=1.0, remaining=80, burn=1,
     }
 
 
-class DerivedRoutingTests(unittest.TestCase):
+class TestDerivedRouting(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
@@ -87,6 +88,96 @@ class DerivedRoutingTests(unittest.TestCase):
         result = routing.route(request)
         self.assertEqual(result['selected'], triple)
         self.assertEqual(result['status'], 'selected')
+
+    def test_concurrency_cap_refuses_full_model_across_runs_and_falls_back(self):
+        target = cand('opencode', 'glm-5.3-flash-free', effort='high', money=0)
+        target.update(invocation_model_id='opencode/glm-5.3-flash-free', max_concurrent=2)
+        fallback = cand('agy', 'fallback', money=0)
+        other_model = cand('opencode', 'another-model', money=0)
+        other_model.update(invocation_model_id='opencode/another-model', max_concurrent=1)
+        target_id = 'opencode@1/glm-5.3-flash-free@high'
+        fallback_id = 'agy@1/fallback@high'
+        other_id = 'opencode@1/another-model@high'
+        scoring.record_trust_act(self.db_path, target_id, 'proven', 'rico', 'operator-verified route')
+        scoring.record_trust_act(self.db_path, fallback_id, 'proven', 'rico', 'operator-verified route')
+        scoring.record_trust_act(self.db_path, other_id, 'proven', 'rico', 'operator-verified route')
+        from office import db as office_db
+        office_db.connect(Path(self.db_path)).close()
+        import sqlite3
+        con = sqlite3.connect(self.db_path)
+        for i, effort in enumerate(('low', 'medium')):
+            con.execute(
+                "INSERT INTO dispatches(id, run_id, role, holder_id, triple, status, harness, model, effort) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f'live-{i}', f'run-{i}', 'executor', f'h{i}', f'opencode@1/glm-5.3-flash-free@{effort}',
+                 'running' if i == 0 else 'launching', 'opencode', 'opencode/glm-5.3-flash-free', effort),
+            )
+        con.commit(); con.close()
+        request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
+                   'candidates': [target, fallback, other_model]}
+
+        result = current_routing.route(request)
+
+        self.assertEqual(result['selected'], fallback_id)
+        def assert_quota_gate_rejects(route_result):
+            refusal = next(r for r in route_result['rejected'] if r['candidate'] == target_id)
+            self.assertEqual(refusal['stage'], 6)
+            self.assertEqual(refusal['category'], 'concurrency')
+            self.assertEqual(refusal['reason'], 'concurrency cap reached (2/2)')
+            self.assertEqual(target['quota'], {
+                'status': 'ok', 'tightest_remaining_percent': 0, 'projected_burn_percent': 1,
+                'cause': 'concurrency-cap', 'concurrency': {'count': 2, 'cap': 2},
+            })
+            self.assertEqual(current_routing._quota_gate(target, 20),
+                             (6, 'concurrency cap reached (2/2)', 'concurrency-cap'))
+
+        # The first call derives its overlay from live dispatches. Its replay uses
+        # the recorded snapshot, so both inputs must reach the same quota gate.
+        assert_quota_gate_rejects(result)
+        self.assertEqual(request['concurrency_snapshot'][target_id], 2)
+        self.assertEqual(request['concurrency_snapshot'][other_id], 0)
+        replay = current_routing.route(request)
+        self.assertEqual(replay['selected'], result['selected'])
+        self.assertEqual(replay['rejected'], result['rejected'])
+        assert_quota_gate_rejects(replay)
+
+    def test_one_live_dispatch_below_cap_keeps_route_and_cost_score(self):
+        target = cand('opencode', 'glm-5.3-flash-free', effort='high', money=0)
+        target.update(invocation_model_id='opencode/glm-5.3-flash-free', max_concurrent=2,
+                      price_fields={'input_per_mtok': 0.0, 'output_per_mtok': 0.0})
+        triple = 'opencode@1/glm-5.3-flash-free@high'
+        scoring.record_trust_act(self.db_path, triple, 'proven', 'rico', 'operator-verified route')
+        from office import db as office_db
+        office_db.connect(Path(self.db_path)).close()
+        import sqlite3
+        con = sqlite3.connect(self.db_path)
+        rows = [
+            ('live', 'run-live', 'running', None),
+            ('ended', 'run-ended', 'running', '2026-10-22T00:00:00Z'),
+            ('failed', 'run-failed', 'failed', '2026-10-22T00:00:00Z'),
+            ('superseded', 'run-superseded', 'superseded', None),
+        ]
+        for did, rid, status, ended_at in rows:
+            con.execute(
+                "INSERT INTO dispatches(id, run_id, role, holder_id, triple, status, harness, model, effort, ended_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (did, rid, 'executor', did, triple, status, 'opencode', 'opencode/glm-5.3-flash-free', 'low', ended_at),
+            )
+        con.commit(); con.close()
+        request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [target]}
+
+        result = current_routing.route(request)
+
+        self.assertEqual(result['selected'], triple)
+        self.assertEqual(target['concurrency'], {'count': 1, 'cap': 2})
+        self.assertEqual(result['routing']['candidates'][0]['components']['cost'], 1.0)
+
+    def test_catalog_cap_overrides_free_adapter_default_and_other_routes_are_uncapped(self):
+        adapter = {'free_model_max_concurrent': 2}
+        self.assertEqual(candidate_builder._max_concurrent({'max_concurrent': 3}, adapter, True), 3)
+        self.assertEqual(candidate_builder._max_concurrent({}, adapter, True), 2)
+        self.assertIsNone(candidate_builder._max_concurrent({}, adapter, False))
+        self.assertIsNone(candidate_builder._max_concurrent({}, {}, False))
 
     # ---- receipt: stage 3 required_capabilities actually rejects (ADDED FINDING) ----
 

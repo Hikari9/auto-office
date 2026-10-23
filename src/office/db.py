@@ -25,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -262,6 +262,7 @@ def migrate(con: sqlite3.Connection) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS dispatches_route_concurrency ON dispatches(harness, model, status, ended_at)")
         _repair_historical_plan_review_routes(con)
         # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
@@ -316,7 +317,8 @@ def _schema_version(con: sqlite3.Connection) -> int:
 
 _TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DDL)
 _ROUTE_INDEXES = {"route_probe_inflight", "route_probe_run", "route_trial_run", "route_discovery_attempt",
-                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal"}
+                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal",
+                  "dispatches_route_concurrency"}
 _ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace"}
 
 

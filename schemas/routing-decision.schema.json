@@ -262,6 +262,14 @@
               "state"
             ]
           },
+          "concurrency": {
+            "type": "object",
+            "required": ["count", "cap"],
+            "properties": {
+              "count": {"type": "integer", "minimum": 0},
+              "cap": {"type": "integer", "minimum": 1}
+            }
+          },
           "preference": {
             "type": "object",
             "required": [
