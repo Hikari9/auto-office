@@ -42,6 +42,11 @@ def candidate_id(c):
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
 
 
+def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
+    """Stable quota cooldown identity shared by effort variants of one invocation."""
+    return f"{harness or ''}/{invocation_model_id or ''}"
+
+
 def preferred_rank(c, preferred_seed):
     """Index of the first roles.<role>.preferred_seed entry c matches, or None.
 
@@ -249,6 +254,48 @@ def _connect(db_path):
     return con
 
 
+def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None:
+    """Overlay live counts for capped routes once, or honor a recorded snapshot on replay."""
+    candidates = request.get("candidates", [])
+    snapshot = request.get("concurrency_snapshot")
+    if snapshot is None:
+        snapshot = {}
+        counts: dict[tuple[str, str], int] = {}
+        if con is not None:
+            for c in candidates:
+                if c.get("max_concurrent") is None:
+                    continue
+                key = (str(c.get("harness") or ""),
+                       str(c.get("invocation_model_id") or c.get("model_id") or ""))
+                if not all(key) or key in counts:
+                    continue
+                counts[key] = con.execute(
+                    "SELECT COUNT(*) FROM dispatches d JOIN runs r ON r.id=d.run_id "
+                    "WHERE d.harness=? AND d.model=? AND d.ended_at IS NULL "
+                    "AND d.status IN ('launching','running') "
+                    "AND COALESCE(r.phase,'') NOT IN ('closed','abandoned','landed') "
+                    "AND COALESCE(r.status,'') NOT IN ('closed','abandoned','landed')", key,
+                ).fetchone()[0]
+        for c in candidates:
+            if c.get("max_concurrent") is not None:
+                snapshot[candidate_id(c)] = counts.get(
+                    (str(c.get("harness") or ""), str(c.get("invocation_model_id") or c.get("model_id") or "")), 0)
+        request["concurrency_snapshot"] = snapshot
+    for c in candidates:
+        cap = c.get("max_concurrent")
+        if cap is not None:
+            concurrency = {"count": int(snapshot.get(candidate_id(c), 0)), "cap": int(cap)}
+            c["concurrency"] = concurrency
+            if concurrency["count"] >= concurrency["cap"]:
+                c["quota"] = {
+                    **(c.get("quota") or {}),
+                    "status": "ok",
+                    "tightest_remaining_percent": 0,
+                    "cause": "concurrency-cap",
+                    "concurrency": concurrency,
+                }
+
+
 def route(request: dict, discovery_input: dict | None = None, *,
           connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
@@ -306,6 +353,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
 
     con = connection if connection is not None else _connect(db_path)
     try:
+        _concurrency_snapshot(request, con)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.
@@ -419,20 +467,51 @@ def route(request: dict, discovery_input: dict | None = None, *,
             nxt.append(c)
         stage = nxt
 
-        if not stage:
-            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
-            return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
+        # A dispatch-reported quota wall blocks the same harness invocation across
+        # effort variants. Cooldowns live in shared runs.db across runs/processes.
+        now = datetime.now(timezone.utc).isoformat()
+        routes = [(cooldown_key(c.get("harness"), c.get("invocation_model_id") or c.get("model_id")), c)
+                  for c in stage]
+        rate_limited = {}
+        if con and routes:
+            has_cooldowns = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_cooldowns'"
+            ).fetchone()
+            if has_cooldowns:
+                ids = list(dict.fromkeys(key for key, _ in routes))
+                placeholders = ",".join("?" for _ in ids)
+                rate_limited = {row[0]: row[1] for row in con.execute(
+                    f"SELECT route, expires_at FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
+                    (now, *ids))}
+        for key, c in routes:
+            if key in rate_limited:
+                c["quota"] = {
+                    **(c.get("quota") or {}),
+                    "status": "ok",
+                    "tightest_remaining_percent": 0,
+                    "cause": "rate-limited",
+                    "expires_at": rate_limited[key],
+                }
 
         # 6 quota safety: unknown quota is scored conservatively downstream, not
         # excluded when a known-safe route is also available.
         from office import candidates as candidate_builder
         safe = []; unknown = []; unsafe = []
         for c in stage:
+            gate = _quota_gate(c, reserve)
+            if gate and gate[2] in {"concurrency-cap", "rate-limited"}:
+                category = "concurrency" if gate[2] == "concurrency-cap" else gate[2]
+                rejected.append({"candidate": candidate_id(c), "stage": gate[0], "category": category,
+                                 "reason": gate[1]})
+                continue
             q = candidate_builder.quota_for_candidate(c); status = q.get("status", "unknown")
             if status != "ok" or q.get("tightest_remaining_percent") is None:
                 unknown.append(c); continue
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
             (safe if remaining - burn >= reserve else unsafe).append(c)
+        if not (safe or unknown or unsafe):
+            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
+            return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
                 rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
@@ -574,6 +653,12 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tup
 
 def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
     q = c.get("quota", {})
+    if q.get("cause") == "rate-limited":
+        return 6, "rate-limited", "rate-limited"
+    if q.get("cause") == "concurrency-cap":
+        concurrency = q.get("concurrency") or {}
+        return (6, f"concurrency cap reached ({concurrency.get('count')}/{concurrency.get('cap')})",
+                "concurrency-cap")
     if q.get("status", "unknown") == "ok" and q.get("tightest_remaining_percent") is not None:
         remaining, burn = float(q["tightest_remaining_percent"]), float(q.get("projected_burn_percent") or 0)
         if remaining - burn < reserve:
@@ -811,9 +896,10 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
               **({"task_descriptor": (request.get("context") or {}).get("task_descriptor")}
                  if (request.get("context") or {}).get("task_descriptor") else {}),
               "slate": [e["route"] for e in slate],
-              "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
-                                            "time_to_success_seconds", "quota", "preference",
-                                            "utility")} for r in audit["candidates"]],
+              "inputs": [{**{k: r[k] for k in ("route", "p_success", "cost_to_success",
+                                                 "time_to_success_seconds", "quota", "preference", "utility")},
+                          **({"concurrency": r["concurrency"]} if r.get("concurrency") else {})}
+                         for r in audit["candidates"]],
               "clincher": audit["clincher"], "exploration": audit["exploration"],
               "policy_version": audit["policy_version"], "evidence_digest": audit["evidence_digest"]}
     if disc:

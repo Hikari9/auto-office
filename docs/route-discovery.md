@@ -25,7 +25,13 @@ A catalog route becomes probe-able only when the catalog marks it `discovery: el
 
 Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, `probe-passed`, `temporarily-unavailable` and `confirmed-unsupported`. Availability still leaves role, permission, capability, trust, task and quota gates to check.
 
+Dispatches that end on a harness quota or rate-limit wall temporarily block that harness invocation across effort variants, runs, and Office processes. A reset time reported in the output sets the expiry; otherwise `quota.cooldown_minutes` applies (15 minutes by default). A successful dispatch of the same invocation clears its cooldown early. Other models on the same harness remain eligible.
+
 ## Policy and config
+
+### Concurrent free-model routes
+
+Catalog rows may set `max_concurrent` to cap simultaneous dispatches for a harness/model pair. That row value takes precedence over an adapter's `free_model_max_concurrent`, which applies to free-model rows only. Effort variants share the same count. Routing counts only unended `launching` or `running` dispatches across runs; ended, failed and superseded dispatches do not consume capacity. A full route is refused at stage 6 with its live count and cap, and a recorded concurrency snapshot keeps replay deterministic. Uncapped routes perform no dispatch-count query.
 
 Config precedence is explicit run/prompt > repo > user > shipped defaults. The run pins the effective values, their provenance and a policy digest at start. Read and set keys with `office config` (`office config <key>`, `--show-origin` for the source tier, `--repo` for the repo file, `--edit` for list values such as the denial list). Do not create another preference store.
 

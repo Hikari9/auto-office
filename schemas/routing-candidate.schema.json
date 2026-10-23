@@ -17,6 +17,15 @@
       "enum": ["available", "discovered-unconfirmed", "probe-pending", "probe-passed", "temporarily-unavailable", "confirmed-unsupported"]
     },
     "status_reason": {"type": "string"},
+    "max_concurrent": {"type": ["integer", "null"], "minimum": 1},
+    "concurrency": {
+      "type": "object",
+      "required": ["count", "cap"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0},
+        "cap": {"type": "integer", "minimum": 1}
+      }
+    },
     "discovery": {"type": "boolean"},
     "probe_key": {"type": ["string", "null"]},
     "harness": {

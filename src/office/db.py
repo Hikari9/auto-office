@@ -25,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS lineage(id TEXT PRIMARY KEY, component_kind TEXT, com
 CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL, holder_id TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL, released_at TEXT, revoked_at TEXT, revoke_reason TEXT);
 CREATE TABLE IF NOT EXISTS adapter_trust_acts(id TEXT PRIMARY KEY, triple TEXT NOT NULL, target_state TEXT NOT NULL, actor_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_reference TEXT, recorded_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recorded_overrides(override_id TEXT PRIMARY KEY, run_id TEXT, family_id TEXT, task_id TEXT, role TEXT, candidate_id TEXT, bypass_stage INTEGER, rationale TEXT, authorized_by TEXT, authorized_at TEXT, expires_at TEXT);
+CREATE TABLE IF NOT EXISTS route_cooldowns(route TEXT PRIMARY KEY, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
 
 # Nullable 3.1 columns on tables shared with the legacy recorder.
@@ -262,6 +263,7 @@ def migrate(con: sqlite3.Connection) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
         con.execute("CREATE INDEX IF NOT EXISTS dispatches_run ON dispatches(run_id, task_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS dispatches_route_concurrency ON dispatches(harness, model, status, ended_at)")
         _repair_historical_plan_review_routes(con)
         # Never lower a stamp a newer runtime wrote; drift repair runs below it.
         con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('office_schema', ?)",
@@ -316,7 +318,8 @@ def _schema_version(con: sqlite3.Connection) -> int:
 
 _TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DDL)
 _ROUTE_INDEXES = {"route_probe_inflight", "route_probe_run", "route_trial_run", "route_discovery_attempt",
-                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal"}
+                  "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal",
+                  "dispatches_route_concurrency"}
 _ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace"}
 
 
