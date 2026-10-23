@@ -99,6 +99,11 @@
       "type": "boolean",
       "description": "A user-level adapter whose id names a seed adapter replaces it only when this is true."
     },
+    "free_model_max_concurrent": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default simultaneous dispatch cap for free catalog rows without a row-level max_concurrent."
+    },
     "session": {
       "type": "object",
       "description": "How Office learns the harness's session id for resume: assigned at launch, or detected from hooks, herdr, or CLI output.",

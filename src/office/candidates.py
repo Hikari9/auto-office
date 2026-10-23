@@ -42,7 +42,8 @@ def catalog_rows() -> list[dict]:
     return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 
 
-_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date", "free_model")
+_ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date",
+                 "free_model", "max_concurrent")
 
 
 def _version_key(version: str) -> tuple[int, ...]:
@@ -539,6 +540,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "speed_fields": row.get("speed_fields") or {},
             "route_status": state["status"], "status_reason": state["reason"],
             "free_model": is_free_model,
+            "max_concurrent": _max_concurrent(row, adapter, is_free_model),
             "discovery": state["discovery_eligible"], "probe_key": None,
         }
         if row.get("alias_resolved_to"):
@@ -590,6 +592,12 @@ def _cost(row: dict) -> dict:
     price = row.get("price_fields") or {}
     out = price.get("output_per_mtok")
     return {"money_estimate": float(out) if isinstance(out, (int, float)) else None}
+
+
+def _max_concurrent(row: dict, adapter: dict, is_free_model: bool) -> int | None:
+    """Resolve a catalog row cap before the adapter default for free models."""
+    cap = row.get("max_concurrent")
+    return cap if cap is not None else (adapter.get("free_model_max_concurrent") if is_free_model else None)
 
 
 def parse_route_override(text: str) -> dict:

@@ -249,6 +249,36 @@ def _connect(db_path):
     return con
 
 
+def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None:
+    """Overlay live counts for capped routes once, or honor a recorded snapshot on replay."""
+    candidates = request.get("candidates", [])
+    snapshot = request.get("concurrency_snapshot")
+    if snapshot is None:
+        snapshot = {}
+        counts: dict[tuple[str, str], int] = {}
+        if con is not None:
+            for c in candidates:
+                if c.get("max_concurrent") is None:
+                    continue
+                key = (str(c.get("harness") or ""),
+                       str(c.get("invocation_model_id") or c.get("model_id") or ""))
+                if not all(key) or key in counts:
+                    continue
+                counts[key] = con.execute(
+                    "SELECT COUNT(*) FROM dispatches WHERE harness=? AND model=? AND ended_at IS NULL "
+                    "AND status IN ('launching','running')", key,
+                ).fetchone()[0]
+        for c in candidates:
+            if c.get("max_concurrent") is not None:
+                snapshot[candidate_id(c)] = counts.get(
+                    (str(c.get("harness") or ""), str(c.get("invocation_model_id") or c.get("model_id") or "")), 0)
+        request["concurrency_snapshot"] = snapshot
+    for c in candidates:
+        cap = c.get("max_concurrent")
+        if cap is not None:
+            c["concurrency"] = {"count": int(snapshot.get(candidate_id(c), 0)), "cap": int(cap)}
+
+
 def route(request: dict, discovery_input: dict | None = None, *,
           connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
@@ -306,6 +336,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
 
     con = connection if connection is not None else _connect(db_path)
     try:
+        _concurrency_snapshot(request, con)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.
@@ -419,6 +450,17 @@ def route(request: dict, discovery_input: dict | None = None, *,
             nxt.append(c)
         stage = nxt
 
+        # Enforce route concurrency before the protected quota reserve. The count is
+        # captured in the request so replay uses the same gate decision.
+        available = []
+        for c in stage:
+            concurrency = c.get("concurrency") or {}
+            if concurrency.get("cap") is not None and concurrency["count"] >= concurrency["cap"]:
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "concurrency",
+                                 "reason": f"concurrency cap reached ({concurrency['count']}/{concurrency['cap']})"})
+            else:
+                available.append(c)
+        stage = available
         if not stage:
             _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
@@ -811,9 +853,10 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
               **({"task_descriptor": (request.get("context") or {}).get("task_descriptor")}
                  if (request.get("context") or {}).get("task_descriptor") else {}),
               "slate": [e["route"] for e in slate],
-              "inputs": [{k: r[k] for k in ("route", "p_success", "cost_to_success",
-                                            "time_to_success_seconds", "quota", "preference",
-                                            "utility")} for r in audit["candidates"]],
+              "inputs": [{**{k: r[k] for k in ("route", "p_success", "cost_to_success",
+                                                 "time_to_success_seconds", "quota", "preference", "utility")},
+                          **({"concurrency": r["concurrency"]} if r.get("concurrency") else {})}
+                         for r in audit["candidates"]],
               "clincher": audit["clincher"], "exploration": audit["exploration"],
               "policy_version": audit["policy_version"], "evidence_digest": audit["evidence_digest"]}
     if disc:

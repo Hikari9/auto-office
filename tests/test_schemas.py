@@ -55,6 +55,14 @@ class TestSchemas(unittest.TestCase):
             f'rejection must name the missing effort field, got: {[e.message for e in errors]}',
         )
 
+    def test_routing_candidate_accepts_concurrency_cap_snapshot(self):
+        schema = json.loads((ROOT / 'schemas/routing-candidate.schema.json').read_text())
+        validator = Draft202012Validator(schema)
+        candidate = json.loads((FIXTURES_DIR / 'routing-candidate/accept_complete.json').read_text())
+        candidate['max_concurrent'] = 2
+        candidate['concurrency'] = {'count': 1, 'cap': 2}
+        self.assertEqual(list(validator.iter_errors(candidate)), [])
+
     def test_catalog_effort_field_is_universally_populated(self):
         # Deliverable F1 empirical audit: every catalog/seed.yaml row carries `effort`
         # (not `min_effort`), and `min_effort` does not appear there at all (it is a
