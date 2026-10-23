@@ -467,21 +467,6 @@ def route(request: dict, discovery_input: dict | None = None, *,
             nxt.append(c)
         stage = nxt
 
-        # Enforce route concurrency before the protected quota reserve. The count is
-        # captured in the request so replay uses the same gate decision.
-        available = []
-        for c in stage:
-            concurrency = c.get("concurrency") or {}
-            if concurrency.get("cap") is not None and concurrency["count"] >= concurrency["cap"]:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "concurrency",
-                                 "reason": f"concurrency cap reached ({concurrency['count']}/{concurrency['cap']})"})
-            else:
-                available.append(c)
-        stage = available
-        if not stage:
-            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
-            return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
-
         # A dispatch-reported quota wall blocks the same harness invocation across
         # effort variants. Cooldowns live in shared runs.db across runs/processes.
         now = datetime.now(timezone.utc).isoformat()
