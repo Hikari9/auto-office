@@ -315,6 +315,8 @@ def test_a_session_that_only_printed_the_path_or_ran_elsewhere_or_is_old_is_not_
     _session_store(opencode.home, [
         # An assistant or tool message that mentions the path is not a prompt.
         ("ses_tool", cwd, [("assistant", _ms(1), {"content": [{"type": "text", "text": str(brief)}]})]),
+        # Even an assistant row shaped like a prompt (a top-level `text`) is not one: only `user` rows count.
+        ("ses_shaped", cwd, [("assistant", _ms(1), _prompt(brief)), ("synthetic", _ms(1), _prompt(brief))]),
         ("ses_dir", elsewhere, [("user", _ms(1), _prompt(brief))]),
         ("ses_old", cwd, [("user", _ms(24 * 60), _prompt(brief))]),
     ])
@@ -358,7 +360,11 @@ def test_the_store_is_opened_read_only(opencode, monkeypatch, tmp_path):
     cwd.mkdir()
     db = _session_store(opencode.home, [("ses_mine", cwd, [("user", _ms(1), _prompt(brief))])])
     before = (db.read_bytes(), db.stat().st_mtime_ns)
+    opened = []
+    real = transcripts.sqlite3.connect
+    monkeypatch.setattr(transcripts.sqlite3, "connect", lambda *a, **kw: opened.append(a[0]) or real(*a, **kw))
     assert transcripts.prompt_seen("opencode", marker=str(brief), cwd=cwd, since=0)
+    assert len(opened) == 1 and opened[0].endswith("?mode=ro"), opened  # SQLite refuses any write on this handle
     assert (db.read_bytes(), db.stat().st_mtime_ns) == before
     assert not db.with_name(db.name + "-journal").exists()
 
