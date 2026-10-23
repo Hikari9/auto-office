@@ -32,6 +32,8 @@ deploy:
 quota:
   # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
+  # Block a route after a quota wall when the provider gives no reset time.
+  cooldown_minutes: 15
 cost_policy:
   default: balanced
   # Legacy: planner and reviewer routing only. Executor and worker routing (#300)

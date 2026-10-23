@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS lineage(id TEXT PRIMARY KEY, component_kind TEXT, com
 CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL, holder_id TEXT NOT NULL, acquired_at TEXT NOT NULL, expires_at TEXT NOT NULL, released_at TEXT, revoked_at TEXT, revoke_reason TEXT);
 CREATE TABLE IF NOT EXISTS adapter_trust_acts(id TEXT PRIMARY KEY, triple TEXT NOT NULL, target_state TEXT NOT NULL, actor_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_reference TEXT, recorded_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recorded_overrides(override_id TEXT PRIMARY KEY, run_id TEXT, family_id TEXT, task_id TEXT, role TEXT, candidate_id TEXT, bypass_stage INTEGER, rationale TEXT, authorized_by TEXT, authorized_at TEXT, expires_at TEXT);
+CREATE TABLE IF NOT EXISTS route_cooldowns(route TEXT PRIMARY KEY, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
 
 # Nullable 3.1 columns on tables shared with the legacy recorder.

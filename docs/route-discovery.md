@@ -25,6 +25,8 @@ A catalog route becomes probe-able only when the catalog marks it `discovery: el
 
 Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, `probe-passed`, `temporarily-unavailable` and `confirmed-unsupported`. Availability still leaves role, permission, capability, trust, task and quota gates to check.
 
+Dispatches that end on a harness quota or rate-limit wall temporarily block that harness invocation across effort variants, runs, and Office processes. A reset time reported in the output sets the expiry; otherwise `quota.cooldown_minutes` applies (15 minutes by default). A successful dispatch of the same invocation clears its cooldown early. Other models on the same harness remain eligible.
+
 ## Policy and config
 
 ### Concurrent free-model routes

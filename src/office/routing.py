@@ -42,6 +42,11 @@ def candidate_id(c):
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
 
 
+def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
+    """Stable quota cooldown identity shared by effort variants of one invocation."""
+    return f"{harness or ''}/{invocation_model_id or ''}"
+
+
 def preferred_rank(c, preferred_seed):
     """Index of the first roles.<role>.preferred_seed entry c matches, or None.
 
@@ -265,8 +270,11 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
                 if not all(key) or key in counts:
                     continue
                 counts[key] = con.execute(
-                    "SELECT COUNT(*) FROM dispatches WHERE harness=? AND model=? AND ended_at IS NULL "
-                    "AND status IN ('launching','running')", key,
+                    "SELECT COUNT(*) FROM dispatches d JOIN runs r ON r.id=d.run_id "
+                    "WHERE d.harness=? AND d.model=? AND d.ended_at IS NULL "
+                    "AND d.status IN ('launching','running') "
+                    "AND COALESCE(r.phase,'') NOT IN ('closed','abandoned','landed') "
+                    "AND COALESCE(r.status,'') NOT IN ('closed','abandoned','landed')", key,
                 ).fetchone()[0]
         for c in candidates:
             if c.get("max_concurrent") is not None:
@@ -459,14 +467,41 @@ def route(request: dict, discovery_input: dict | None = None, *,
             nxt.append(c)
         stage = nxt
 
+        # A dispatch-reported quota wall blocks the same harness invocation across
+        # effort variants. Cooldowns live in shared runs.db across runs/processes.
+        now = datetime.now(timezone.utc).isoformat()
+        routes = [(cooldown_key(c.get("harness"), c.get("invocation_model_id") or c.get("model_id")), c)
+                  for c in stage]
+        rate_limited = {}
+        if con and routes:
+            has_cooldowns = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_cooldowns'"
+            ).fetchone()
+            if has_cooldowns:
+                ids = list(dict.fromkeys(key for key, _ in routes))
+                placeholders = ",".join("?" for _ in ids)
+                rate_limited = {row[0]: row[1] for row in con.execute(
+                    f"SELECT route, expires_at FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
+                    (now, *ids))}
+        for key, c in routes:
+            if key in rate_limited:
+                c["quota"] = {
+                    **(c.get("quota") or {}),
+                    "status": "ok",
+                    "tightest_remaining_percent": 0,
+                    "cause": "rate-limited",
+                    "expires_at": rate_limited[key],
+                }
+
         # 6 quota safety: unknown quota is scored conservatively downstream, not
         # excluded when a known-safe route is also available.
         from office import candidates as candidate_builder
         safe = []; unknown = []; unsafe = []
         for c in stage:
             gate = _quota_gate(c, reserve)
-            if gate and gate[2] == "concurrency-cap":
-                rejected.append({"candidate": candidate_id(c), "stage": gate[0], "category": "concurrency",
+            if gate and gate[2] in {"concurrency-cap", "rate-limited"}:
+                category = "concurrency" if gate[2] == "concurrency-cap" else gate[2]
+                rejected.append({"candidate": candidate_id(c), "stage": gate[0], "category": category,
                                  "reason": gate[1]})
                 continue
             q = candidate_builder.quota_for_candidate(c); status = q.get("status", "unknown")
@@ -618,6 +653,8 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tup
 
 def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
     q = c.get("quota", {})
+    if q.get("cause") == "rate-limited":
+        return 6, "rate-limited", "rate-limited"
     if q.get("cause") == "concurrency-cap":
         concurrency = q.get("concurrency") or {}
         return (6, f"concurrency cap reached ({concurrency.get('count')}/{concurrency.get('cap')})",
