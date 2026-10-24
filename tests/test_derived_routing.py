@@ -235,7 +235,11 @@ class TestDerivedRouting(unittest.TestCase):
 
         request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
                    'candidates': [target, target_low, alternate]}
-        result = current_routing.route(request)
+        # Check during the simulated cooldown, independent of today's wall clock.
+        # Otherwise this fixed 2026-10-23 expiry eventually becomes stale.
+        with unittest.mock.patch.object(current_routing, 'datetime') as routing_clock:
+            routing_clock.now.return_value = now + timedelta(minutes=1)
+            result = current_routing.route(request)
         self.assertEqual(result['selected'], alternate_id)
         rejected = next(row for row in result['rejected'] if row['candidate'] == target_id)
         self.assertEqual(rejected['category'], 'rate-limited')
