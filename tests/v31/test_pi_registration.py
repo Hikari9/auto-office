@@ -20,6 +20,7 @@ import pytest
 
 import fake_agent
 from conftest import GOOD_ADD, approved_run, task_row
+from retired_mimo_fixture import isolated_retired_mimo_catalog
 
 from office import adapters, candidates, configcmd, routing
 from office.state import Refused
@@ -44,7 +45,7 @@ def _rows() -> list[dict]:
 def _isolate_user_catalog(tmp_path, monkeypatch):
     """Keep operator-specific user config and catalog choices out of seed tests."""
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "config.yaml"))
-    monkeypatch.setenv("OFFICE_USER_CATALOG", str(tmp_path / "catalog.yaml"))
+    monkeypatch.setenv("OFFICE_USER_CATALOG", str(isolated_retired_mimo_catalog(tmp_path, PI)))
 
 
 # ---------------------------------------------------------------- argv and trust flags
@@ -101,7 +102,7 @@ def test_pi_preflight_validates_the_pinned_slug_and_credentials():
 
 # ---------------------------------------------------------------- catalog rows
 
-def test_mimo_rows_pin_the_provider_and_claim_no_conformance():
+def test_archived_mimo_test_overlay_pins_provider_without_claiming_conformance():
     rows = {r["model_id"]: r for r in _rows() if str(r["model_id"]).startswith("mimo")}
     assert set(rows) == {"mimo-v2.6-pro", "mimo-v2.6-flash"}, set(rows)
     for model_id, row in rows.items():
@@ -255,6 +256,7 @@ PASS = {"reply": "VERDICT: APPROVED\nNEXT proceed"}  # the lane reviewer (#337)
 
 def _approved(env):
     _install_pi(env)
+    os.environ["OFFICE_USER_CATALOG"] = str(isolated_retired_mimo_catalog(env.tmp, PI))
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[PASS])
 
 
