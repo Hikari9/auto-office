@@ -164,7 +164,8 @@ def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
         # unreachable or unexpectedly formatted pane may still hold open file
         # handles, regardless of its current shell cwd.
         payload = answer(p.stdout) or answer(p.stderr)
-        if not (isinstance(payload, dict) and (payload.get("error") or {}).get("code") == "pane_not_found"):
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not (isinstance(error, dict) and error.get("code") == "pane_not_found"):
             return f"Herdr pane {pane} still present or unverified"
     return None
 
