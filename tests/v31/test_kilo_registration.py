@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from conftest import GOOD_ADD, approved_run, task_row
+from retired_mimo_fixture import isolated_retired_mimo_catalog
 from office import adapters, candidates, configcmd, onboarding, routing, scoring
 from office.state import Refused
 
@@ -96,6 +97,12 @@ raise SystemExit(2)
 '''
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFFICE_USER_CATALOG",
+                       str(isolated_retired_mimo_catalog(tmp_path, "kilo")))
+
+
 def _adapter() -> dict:
     return adapters.load_all()["kilo"]
 
@@ -123,6 +130,7 @@ def _install_kilo(env) -> Path:
 
 def _approved(env):
     _install_kilo(env)
+    os.environ["OFFICE_USER_CATALOG"] = str(isolated_retired_mimo_catalog(env.tmp, "kilo"))
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[PASS])
 
