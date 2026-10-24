@@ -16,12 +16,21 @@ def _task(env, run_id: str, task="T1") -> Path:
     return env.state / "worktrees" / run_id[:8] / task
 
 
+def _prove_integration_online(env, run_id: str):
+    """A detached integration commit must be backed by a LIVE remote branch."""
+    env.git("-C", str(_task(env, run_id, "_integration")), "push", "origin",
+            f"HEAD:refs/heads/office-integration-proof-{run_id[:8]}")
+
+
 def test_crash_after_terminal_transition_is_recovered_by_repeating_close(env, monkeypatch):
     _merged(env, monkeypatch)
     rid = _run_id(env)
     con = env.con()
     run = state.get_run(con, rid)
     landing = gates.landing_state(con, run, None)
+    # A merged integration tree alone does not prove a detached commit's
+    # identity is recoverable. Prove that commit exists on the live remote.
+    _prove_integration_online(env, rid)
     # Mimic a crash immediately after the terminal transaction committed.
     con.execute("UPDATE runs SET phase='closed', terminal_at='2026-10-24', "
                 "archive_digest='sha256:recovery', landing_json=? WHERE id=?",
@@ -83,6 +92,7 @@ def test_locked_worktree_retained_and_retry_removes_after_unlock(env, monkeypatc
 def test_older_landed_run_offers_preview_opt_in_and_repeat_is_idempotent(env, monkeypatch):
     _merged(env, monkeypatch)
     rid = _run_id(env)
+    _prove_integration_online(env, rid)
     code, out = env.office("close")
     assert code == 0, out
     root = env.state / "worktrees" / rid[:8]
@@ -217,3 +227,17 @@ def test_previously_closed_handoff_can_later_verify_merge_and_cleanup(env, monke
     _gh(env, "MERGED", commit)
     code, out = env.office("close", "--landed-externally", "https://github.com/o/r/pull/7", "--run", rid)
     assert code == 0 and "external landing verified" in out and not _task(env, rid).exists(), out
+
+
+def test_identical_remote_tree_does_not_erase_unique_local_commit_history(env, monkeypatch):
+    _merged(env, monkeypatch)
+    rid = _run_id(env)
+    wt = _task(env, rid)
+    # The new commit has exactly the same tree as origin, but its commit hash
+    # and message are local evidence not present in the remote history.
+    env.git("-C", str(wt), "commit", "-qm", "local-only empty commit", "--allow-empty")
+    new_commit = env.git("-C", str(wt), "rev-parse", "HEAD").strip()
+    code, out = env.office("close")
+    assert code == 0 and "not proven recoverable from current online origin" in out, out
+    assert wt.exists(), out
+    assert env.git("cat-file", "-t", new_commit).strip() == "commit"

@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from datetime import datetime, timezone
 
 from office import db, paths, state
 from office.result import Result
@@ -115,15 +116,11 @@ def _remote_tips(repo: Path, *, refresh: bool = False) -> list[str]:
 
 
 def _has_online_counterpart(repo: Path, head: str, tips: list[str]) -> bool:
-    for tip in tips:
-        if _git(repo, "merge-base", "--is-ancestor", head, tip).returncode == 0:
-            return True
-        # A squash can leave identical trees with distinct commit ancestry.
-        left = _git(repo, "rev-parse", head + "^{tree}")
-        right = _git(repo, "rev-parse", tip + "^{tree}")
-        if left.returncode == right.returncode == 0 and left.stdout.strip() == right.stdout.strip():
-            return True
-    return False
+    # An identical tree (such as a squash merge) does NOT preserve locally
+    # unique commit identity or history. Require the actual commit to exist
+    # in reachable online history. False negatives preserve data.
+    return any(_git(repo, "merge-base", "--is-ancestor", head, tip).returncode == 0
+               for tip in tips)
 
 
 def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
@@ -237,8 +234,8 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
         for wt in worktrees:
             try:
                 blocker = _safe_candidate(con, run, wt, registered, tips)
-                modified = now_iso() if not wt.exists() else __import__("datetime").datetime.fromtimestamp(
-                    wt.stat().st_mtime, tz=__import__("datetime").timezone.utc).isoformat()
+                modified = (datetime.fromtimestamp(wt.stat().st_mtime, tz=timezone.utc).isoformat()
+                            if wt.exists() else None)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 blocker, modified = str(exc), None
             details.append({"path": str(wt), "modified_at": modified,
