@@ -264,6 +264,24 @@ office close
 
 `office close` is a cleanup sweep, not just a state change. After a real merge it fast-forwards the local base branch to `origin/<base>` (a dirty checkout of it is left alone and the user is asked), removes only the worktrees and `office/<run>/` branches Office created for the run (`git branch -d`, never `-D`), and runs `git worktree prune`. A `--handoff` close marks a PR Office opened ready (a PR it did not open keeps its draft state) and keeps everything for after the user merges. It warns (non-blocking) when the diff changes code but no CHANGELOG/README the repo keeps, and every path ends with one `office close done — <summary>` line.
 
+### Safe worktree cleanup and recovery
+
+Closeout cleanup is independently recorded in `runs.db` as a `cleanup_runs` receipt. A crash after the run is marked **closed** does not strand cleanup: run `office close --run <id>` again to retry only the unfinished tail. A close that hands a PR to the user **retains** its checkouts until landing is verified; after an external merge use `office close --landed-externally <merged-PR-URL> --run <id>` (also supported for already-closed handoffs).
+
+Removal is conservative: Office checks its run-owned or recorded worktree, same Git repository identity, live Git worktree registration and locks, live agents/Herdr panes, local staged and unstaged edits, and a current **online origin** ref containing the worktree commit (or its exact full tree). Before deletion it verifies an archive of all untracked and ignored files, including private environment files, outside the prunable run directory. Unproven commits, changes, pane attachments, missing archive proof, and pinned runtimes are **retained with a reason**. The close report gives removed/retained counts and approximate bytes reclaimed; a terminal run remains closed even when cleanup is incomplete.
+
+The separate opt-in path for older finished runs is:
+
+```bash
+office cleanup --older                  # preview old run/version, refs, dates, GB and blockers; no deletion
+office cleanup --run <id>                # inspect this recorded finished run
+office cleanup --run <id> --decline      # retain and suppress future offers
+office cleanup --run <id> --apply        # attempt safe cleanup for this one run
+office cleanup --run <id> --apply        # retry after resolving a blocker
+```
+
+Active and resumable runs are ineligible. Previews do not mutate local or remote Git refs, worktrees or run status. Apply revalidates eligibility and online recoverability under a per-run lock. `office prune` separately removes run detail and is **not** the safe worktree-cleanup interface.
+
 The important part is not the exact command sequence above; it is that the runtime keeps the legal sequence explicit. If the state changes, `next:` changes with it.
 
 ## The opinionated SDLC
@@ -713,6 +731,7 @@ office benchmarks brief|submit ...
 office list
 office doctor [--fix]
 office prune [-f]
+office cleanup --older|--run <id> [--apply|--decline]
 ```
 
 Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
