@@ -1,6 +1,6 @@
 # AGY CLI: Gemini and other routed agents
 
-Use `agy --help` and `agy models` at launch time. Native Gemini variants include effort in the **model slug** (`gemini-3.8-flash-medium`); do not split the known-good native Gemini slug into a base model plus `--effort`. For non-Gemini models through AGY, the exact display name may be required instead of the slug: confirm against the startup banner.
+Use `agy --help` and `agy models` at launch time. Some native routes encode effort inside the **advertised model slug**; never split a supported slug into a base route plus `--effort`. Other routes may require an exact display name instead of a slug. Confirm the installed command syntax and startup banner rather than assuming any specific model is available.
 
 ## Launch in a named worktree
 
