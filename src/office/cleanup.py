@@ -150,10 +150,21 @@ def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
             p = subprocess.run(["herdr", "pane", "get", pane], capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             return f"Herdr pane {pane} liveness unknown"
-        output = p.stdout + p.stderr
-        if "pane_not_found" not in output:
-            # A present (or unreachable) pane may still hold open file handles,
-            # regardless of its current shell cwd.
+
+        def answer(text: str) -> dict | None:
+            start = text.find("{")
+            try:
+                payload = json.loads(text[start:]) if start >= 0 else None
+            except ValueError:
+                return None
+            return payload if isinstance(payload, dict) else None
+
+        # A present pane answers on stdout, a missing one on stderr. Only
+        # herdr's structured not-found answer proves detachment; a busy,
+        # unreachable or unexpectedly formatted pane may still hold open file
+        # handles, regardless of its current shell cwd.
+        payload = answer(p.stdout) or answer(p.stderr)
+        if not (isinstance(payload, dict) and (payload.get("error") or {}).get("code") == "pane_not_found"):
             return f"Herdr pane {pane} still present or unverified"
     return None
 
@@ -161,7 +172,7 @@ def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
 def _safe_candidate(con, run: dict, wt: Path, registered: dict[Path, dict],
                     tips: list[str]) -> str | None:
     repo = Path(run["repo_root"]).absolute()
-    root = paths.worktrees_dir().absolute()
+    root = (paths.worktrees_dir() / run["id"][:8]).absolute()
     state_dir = Path(run.get("state_dir") or paths.run_dir(run["id"])).absolute()
     runtime_root = paths.runtimes_dir().absolute()
     # A recorded dispatch path outside the current run root is accepted only
@@ -304,12 +315,12 @@ def sweep(con, run: dict, *, override_decline: bool = False) -> dict:
                 if reason:
                     kept.append({"path": str(wt), "reason": "changed since archive: " + reason})
                     continue
-                if backup:
-                    # A post-archive untracked/ignored change must not go unnoticed.
-                    after = deploy_artifacts.preserve_or_refuse(current, wt)
-                    if after != backup:
-                        kept.append({"path": str(wt), "reason": "local evidence changed since archive"})
-                        continue
+                # A post-archive untracked/ignored change must not go unnoticed,
+                # including one that appeared after an initially empty inventory.
+                after = deploy_artifacts.preserve_or_refuse(current, wt)
+                if after != backup:
+                    kept.append({"path": str(wt), "reason": "local evidence changed since archive"})
+                    continue
                 size = _size(wt)
                 proc = _git(repo, "worktree", "remove", "--force", str(wt))
                 if proc.returncode or wt.exists():

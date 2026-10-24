@@ -234,6 +234,26 @@ def test_previously_closed_handoff_can_later_verify_merge_and_cleanup(env, monke
     assert code == 0 and "external landing verified" in out and not _task(env, rid).exists(), out
 
 
+def test_crash_after_landed_externally_terminal_replays_as_sweep(env, monkeypatch):
+    _merged(env, monkeypatch)
+    rid = _run_id(env)
+    _prove_integration_online(env, rid)
+    con = env.con()
+    run = state.get_run(con, rid)
+    landing = gates.landing_state(con, run, None)
+    # A landed-externally close stores the PR URL in landing.handoff; a crash
+    # before its cleanup tail must replay as a sweep, not re-offer a handoff.
+    con.execute("UPDATE runs SET phase='closed', terminal_at='2026-10-24', "
+                "terminal_reason='landed externally', archive_digest='sha256:recovery', landing_json=? WHERE id=?",
+                (json.dumps({**landing, "status": "landed-externally", "pr": "https://github.com/o/r/pull/7",
+                             "merge_commit": env.git("rev-parse", "origin/main").strip(),
+                             "handoff": "https://github.com/o/r/pull/7"}), rid))
+    con.commit()
+    code, out = env.office("close", "--run", rid)
+    assert code == 0 and "worktree(s) removed" in out and not _task(env, rid).exists(), out
+    assert "handed off" not in out, out
+
+
 def test_identical_remote_tree_does_not_erase_unique_local_commit_history(env, monkeypatch):
     _merged(env, monkeypatch)
     rid = _run_id(env)

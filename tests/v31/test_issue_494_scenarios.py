@@ -1254,7 +1254,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
                    # #723: opt-in root wake receipts (new tables only; no existing table changed).
                    "root_wake_bindings", "root_wake_intents", "root_wake_stall_state",
                    # T2: quota-wall cooldowns are additive shared routing state.
-                   "route_cooldowns"}
+                   "route_cooldowns",
+                   # #783: durable closeout-cleanup receipts (new table only).
+                   "cleanup_runs"}
     assert all(after.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0 for t in new)
     after.close()
     again = old.connect(path)  # the previous runtime still opens it and keeps writing its own tables

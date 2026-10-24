@@ -405,7 +405,11 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                           final=closeout.done(f"already {run['phase']}, worktrees retained"))
         landing = run.get("landing") or {}
         res = Result(lines=[f"{short(run['id'])} already closed | retrying closeout"])
-        _closeout(con, run, landing, res, handoff=landing.get("handoff"))
+        # A landed-externally close stores the PR URL in landing.handoff; that
+        # landing is already verified, so a replay sweeps instead of re-offering
+        # the handoff and keeping the worktrees (#783 review).
+        _closeout(con, run, landing, res,
+                  handoff=None if landing.get("status") == "landed-externally" else landing.get("handoff"))
         res.lines.extend(cleanup.offer(con, run))
         return res
     dispatch.reap_orphans(con, run)
