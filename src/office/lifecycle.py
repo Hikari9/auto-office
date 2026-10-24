@@ -396,7 +396,25 @@ def reconcile_repository(con, run: dict) -> str | None:
 
 
 def close(con, run: dict, *, handoff: str | None = None) -> Result:
-    from office import closeout, dispatch, gates, guide
+    from office import cleanup, closeout, dispatch, gates, guide
+    if state.is_terminal(run):
+        # A crash may have committed terminal status before the cleanup tail.
+        # Replay does not reopen the run, label learning twice, or repeat pane teardown.
+        if run["phase"] != "closed":
+            return Result(lines=[f"{short(run['id'])} already {run['phase']}"],
+                          final=closeout.done(f"already {run['phase']}, worktrees retained"))
+        landing = run.get("landing") or {}
+        res = Result(lines=[f"{short(run['id'])} already closed | retrying closeout"])
+        # A landed-externally close stores the PR URL in landing.handoff and
+        # neither target nor detail; that landing is already verified, so a
+        # replay sweeps instead of re-offering the handoff. The PR must be
+        # passed on: _closeout's merged-detection reads it, not the status.
+        external = landing.get("status") == "landed-externally"
+        _closeout(con, run, landing, res,
+                  handoff=None if external else landing.get("handoff"),
+                  pr=landing.get("pr") if external else None)
+        res.lines.extend(cleanup.offer(con, run))
+        return res
     dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
     landing = gates.landing_state(con, run, handoff)
@@ -411,8 +429,10 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
-            return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None,
-                          final=closeout.done(f"already {current['phase']}, nothing to do"))
+            # A concurrent closer finished the transition. Never fake cleanup.
+            return Result(lines=[f"{short(run['id'])} already {current['phase']}; retry close"],
+                          next=f"office close --run {short(run['id'])}",
+                          final=closeout.done("terminal transition committed; retry cleanup"))
         receipt = _archive_receipt(con, current, landing, handoff)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
@@ -430,6 +450,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                  data={"archive_digest": receipt["digest"]})
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
+    res.lines.extend(cleanup.offer(con, run))
     return res
 
 
@@ -514,10 +535,10 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
     or the user's explicit quote retain the external-close behavior (#239).
     Squash recovery instead requires the current accepted integration, proven
     PR heads or exact tree equality, and fresh post-merge checks (#705)."""
-    from office import closeout, landing_recovery
-    if state.is_terminal(run):
-        return Result(lines=[f"{short(run['id'])} already {run['phase']}"], next=None,
-                      final=closeout.done(f"already {run['phase']}, nothing to do"))
+    from office import cleanup, closeout, landing_recovery
+    if state.is_terminal(run) and run["phase"] != "closed":
+        raise Refused("run-terminal", f"{short(run['id'])} is abandoned; cannot certify it as landed",
+                      preserved="all run evidence")
     pr = _merged_pr(run, ref)
     tasks = state.tasks(con, run["id"])
     accepted = {t["id"]: con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)
@@ -542,13 +563,26 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
                "contains": contained, "unproven": unproven, "quote": (quote or "").strip() or None}
     if recovered:
         landing["squash_proof"] = recovered[0]
+    if state.is_terminal(run):
+        # Previously closed handoff now has a proven merged PR. Keep the
+        # original terminal receipt and record the new verified landing proof.
+        with db.transaction(con):
+            current = state.get_run(con, run["id"])
+            if current["phase"] != "closed":
+                raise Refused("run-terminal", "terminal run is not closed")
+            state.update_run(con, run["id"], landing={**landing, "handoff": None})
+        res = Result(lines=[f"{short(run['id'])} external landing verified: {pr['url']}"])
+        _closeout(con, state.get_run(con, run["id"]), landing, res,
+                  pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
+        res.lines.extend(cleanup.offer(con, run))
+        return res
     from office import deploy_artifacts
     deploy_artifacts.preserve_interrupted(run)
     with db.transaction(con):
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
             return Result(lines=[f"{short(run['id'])} already {current['phase']}"], next=None,
-                          final=closeout.done(f"already {current['phase']}, nothing to do"))
+                          final=closeout.done("terminal transition committed; retry office close"))
         if recovered:
             landing_recovery.require_current(con, current, recovered[1])
         live = _stop_work(con, run)
@@ -581,6 +615,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
                                                                                    "landing": landing})
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
+    res.lines.extend(cleanup.offer(con, run))
     return res
 
 

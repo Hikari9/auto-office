@@ -82,40 +82,9 @@ def _office_worktrees(run: dict) -> list[Path]:
 
 
 def remove_worktrees(con, run: dict) -> dict:
-    """Remove only what Office created for this run: worktrees under its
-    worktree root and `office/<run>/` branches. A worktree with changes no
-    revision recorded is kept and reported; branches go with `git branch -d`."""
-    from office.prune import _recorded
-    repo = run["repo_root"]
-    removed, kept = [], []
-    for wt in _office_worktrees(run):
-        dirty = paths.git(wt, "status", "--porcelain", check=False)
-        if dirty and not _recorded(con, run, wt):
-            kept.append(f"{wt.name} (uncommitted changes no revision recorded)")
-            continue
-        proc = _git(repo, "worktree", "remove", "--force", str(wt))
-        (removed if proc.returncode == 0 else kept).append(wt.name if proc.returncode == 0
-                                                           else f"{wt.name} ({proc.stderr.strip()[:80]})")
-    from office import deploy_artifacts
-    for wt in deploy_artifacts.checkouts(run):
-        # Recheck immediately before removal; close saved a receipt before it
-        # became terminal, but a leftover deployment writer may have changed it.
-        try:
-            deploy_artifacts.preserve_or_refuse(run, wt)
-        except Exception as exc:
-            kept.append(f"{wt.name} ({exc})")
-            continue
-        proc = _git(repo, "worktree", "remove", "--force", str(wt))
-        (removed if proc.returncode == 0 else kept).append(wt.name if proc.returncode == 0
-                                                           else f"{wt.name} ({proc.stderr.strip()[:80]})")
-    _git(repo, "worktree", "prune")
-    deleted, branches_kept = [], []
-    prefix = f"refs/heads/office/{run['id'][:8]}/"
-    for ref in paths.git(repo, "for-each-ref", "--format=%(refname)", prefix, check=False).split():
-        name = ref[len("refs/heads/"):]
-        proc = _git(repo, "branch", "-d", name)
-        (deleted if proc.returncode == 0 else branches_kept).append(name)
-    return {"removed": removed, "kept": kept, "branches": deleted, "branches_kept": branches_kept}
+    """One runtime cleanup engine for normal, interrupted and older run close."""
+    from office import cleanup
+    return cleanup.sweep(con, run)
 
 
 def docs_warning(repo: Path, base_sha: str | None, commit: str | None) -> str | None:
@@ -169,8 +138,8 @@ def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[lis
     if cleaned["removed"] or cleaned["branches"]:
         lines.append(f"removed {len(cleaned['removed'])} run worktree(s), deleted {len(cleaned['branches'])} branch(es); "
                      "git worktree prune")
-    for k in cleaned["kept"]:
-        lines.append(f"kept worktree {k}")
+    for item in cleaned["kept"]:
+        lines.append(f"kept worktree {item['path']} ({item['reason']})")
     if cleaned["branches_kept"]:
         lines.append(f"kept branch(es) git branch -d refused (not merged locally): {', '.join(cleaned['branches_kept'][:4])}")
     what = f"{pr} merged" if pr else "merged"
@@ -178,4 +147,9 @@ def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[lis
     summary = f"{what}, {base_part}, {len(cleaned['removed'])} worktree(s) removed"
     if cleaned["kept"]:
         summary += f", {len(cleaned['kept'])} kept"
+    if cleaned["branches_kept"]:
+        summary += f", {len(cleaned['branches_kept'])} branch(es) kept"
+    summary += f", ~{cleaned['bytes']/1e9:.3f} GB reclaimed"
+    lines.append(f"cleanup receipt: removed {len(cleaned['removed'])}, retained {len(cleaned['kept'])}, "
+                 f"~{cleaned['bytes']/1e9:.3f} GB reclaimed; retry office close --run {run['id'][:8]} if incomplete")
     return lines, sync["ask"], summary
