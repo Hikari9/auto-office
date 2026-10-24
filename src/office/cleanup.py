@@ -76,6 +76,14 @@ def _candidates(con, run: dict, registered: dict[Path, dict]) -> list[Path]:
                 found.add(candidate)
     from office import deploy_artifacts
     found.update(p.absolute() for p in deploy_artifacts.checkouts(run))
+    # Detached review/check/convergence checkouts live beside deploy ones
+    # under the run directory; a crash before their finally-removal leaves
+    # them registered there. Plain non-worktree debris is not Office's to move.
+    checkouts = paths.run_dir(run["id"]) / "checkouts"
+    if checkouts.is_dir() and checkouts.resolve().is_relative_to(paths.state_home()):
+        found.update(p.absolute() for p in checkouts.iterdir()
+                     if p.is_dir() and not p.name.startswith(".")
+                     and ((p / ".git").exists() or p.absolute() in registered))
     # Git still registers paths whose .git file or original directory is gone.
     found.update(p for p in registered if p.is_relative_to(root.absolute()))
     return sorted(found)

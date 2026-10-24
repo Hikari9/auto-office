@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from office import state, gates
@@ -163,8 +164,12 @@ def test_live_herdr_pane_attached_after_preview_blocks_apply(env, monkeypatch):
     con.commit()
     code, out = env.office("cleanup", "--run", rid)
     assert code == 0 and "candidate" in out and wt.exists(), out
-    # The recorded pane attaches after the preview. Missing Herdr means
-    # Office cannot prove detachment and must preserve the checkout.
+    # The recorded pane attaches after the preview. This host may have a real
+    # herdr that answers pane_not_found for the synthetic pane id, so force the
+    # cannot-prove-detachment path; a genuinely attached pane is exercised by
+    # the macOS/Herdr smoke fixture.
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "herdr" else real_which(name))
     con.execute("UPDATE dispatches SET pane_id='newly-attached', launcher='herdr' "
                 "WHERE run_id=? AND worktree=?", (rid, str(wt)))
     con.commit()
@@ -241,3 +246,60 @@ def test_identical_remote_tree_does_not_erase_unique_local_commit_history(env, m
     assert code == 0 and "not proven recoverable from current online origin" in out, out
     assert wt.exists(), out
     assert env.git("cat-file", "-t", new_commit).strip() == "commit"
+
+
+def test_crash_leaked_convergence_checkout_is_discovered_and_removed(env, monkeypatch):
+    _merged(env, monkeypatch)
+    rid = _run_id(env)
+    checkout = env.state / "runs" / rid / "checkouts" / "converge-Gfixture01"
+    env.git("worktree", "add", "-q", "--detach", str(checkout), "origin/main")
+    code, out = env.office("close")
+    assert code == 0 and not checkout.exists(), out
+    assert checkout.name not in env.git("worktree", "list", "--porcelain"), out
+
+
+def test_leaked_checkout_at_unproven_commit_is_retained_with_reason(env, monkeypatch):
+    _merged(env, monkeypatch)
+    rid = _run_id(env)
+    checkout = env.state / "runs" / rid / "checkouts" / "review-Rfixture02"
+    base = env.git("rev-parse", "origin/main").strip()
+    env.git("worktree", "add", "-q", "--detach", str(checkout), base)
+    (checkout / "evidence.txt").write_text("review evidence\n")
+    env.git("-C", str(checkout), "add", "evidence.txt")
+    env.git("-C", str(checkout), "commit", "-qm", "unpushed review notes")
+    code, out = env.office("close")
+    assert code == 0 and "not proven recoverable from current online origin" in out, out
+    assert checkout.is_dir(), out
+
+
+def test_symlink_primary_checkout_runtime_and_unowned_paths_are_never_deleted(env, monkeypatch):
+    _merged(env, monkeypatch)
+    rid = _run_id(env)
+    _prove_integration_online(env, rid)
+    con = env.con()
+    run = state.get_run(con, rid)
+    landing = gates.landing_state(con, run, None)
+    con.execute("UPDATE runs SET phase='closed', terminal_at='2026-10-24', "
+                "archive_digest='sha256:recovery', landing_json=? WHERE id=?", (json.dumps(landing), rid))
+    con.commit()
+    root = env.state / "worktrees" / rid[:8]
+    # A linked name that resolves into a real worktree must not be followed.
+    real = env.tmp / "linked-target"
+    env.git("worktree", "add", "-q", "--detach", str(real), "origin/main")
+    (root / "T9-link").symlink_to(real, target_is_directory=True)
+    runtime = env.data / "runtimes" / "3.4.1"
+    runtime.mkdir(parents=True)
+    unowned = env.tmp / "never-ours"
+    unowned.mkdir()
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, status, worktree, started_at) VALUES "
+                "('d-primary', ?, 'T1', 'executor', 'accepted', ?, '2026-10-24'),"
+                "('d-runtime', ?, 'T1', 'executor', 'accepted', ?, '2026-10-24'),"
+                "('d-unowned', ?, 'T1', 'executor', 'accepted', ?, '2026-10-24')",
+                (rid, str(env.repo), rid, str(runtime), rid, str(unowned)))
+    con.commit()
+    code, out = env.office("cleanup", "--run", rid, "--apply")
+    assert code == 0, out
+    assert "primary checkout or symlink" in out and env.repo.is_dir(), out
+    assert (root / "T9-link").is_symlink() and real.is_dir(), out
+    assert "installed/pinned runtime" in out and runtime.is_dir(), out
+    assert "not registered as a Git worktree" in out and unowned.is_dir(), out
