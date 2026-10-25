@@ -58,7 +58,7 @@ def test_headless_invalid_diagnostic_never_promises_a_reprompt(tmp_path, monkeyp
     assert "its pane is kept" not in reason and "office prompt" not in reason
 
 
-@pytest.mark.parametrize("screen", ["Hooks need review", "Trust this folder?", "Update available\n1. Update now\n2. Skip"])
+@pytest.mark.parametrize("screen", ["Hooks need review", "Trust this folder?", "Update available\n› 1. Update now\n  2. Skip"])
 @pytest.mark.parametrize("timeout", [False, True])
 def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, timeout):
     calls, notices = [], []
