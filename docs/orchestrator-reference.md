@@ -143,6 +143,10 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   checks re-queues the reviews checks had cancelled.
 - Re-accepting a task reopens its accepted dependents whose revision does not contain the new one: each is paused `restack: ...` and `office status`
   prints a rerun command supported by its stored session and adapter. If the original route is unavailable, inspect the route before selecting another.
+  An amendment/redispatch reusing a task worktree restacks accepted dependencies before the executor starts (issue #696).
+  If tracked WIP blocks restack, revoke the failed relaunch and run `office rerun <task> --fresh --stash-wip`:
+  Office saves tracked/untracked WIP under its own `refs/office/wip/` ref (never the shared `refs/stash`), merges the dependency, and restores the WIP.
+  A restoration conflict appends the WIP to `git stash list` and reports its immutable commit for recovery; the orchestrator must not run raw Git in the worktree.
   A conflicting restack leaves HEAD unchanged and tells the executor to merge every missing accepted dependency, resolve within its scope, and rerun checks.
   Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
   contain <dep> accepted on ...; restack <T> onto <dep>` instead of reporting a merge conflict.
