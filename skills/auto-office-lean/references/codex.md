@@ -1,6 +1,6 @@
 # Codex CLI: direct worker or reviewer
 
-Use Codex when its exact installed model and effort are confirmed. Start with `codex --version`, `codex exec --help`, and `codex exec resume --help`. The active CLI is authoritative; a model name in a routing table is not proof of local access.
+Use Codex when its exact installed model and effort are confirmed. Start with `codex --version`, `codex exec --help`, and `codex exec resume --help`. The active CLI is authoritative; a stale or published recommendation is not proof of local access.
 
 ## Launch a bounded worker
 
