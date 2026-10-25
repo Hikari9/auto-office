@@ -2061,6 +2061,18 @@ def _wall_cap_seconds(prof: dict) -> float | None:
         return None
 
 
+def _pane_wall_cap(d: dict, spec: dict) -> float | None:
+    """The wall-clock limit for a pane-hosted agent, in seconds. A pane agent is
+    capped only where its interactive form declares `wall_cap: true` (opencode: `mini`
+    has no timeout of its own, as `run` has none); the limit is then the headless
+    one, OFFICE_WORKER_MAX_MINUTES else the profile's max_minutes."""
+    adapter = adapters.load_all().get(d.get("adapter_id") or "")
+    prof = adapters.profile(adapter, spec.get("kind") or "worker") if adapter else None
+    if not prof or not (prof.get("interactive") or {}).get("wall_cap"):
+        return None
+    return _wall_cap_seconds(prof)
+
+
 def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] | None = None,
                  output: Path | None = None) -> tuple[list[str], str] | None:
     """The pane-hosted form of this dispatch's harness, or None (headless)."""
@@ -3258,6 +3270,15 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     last_size = None
     unknown = 0
     unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
+    con = db.connect()
+    try:
+        first = state.get_dispatch(con, dispatch_id)
+        run = state.get_run(con, first["run_id"])
+    finally:
+        con.close()
+    cap = _pane_wall_cap(first, spec)
+    # Counted from the launch, so a watcher started again later does not restart the clock.
+    deadline = parse_iso(first.get("launched_at") or first["started_at"]).timestamp() + cap if cap else float("inf")
     while True:
         con = db.connect()
         try:
@@ -3290,9 +3311,17 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # pane has been unreadable past the limit, a file that stopped
             # growing is the only evidence left, so it bounds the wait.
             return 0, "success"
+        fresh_output = bool(size) and size != last_size
         last_size = size or None
         if sample is None:
             return None, "nonzero"
+        if time.time() >= deadline and not fresh_output:
+            # A submit or a settled reply was taken above, and a reply file first seen (or still
+            # growing) gets one more poll to settle; what is left ran past the cap.
+            _watch_notice(dispatch_id, f"herdr agent {spec['herdr_agent']} reached its wall-clock cap; "
+                                       "stopping it and closing its pane (its last screen is in pane-final.txt)")
+            reclaim_pane(run, dispatch_id, explicit=True)
+            return None, "timeout"
         if worker:
             if sample.get("busy") is False:
                 idle_since = idle_since or time.time()
