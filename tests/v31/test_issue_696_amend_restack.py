@@ -204,3 +204,73 @@ def test_stash_wip_restore_failure_does_not_hide_restack_error(tmp_path):
         assert exc.category == "restack-conflict"
         assert "stash" in (exc.preserved or "")
     assert "preserve T1 WIP" in git(a, "stash", "list")
+
+
+def test_stash_wip_restore_exception_does_not_replace_restack_error(tmp_path, monkeypatch):
+    """An OSError from the restore itself is noted on the restack error, which still propagates."""
+    from office import rerun
+    from office.state import Refused
+
+    git, a, _ = _repo_with_worktrees(tmp_path)
+    (a / "a.py").write_text("wip\n")
+    real_run = subprocess.run
+
+    def flaky(cmd, *args, **kwargs):
+        if "apply" in cmd:
+            raise OSError("git vanished")
+        return real_run(cmd, *args, **kwargs)
+
+    try:
+        with rerun._stash_wip(a, "T1"):
+            monkeypatch.setattr(rerun.subprocess, "run", flaky)
+            raise Refused("restack-conflict", "restack failed")
+    except Refused as exc:
+        assert exc.category == "restack-conflict"
+        assert any("git vanished" in note for note in exc.__notes__)
+    monkeypatch.undo()
+    assert "preserve T1 WIP" in git(a, "stash", "list")
+
+
+def test_stash_wip_rerun_with_conflicting_dependency_launches_with_the_conflict(env):
+    """rerun --stash-wip finds the conflict and restores the WIP; the launch job must not restack the dirty tree again."""
+    import json
+
+    _accepted_independent(env)
+    wt, _ = _wt(env, "T2")
+    (wt / "calc.py").write_text("# T2 collides with the accepted T1\n")
+    env.git("add", "calc.py", cwd=wt)
+    env.git("commit", "-qm", "t2 conflicting", cwd=wt)
+    head = env.git("rev-parse", "HEAD", cwd=wt).strip()
+    (wt / "mul.py").write_text(GOOD_MUL + "\n# uncommitted executor WIP\n")
+    env.write_plan(DEPENDENT)
+    code, out = env.office("amend", "T2", "--contract", "--", "depend on accepted T1", env=EXTERNAL)
+    assert code == 0, out
+    code, out = env.office("revoke", "T2", env=EXTERNAL)
+    assert code == 0, out
+    code, out = env.office("rerun", "T2", "--fresh", "--stash-wip", env=EXTERNAL)
+    assert code == 0 and "conflicts" in out, out
+    _, disp = _wt(env, "T2")
+    packet = next((env.state / "runs").glob(f"*/dispatches/{disp['id']}/packet.json"))
+    assert json.loads(packet.read_text())["restack"]["conflict"]["task"] == "T1"
+    assert env.git("rev-parse", "HEAD", cwd=wt).strip() == head
+    assert "# uncommitted executor WIP" in (wt / "mul.py").read_text()
+    assert not env.git("stash", "list", cwd=wt).strip()
+
+
+def test_relaunch_onto_a_branch_lacking_its_recorded_base_is_refused_without_a_restack(env):
+    """No dependency moved, so the restack is a no-op: the base-mismatch refusal still applies to the reused branch."""
+    _accepted_independent(env)
+    wt, prior = _wt(env, "T2")
+    base = env.git("rev-parse", prior["base_commit"] + "^{tree}").strip()
+    other = env.git("commit-tree", base, "-p", prior["base_commit"], "-m", "unrelated base").strip()
+    con = env.con()
+    con.execute("UPDATE dispatches SET base_commit=? WHERE id=?", (other, prior["id"]))
+    con.execute("UPDATE tasks SET status='changes_required', pause_reason='RECHECK: base moved' WHERE id='T2'")
+    con.commit()
+    env.git("worktree", "remove", "--force", str(wt))
+    code, out = env.office("rerun", "T2", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    _, new = _wt(env, "T2")
+    assert new["id"] != prior["id"] and new["base_commit"] == other
+    assert not list((env.state / "runs").glob(f"*/dispatches/{new['id']}/packet.json")), out
+    assert "does not contain the base" in env.office("status", "--verbose")[1]

@@ -310,7 +310,11 @@ def _stash_wip(wt: Path, tid: str):
     try:
         yield
     except BaseException as exc:
-        conflict = restore()
+        try:
+            conflict = restore()
+        except Exception as restore_exc:
+            conflict = None
+            exc.add_note(f"{tid} WIP restore failed: {restore_exc}; saved stash {saved[:12]} may remain")
         if conflict is not None:
             if isinstance(exc, state.OfficeError):
                 exc.preserved = "; ".join(x for x in (exc.preserved, conflict.preserved) if x)

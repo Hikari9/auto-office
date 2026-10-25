@@ -1647,6 +1647,14 @@ def stop_dispatch(run: dict, d: dict, *, wait: float = 5.0, notes: list[str] | N
 
 # ------------------------------------------------------------------ launch job
 
+def _base_mismatch(dispatch: dict, head: str) -> Refused:
+    return Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "
+                   f"{dispatch['base_commit'][:12]} dispatch {dispatch['id']} recorded", scope=dispatch.get("task_id"),
+                   preserved="the branch and its commits",
+                   next_step=f"merge {dispatch['base_commit'][:12]} into {dispatch['branch']}, or remove the branch "
+                             f"and office rerun {dispatch.get('task_id')} --fresh")
+
+
 def ensure_worktree(run: dict, dispatch: dict, *, restack_existing: bool = False) -> Path:
     wt = Path(dispatch["worktree"])
     repo = Path(run["repo_root"])
@@ -1660,11 +1668,7 @@ def ensure_worktree(run: dict, dispatch: dict, *, restack_existing: bool = False
         if not restack_existing and not integration.contains(run, head, dispatch["base_commit"]):
             # The launch job may restack an Office-owned predecessor branch after checkout.
             # Every other caller still refuses a mismatched base before a worker can start.
-            raise Refused("base-mismatch", f"branch {dispatch['branch']} ({head[:12]}) does not contain the base "
-                          f"{dispatch['base_commit'][:12]} dispatch {dispatch['id']} recorded", scope=dispatch.get("task_id"),
-                          preserved="the branch and its commits",
-                          next_step=f"merge {dispatch['base_commit'][:12]} into {dispatch['branch']}, or remove the branch "
-                                    f"and office rerun {dispatch.get('task_id')} --fresh")
+            raise _base_mismatch(dispatch, head)
         paths.git(repo, "worktree", "add", str(wt), dispatch["branch"])
     else:
         paths.git(repo, "worktree", "add", "-b", dispatch["branch"], str(wt), dispatch["base_commit"])
@@ -1769,7 +1773,13 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
         # writing the packet or starting any worker. Rerun may already have done it.
         from office import rerun
         task = state.get_task(con, run["id"], dispatch["task_id"])
-        restack = rerun._restack(con, run, task, str(wt))
+        recorded = (payload.get("restack") or {}).get("conflict")
+        if recorded and paths.git(wt, "status", "--porcelain", "--untracked-files=no").strip():
+            # rerun --stash-wip already found this conflict and restored the WIP: restacking the
+            # dirty tree again would refuse, and the executor must get the recorded conflict.
+            restack = None
+        else:
+            restack = rerun._restack(con, run, task, str(wt))
         if restack:
             if restack.get("base"):
                 with db.transaction(con):
@@ -1783,6 +1793,12 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
                 with db.transaction(con):
                     state.emit(con, run, "task.restacked", f"{task['id']} {restack['line']}",
                                task_id=task["id"], dispatch_id=dispatch["id"])
+        if created and not recorded and not (restack or {}).get("merged") and not (restack or {}).get("conflict"):
+            # ensure_worktree deferred its base-mismatch refusal to the restack; it merged nothing.
+            from office import integration
+            head = paths.git(wt, "rev-parse", "HEAD")
+            if not integration.contains(run, head, dispatch["base_commit"]):
+                raise _base_mismatch(dispatch, head)
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch["id"]
     ddir.mkdir(parents=True, exist_ok=True, mode=0o700)
     setup = None
