@@ -2096,7 +2096,7 @@ def _strip_ansi(text: str | None) -> str:
 # An update notice holds the composer only when it asks for a choice. Codex and pi print a passive
 # banner above a working composer on every start while an update is pending (#761, #790).
 _UPDATE_MARKER = "update available"
-_UPDATE_CHOICE = re.compile(r"^\s*[❯›>▸▶]?\s*\d+[.)]\s|update now|skip until|press enter to", re.I | re.M)
+_UPDATE_CHOICE = re.compile(r"^\s*[❯›>▸▶]\s*\d+[.)]\s", re.M)  # the selected option of a menu
 
 
 def _startup_screen(text: str | None) -> str | None:

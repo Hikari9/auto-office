@@ -207,3 +207,11 @@ def test_update_banner_never_skips_the_enter_retry(monkeypatch):
     monkeypatch.setattr(dispatch, "_herdr_quiet", herdr)
     assert dispatch._deliver_prompt("office-d1", "w1:p1", "read the brief") is True
     assert ("pane", "send-keys", "w1:p1", "Enter") in sent
+
+
+def test_update_words_outside_a_menu_do_not_block():
+    # Only a selected numbered option is a menu; prose that mentions the words is not.
+    for tail in ("› update now please", "Press enter to send", "  1. a plain numbered list line", "skip until later"):
+        assert dispatch._startup_screen(CODEX_BANNER + tail) is None
+    assert dispatch._startup_screen("Update available! 1 -> 2\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n"
+                                    "  Press enter to continue") is not None
