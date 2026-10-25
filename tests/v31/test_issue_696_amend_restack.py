@@ -154,6 +154,7 @@ def test_stash_wip_restores_tracked_and_untracked_wip_and_drops_its_stash(tmp_pa
     assert (a / "a.py").read_text() == "one\nwip\n"
     assert (a / "new.py").read_text() == "untracked\n"
     assert not git(a, "stash", "list")
+    assert not git(a, "for-each-ref", "refs/office/wip")
 
 
 def test_stash_wip_drop_leaves_other_worktrees_stashes(tmp_path):
