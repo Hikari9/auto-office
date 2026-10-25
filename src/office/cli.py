@@ -98,6 +98,9 @@ Auto Office {ver}
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
   office prune [--run <id>]         show finished runs that office prune -f would remove
+  office cleanup --older            preview leftover worktrees from older finished runs
+  office cleanup --run <id> --apply  opt in to one verified run's safe worktree cleanup
+  office cleanup --run <id> --decline  preserve this older run; suppress future prompts
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
@@ -432,6 +435,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--apply", action="store_true", help="commit the upgrade (default is a dry run)")
     s = sp.add_parser("prune", parents=[common])
     s.add_argument("-f", "--force", action="store_true")
+    s = sp.add_parser("cleanup", parents=[common])
+    s.add_argument("--older", action="store_true", help="preview recorded leftover worktrees from older runs")
+    choice = s.add_mutually_exclusive_group()
+    choice.add_argument("--apply", action="store_true", help="opt in to cleanup of exactly one --run ID")
+    choice.add_argument("--decline", action="store_true", help="retain worktrees and suppress future offers")
     s = sp.add_parser("install", parents=[common])
     s.add_argument("--only", dest="only", action="append", help="limit to one harness")
     s.add_argument("--dry-run", action="store_true")
@@ -783,6 +791,15 @@ def _run(args, unknown) -> int:
         try:
             only = prune.select_run(con, args.run_arg) if args.run_arg else None
             return emit(prune.force(con, only) if args.force else prune.dry_run(con, only), args)
+        finally:
+            con.close()
+    if cmd == "cleanup":
+        from office import cleanup
+        if (args.apply or args.decline) and not args.run_arg:
+            raise OfficeError("cleanup-run-required", "--apply and --decline require a specific --run ID", exit_code=2)
+        con = _con()
+        try:
+            return emit(cleanup.command(con, run_id=args.run_arg, apply=args.apply, decline=args.decline), args)
         finally:
             con.close()
     if cmd == "config" and args.apply_routing:

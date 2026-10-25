@@ -209,7 +209,8 @@ class TestDerivedRouting(unittest.TestCase):
         scoring.record_trust_act(self.db_path, alternate_id, 'proven', 'rico', 'verified route')
         office_db.connect(Path(self.db_path)).close()
 
-        now = datetime.now(timezone.utc).replace(microsecond=0)  # route() reads the real clock
+        # The router reads the real clock, so the cooldown must still be running when it is asked.
+        now = datetime.now(timezone.utc).replace(microsecond=0)
         log = Path(self.db_path).with_suffix('.log')
         log.write_text('Free usage limit reached\n', encoding='utf-8')
         con = office_db.connect(Path(self.db_path))
@@ -235,7 +236,11 @@ class TestDerivedRouting(unittest.TestCase):
 
         request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,
                    'candidates': [target, target_low, alternate]}
-        result = current_routing.route(request)
+        # Check during the simulated cooldown, independent of today's wall clock.
+        # Otherwise this fixed 2026-10-23 expiry eventually becomes stale.
+        with unittest.mock.patch.object(current_routing, 'datetime') as routing_clock:
+            routing_clock.now.return_value = now + timedelta(minutes=1)
+            result = current_routing.route(request)
         self.assertEqual(result['selected'], alternate_id)
         rejected = next(row for row in result['rejected'] if row['candidate'] == target_id)
         self.assertEqual(rejected['category'], 'rate-limited')

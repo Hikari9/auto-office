@@ -31,6 +31,11 @@ def test_merged_close_syncs_checked_out_clean_base_and_removes_run_worktrees(env
     other = env.tmp / "mine"
     env.git("worktree", "add", "-q", "-b", "mine", str(other))
     assert _office_worktrees(env)
+    # The integrated commit is detached; an identical remote tree alone does
+    # not guarantee recovery of its unique local commit history.
+    rid = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    env.git("-C", str(env.state / "worktrees" / rid[:8] / "_integration"),
+            "push", "origin", f"HEAD:refs/heads/integration-proof-{rid[:8]}")
     code, out = env.office("close")
     assert code == 0, out
     assert env.git("rev-parse", "main").strip() == remote_head(bare, "main"), out

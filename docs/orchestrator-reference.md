@@ -103,6 +103,12 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   reported session must match the recorded one, and no other dispatch may hold the pane's reservation. Each send re-checks the reservation
   under the pane lock, which is held for that one send only. Any mismatch sends nothing, starts no headless copy and prints
   `pane-mismatch: <why>; brief NOT sent`: read the pane, then `office revoke <task>`.
+- opencode workers and reviewers get panes like every other harness with a Herdr kind: `opencode mini --model <slug>#<effort>` (a reviewer adds
+  `--standalone --agent office-reviewer`, its per-dispatch permissions), labelled and identity-checked before the brief is sent. `mini` has no
+  timeout of its own, so the pane watcher stops an opencode pane past `max_minutes` (60, or `OFFICE_WORKER_MAX_MINUTES`) as `timeout` and
+  closes the pane, keeping `pane-final.txt`. A `Free usage limit reached` or `Rate limit exceeded` wall in the pane is classified from the pane
+  tail like any pane agent's. Office reads opencode's session store (read-only) only to confirm the brief landed and to record the session id;
+  a review is read from the reply file only. Without Herdr the headless `opencode run` form runs.
 - `office revoke` restores a task to its accepted revision only when an amendment delivery alone demoted it. A task reopened for work still
   owed (open RECHECK or APPROVED-cleanup findings, a `restack:` pause, a hold for an amended dependency) stays reopened.
 - Office presses Enter for a prompt left typed but unsubmitted. A notice saying it is still unsubmitted means
