@@ -334,3 +334,27 @@ def test_the_headless_reviewer_form_runs_when_herdr_is_unavailable(opencode, mon
     assert results[("read", opencode.repo / "README.md")] == "ok"
     assert results[("write", out)] == "ok" and out.is_file()
     assert results[("write", opencode.repo / "README.md")].startswith("Permission denied")
+
+
+@pytest.mark.approved
+def test_a_pane_reviewer_never_starts_when_its_agent_file_cannot_be_written(opencode, monkeypatch):
+    """No agent file means no write fence, and an unknown `--agent` may fall back to a default
+    agent that can write anywhere: the pane launch refuses and never starts opencode."""
+    from office import adapters
+    from test_herdr_agent_launch import _launch_events
+    real = adapters.reviewer_env
+
+    def blocked(adapter, kind, *, cwd, output, include_dirs=()):
+        (Path(output).parent / "opencode").write_text("a file where the config dir must go")
+        return real(adapter, kind, cwd=cwd, output=output, include_dirs=include_dirs)
+
+    monkeypatch.setattr(adapters, "reviewer_env", blocked)
+    state_file, run, d, ddir, res = launch_in_herdr(opencode, monkeypatch, adapter="opencode", model=MODEL,
+                                                    effort="high", role="reviewer", output=True,
+                                                    brief="You are a code reviewer\n")
+    calls = _calls(state_file)
+    assert not any(c[:2] == ["agent", "start"] for c in calls), calls
+    assert res["launcher"] == "process-fallback", res
+    assert any("per-dispatch permissions could not be written" in e and "agent file could not be written" in e
+               for e in _launch_events(opencode, run))
+    assert "OPENCODE_CONFIG_DIR" not in (ddir / "agent.env").read_text()

@@ -2076,9 +2076,10 @@ def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False)
     """Environment a reviewer's harness needs for its per-dispatch permissions
     (an opencode agent file), from the launch spec; {} for the other harnesses.
     Writing the file here keeps the pane and headless launches on one definition.
-    A file that cannot be written raises when `strict` (the headless supervisor
-    stops with the reason); a pane launch records the reason and goes on without
-    it, so opencode finds no per-dispatch agent and denies rather than widens."""
+    A file that cannot be written raises when `strict`: the pane launch and the
+    headless supervisor both refuse to start the harness with the reason, since
+    an unknown `--agent` may fall back to a default agent that can write anywhere.
+    The non-strict callers only record the reason (agent.env is written either way)."""
     adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
     if not adapter or not spec.get("output"):
         return {}
@@ -2088,7 +2089,7 @@ def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False)
     except adapters.AdapterError as exc:
         if strict:
             raise
-        _launch_notice(run, dispatch, f"{exc}; the reviewer starts without its per-dispatch permissions")
+        _launch_notice(run, dispatch, f"{exc}; Office will not start this reviewer without its per-dispatch permissions")
         return {}
 
 
@@ -2405,7 +2406,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
-    env_file = write_agent_env(run, dispatch, ddir, worker=worker, harness_env=_harness_env(run, dispatch, spec))
+    try:
+        harness_env = _harness_env(run, dispatch, spec, strict=True)
+    except adapters.AdapterError as exc:
+        # No agent file means no write fence: never start the harness in the pane.
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "the reviewer's per-dispatch permissions "
+                               "could not be written", str(exc))
+        return None
+    env_file = write_agent_env(run, dispatch, ddir, worker=worker, harness_env=harness_env)
     setup = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"
     if not _shell_run(pane, setup, ddir / "shell-ready"):
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
