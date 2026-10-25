@@ -122,3 +122,85 @@ def test_dispatch_again_on_an_off_base_branch_restacks_before_worker(env):
     assert new["id"] != old["id"]
     assert new["base_commit"] == parent
     env.git("merge-base", "--is-ancestor", parent, "HEAD", cwd=wt)
+
+
+# ---- _stash_wip: Office-owned WIP preservation around a restack -------------------------------
+
+def _repo_with_worktrees(tmp_path):
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git(main, "init", "-q", "-b", "main")
+    (main / "a.py").write_text("one\n")
+    git(main, "add", "a.py")
+    git(main, "commit", "-qm", "init")
+    a, b = tmp_path / "wt-a", tmp_path / "wt-b"
+    git(main, "worktree", "add", "-q", "-b", "task-a", str(a))
+    git(main, "worktree", "add", "-q", "-b", "task-b", str(b))
+    return git, a, b
+
+
+def test_stash_wip_restores_tracked_and_untracked_wip_and_drops_its_stash(tmp_path):
+    from office import rerun
+
+    git, a, _ = _repo_with_worktrees(tmp_path)
+    (a / "a.py").write_text("one\nwip\n")
+    (a / "new.py").write_text("untracked\n")
+    with rerun._stash_wip(a, "T1"):
+        assert not git(a, "status", "--porcelain")
+    assert (a / "a.py").read_text() == "one\nwip\n"
+    assert (a / "new.py").read_text() == "untracked\n"
+    assert not git(a, "stash", "list")
+
+
+def test_stash_wip_drop_leaves_other_worktrees_stashes(tmp_path):
+    """refs/stash is shared: a stash another worktree pushed meanwhile is neither applied nor dropped."""
+    from office import rerun
+
+    git, a, b = _repo_with_worktrees(tmp_path)
+    (b / "a.py").write_text("b-before\n")
+    git(b, "stash", "push", "-m", "b-before")
+    (a / "a.py").write_text("one\nwip\n")
+    with rerun._stash_wip(a, "T1"):
+        (b / "a.py").write_text("b-during\n")
+        git(b, "stash", "push", "-m", "b-during")
+    assert (a / "a.py").read_text() == "one\nwip\n"
+    remaining = git(a, "stash", "list")
+    assert "b-before" in remaining and "b-during" in remaining and "preserve T1 WIP" not in remaining
+
+
+def test_stash_wip_restore_conflict_keeps_stash(tmp_path):
+    from office import rerun
+    from office.state import Refused
+
+    git, a, _ = _repo_with_worktrees(tmp_path)
+    (a / "a.py").write_text("wip\n")
+    try:
+        with rerun._stash_wip(a, "T1"):
+            (a / "a.py").write_text("restack change\n")
+            git(a, "commit", "-qam", "restack")
+    except Refused as exc:
+        assert exc.category == "restack-wip-restore-conflict"
+    else:
+        raise AssertionError("a restore conflict must surface")
+    assert "preserve T1 WIP" in git(a, "stash", "list")
+
+
+def test_stash_wip_restore_failure_does_not_hide_restack_error(tmp_path):
+    from office import rerun
+    from office.state import Refused
+
+    git, a, _ = _repo_with_worktrees(tmp_path)
+    (a / "a.py").write_text("wip\n")
+    try:
+        with rerun._stash_wip(a, "T1"):
+            (a / "a.py").write_text("restack change\n")
+            git(a, "commit", "-qam", "restack")
+            raise Refused("restack-conflict", "restack failed")
+    except Refused as exc:
+        assert exc.category == "restack-conflict"
+        assert "stash" in (exc.preserved or "")
+    assert "preserve T1 WIP" in git(a, "stash", "list")

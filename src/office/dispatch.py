@@ -1770,20 +1770,15 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
         from office import rerun
         task = state.get_task(con, run["id"], dispatch["task_id"])
         restack = rerun._restack(con, run, task, str(wt))
-        if restack and restack.get("reopened"):
-            blocked = ", ".join(r["task"] for r in restack["reopened"])
-            raise Refused("dependency-not-ready", f"{task['id']} cannot relaunch: {blocked} is not accepted",
-                          scope=task["id"], preserved="task worktree and revisions",
-                          next_step=f"wait for {blocked} to be accepted; office revoke {task['id']}; "
-                                    f"office rerun {task['id']} --fresh")
         if restack:
             if restack.get("base"):
                 with db.transaction(con):
                     con.execute("UPDATE dispatches SET base_commit=? WHERE id=? AND status='launching'",
                                 (restack["base"], dispatch["id"]))
                 dispatch = state.get_dispatch(con, dispatch["id"])
-            if restack.get("merged") or restack.get("conflict"):
-                payload["restack"] = {k: restack.get(k)
+            if restack.get("merged") or restack.get("conflict") or restack.get("reopened"):
+                prior = payload.get("restack") or {}
+                payload["restack"] = {k: restack.get(k) or prior.get(k)
                                     for k in ("merged", "conflict", "unmerged", "reopened")}
                 with db.transaction(con):
                     state.emit(con, run, "task.restacked", f"{task['id']} {restack['line']}",

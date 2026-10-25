@@ -13,6 +13,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
@@ -261,44 +262,63 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged), note) if x)}
 
 
+def _stash_entries(wt: Path) -> list[tuple[str, str]]:
+    """(commit, subject) of every stash, newest first; refs/stash is shared by every worktree."""
+    listed = subprocess.run(["git", "-C", str(wt), "stash", "list", "--format=%H %gs"], capture_output=True, text=True)
+    return [tuple(line.split(" ", 1)) for line in listed.stdout.splitlines()]
+
+
 @contextlib.contextmanager
 def _stash_wip(wt: Path, tid: str):
     """Office-owned, opt-in preservation of dirty tracked/untracked WIP for a restack.
 
-    Apply by the immutable stash commit, not the moving stash@{0} alias.
-    Retain the stash on any restore conflict so WIP is never silently dropped.
+    refs/stash is shared by every worktree of the repo, so the stash is found by a unique
+    message token and applied/dropped by its immutable commit, never by stash@{0}.
+    Retain the stash on any restore conflict so WIP is never silently dropped; a restore
+    failure never replaces an error already raised by the restack.
     """
     if not (wt / ".git").exists() or not paths.git(wt, "status", "--porcelain").strip():
         yield
         return
-    before = subprocess.run(["git", "-C", str(wt), "rev-parse", "-q", "--verify", "refs/stash"],
-                            capture_output=True, text=True)
-    previous = before.stdout.strip() if before.returncode == 0 else None
+    token = uuid.uuid4().hex
     save = subprocess.run(["git", "-C", str(wt), "stash", "push", "--include-untracked",
-                           "-m", f"office: preserve {tid} WIP before restack"],
+                           "-m", f"office: preserve {tid} WIP before restack [{token}]"],
                           capture_output=True, text=True)
     if save.returncode:
         raise Refused("restack-wip-save-failed", f"Office could not stash {tid}'s WIP: {save.stderr[:160]}",
                       preserved="task worktree", next_step=f"inspect {tid}'s worktree before retrying")
-    after = paths.git(wt, "rev-parse", "refs/stash").strip()
-    if after == previous:
+    saved = next((sha for sha, subject in _stash_entries(wt) if f"[{token}]" in subject), None)
+    if saved is None:
         raise Refused("restack-wip-save-failed", f"Office did not record a new WIP stash for {tid}",
                       preserved="task worktree", next_step="inspect the worktree before retrying")
+
+    def restore() -> Refused | None:
+        applied = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", saved],
+                                 capture_output=True, text=True)
+        if applied.returncode:
+            return Refused("restack-wip-restore-conflict",
+                           f"{tid} WIP could not be reapplied cleanly after restack; saved stash {saved[:12]} "
+                           f"remains available; {applied.stderr[:130]}",
+                           preserved=f"stash {saved} and current task worktree",
+                           next_step=f"resolve the worktree conflict using saved stash {saved[:12]} before rerunning")
+        index = next((i for i, (sha, _) in enumerate(_stash_entries(wt)) if sha == saved), None)
+        if index is not None:
+            subprocess.run(["git", "-C", str(wt), "stash", "drop", "-q", f"stash@{{{index}}}"],
+                           capture_output=True, text=True)
+        return None
+
     try:
         yield
-    finally:
-        restore = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", after],
-                                 capture_output=True, text=True)
-        if restore.returncode:
-            raise Refused("restack-wip-restore-conflict",
-                          f"{tid} WIP could not be reapplied cleanly after restack; saved stash {after[:12]} "
-                          f"remains available; {restore.stderr[:130]}",
-                          preserved=f"stash {after} and current task worktree",
-                          next_step=f"resolve the worktree conflict using saved stash {after[:12]} before rerunning")
-        current = paths.git(wt, "rev-parse", "refs/stash").strip()
-        if current == after:
-            subprocess.run(["git", "-C", str(wt), "stash", "drop", "-q", "stash@{0}"],
-                           capture_output=True, text=True)
+    except BaseException as exc:
+        conflict = restore()
+        if conflict is not None:
+            if isinstance(exc, state.OfficeError):
+                exc.preserved = "; ".join(x for x in (exc.preserved, conflict.preserved) if x)
+            exc.add_note(conflict.message)
+        raise
+    conflict = restore()
+    if conflict is not None:
+        raise conflict
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:

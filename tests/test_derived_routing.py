@@ -209,7 +209,7 @@ class TestDerivedRouting(unittest.TestCase):
         scoring.record_trust_act(self.db_path, alternate_id, 'proven', 'rico', 'verified route')
         office_db.connect(Path(self.db_path)).close()
 
-        now = datetime(2026, 10, 23, 9, 0, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc).replace(microsecond=0)  # route() reads the real clock
         log = Path(self.db_path).with_suffix('.log')
         log.write_text('Free usage limit reached\n', encoding='utf-8')
         con = office_db.connect(Path(self.db_path))
@@ -230,7 +230,7 @@ class TestDerivedRouting(unittest.TestCase):
         self.assertNotIn('reason', cooldown_columns)
         cooldown_key = 'opencode/muse-free'
         expires = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?", (cooldown_key,)).fetchone()[0]
-        self.assertEqual(expires, '2026-10-23T09:15:00+00:00')
+        self.assertEqual(expires, (now + timedelta(minutes=15)).isoformat())
         con.close()
 
         request = {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path,

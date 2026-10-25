@@ -143,10 +143,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   Do not ask the user just because the rounds ran out. Another plan review only on the user's ask: `office review plan --quote "<words>" [--rounds N]`.
 - A task is accepted on its own checks. A check that also fails the same way on the revision's base (never when its output names a changed file, or on
   timeout) is pre-existing: a nonblocking note, and lane review still runs. Re-accepting a task reopens its stale accepted dependents (`restack:`):
-  `office rerun <dependent> --resume|--fresh`; integration reports `stale` and names the task to restack. When amending or redispatching an
-  existing task, Office restacks accepted dependencies before the worker launches. For a dirty-worktree refusal, revoke the pending
-  relaunch then use `office rerun <task> --fresh --stash-wip`; Office preserves and reapplies WIP (retaining the stash on conflict).
-  The orchestrator never runs Git commands inside a task worktree. When a lane's tasks (joined by `depends` or `lane:`) are all accepted, Office composes them and runs
+  `office rerun <dependent> --resume|--fresh`; integration reports `stale` and names the task to restack. Amending or redispatching an existing task restacks its accepted dependencies before the worker launches; on a dirty-worktree refusal, revoke the relaunch and rerun `office rerun <task> --fresh --stash-wip` (WIP is preserved and reapplied, the stash survives a restoration conflict; the orchestrator never runs Git in a task worktree). When a lane's tasks (joined by `depends` or `lane:`) are all accepted, Office composes them and runs
   one convergence review, plus a visual review for user-visible acceptance. Lanes sharing a boundary, or a run with risk or a shared
   outcome the runtime names, get one integrated review (#422); `office inspect convergence` states why it was required or skipped.
 - Findings never relaunch anything on their own. A RECHECK routes every blocking finding to its owning tasks at once: `office rerun <task>
