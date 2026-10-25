@@ -172,6 +172,45 @@ def test_stash_wip_drop_leaves_other_worktrees_stashes(tmp_path):
     assert "b-before" in remaining and "b-during" in remaining and "preserve T1 WIP" not in remaining
 
 
+def test_stash_wip_never_uses_the_shared_refs_stash_so_a_foreign_entry_cannot_be_dropped(tmp_path):
+    """696-1: Office held WIP in refs/stash and dropped it by stash@{n}; a foreign entry pushed
+    between lookup and drop shifted the index. WIP now lives in an Office ref, refs/stash is untouched."""
+    from office import rerun
+
+    git, a, b = _repo_with_worktrees(tmp_path)
+    (b / "a.py").write_text("b-before\n")
+    git(b, "stash", "push", "-m", "b-before")
+    before = git(a, "rev-parse", "refs/stash")
+    (a / "a.py").write_text("one\nwip\n")
+    (a / "new.py").write_text("untracked\n")
+    with rerun._stash_wip(a, "T1"):
+        assert git(a, "rev-parse", "refs/stash") == before and "T1" not in git(a, "stash", "list")
+        assert git(a, "for-each-ref", "refs/office/wip/")
+        (b / "a.py").write_text("b-during\n")
+        git(b, "stash", "push", "-m", "b-during")
+    assert (a / "a.py").read_text() == "one\nwip\n" and (a / "new.py").read_text() == "untracked\n"
+    listing = git(a, "stash", "list")
+    assert "b-before" in listing and "b-during" in listing and "T1" not in listing
+    assert not git(a, "for-each-ref", "refs/office/wip/")
+    git(b, "stash", "pop")
+    assert (b / "a.py").read_text() == "b-during\n"
+
+
+def test_stash_wip_restores_index_state_and_deletions(tmp_path):
+    from office import rerun
+
+    git, a, _ = _repo_with_worktrees(tmp_path)
+    (a / "b.py").write_text("keep\n")
+    git(a, "add", "b.py")
+    git(a, "commit", "-qm", "b")
+    (a / "a.py").write_text("staged\n")
+    git(a, "add", "a.py")
+    (a / "b.py").unlink()
+    with rerun._stash_wip(a, "T1"):
+        assert not git(a, "status", "--porcelain")
+    assert git(a, "status", "--porcelain").splitlines() == ["M  a.py", " D b.py"]
+
+
 def test_stash_wip_restore_conflict_keeps_stash(tmp_path):
     from office import rerun
     from office.state import Refused
@@ -187,6 +226,7 @@ def test_stash_wip_restore_conflict_keeps_stash(tmp_path):
     else:
         raise AssertionError("a restore conflict must surface")
     assert "preserve T1 WIP" in git(a, "stash", "list")
+    assert not git(a, "for-each-ref", "refs/office/wip/"), "the stash is stored, so the Office ref is dropped"
 
 
 def test_stash_wip_restore_failure_does_not_hide_restack_error(tmp_path):
@@ -274,3 +314,50 @@ def test_relaunch_onto_a_branch_lacking_its_recorded_base_is_refused_without_a_r
     assert new["id"] != prior["id"] and new["base_commit"] == other
     assert not list((env.state / "runs").glob(f"*/dispatches/{new['id']}/packet.json")), out
     assert "does not contain the base" in env.office("status", "--verbose")[1]
+
+
+def test_restack_cleanup_failure_does_not_replace_the_restack_error(env, monkeypatch):
+    """696-2: a scratch-worktree cleanup error in `finally` is noted on the error in flight."""
+    import json
+    import pytest
+    from office import integration, rerun, state
+
+    _accepted_independent(env)
+    wt, _ = _wt(env, "T2")
+    con = env.con()
+    con.execute("UPDATE tasks SET status='planned', depends_json=? WHERE id='T2'", (json.dumps(["T1"]),))
+    con.commit()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    task = state.get_task(con, run["id"], "T2")
+    real_run = subprocess.run
+
+    def flaky(cmd, *args, **kwargs):
+        if cmd[3:5] == ["worktree", "remove"]:
+            raise OSError("remove vanished")
+        return real_run(cmd, *args, **kwargs)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("combine exploded")
+
+    monkeypatch.setattr(integration, "combine", boom)
+    monkeypatch.setattr(rerun.subprocess, "run", flaky)
+    with pytest.raises(RuntimeError, match="combine exploded") as info:
+        rerun._restack(con, run, task, str(wt))
+    assert any("remove vanished" in note for note in info.value.__notes__)
+    monkeypatch.undo()
+    real_run(["git", "-C", str(run["repo_root"]), "worktree", "prune"], check=False)
+
+
+def test_restack_cleanup_failure_alone_still_raises(tmp_path, monkeypatch):
+    from office import rerun
+
+    def flaky(cmd, *args, **kwargs):
+        raise OSError("remove vanished")
+
+    monkeypatch.setattr(rerun.subprocess, "run", flaky)
+    try:
+        rerun._remove_scratch(str(tmp_path), tmp_path / "scratch", None)
+    except OSError as exc:
+        assert "remove vanished" in str(exc)
+    else:
+        raise AssertionError("with no error in flight a cleanup failure must surface")
