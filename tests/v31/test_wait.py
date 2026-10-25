@@ -15,6 +15,23 @@ from conftest import GOOD_ADD, approved_run, self_reviewed
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 
+@pytest.fixture
+def virtual_wait_clock(monkeypatch):
+    """Advance only Office wait's deadline/poll clock, not subprocess or OS time.
+
+    These tests assert decisions after elapsed time without needing a process
+    to run concurrently. Real-time/process tests intentionally do not use it.
+    """
+    from office import guide
+    tick = [100.0]
+
+    def advance(seconds):
+        assert seconds > 0
+        tick[0] += seconds
+
+    monkeypatch.setattr(guide, "_wait_clock", lambda: (lambda: tick[0], advance))
+
+
 def _go(env):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
@@ -22,7 +39,7 @@ def _go(env):
 
 
 @pytest.mark.approved
-def test_wait_times_out_with_124_when_nothing_changes(env):
+def test_wait_times_out_with_124_when_nothing_changes(env, virtual_wait_clock):
     _go(env)
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
     assert code == 124 and "nothing new" in out, out
@@ -50,7 +67,7 @@ def test_wait_returns_0_at_once_when_a_task_already_needs_the_orchestrator(env):
 
 
 @pytest.mark.approved
-def test_an_informative_event_does_not_wake_wait_into_exit_0(env):
+def test_an_informative_event_does_not_wake_wait_into_exit_0(env, virtual_wait_clock):
     """#296: a pure lifecycle event that an old cursor carries (a launch.session or a
     setup.done) has no next step, so it must not turn a wait that would otherwise time
     out into an unattended exit 0, which an orchestrator reads as 'act now' and
@@ -256,7 +273,7 @@ def test_a_flood_of_signals_prints_the_newest_few_with_a_count(env):
 
 
 @pytest.mark.approved
-def test_signals_an_older_run_already_read_are_not_news(env):
+def test_signals_an_older_run_already_read_are_not_news(env, virtual_wait_clock):
     from office import state
     _go(env)
     wenv, wt, d = _executor(env)
@@ -341,7 +358,7 @@ def _wait(env, e, timeout="1"):
     return env.office("wait", "--timeout", timeout, "--poll", "0.2", env=e)
 
 
-def test_a_working_agent_is_not_a_stall(env):
+def test_a_working_agent_is_not_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="thinking")
     _as_herdr(env)
@@ -366,7 +383,7 @@ def paths_run_dir(env) -> str:
     return str(paths.run_dir(con.execute("SELECT id FROM runs").fetchone()[0]))
 
 
-def test_the_idle_threshold_holds_across_wait_invocations(env):
+def test_the_idle_threshold_holds_across_wait_invocations(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="idle", pane="> waiting")
     e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
@@ -393,7 +410,7 @@ def test_an_agent_idle_after_an_accepted_submit_is_not_a_stall(env):
     assert "stall" not in out, out
 
 
-def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env):
+def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="idle", pane="esc to cancel", changing="1")
     _as_herdr(env)
@@ -401,7 +418,7 @@ def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env):
     assert code == 124 and "stall" not in out, out
 
 
-def test_herdr_unreachable_is_never_a_stall(env):
+def test_herdr_unreachable_is_never_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, mode="unreachable")
     _as_herdr(env)
@@ -522,7 +539,7 @@ def test_a_session_limit_is_a_usage_limit_stall_despite_busy_markers(env):
     assert "session limit" in (Path(paths_run_dir(env)) / "dispatches" / d["id"] / "pane-tail.txt").read_text()
 
 
-def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env):
+def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
     _as_herdr(env)
@@ -583,7 +600,7 @@ def test_a_limit_stall_with_an_unresolvable_zone_shows_the_raw_label(env):
     assert f"office prompt {d['id']} -- continue" in out, out
 
 
-def test_a_stale_limit_line_with_later_activity_is_not_a_stall(env):
+def test_a_stale_limit_line_with_later_activity_is_not_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="idle", pane=REAL_LIMIT + "> continue\n● Picking the task back up\n")
     e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
@@ -667,7 +684,7 @@ def test_a_new_limit_with_the_same_label_stores_its_own_reset(env):
     assert row["resets_at"] != "2026-01-01T13:30:00+00:00" and row["limit_fingerprint"] != "0" * 64, row
 
 
-def test_a_resolved_limit_clears_the_stored_episode(env):
+def test_a_resolved_limit_clears_the_stored_episode(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="idle", pane=REAL_LIMIT + "> continue\n● Picking the task back up\n")
     e["OFFICE_EXECUTOR_IDLE_STALL_S"] = "1800"
@@ -724,7 +741,7 @@ def test_a_codex_pane_herdr_calls_working_but_idle_times_out_to_a_stall(env):
     assert code == 3 and "stall:" in out and d["id"] in out and "idle" in out, out
 
 @pytest.mark.approved
-def test_the_same_pending_action_wakes_only_once_across_wait_invocations(env):
+def test_the_same_pending_action_wakes_only_once_across_wait_invocations(env, virtual_wait_clock):
     """#561: unchanged blocked/rerun guidance is not a new event every second."""
     _go(env)
     env.office("revoke", "T1", check=0)
@@ -765,7 +782,7 @@ def test_wait_on_an_already_terminal_run_returns_at_once_not_124(env):
 # --- #697, #701, #722: independent pending action vs watchdog progress ---
 
 @pytest.mark.approved
-def test_723_reported_pending_action_does_not_suppress_new_other_stalls(env):
+def test_723_reported_pending_action_does_not_suppress_new_other_stalls(env, virtual_wait_clock):
     from office import state
     _go(env)
     env.office("revoke", "T1", check=0)
