@@ -2170,9 +2170,19 @@ def _strip_ansi(text: str | None) -> str:
     return _CSI.sub("", text or "")
 
 
+# An update notice holds the composer only when it asks for a choice. Codex and pi print a passive
+# banner above a working composer on every start while an update is pending (#761, #790).
+_UPDATE_MARKER = "update available"
+_UPDATE_CHOICE = re.compile(r"^\s*[❯›>▸▶]\s*\d+[.)]\s", re.M)  # the selected option of a menu
+
+
 def _startup_screen(text: str | None) -> str | None:
-    low = _strip_ansi(text).lower()
-    return next((label for marker, label in _STARTUP_SCREEN_MARKERS if marker in low), None)
+    clean = _strip_ansi(text)
+    low = clean.lower()
+    for marker, label in _STARTUP_SCREEN_MARKERS:
+        if marker in low and not (marker == _UPDATE_MARKER and not _UPDATE_CHOICE.search(clean)):
+            return label
+    return None
 
 
 def _herdr_fallback_notice(run: dict, dispatch: dict, spec: dict, ddir: Path, pane: str,
