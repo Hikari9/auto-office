@@ -1882,7 +1882,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         # ends when its output file is written.
         return _launch_external(run, dispatch, kind, spec, ddir, sup, env, cwd, wait=wait, announce=external)
     # The brief tells the agent to source agent.env whichever way it starts (the Herdr path rewrites it identically).
-    write_agent_env(run, dispatch, ddir, worker=kind == "worker")
+    write_agent_env(run, dispatch, ddir, worker=kind == "worker", harness_env=_harness_env(run, dispatch, spec))
     if launcher == "sync":
         # Deterministic mode for tests and fixtures: supervise in the foreground.
         _record_launch(run, dispatch["id"], launcher="sync", pid=os.getpid())
@@ -1974,14 +1974,16 @@ def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
 def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
     """Start the harness process in its own session, its output piped back.
     The one place a harness child is created, so tests can replace it."""
+    # Popen's cwd leaves $PWD at the supervisor's directory; opencode takes its working
+    # directory from $PWD, so the checkout would count as external and be denied.
     return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=env, start_new_session=True)
+                            env={**env, "PWD": str(cwd)}, start_new_session=True)
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
                      cwd: Path, *, wait: bool, announce: bool) -> dict:
     worker = kind == "worker"
-    write_agent_env(run, dispatch, ddir, worker=worker)
+    write_agent_env(run, dispatch, ddir, worker=worker, harness_env=_harness_env(run, dispatch, spec))
     _record_launch(run, dispatch["id"], launcher="external")
     if announce:
         lines = launch_instructions(run, state_dispatch(dispatch["id"]), output=None if worker else spec.get("output"))
@@ -2070,15 +2072,39 @@ def _interactive(dispatch: dict, kind: str, cwd: Path, include_dirs: list[Path] 
                                      session_id=_assigned_session(dispatch))
 
 
-def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True) -> Path:
+def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False) -> dict[str, str]:
+    """Environment a reviewer's harness needs for its per-dispatch permissions
+    (an opencode agent file), from the launch spec; {} for the other harnesses.
+    Writing the file here keeps the pane and headless launches on one definition.
+    A file that cannot be written raises when `strict`: the pane launch and the
+    headless supervisor both refuse to start the harness with the reason, since
+    an unknown `--agent` may fall back to a default agent that can write anywhere.
+    The non-strict callers only record the reason (agent.env is written either way)."""
+    adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
+    if not adapter or not spec.get("output"):
+        return {}
+    try:
+        return adapters.reviewer_env(adapter, spec["kind"], cwd=Path(spec["cwd"]), output=Path(spec["output"]),
+                                     include_dirs=[Path(i) for i in spec.get("include_dirs") or []])
+    except adapters.AdapterError as exc:
+        if strict:
+            raise
+        _launch_notice(run, dispatch, f"{exc}; Office will not start this reviewer without its per-dispatch permissions")
+        return {}
+
+
+def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True,
+                    harness_env: dict[str, str] | None = None) -> Path:
     """agent.env: the dispatch identity a pane-hosted agent sources before it
-    starts, whether Office or the user launches it."""
+    starts, whether Office or the user launches it. `harness_env` is the
+    harness's own per-dispatch settings (`_harness_env`)."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
         # Reviewers get no Office authority: they cannot submit or ack.
         for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
             wenv.pop(k, None)
     carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
+    carry.update(harness_env or {})
     env_file = ddir / "agent.env"
     env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
     env_file.chmod(0o600)
@@ -2380,7 +2406,14 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         return None
     # The pane's shell does not inherit this process's environment: source the
     # dispatch identity into it first, so the agent's own `office submit` works.
-    env_file = write_agent_env(run, dispatch, ddir, worker=worker)
+    try:
+        harness_env = _harness_env(run, dispatch, spec, strict=True)
+    except adapters.AdapterError as exc:
+        # No agent file means no write fence: never start the harness in the pane.
+        _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "the reviewer's per-dispatch permissions "
+                               "could not be written", str(exc))
+        return None
+    env_file = write_agent_env(run, dispatch, ddir, worker=worker, harness_env=harness_env)
     setup = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))}"
     if not _shell_run(pane, setup, ddir / "shell-ready"):
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, f"the shell in pane {pane} never ran Office's setup "
@@ -4195,6 +4228,13 @@ def supervise(dispatch_id: str) -> int:
             for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
                 env.pop(k, None)
             env["OFFICE_ROLE"] = "reviewer"
+        try:
+            env.update(_harness_env(run, d, spec, strict=True))
+        except adapters.AdapterError as exc:
+            _note(log_path, f"launch stopped before the harness started: {exc}")
+            _launch_notice(run, d, str(exc))
+            classification, code = "preflight_failed", 127
+            return 1
         with log_path.open("ab") as log:
             os.chmod(log_path, 0o600)
             stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
