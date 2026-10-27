@@ -112,7 +112,8 @@ def _dispatched_routes(con, run_id: str, tasks: list[dict]) -> dict[str, str]:
         dispatch_id = recorded and recorded.get("current_dispatch_id")
         dispatch = state.get_dispatch(con, dispatch_id) if dispatch_id else None
         if dispatch and dispatch.get("triple"):
-            routes[task["id"]] = dispatch["triple"]
+            inline = ((loads(recorded.get("route_json"), {}).get("execution_mode") or {}).get("mode") == "inline")
+            routes[task["id"]] = task_sizing.INLINE_ROUTE if inline else dispatch["triple"]
     return routes
 
 
@@ -166,12 +167,14 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
         else:
             sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
+        mode = task_sizing.execution_mode(run.get("gear"), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "task_size": sizing.get("task_size"),
                         "task_size_rationale": sizing.get("task_size_rationale"),
                         "task_size_version": sizing.get("task_size_version"),
                         "profile": sizing.get("profile"), "profile_version": sizing.get("profile_version"),
                         "decomposition_recommended": sizing.get("decomposition_recommended", False),
+                        **_execution_fields(mode),
                         "preferred_route": ex.get("triple"),
                         "preferred_route_reason": ex.get("why"),
                         "fallback_routes": [dict(s) for s in (ex.get("slate") or [])[1:]],
@@ -233,9 +236,36 @@ def record_audit(con, run: dict, audit: dict, *, plan_version: int | None, dispa
     return audit_id
 
 
+def _execution_fields(mode: dict) -> dict:
+    """The diagram's view of a task's execution mode: who owns it, why, the estimated savings, the outcome."""
+    return {"execution_mode": mode.get("mode"), "execution_owner": mode.get("owner"),
+            "execution_reason": mode.get("why"), "estimated_savings": mode.get("estimated_savings"),
+            "execution_outcome": (mode.get("outcome") or {}).get("status")}
+
+
+def execution_line(mode: dict) -> str:
+    """One line for a dispatch receipt or the diagram: owner, reasoning, estimated savings and outcome."""
+    savings = mode.get("estimated_savings")
+    return (f"{mode.get('mode') or 'delegated'} (owner {mode.get('owner') or 'executor'}): "
+            f"{mode.get('why') or 'dedicated executor default'}"
+            + (f"; estimated savings {savings['savings']:g} {savings['unit']}" if savings else "")
+            + (f"; outcome {mode['outcome']['status']}" if mode.get("outcome") else ""))
+
+
 def load(con, run_id: str, version: int) -> dict | None:
+    """The stored diagram, with each dispatched task's recorded execution mode and outcome laid over the
+    planned preview: the plan predicts who will execute a task, the task records who did and how it went."""
     row = con.execute("SELECT preview_json FROM plans WHERE run_id=? AND version=?", (run_id, version)).fetchone()
-    return loads(row["preview_json"], None) if row else None
+    pv = loads(row["preview_json"], None) if row else None
+    for task in state.tasks(con, run_id) if pv else ():
+        mode = loads(task.get("route_json"), {}).get("execution_mode")
+        entry = pv["tasks"].get(task["id"])
+        if entry is not None and isinstance(mode, dict) and mode.get("mode"):
+            entry.update(_execution_fields(mode))
+            if mode["mode"] == "inline" and task.get("current_dispatch_id"):
+                entry.update(dispatched_route=task_sizing.INLINE_ROUTE, selected_route=task_sizing.INLINE_ROUTE,
+                             route=task_sizing.INLINE_ROUTE)
+    return pv
 
 
 # ------------------------------------------------------------------ render
@@ -341,6 +371,7 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
                 lines.append(f"  {'':<{width}}  size: {e['task_size']} | {e.get('task_size_rationale') or 'unclassified'}")
                 lines.append(f"  {'':<{width}}  profile: {e.get('profile') or 'balanced'} "
                              f"({e.get('profile_version') or 'legacy'})")
+                lines.append(f"  {'':<{width}}  execution: " + execution_line(_entry_mode(e)))
                 if e.get("decomposition_recommended"):
                     lines.append(f"  {'':<{width}}  XL subtask: evaluate decomposition before execution")
                 if e.get("selected_route"):
@@ -373,6 +404,12 @@ def run_dispatch_lines(gear: str, rationale: str | None, gates: dict | None, rec
         (("plan review", "plan_review"), ("convergence", "code_review"),
          ("browser", "visual"), ("dedicated planner", "dedicated_planner"))))
     return lines
+
+
+def _entry_mode(entry: dict) -> dict:
+    return {"mode": entry.get("execution_mode"), "owner": entry.get("execution_owner"),
+            "why": entry.get("execution_reason"), "estimated_savings": entry.get("estimated_savings"),
+            "outcome": {"status": entry["execution_outcome"]} if entry.get("execution_outcome") else None}
 
 
 def _slate_notes(entry: dict) -> list[str]:
@@ -420,6 +457,9 @@ def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:
         if x.get("task_size") != y.get("task_size"):
             out.append(f"{tid} size: {x.get('task_size') or 'unknown'} -> {y.get('task_size') or 'unknown'} "
                        f"({y.get('task_size_rationale') or 'new evidence'})")
+        if x.get("execution_mode") != y.get("execution_mode"):
+            out.append(f"{tid} execution: {x.get('execution_mode') or 'unknown'} -> {y.get('execution_mode') or 'unknown'} "
+                       f"({y.get('execution_reason') or 'new evidence'})")
         if x.get("profile") != y.get("profile"):
             out.append(f"{tid} profile: {x.get('profile') or 'unknown'} -> {y.get('profile') or 'unknown'}")
         if x.get("review") != y.get("review"):
