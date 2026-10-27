@@ -35,8 +35,8 @@ def parse_field(key: str, value: str):
         return value
     if key == "task_size_rationale":
         text = value.strip()
-        if not 12 <= len(text) <= 500 or "\n" in text:
-            raise ValueError(f"{key} must contain concrete evidence (12-500 characters)")
+        if not 12 <= len(text) <= 500 or any(ord(c) < 32 or ord(c) == 127 for c in text):
+            raise ValueError(f"{key} must contain concrete evidence (12-500 characters, no control characters)")
         return text
     if key in TOKENS:
         if not value.isdecimal() or int(value) > 100000000:

@@ -120,10 +120,13 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         for line in _apply_risk(con, run, proposed_risk, declaration, new_version):
             res.add(line)
         run = state.get_run(con, run["id"])
-        if rec:  # advisory: the pinned gear and its gates never change from a recommendation
-            state.update_run(con, run["id"], gates={**(run.get("gates") or {}), "run_gear_recommendation":
-                                                    {**rec, "plan_version": new_version}})
+        # Advisory: the pinned gear and its gates never change from a recommendation. A revision that drops it clears it.
+        gates = {k: v for k, v in (run.get("gates") or {}).items() if k != "run_gear_recommendation"}
+        if rec:
+            gates["run_gear_recommendation"] = {**rec, "plan_version": new_version}
             res.add(f"planner recommends run gear {rec['gear']} (pinned gear stays {run['gear']}): {rec['why']}")
+        if gates != (run.get("gates") or {}):
+            state.update_run(con, run["id"], gates=gates)
             run = state.get_run(con, run["id"])
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -317,6 +320,16 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     state.update_run(con, run["id"], requirements_version=version, envelope=envelope)
 
 
+def _sized_descriptor(run: dict, planned: dict) -> dict:
+    """The planner's descriptor, plus Office's size, rationale and profile for an XS-XL run. A run pinned to a
+    legacy gear keeps exactly the descriptor its plan wrote."""
+    from office import task_sizing
+    declared = planned.get("descriptor") or {}
+    if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1":
+        return declared
+    return {**declared, **task_sizing.classify(planned, run_gear=run.get("gear"))}
+
+
 def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
     """Make the tasks table match a plan version. Caller holds the tx.
 
@@ -339,9 +352,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                 (run["id"], p["id"], p["title"], "executor", dumps(p["scope"]), dumps(p["depends"]),
                  dumps(p["interfaces"]), dumps(p["accept"]), dumps(checks), dumps(p["visual"]) if p["visual"] else None,
                  "planned", plan_version, plan_version, plan_version, now, now))
-            from office import task_sizing
-            desc = {**(p.get("descriptor") or {}), **task_sizing.classify(p, run_gear=run.get("gear"))}
-            state.update_task(con, run["id"], p["id"], descriptor=desc)
+            state.update_task(con, run["id"], p["id"], descriptor=_sized_descriptor(run, p))
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
@@ -352,10 +363,8 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
         checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
-        from office import task_sizing
-        desc = {**(p.get("descriptor") or {}), **task_sizing.classify(p, run_gear=run.get("gear"))}
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
-                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=desc)
+                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=_sized_descriptor(run, p))
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])

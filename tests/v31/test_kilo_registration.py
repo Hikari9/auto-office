@@ -15,13 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, approved_run, task_row
+from conftest import GOOD_ADD, approved_run, enable_decommissioned_mimo, task_row
 from office import adapters, candidates, configcmd, onboarding, routing, scoring
 from office.state import Refused
 
 MODEL_ID = "mimo-v2.6-flash"
 MODEL = "kilo/xiaomi/mimo-v2.6-flash"
 ROUTE = f"kilo/{MODEL_ID}@medium"
+LAUNCH_ROUTE = f"kilo/{MODEL_ID}@low"  # the seed row is decommissioned (#809); launch tests use a user-catalog copy
 EXECUTOR_CAPS = {"roles": {"executor": {"required_capabilities": ["builder"]}}}
 PLANNER_CAPS = {"roles": {"planner": {"required_capabilities": ["planning"]}}}
 REVIEW_CAPS = {"roles": {"code_reviewer": {"required_capabilities": ["review"]}}}
@@ -123,12 +124,13 @@ def _install_kilo(env) -> Path:
 
 def _approved(env):
     _install_kilo(env)
+    enable_decommissioned_mimo("kilo", MODEL_ID)
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[PASS])
 
 
 def _dispatch_as_kilo(env, **extra):
-    return env.office("dispatch", "T1", "--as", ROUTE, env={**extra}, check=0)
+    return env.office("dispatch", "T1", "--as", LAUNCH_ROUTE, env={**extra}, check=0)
 
 
 def _dispatch_row(env) -> dict:

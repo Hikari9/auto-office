@@ -16,8 +16,8 @@ def classify(task: dict, *, run_gear: str | None = None) -> dict:
     """Derive one independent task size, rationale, and versioned route profile.
 
     Existing descriptor values remain authoritative recommendations, but they
-    cannot change or weaken the run's pinned guarantees. The run gear is used
-    only by the execution-mode decision, never for sizing.
+    cannot change or weaken the run's pinned guarantees. `run_gear` is accepted
+    so callers can pass it, but it never influences sizing.
     """
     d = task.get("descriptor") or {}
     scopes = task.get("scope") or []
@@ -76,8 +76,18 @@ def classify(task: dict, *, run_gear: str | None = None) -> dict:
     # Record decomposition advice without silently changing size, acceptance,
     # ownership or scope. The orchestrator owns splitting substantial XL tasks.
     return {"task_size": size, "task_size_rationale": rationale,
+            "task_size_source": "planner" if explicit in SIZES else "inferred",
             "profile": profile, "profile_version": PROFILE_VERSION,
             "task_size_version": VERSION,
             "decomposition_recommended": size == "XL" and (len(scopes) > 2 or len(deps) > 1 or
                                                          len(interfaces) > 2)}
 
+
+
+def planner_declared(descriptor: dict | None) -> dict:
+    """The descriptor with an Office-inferred size removed: a gate that needs a size the planner declared
+    (a production-run discovery trial) never reads the conservative M that sizing fills in."""
+    d = dict(descriptor or {})
+    if d.get("task_size_source") == "inferred":
+        d.pop("task_size", None)
+    return d

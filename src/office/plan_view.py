@@ -166,7 +166,6 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
         else:
             sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
-        fallback_rows = [dict(s) for s in (ex.get("slate") or [])[1:]]
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "task_size": sizing.get("task_size"),
                         "task_size_rationale": sizing.get("task_size_rationale"),
@@ -175,7 +174,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
                         "decomposition_recommended": sizing.get("decomposition_recommended", False),
                         "preferred_route": ex.get("triple"),
                         "preferred_route_reason": ex.get("why"),
-                        "fallback_routes": fallback_rows,
+                        "fallback_routes": [dict(s) for s in (ex.get("slate") or [])[1:]],
                         "selected_route": dispatched_route,
                         "route": dispatched_route or ex.get("route"), "dispatched_route": dispatched_route,
                         **({"trial": dispatched_trials[t["id"]]} if t["id"] in dispatched_trials else {}),

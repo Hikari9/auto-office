@@ -338,7 +338,6 @@ def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bo
             "no reliable task-size evidence at intake: conservative M pending planning")
 
 
-
 def resolve_gates(gear: str, risk, config: dict) -> dict:
     """`risk` is the run's risk record (a bare bool is the pre-#420 high flag: no floor applies).
     Gear tunes ceremony; it never drops independent code review below what the risk classification implies."""

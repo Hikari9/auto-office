@@ -31,7 +31,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -706,11 +706,11 @@ def _preferred_routes(decision: dict) -> tuple[str | None, list]:
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
+    preferred, fallbacks = _preferred_routes(decision)
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure"),
            "selected_route": decision.get("selected"),
            "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
-           "preferred_route": _preferred_routes(decision)[0],
-           "fallback_routes": _preferred_routes(decision)[1],
+           "preferred_route": preferred, "fallback_routes": fallbacks,
            "size_decision": decision.get("size_decision")}
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
                 "route_authority", "route_change", "override_ceiling"):
@@ -894,7 +894,8 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     risk = run.get("risk") or {}
     if not (settings["enabled"] and "executor" in settings["roles"]):
         return "discovery-disabled"
-    if route_policy.trial_risk_blocked(settings, risk, (task or {}).get("descriptor")):
+    if route_policy.trial_risk_blocked(
+            settings, risk, task_sizing.planner_declared((task or {}).get("descriptor"))):
         return "risk"
     alloc = route_probe.allocation(con, run["id"], settings)
     if alloc["trials"]["used"] >= alloc["trials"]["max"]:

@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import math
 
-from office import model_lineages, route_learning, task_descriptors
+from office import executor_slates, model_lineages, route_learning, task_descriptors
 from office.util import sha256_obj
 
 POLICY_VERSION = "adaptive-2-task"
@@ -357,8 +357,9 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
     # Adaptive selection remains free to choose another model for task-fit.
     self_fallbacks = []
     task_size = (request.get("context") or {}).get("size_class")
-    limit = 4 if task_size in ("M", "L") and len(request.get("preferred_seed") or []) >= 4 else SLATE_SIZE
-    for item in list(rows):
+    new_gear = executor_slates.new_gear_size(request) is not None  # legacy-pinned runs keep their order
+    limit = 4 if new_gear and task_size in ("M", "L") and len(request.get("preferred_seed") or []) >= 4 else SLATE_SIZE
+    for item in list(rows) if new_gear else []:
         candidate = by_id[item["route"]]
         if (candidate.get("alias_resolved_to") or candidate.get("model_id")) != "claude-sonnet-5-5" or candidate.get("harness") != "claude":
             continue

@@ -19,13 +19,14 @@ from pathlib import Path
 import pytest
 
 import fake_agent
-from conftest import GOOD_ADD, approved_run, task_row
+from conftest import GOOD_ADD, approved_run, enable_decommissioned_mimo, task_row
 
 from office import adapters, candidates, configcmd, routing
 from office.state import Refused
 
 PI = "pi"
 MIMO_FLASH = "xiaomi-token-plan-sgp/mimo-v2.6-flash"
+LAUNCH_EFFORT = "low"  # the seed row is decommissioned (#809); launch tests use a user-catalog copy at this effort
 MIMO_PRO = "xiaomi-token-plan-sgp/mimo-v2.6-pro"
 EXECUTOR_CAPS = {"roles": {"executor": {"required_capabilities": ["builder"]}}}
 PLANNER_CAPS = {"roles": {"planner": {"required_capabilities": ["planning"]}}}
@@ -267,11 +268,12 @@ PASS = {"reply": "VERDICT: APPROVED\nNEXT proceed"}  # the lane reviewer (#337)
 
 def _approved(env):
     _install_pi(env)
+    enable_decommissioned_mimo("pi", "mimo-v2.6-flash", LAUNCH_EFFORT)
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[PASS])
 
 
 def _dispatch_as_pi(env, **extra):
-    return env.office("dispatch", "T1", "--as", f"pi/{MIMO_FLASH}@medium", env={**extra}, check=0)
+    return env.office("dispatch", "T1", "--as", f"pi/{MIMO_FLASH}@{LAUNCH_EFFORT}", env={**extra}, check=0)
 
 
 def _dispatch_row(env):
@@ -289,7 +291,7 @@ def _log(env, d) -> str:
 def test_supported_provider_model_launches_the_pinned_slug(env):
     _approved(env)
     code, out = _dispatch_as_pi(env)
-    assert f"pi@1/mimo-v2.6-flash@medium" in out, out
+    assert f"pi@1/mimo-v2.6-flash@{LAUNCH_EFFORT}" in out, out
     d = _dispatch_row(env)
     # The dispatch records the provider-pinned invocation slug, not the bare id.
     assert d["model"] == MIMO_FLASH and d["terminal_classification"] == "success", d

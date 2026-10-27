@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, state
+from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, state, task_sizing
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -785,7 +785,6 @@ def _effective_task_descriptor(run: dict, task: dict | None) -> dict:
     d = task.get("descriptor") or {}
     if ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
             and (not d.get("task_size") or not d.get("profile_version"))):
-        from office import task_sizing
         return {**d, **task_sizing.classify({**task, "descriptor": d}, run_gear=run.get("gear"))}
     return d
 
@@ -859,7 +858,8 @@ def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: 
             "known_working": sorted(known), "quarantined": sorted(quarantined),
             "risk": {"size_class": risk.get("size_class"), "blast_radius": risk.get("blast_radius"),
                      "irreversible": bool(risk.get("irreversible")),
-                     "task": {k: ((task or {}).get("descriptor") or {}).get(k) for k in ("task_size", "bounds", "domain")}}}
+                     "task": {k: task_sizing.planner_declared((task or {}).get("descriptor")).get(k)
+                              for k in ("task_size", "bounds", "domain")}}}
 
 
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,

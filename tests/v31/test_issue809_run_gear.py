@@ -177,6 +177,7 @@ def test_recommendation_below_the_intake_gear_is_refused(env, intake, rec, refus
         gates = _run(env)[1]["gates"]
         assert gates["run_gear_recommendation"]["gear"] == rec
         assert _run(env)[1]["gear"] == intake, "a recommendation is advisory and never repins the run"
+        assert f"planner recommends gear {rec} (advisory; pinned gear stays {intake})" in env.office("inspect", "plan")[1]
 
 
 def test_recommendation_below_the_risk_floor_is_refused_even_at_the_intake_gear(env):
@@ -271,3 +272,86 @@ def test_replan_delta_reports_size_and_profile_changes():
                             "profile": "deep", "route": "a", "depends": [], "wave": 1, "base": None, "needs": []}}}
     lines = plan_view.diff(prev, cur, 1)
     assert "  T1 size: S -> L (coupled interfaces appeared)" in lines and "  T1 profile: balanced -> deep" in lines, lines
+
+
+# ---------------------------------------------------------------- self-review fixes
+
+def test_legacy_pinned_run_keeps_the_descriptor_its_plan_wrote(env):
+    env.trust()
+    start_inline(env, plan=PLAN_ONE, gear="direct+review")
+    con, run = _run(env)
+    desc = state.get_task(con, run["id"], "T1")["descriptor"]
+    assert not {"task_size", "profile", "profile_version", "task_size_source"} & set(desc), desc
+
+
+def test_inferred_size_is_marked_and_never_counts_as_a_planner_declared_size():
+    base = {"id": "T1", "scope": ["a.py"], "depends": [], "interfaces": []}
+    inferred = task_sizing.classify({**base, "descriptor": {"bounds": "bounded"}})
+    assert inferred["task_size_source"] == "inferred" and inferred["task_size"] in task_sizing.SIZES
+    declared = task_sizing.classify({**base, "descriptor": {"task_size": "S", "bounds": "bounded"}})
+    assert declared["task_size_source"] == "planner"
+    assert "task_size" not in task_sizing.planner_declared({"bounds": "bounded", **inferred})
+    assert task_sizing.planner_declared({"bounds": "bounded", **declared})["task_size"] == "S"
+    assert task_sizing.planner_declared(None) == {}
+
+
+def test_production_run_discovery_trial_needs_a_size_the_planner_declared():
+    from office import route_policy
+    settings = route_policy.discovery_settings({"routing": {"discovery": {"trial_bounded_production_tasks": True}}})
+    risk_record = {"blast_radius": "production", "irreversible": False, "size_class": "L"}
+    base = {"id": "T1", "scope": ["a.py"], "depends": [], "interfaces": []}
+    inferred = {"bounds": "bounded", **task_sizing.classify({**base, "descriptor": {"bounds": "bounded"}})}
+    declared = {"bounds": "bounded", **task_sizing.classify({**base, "descriptor": {"task_size": "S", "bounds": "bounded"}})}
+    assert route_policy.trial_risk_blocked(settings, risk_record, task_sizing.planner_declared(inferred))
+    assert not route_policy.trial_risk_blocked(settings, risk_record, task_sizing.planner_declared(declared))
+
+
+def test_a_revision_that_drops_the_run_gear_recommendation_clears_it(env):
+    env.trust()
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline", "--blast-radius", "local")
+    assert code == 0, out
+    env.write_plan(_plan_with(REC.format(gear="L")))
+    assert env.office("submit")[0] == 0
+    assert _run(env)[1]["gates"]["run_gear_recommendation"]["plan_version"] == 1
+    env.write_plan(PLAN_ONE.replace("done:\n", "done:\n- the revision drops the recommendation\n", 1))
+    code, out = env.office("submit")
+    assert code == 0 and "recommends run gear" not in out, out
+    assert "run_gear_recommendation" not in _run(env)[1]["gates"]
+    assert "planner recommends" not in env.office("inspect", "plan")[1]
+
+
+def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
+    from test_issue809_real_routes import candidate, decide
+    pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
+            candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
+            candidate("gpt-6.1-terra", "medium", 44),
+            candidate("glm-5.3-flash", "max", 42, harness="opencode")]
+    new = decide("M", pool, gear="M")
+    assert [e["route"].split("@")[0] for e in new["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
+    assert new["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
+    legacy = decide("M", pool, gear="express")
+    assert "sonnet_self_fallbacks" not in legacy["routing"]
+    assert len(legacy["selection_disclosure"]["slate"]) == 3
+
+
+def test_planner_free_text_rejects_control_characters():
+    from office import task_descriptors
+    for bad in ("evidence with \x1b[2K escape", "evidence with \r carriage return", "evidence with \x7f delete"):
+        with pytest.raises(ValueError):
+            task_descriptors.parse_field("task_size_rationale", bad)
+        if "\r" in bad:
+            continue  # a carriage return ends the plan line, so nothing after it can ride on the value
+        plan = planfile.parse(_plan_with(f"run_gear: L\nrun_gear_why: {bad}\n"))
+        assert any("no control characters" in e for e in plan.errors), plan.errors
+    assert task_descriptors.parse_field("task_size_rationale", "one bounded reversible file") == "one bounded reversible file"
+
+
+def test_plan_warns_about_unpaired_size_and_gear_fields():
+    orphan = planfile.parse(_plan_with("run_gear_why: coupled interfaces across three packages\n"))
+    assert any("without `run_gear:`" in w for w in orphan.warnings), orphan.warnings
+    no_why = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S", 1)
+    assert any("no `task_size_rationale:`" in w for w in planfile.parse(no_why).warnings)
+    no_size = PLAN_ONE.replace("visual: none", "visual: none\ntask_size_rationale: a bounded single file change", 1)
+    assert any("without `task_size:`" in w for w in planfile.parse(no_size).warnings)
+    assert planfile.parse(_plan_with("run_gear: l   (optional note)\nrun_gear_why: three coupled packages here\n")
+                          ).requirements["run_gear"]["gear"] == "L"
