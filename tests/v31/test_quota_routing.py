@@ -108,19 +108,14 @@ def test_protected_luna_falls_through_to_a_proven_deepseek_code_reviewer(tmp_pat
 
 
 @pytest.mark.parametrize("role", ["plan_reviewer", "code_reviewer"])
-def test_protected_stop_names_the_seeded_fallback_cut_by_the_trust_floor(role):
+def test_protected_luna_falls_to_neutral_seed_without_trust_gate(role):
     luna = _candidate("codex", "luna", quota="ok", remaining=0, caps=("review",))
     deepseek = _candidate("opencode", "deepseek", caps=("review",))
-    request = _reviewer_request(role, luna, deepseek)
-    decision = routing.route(request)
-    decision["request"] = request
-    decision["rejected"] = list(decision.get("rejected") or []) + [
-        {"candidate": routing.candidate_id(deepseek), "stage": 2,
-         "reason": "adapter trust is derived as 'valid-unverified', not proven for normal mutable/gate authority"}]
-
-    text = candidates.seeded_fallback_blockers(decision)
-
-    assert f"office approve trust {routing.candidate_id(deepseek)}" in text
+    decision = routing.route(_reviewer_request(role, luna, deepseek))
+    assert decision["status"] == "selected"
+    assert decision["selected"] == routing.candidate_id(deepseek)
+    assert candidates.seeded_fallback_blockers(decision) == ""
+    assert not any("adapter trust is derived" in r.get("reason", "") for r in decision["rejected"])
 
 
 def test_seeded_fallback_blockers_ignore_non_trust_cuts():

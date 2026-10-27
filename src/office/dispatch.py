@@ -523,10 +523,8 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     if quote and not route.get("route_change"):
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"))
         triple = routing.candidate_id(decision["candidate"])
-        # Explicit consent bypasses registry/trust/floors, not a standing
-        # quarantine or a known exhausted reserve on a later automatic launch.
-        if scoring.evaluate_trust_state(con, triple)[1] == "quarantined":
-            raise Refused("route-unavailable", f"{triple} is quarantined", scope=task["id"])
+        # Historical adapter trust is audit-only under #837. Actual quota and
+        # capability checks still apply to this explicitly selected route.
         quota = candidates.quota_for_candidate(
             decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
         decision["candidate"]["quota"] = quota
@@ -675,9 +673,8 @@ def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
         return (f"office dispatch {tid} --reroute routes from current evidence; office inspect route {tid} shows "
                 "the planned slate")
     for r in decision.get("rejected") or []:
-        if r.get("stage") == 2:
-            return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
-                    "or office inspect route for details")
+        if r.get("category") == "role-deny":
+            return "check the user-owned allow/neutral/deny policy: office route policy --effective --role executor"
     if decision.get("status") == "protected_quota_would_be_consumed":
         remedy = candidates.protected_quota_remedy(run, "executor", tid) if run else ""
         return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
@@ -925,16 +922,12 @@ def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: b
 
 
 def _known_working(con, cand: dict) -> bool:
-    """The routing's own definition (`candidates.discovery_inputs`): an available route that is proven, or
-    learned eligible, and not quarantined."""
-    from office import route_learning
-    _, trust = scoring.evaluate_trust_state(con, routing.candidate_id(cand))
-    if trust == "quarantined" or cand.get("route_status", "available") != "available":
-        return False
-    if trust == "proven":
-        return True
-    learned = route_learning.current_eligibility(con, "executor")
-    return (learned.get(route_learning.candidate_key(cand)) or {}).get("state") == "learned-eligible"
+    """An available, factual invocation is a fallback; legacy trust is not a gate.
+
+    The fallback already passed role capability and task gates when selected.
+    A candidate with a pending/failed probe is not an available invocation.
+    """
+    return cand.get("route_status", "available") == "available"
 
 
 def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | None = None) -> str | None:
@@ -958,8 +951,10 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     probe = route_probe.status(con, cand)
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
         return "probe-stale"
-    if scoring.evaluate_trust_state(con, link["candidate"])[1] == "quarantined":
-        return "quarantined"
+    from office import candidates as candidate_builder
+    policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
+    if route_policy.effective_role_state(cand, "executor", policies)["state"] == "deny":
+        return "role-deny"
     # No trial without a known-working fallback on record, whoever launched this dispatch.
     if (fallback.get("status") != "selected" or not fallback.get("candidate")
             or routing.candidate_id(fallback["candidate"]) == link["candidate"]

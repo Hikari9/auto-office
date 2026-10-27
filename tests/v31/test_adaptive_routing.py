@@ -371,7 +371,7 @@ def test_learned_eligibility_changes_routing_but_not_factual_gates():
     assert promoted["status"] == "selected"
     assert promoted["routing"]["candidates"][0]["eligibility"]["source"] == "learned"
     unpromoted = routing.route(req([c], role="executor"))
-    assert unpromoted["status"] == "no_qualifying_candidate"
+    assert unpromoted["status"] == "selected"  # #837: neutral is eligible without maturity proof
     missing = cand("a", "m1", caps=())
     blocked = routing.route(req([missing], role="executor",
                                 policy={"cost_policy": "balanced", "required_capabilities": ["builder"]},

@@ -51,9 +51,7 @@ def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | N
     if re.fullmatch(r"x\d+", t):
         return _envelope_entry(con, run, target.upper(), quote)
     if t == "trust":
-        if not extra:
-            raise Usage("missing-route", "name the route to promote", next_step="office approve trust <harness@ver/model@effort> --quote ...")
-        return _trust(con, run, extra[0], quote)
+        return _trust(con, run, extra[0] if extra else "", quote)
     if t == "waive":
         if not extra:
             raise Usage("missing-gate", "name what to waive", next_step="office approve waive <T2:visual|plan-review|P3> --quote ...")
@@ -113,21 +111,11 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
 
 
 def _trust(con, run, triple: str, quote: str) -> Result:
-    """#134, #625: the CLI path for an explicit, attributed trust act."""
-    from office import candidates, paths
-    triples, gate_lines, next_action = candidates.resolve_trust_targets(triple, con=con, run=run)
-    db_target = con if isinstance(con, sqlite3.Connection) else paths.runs_db()
-    run_id = (run or {}).get("id")
-    ev_ref = f"run:{run_id}" if run_id else None
-    run_label = f" in run {short(run_id)}" if run_id else ""
-    reason = f"user authorized{run_label}: {quote.strip()}"
-    acts = scoring.record_trust_acts(db_target, triples, "proven", "user", reason,
-                                     evidence_reference=ev_ref)
-    lines = [f"{t} trust recorded as proven (attributed to the user)" for t in triples] + gate_lines
-    return Result(lines=lines,
-                  next=next_action,
-                  data={"trust_act_id": acts[0]["trust_act_id"],
-                        "trust_act_ids": [a["trust_act_id"] for a in acts]})
+    """#837: the old approval ceremony is retired, including for a named user."""
+    raise Refused("legacy-trust-retired",
+                  "office approve trust is retired by #837; set a role-scoped user "
+                  "allow/neutral/deny rule instead. Historical trust acts stay audit-only.",
+                  next_step="office route policy --effective --role code_reviewer")
 
 
 def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:
