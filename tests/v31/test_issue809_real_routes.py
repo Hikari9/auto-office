@@ -105,3 +105,18 @@ def test_discovery_never_trials_a_known_below_size_floor_or_non_xl_opus():
     assert routing._pool_gate(unknown, {"builder"}, None, "Change", set(),
                               policy_size="S") is None
     assert decide("S", [unknown])["status"] == "no_qualifying_candidate"
+
+
+def test_m_l_planner_preserves_all_three_fallbacks_when_slate_has_four():
+    from office import adaptive
+    routes = ["claude@2/claude-sonnet-5-5@medium",
+              "agy@1/claude-sonnet-5-5@medium",
+              "codex@0/gpt-6.1-terra@medium",
+              "opencode@1/glm-5.3-flash@max"]
+    audit = {"slate": [{"route": route} for route in routes],
+             "candidates": [{"route": route, "label": route, "utility": 0.80} for route in routes]}
+    automatic = adaptive.apply_planner_choice(audit, None)
+    assert automatic["primary"] == routes[0] and automatic["fallbacks"] == routes[1:]
+    explicit = adaptive.apply_planner_choice(audit, {"routes": routes, "why": "qualified exact routes"})
+    assert explicit["fallbacks"] == routes[1:]
+    assert len(explicit["fallbacks"]) == 3

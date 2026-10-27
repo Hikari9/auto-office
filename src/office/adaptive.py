@@ -606,11 +606,15 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
     name are filled from the router's order."""
     rows = audit.get("candidates") or []
     router = [e["route"] for e in audit.get("slate") or []]
-    out = {"chooser": "router", "primary": router[0] if router else None, "fallbacks": router[1:SLATE_SIZE]}
+    # M/L run-gear slates fund four routes (Claude Code Sonnet, same-effort
+    # agy, then two different-model fallbacks). Preserve the entire effective
+    # slate, not just the old three-route planner-choice limit.
+    capacity = max(SLATE_SIZE, len(router))
+    out = {"chooser": "router", "primary": router[0] if router else None, "fallbacks": router[1:capacity]}
     if not choice or not choice.get("routes"):
         return out
     picked, rejected, unknown = [], [], []
-    for ref in choice["routes"][:SLATE_SIZE]:
+    for ref in choice["routes"][:capacity]:
         r = resolve_route_ref(ref, rows)
         if r is None:
             reason = _rejected_route_ref(ref, audit.get("rejected") or [])
@@ -637,7 +641,7 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
         return {**out, "planner_error": (f"{primary_row['label']} is {gap:.3f} utility behind the best route; "
                                          "a primary outside the close-call band needs route_why")}
     fallbacks = picked[1:] + [x for x in router if x not in picked]
-    return {"chooser": "planner", "primary": picked[0], "fallbacks": fallbacks[:SLATE_SIZE - 1],
+    return {"chooser": "planner", "primary": picked[0], "fallbacks": fallbacks[:capacity - 1],
             "override": picked != router[:len(picked)],
             "departs_from_ranking": departs, "gap_to_best": gap, "why": why or None}
 
