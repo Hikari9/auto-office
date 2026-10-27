@@ -747,7 +747,7 @@ def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: b
         return decision
     fallback, link = trial["fallback"], decision["discovery_link"]
     blocked = None if launching else "not-launching"
-    blocked = blocked or _trial_blocked(con, run, decision, fallback)
+    blocked = blocked or _trial_blocked(con, run, decision, fallback, task)
     if blocked:
         return _annotated(fallback, link, blocked=blocked)
     record = {"id": link["attempt_id"], "route": link["candidate"], "probe_key": link["probe_key"],
@@ -769,7 +769,7 @@ def _known_working(con, cand: dict) -> bool:
     return (learned.get(route_learning.candidate_key(cand)) or {}).get("state") == "learned-eligible"
 
 
-def _trial_blocked(con, run: dict, decision: dict, fallback: dict) -> str | None:
+def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | None = None) -> str | None:
     """Why no trial may be reserved now (a routing `blocked` token), or None."""
     config = state.pinned_config(run)
     settings = route_policy.discovery_settings(config)
@@ -777,8 +777,7 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict) -> str | None
     risk = run.get("risk") or {}
     if not (settings["enabled"] and "executor" in settings["roles"]):
         return "discovery-disabled"
-    if (risk.get("size_class") not in settings["trial_size_classes"]
-            or risk.get("blast_radius") not in settings["trial_blast_radius"] or risk.get("irreversible")):
+    if route_policy.trial_risk_blocked(settings, risk, (task or {}).get("descriptor")):
         return "risk"
     alloc = route_probe.allocation(con, run["id"], settings)
     if alloc["trials"]["used"] >= alloc["trials"]["max"]:
