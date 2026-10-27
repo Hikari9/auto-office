@@ -47,6 +47,7 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
                                 f"then office dispatch {tid} --as {as_route}")
     effort = want["effort"] or d.get("effort")
     _require_known(harness, want["model_id"], effort)
+    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as")
     cand = candidates.declared_candidate(harness, want["model_id"], effort)
     after = routing.candidate_id(cand)
     before = d.get("triple")
@@ -62,7 +63,7 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
                           next_step=USAGE)
         _record(con, cur, cand, change)
         dispatch.abandon_trial(con, cur["id"], f"the user declared {after}: no longer a discovery trial")
-        state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote)))
+        state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote, ceiling)))
         lines += _recheck_review(con, run, tid, cand)
         new = None
         if restart:
@@ -86,11 +87,12 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
     return Result(lines=lines, next="exceptions only; office status")
 
 
-def _declared_payload(cand: dict, before: str | None, quote: str) -> dict:
+def _declared_payload(cand: dict, before: str | None, quote: str, ceiling: dict | None = None) -> dict:
     """The task's recorded route after a deliberate change: dispatch and every
     relaunch follow it (`declared`), with no fallback behind it."""
     triple = routing.candidate_id(cand)
     return {"candidate": cand, "declared": True, "override": True, "route_source": "declared",
+            **({"override_ceiling": ceiling} if ceiling else {}),
             "route_authority": {"actor": "user", "quote": quote, "reason": f'user route change: "{quote}"'},
             "selection_disclosure": {"triple": triple, "override": True,
                                      "reason": f"declared route change ({before or 'unrecorded'} -> {triple})"},
@@ -124,7 +126,6 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
     rec = state.recorded_route(task)
     before = routing.candidate_id(rec["candidate"]) if rec else None
     if before is None:
-        from office import dispatch
         plan = dispatch._planned_slate(con, run, tid)
         before = (plan or {}).get("primary")
     harness = want["harness"] or ((rec.get("candidate") or {}).get("harness") if rec else None)
@@ -133,6 +134,7 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
                     exit_code=2)
     effort = want["effort"] or (rec.get("candidate") or {}).get("effort")
     _require_known(harness, want["model_id"], effort)
+    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as")
     cand = candidates.declared_candidate(harness, want["model_id"], effort)
     after = routing.candidate_id(cand)
     if before and scoring.normalize_triple(after) == scoring.normalize_triple(before):
@@ -142,7 +144,7 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
         if cur["status"] != task["status"] or cur.get("current_dispatch_id") != task.get("current_dispatch_id"):
             raise Refused("state-changed", f"{tid} changed while the route was being recorded; re-run", scope=tid,
                           next_step=USAGE)
-        state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote)))
+        state.update_task(con, run["id"], tid, route_json=dumps(_declared_payload(cand, before, quote, ceiling)))
         state.record_route_change(con, run, tid, before, after, kind="reroute", actor="user",
                                   reason=f"user route change: \"{quote.strip()}\"", extra={"quote": quote, "pending": True})
     if task["status"] == "accepted":
