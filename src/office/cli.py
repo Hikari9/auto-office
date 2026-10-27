@@ -834,7 +834,7 @@ def _run(args, unknown) -> int:
         if args.action == "policy":
             if args.ident or args.wildcard:
                 raise OfficeError("usage", "route policy accepts --role and --effective only", exit_code=2)
-            return emit(routecmd.policy(role=args.role), args)
+            return emit(routecmd.policy(role=args.role, effective=args.effective), args)
         if args.action == "override":
             return emit(routecmd.override(route=args.ident, role=args.role, run=getattr(args, "run_arg", None),
                                           reason=args.reason, ttl=args.ttl, revoke=args.revoke,

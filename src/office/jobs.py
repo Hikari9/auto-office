@@ -66,6 +66,7 @@ def _handlers():
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
         "trial_recovery": dispatch.job_trial_recovery,
+        "route_fallback": dispatch.job_route_fallback,
         "notify_worker": dispatch.job_notify_worker,
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
@@ -274,6 +275,11 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
     if job["kind"] == "trial_recovery":
         from office import dispatch
         dispatch.trial_recovery_failed(con, run, job, err)
+        return
+    if job["kind"] == "route_fallback" and task_id:
+        state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"route fallback failed: {err[:200]}")
+        state.emit(con, run, "task.blocked", f"{task_id} route fallback could not run: {err[:120]}; "
+                   f"office dispatch {task_id} --reroute", task_id=task_id)
         return
     if job["kind"] == "launch_agent" and task_id:
         from office import dispatch

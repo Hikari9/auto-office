@@ -49,18 +49,36 @@ def _canonicalize(spec: str) -> str:
     return f"{harness}@{major}/{target}@{effort}" if major.isdigit() else f"{harness}/{target}@{effort}"
 
 
-def policy(*, role: str | None = None) -> Result:
+def _dispatch_view(row: dict, state: dict) -> tuple[bool, str]:
+    """(dispatches, why) for one catalog route under one role (#845). An allow dispatches with no proof;
+    a catalog or overlay `dispatchable: false` only stops a route the user has not allowed."""
+    if state["state"] == "deny":
+        return False, f"denied by {state['source']}"
+    if row.get("dispatchable") is False:
+        if state["state"] == "allow":
+            was = "your catalog overlay disabled it" if row.get("user_disabled") else "its catalog row is not dispatchable"
+            return True, f"your allow overrides this ({was})"
+        was = "your catalog overlay disables it" if row.get("user_disabled") else "its catalog row is not dispatchable"
+        return False, f"{was}; `office route allow` makes it dispatch"
+    return True, "ready"
+
+
+def policy(*, role: str | None = None, effective: bool = False) -> Result:
     if role and role not in route_policy.POLICY_ROLES:
         raise configcmd._usage(f"unknown routing role {role!r}")
-    effective, _ = cfg.resolve(configcmd._repo_root(Path.cwd()))
-    p = route_policy.user_policy(effective)
+    cfg_effective, _ = cfg.resolve(configcmd._repo_root(Path.cwd()))
+    p = route_policy.user_policy(cfg_effective)
     sources = adapters.load_sources()
     roles = (role,) if role else tuple(sorted(route_policy.POLICY_ROLES))
+    show_rows = role is not None or effective
     output = []
-    lines = ["effective role routing policy (#837); availability and technical qualification are separate:"]
+    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate; "
+             "a runtime failure is logged and falls back to the next eligible route:"]
     unknown_versions = set()
     for r in roles:
-        count = 0
+        count = {"allow": 0, "neutral": 0, "deny": 0}
+        dispatching = 0
+        role_lines = []
         for row in candidates.catalog_rows():
             harness = row.get("invocation_harness")
             if harness not in sources or not row.get("model_id") or not row.get("effort"):
@@ -73,29 +91,49 @@ def policy(*, role: str | None = None) -> Result:
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
             state = route_policy.effective_role_state(c, r, [p])
+            dispatches, why = _dispatch_view(row, state)
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
-                      "state": state["state"], "source": state["source"], "technical_dispatchable": row.get("dispatchable") is not False}
+                      "state": state["state"], "source": state["source"],
+                      "technical_dispatchable": row.get("dispatchable") is not False,
+                      "dispatches": dispatches, "dispatch_reason": why}
             output.append(result)
-            if role is not None:
-                lines.append(f"  {result['route']}: {result['state']} ({result['source']})"
-                             + (" [technically not dispatchable]" if not result["technical_dispatchable"] else ""))
-            count += 1
-        if role is None:
-            lines.append(f"  {r}: {count} catalog rows (use --role to inspect effective states)")
+            count[state["state"]] += 1
+            dispatching += dispatches
+            role_lines.append(f"  {result['route']}: {state['state']} ({state['source']}) -> "
+                              + ("dispatches" if dispatches else "does not dispatch") + f" ({why})")
+        lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
+        if show_rows:
+            lines += role_lines
+    if not show_rows:
+        lines.append("use --role <role> or --effective to list every route and what it does")
     if unknown_versions:
         lines.append("warning: harness major unknown for " + ", ".join(sorted(unknown_versions))
                      + "; exact shipped major-scoped allowances cannot be resolved until installed/probed")
-    lines.append("legacy global denied_models and version ceilings remain enforced unless explicitly superseded by a user role allow")
-    return Result(lines=lines, data={"policy": p, "effective": output})
+    legacy = [d for d in p["denied"] if isinstance(d, str)]
+    if legacy:
+        lines.append(f"legacy global denied_models ({len(legacy)}): " + ", ".join(legacy)
+                     + " (a role allow overrides one; `office route migrate --apply` turns them into editable role rules)")
+    from office import user_catalog
+    overlay = (user_catalog.load() or {}).get("disabled") or []
+    if overlay:
+        lines.append("user catalog overlay disables: " + ", ".join(
+            f"{d.get('harness')}/{d.get('model_id')}" + (f"@{d['effort']}" if d.get("effort") else "") for d in overlay)
+            + " (a role allow overrides it; `office model enable <route>` removes it)")
+    lines.append("reshuffle in one command: office route allow|neutral|deny|clear <route>[,<route>...] --role <role>; "
+                 "order a role with office config roles.<role>.preferred_seed")
+    return Result(lines=lines, data={"policy": p, "effective": output, "legacy_denied": legacy,
+                                     "catalog_overlay_disabled": overlay})
 
 
 def change(action: str, *, role: str | None, route: str | None, wildcard: bool = False) -> Result:
-    """Transactional-in-effect YAML edit: validate all layers BEFORE atomic file write."""
+    """Transactional-in-effect YAML edit: validate all layers BEFORE atomic file write.
+
+    `route` may be several comma-separated routes: one command reshuffles a role's list (#845)."""
     if role not in route_policy.POLICY_ROLES and not (role == "*" and wildcard):
         raise configcmd._usage(f"a specific --role is required (known: {', '.join(sorted(route_policy.POLICY_ROLES))})")
-    _require_route(route, wildcard=wildcard)
-    original_spec = route
-    route = _canonicalize(route)
+    specs = [r.strip() for r in (route or "").split(",") if r.strip()]
+    for spec in specs or [route]:
+        _require_route(spec, wildcard=wildcard)
     if action not in (*route_policy.ROLE_STATES, "clear"):
         raise configcmd._usage(f"invalid action {action!r}")
     path = configcmd._tier_path("user", Path.cwd())
@@ -109,19 +147,28 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     old = user_policy.get("role_rules", [])
     if not isinstance(old, list):
         raise configcmd._usage("existing user role_rules must be a list; refusing to overwrite")
-    new = [r for r in old if not (isinstance(r, dict) and r.get("role") == role and r.get("route") in (route, original_spec))]
-    if action != "clear":
-        new.append({"role": role, "route": route, "state": action, **({"wildcard": True} if wildcard else {})})
+    new = list(old)
+    routes = []
+    for original_spec in specs:
+        canonical = _canonicalize(original_spec)
+        routes.append(canonical)
+        new = [r for r in new if not (isinstance(r, dict) and r.get("role") == role and r.get("route") in (canonical, original_spec))]
+        if action != "clear":
+            new.append({"role": role, "route": canonical, "state": action, **({"wildcard": True} if wildcard else {})})
+    label = ", ".join(routes)
     if new == old:
-        return Result(lines=[f"{role}/{route}: no policy change"], data={"changed": False})
+        return Result(lines=[f"{role}/{label}: no policy change"], data={"changed": False})
     user_policy["role_rules"] = new
     configcmd._validate(raw, "user", Path.cwd())
     backup = configcmd._write(path, raw)
-    lines = [f"{role}/{route}: {'cleared user rule' if action == 'clear' else action} (user config)"]
+    lines = [f"{role}/{label}: {'cleared user rule' if action == 'clear' else action} (user config)"]
+    if action == "allow":
+        lines.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
     return Result(lines=lines, next="office route policy --effective --role " + (role if role != "*" else "code_reviewer"),
-                  data={"changed": True, "role": role, "route": route, "action": action, "path": str(path)})
+                  data={"changed": True, "role": role, "route": routes[0], "routes": routes, "action": action,
+                        "path": str(path)})
 
 
 def override(*, route: str | None, role: str | None, run: str | None, reason: str | None, ttl: str | None,

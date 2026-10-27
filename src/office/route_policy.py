@@ -15,6 +15,8 @@ from office.util import dumps, new_run_id, now_iso, sha256_obj
 from office import model_lineages
 
 POLICY_VERSION = "route-discovery-3"
+# A route that fails at runtime is demoted for this long, never permanently (#845).
+ROUTE_FAILURE_TTL_MINUTES = 30
 PROVENANCE_KEY = "_provenance"
 DIGEST_KEY = "_route_policy_digest"
 CEILING_KEY = "routing.adaptive.budget_ceiling_usd"
@@ -296,6 +298,26 @@ def effective_role_state(cand: dict, role: str, policies: list[dict]) -> dict:
         if rule["role"] == role and _rule_matches(cand, rule["route"]):
             return {"state": rule["state"], "source": "shipped", "rule": rule["route"]}
     return {"state": "neutral", "source": "default", "reason": "no role-specific deny"}
+
+
+def user_allows(cand: dict, role: str, policies: list[dict]) -> dict | None:
+    """The effective rule when role policy allows this route (#845), else None.
+
+    An allow is the whole admission test: it makes a route dispatchable without any proof, qualification or
+    trust gate, and it outranks a catalog or overlay `dispatchable: false`. A runtime failure falls back."""
+    rule = effective_role_state(cand, role, policies) if policies else None
+    return rule if rule and rule["state"] == "allow" else None
+
+
+def preferred_seed_policy(role: str, entries) -> dict:
+    """A policy holding one allow per exact entry (harness, model_id and effort) of a role's preferred list.
+
+    A preferred list is a user choice of routes, so it makes them dispatchable (#845). It is placed
+    before real policies so any explicit user rule outranks it, and it is never a deny or a floor bypass."""
+    rules = [{"role": role, "route": f"{e['harness']}/{e['model_id']}@{e['effort']}", "state": "allow"}
+             for e in entries or [] if isinstance(e, dict) and e.get("harness") and e.get("model_id") and e.get("effort")]
+    return {"denied": [], "role_rules": rules, "strict_roles": [], "ceilings": {}, "ceiling_sources": {},
+            "overkill": [], "sources": {"role_rules": "preferred_seed"}}
 
 
 def _matches(cand: dict, spec: str) -> bool:

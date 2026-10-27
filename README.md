@@ -437,8 +437,12 @@ The shipped config currently expresses preferences such as:
 | Plan reviewer | Prefer `luna@high`, then Claude `opus@low` (only fallback); requires review capability and benchmark index score >= 31. |
 | Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
 | Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@high`, then Claude `opus@low` (only fallback); independent from the producer's model family; benchmark score >= 31. |
-| Visual reviewer | Prefer agy `gemini-3.8-flash` routes, fallback Sonnet only; also requires a passing image-sensitive conformance proof for that exact route. |
+| Visual reviewer | Prefer agy `gemini-3.8-flash` routes, fallback Sonnet only; also requires a passing image-sensitive conformance proof for that exact route, unless you have allowed the route for the role. |
 | Closeout verifier | Requires verification capability and at least medium effort. |
+
+### The allow contract (3.9)
+
+An allow is the whole admission test. `office route allow <route>[,<route>...] --role <role>` (or an exact entry in `roles.<role>.preferred_seed`) makes a route dispatch immediately: no conformance probe, vision proof, trust act or benchmark floor, and it overrides a catalog or user-overlay `dispatchable: false`. Office stores the correct runtime command for each harness (claude, agy, codex, opencode, pi) at each model and effort. If a route fails at runtime (launch error, unsupported model or effort, auth, timeout, transport death) Office logs a `route.failed` event with the route, reason and stderr tail, demotes that route for 30 minutes, and dispatches the next eligible route; `office status` shows the fallback. A route you declared with `--as` is logged but never swapped silently. `office route policy --effective [--role <role>]` shows exactly what dispatches and why, including legacy `denied_models` and the catalog overlay.
 
 These are policy defaults, not promises that a particular route will always be selected. Installed harnesses, trust evidence, task shape, model-family floors, live quota, benchmark availability, and explicit user overrides can all change the result.
 
