@@ -70,3 +70,8 @@ def test_old_pinned_gears_do_not_inherit_new_task_size_restrictions():
         assert slates.new_gear_size(req) is None
     assert slates.new_gear_size({"context": {"gear": "XL", "size_class": "S"}}) == "S"
     assert slates.new_gear_size({"context": {"gear": "M", "size_class": "XL"}}) == "XL"
+
+
+def test_missing_gear_is_not_silently_upgraded_from_task_size():
+    assert slates.new_gear_size({"context": {"size_class": "L"}}) is None
+    assert slates.new_gear_size({"size_class": "XL"}) is None

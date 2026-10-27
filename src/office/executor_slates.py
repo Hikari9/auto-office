@@ -36,7 +36,9 @@ def new_gear_size(request: dict) -> str | None:
     """New XS-XL funding is not retroactively imposed on legacy pinned runs."""
     context = request.get("context") or {}
     gear = context.get("gear") or request.get("run_gear")
-    if gear is not None and gear not in FLOORS:
+    # Raw routing callers, replay fixtures, and historical requests without a
+    # declared run gear are NOT implicitly upgraded to #809 policy.
+    if gear not in FLOORS:
         return None
     size = request.get("size_class") or context.get("size_class")
     return size if size in FLOORS else None
