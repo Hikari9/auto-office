@@ -1752,7 +1752,8 @@ def test_a_production_run_rechecks_the_task_before_reserving_a_trial(cold, descr
     task = state.get_task(cold.con, "run-A", "T1")
     decision = dispatch.preflight_discovery(cold.con, run, task, dispatch.planned_route(cold.con, run, task))
     trial = decision["trial"]
-    run = {**run, "risk": {"size_class": "L", "blast_radius": "production", "irreversible": False}}
+    run = {**run, "risk": {"size_class": "L", "blast_radius": "production", "irreversible": False},
+           "policy": cold.policy(trial_bounded_production_tasks=True)}
     with db.transaction(cold.con):
         got = dispatch._trial_blocked(cold.con, run, decision, trial["fallback"], {"descriptor": descriptor})
     assert got == blocked

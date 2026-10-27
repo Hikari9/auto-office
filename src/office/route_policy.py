@@ -26,7 +26,8 @@ DISCOVERY_DEFAULTS = {
     "max_trial_percent_rolling_20": 15,
     "trial_size_classes": ["S", "M"], "trial_blast_radius": ["local", "repo"],
     "require_known_fallback": True, "probe_ttl_days": 7, "probe_timeout_s": 120,
-    "trial_bounded_production_tasks": True,
+    # Off here so a run pinned before this key existed never gains it; the shipped config turns it on for new runs.
+    "trial_bounded_production_tasks": False,
 }
 _ROUTE = re.compile(r"(?:(?P<harness>[A-Za-z0-9_.-]+)/)?(?P<model>[A-Za-z0-9_.-]+)(?:@(?P<effort>[a-z]+))?\Z")
 _HARNESSES = re.compile(r"harness:([A-Za-z0-9_.-]+)\Z")
@@ -104,7 +105,7 @@ def trial_risk_blocked(settings: dict, risk: dict, task: dict | None = None) -> 
         return True
     if risk.get("size_class") in settings["trial_size_classes"] and risk.get("blast_radius") in settings["trial_blast_radius"]:
         return False
-    if not settings.get("trial_bounded_production_tasks", True) or risk.get("blast_radius") != "production":
+    if not settings.get("trial_bounded_production_tasks") or risk.get("blast_radius") != "production":
         return True
     task = task or {}
     return not (task.get("task_size") in settings["trial_size_classes"] and task.get("bounds") == "bounded"

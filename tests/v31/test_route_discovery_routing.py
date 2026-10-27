@@ -44,7 +44,7 @@ def failed(reason_class="unsupported-model-effort"):
 
 def discovery(*, known=None, quarantined=(), size="S", blast="repo", irreversible=False, used=(0, 0, 0),
               max_=(2, 1, 3), percent=100, enabled=True, task=None, **settings):
-    s = {**route_policy.DISCOVERY_DEFAULTS, "enabled": enabled, "max_trial_percent_rolling_20": percent, **settings}
+    s = {**route_policy.DISCOVERY_DEFAULTS, "trial_bounded_production_tasks": True, "enabled": enabled, "max_trial_percent_rolling_20": percent, **settings}
     return {"settings": s,
             "allocation": {"probes": {"used": used[0], "max": max_[0]}, "trials": {"used": used[1], "max": max_[1]},
                            "rolling": {"used": used[2], "max": max_[2], "window": 20, "warmup": max_[2] == 0}},
@@ -942,3 +942,12 @@ def test_a_strict_seed_never_falls_to_an_unseeded_route():
     rq = trusted(req([other], disc=None, role="plan_reviewer"))
     rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}])
     assert routing.route(rq)["selected"] == "opencode@2/glm-flash@medium"
+
+
+def test_a_run_pinned_before_the_production_task_key_never_gains_it():
+    from office import route_policy as rp
+    old = {"routing": {"discovery": {"enabled": True}}, rp.PROVENANCE_KEY: {}}
+    settings = rp.discovery_settings(old)
+    assert settings["trial_bounded_production_tasks"] is False
+    assert rp.trial_risk_blocked(settings, {"blast_radius": "production", "size_class": "L"},
+                                 {"task_size": "S", "bounds": "bounded"})
