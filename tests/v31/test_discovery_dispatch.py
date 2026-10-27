@@ -1754,6 +1754,10 @@ def test_a_scan_run_beneath_a_tagged_process_does_not_name_its_own_helpers(monke
     ({"task_size": "L", "bounds": "bounded"}, "risk"),
     ({"task_size": "S", "bounds": "open"}, "risk"),
     ({"task_size": "S", "bounds": "bounded", "domain": "infrastructure"}, "risk"),
+    # #809: a size Office inferred (conservative M) is not a size the planner declared, so it opens no trial.
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "inferred", "profile_version": "task-dispatch-profile-1"}, "risk"),
+    ({"task_size": "M", "bounds": "bounded", "profile_version": "task-dispatch-profile-1"}, "risk"),
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "planner", "profile_version": "task-dispatch-profile-1"}, None),
     (None, "risk")])
 def test_a_production_run_rechecks_the_task_before_reserving_a_trial(cold, descriptor, blocked):
     run = state.get_run(cold.con, "run-A")
@@ -1769,3 +1773,14 @@ def test_a_production_run_rechecks_the_task_before_reserving_a_trial(cold, descr
         for risk in ({"blast_radius": "production-data"}, {"blast_radius": "production", "irreversible": True}):
             assert dispatch._trial_blocked(cold.con, {**run, "risk": {"size_class": "S", **risk}}, decision,
                                            trial["fallback"], {"descriptor": {"task_size": "S", "bounds": "bounded"}}) == "risk"
+
+
+@pytest.mark.parametrize("descriptor,size", [
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "inferred", "profile_version": "task-dispatch-profile-1"}, None),
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "planner", "profile_version": "task-dispatch-profile-1"}, "M")])
+def test_discovery_inputs_record_only_a_planner_declared_task_size(cold, descriptor, size):
+    from office import candidates, route_policy
+    run = state.get_run(cold.con, "run-A")
+    settings = route_policy.discovery_settings(state.pinned_config(run))
+    got = candidates.discovery_inputs(cold.con, run, "executor", [], settings, {"descriptor": descriptor})
+    assert got["risk"]["task"] == {"task_size": size, "bounds": "bounded", "domain": None}

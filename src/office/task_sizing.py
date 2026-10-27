@@ -88,6 +88,7 @@ def planner_declared(descriptor: dict | None) -> dict:
     """The descriptor with an Office-inferred size removed: a gate that needs a size the planner declared
     (a production-run discovery trial) never reads the conservative M that sizing fills in."""
     d = dict(descriptor or {})
-    if d.get("task_size_source") == "inferred":
+    # `profile_version` is written only by classify, so a sized descriptor with no source is Office's, not the planner's.
+    if d.get("task_size_source") == "inferred" or (not d.get("task_size_source") and d.get("profile_version")):
         d.pop("task_size", None)
     return d

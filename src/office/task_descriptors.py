@@ -4,6 +4,14 @@ No model-brand-specific routing rules. Unknown fields remain neutral.
 """
 from __future__ import annotations
 import math
+import re
+
+# Planner prose is echoed to terminals: no C0/C1 controls (ESC, CSI, CR) and no bidi or zero-width formatting.
+_UNSAFE_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def unsafe_text(text: str) -> bool:
+    return bool(_UNSAFE_TEXT.search(text))
 
 OPTIONS = {
  "domain": ("ui", "backend", "data", "infrastructure", "mixed"),
@@ -35,7 +43,7 @@ def parse_field(key: str, value: str):
         return value
     if key == "task_size_rationale":
         text = value.strip()
-        if not 12 <= len(text) <= 500 or any(ord(c) < 32 or ord(c) == 127 for c in text):
+        if not 12 <= len(text) <= 500 or unsafe_text(text):
             raise ValueError(f"{key} must contain concrete evidence (12-500 characters, no control characters)")
         return text
     if key in TOKENS:

@@ -249,9 +249,11 @@ def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env
     assert line.startswith(f"ACTUAL DISPATCH T1: {dispatched} | ") and route, line
     # S's ideal slate starts with Gemini Flash at medium: every ideal that did not run says why.
     skipped = [l for l in out.splitlines() if l.startswith("  ideal route skipped: #")]
-    assert 2 <= len(skipped) <= 3, out  # the adaptive pick is one of three ideals, or none of them
-    assert any("claude/claude-haiku-5-5@high (unqualified): claude@1/claude-haiku-5-5@high" in l for l in skipped), skipped
-    assert any("codex/gpt-6.1-terra@medium (unqualified)" in l for l in skipped), skipped
+    ideals = executor_slates.ideal_seed("S")
+    assert len(skipped) in (len(ideals) - 1, len(ideals)), out  # the adaptive pick is one of the ideals, or none of them
+    for ideal in ideals[1:]:  # the Gemini ideal may be the pick; the Haiku and Terra ideals are discovery-only
+        ref = f"{ideal.get('harness', '*')}/{ideal['model_id']}@{ideal['effort']}"
+        assert any(f"{ref} (unqualified)" in l for l in skipped), (ref, skipped)
     assert all(" (selected)" not in l for l in skipped), skipped
 
 
@@ -277,6 +279,15 @@ def test_routing_audit_records_every_809_field(env):
     assert audit["effective_gates"]["review_contract"] == contract.CONVERGENCE
     assert audit["plan_version"] == run["plan_version"] == 1
     assert audit["wave"] == 1 and audit["dispatch_version"] == 1
+    # The same facts ride on the task's stored route, so a relaunch reproduces them.
+    stored = json.loads(con.execute("SELECT route_json FROM tasks WHERE run_id=? AND id='T1'", (run["id"],)).fetchone()[0])
+    assert stored["selected_route"] == audit["selected_route"] and stored["size_decision"]["task_size"] == "S"
+    assert stored["preferred_route"] == audit["preferred_route"] and stored["fallback_routes"] == audit["fallback_routes"]
+    # The harness ended without submitting, so the task was relaunched: every later audit keeps the ranking.
+    later = [json.loads(r[0]) for r in con.execute(
+        "SELECT disclosure_json FROM route_audit WHERE run_id=? AND phase='dispatch' ORDER BY created_at", (run["id"],))]
+    assert all(a["preferred_route"] == audit["preferred_route"] and a["fallback_routes"] == audit["fallback_routes"]
+               for a in later), [(a["preferred_route"], a["fallback_routes"]) for a in later]
     # A later decision for the same task is dispatch 2, from the dispatches already recorded.
     from office import dispatch
     decision = {"request": {"role": "executor", "task_id": "T1", "context": {"size_class": "S"}}, "routing": {"slate": []},
@@ -287,9 +298,6 @@ def test_routing_audit_records_every_809_field(env):
                                    (run["id"],)).fetchone()[0])
     assert again["dispatch_version"] == len(state.task_dispatches(con, run["id"], "T1")) + 1 >= 2
     assert again["preferred_route"] == audit["selected_route"] and again["fallback_routes"] == []
-    # The same facts ride on the task's stored route, so a relaunch reproduces them.
-    stored = json.loads(con.execute("SELECT route_json FROM tasks WHERE run_id=? AND id='T1'", (run["id"],)).fetchone()[0])
-    assert stored["selected_route"] == audit["selected_route"] and stored["size_decision"]["task_size"] == "S"
 
 
 def test_receipt_lists_why_each_unselected_ideal_route_was_skipped():
@@ -344,6 +352,10 @@ def test_inferred_size_is_marked_and_never_counts_as_a_planner_declared_size():
     assert "task_size" not in task_sizing.planner_declared({"bounds": "bounded", **inferred})
     assert task_sizing.planner_declared({"bounds": "bounded", **declared})["task_size"] == "S"
     assert task_sizing.planner_declared(None) == {}
+    # A descriptor Office sized before the source key existed is still Office's size.
+    legacy_sized = {"task_size": "M", "bounds": "bounded", "profile_version": task_sizing.PROFILE_VERSION}
+    assert "task_size" not in task_sizing.planner_declared(legacy_sized)
+    assert task_sizing.planner_declared({"task_size": "S", "bounds": "bounded"})["task_size"] == "S"
 
 
 def test_production_run_discovery_trial_needs_a_size_the_planner_declared():
@@ -387,7 +399,8 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
 
 def test_planner_free_text_rejects_control_characters():
     from office import task_descriptors
-    for bad in ("evidence with \x1b[2K escape", "evidence with \r carriage return", "evidence with \x7f delete"):
+    for bad in ("evidence with \x1b[2K escape", "evidence with \r carriage return", "evidence with \x7f delete",
+                "evidence with \x9b2J c1 csi", "evidence with \u202e bidi override", "evidence with \u200b zero width"):
         with pytest.raises(ValueError):
             task_descriptors.parse_field("task_size_rationale", bad)
         if "\r" in bad:
@@ -466,3 +479,9 @@ def test_preferred_routes_prefer_the_plan_then_the_router_slate_then_the_selecti
     assert dispatch._preferred_routes(planned) == ("a@1/x@low", ["b@1/y@low"])
     assert dispatch._preferred_routes({**planned, "planned": {}}) == ("r1", ["r2"])
     assert dispatch._preferred_routes({"selected": "z"}) == ("z", [])
+    # A relaunch decision is rebuilt from the stored route: it keeps what the first dispatch ranked.
+    stored = {"preferred_route": "a@1/x@low", "fallback_routes": ["b@1/y@low"], "selected": "z"}
+    assert dispatch._preferred_routes(stored) == ("a@1/x@low", ["b@1/y@low"])
+    # ...even though that decision's fresh exact-route slate ranks only the selected route.
+    assert dispatch._preferred_routes({**stored, "routing": {"slate": [{"route": "z"}]}}) == ("a@1/x@low", ["b@1/y@low"])
+

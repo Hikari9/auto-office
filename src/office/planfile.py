@@ -55,7 +55,6 @@ def requirement_key(raw: str) -> str:
     return raw.strip().lower().replace(" ", "_").replace("-", "_")
 
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")  # plan prose is echoed to terminals: no ESC or carriage-return payloads
 BLAST = ("local", "repo", "production", "production-data")
 SIZES = ("XS", "S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
@@ -379,7 +378,7 @@ def _validate(plan: ParsedPlan) -> None:
     if r.get("run_gear"):
         if r["run_gear"]["gear"] not in SIZES:
             plan.errors.append(f"requirements run_gear must be one of {', '.join(SIZES)}")
-        if not 12 <= len(r["run_gear"]["why"]) <= 500 or _CONTROL.search(r["run_gear"]["why"]):
+        if not 12 <= len(r["run_gear"]["why"]) <= 500 or task_descriptors.unsafe_text(r["run_gear"]["why"]):
             plan.errors.append("requirements `run_gear:` needs a `run_gear_why:` line with concrete reasons "
                                "(12-500 characters, no control characters)")
     if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):

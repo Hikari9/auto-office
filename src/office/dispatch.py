@@ -512,6 +512,10 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
             raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
                           next_step=_route_next(decision, task["id"], run))
     decision.update(origin)
+    # The exact-route re-qualification above ranks one route; the dispatch keeps the ranking it was first given.
+    for key in ("preferred_route", "fallback_routes"):
+        if route.get(key) is not None:
+            decision[key] = route[key]
     decision["route_source"] = route.get("route_source") or "router"
     if authority.get("actor") == "orchestrator":
         decision["route_source"], decision["route_note"] = "orchestrator", "orchestrator choice"
@@ -695,10 +699,13 @@ def _record_routing(con, run: dict, decision: dict) -> None:
 
 
 def _preferred_routes(decision: dict) -> tuple[str | None, list]:
-    """The route the plan or router ranked first, and the ranked fallbacks behind it, whatever was dispatched."""
+    """The route the plan or router ranked first, and the ranked fallbacks behind it, whatever was dispatched.
+    A relaunch rebuilds its decision from the stored route, which already carries both."""
     planned = decision.get("planned") or {}
     if planned.get("primary"):
         return planned["primary"], planned.get("fallbacks") or []
+    if decision.get("preferred_route"):
+        return decision["preferred_route"], decision.get("fallback_routes") or []
     slate = [e.get("route") for e in (decision.get("routing") or {}).get("slate") or []]
     return (slate[0], slate[1:]) if slate else (decision.get("selected"), [])
 
