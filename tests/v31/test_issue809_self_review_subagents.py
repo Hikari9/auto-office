@@ -11,6 +11,13 @@ from test_convergence_contract import APPROVED, _gates, _q, _roles, _start
 
 from office import contract, gates, paths, self_review_subagents as srs, state
 
+@pytest.fixture(autouse=True)
+def _in_process_routing(request):
+    """These tests patch `gates.run_reviewer`, which only reaches work that runs in this process (#841)."""
+    if "env" in request.fixturenames:
+        request.getfixturevalue("env").hide_agy = True
+
+
 EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "submit": True}]
 RUN = {"gates": {"gear_model_version": "run-gear-1"}, "risk": {"classification": "low"}}
 

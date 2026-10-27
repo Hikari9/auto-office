@@ -169,6 +169,8 @@ class Env:
         """`restored`: tmp already holds a repository copied from a snapshot. `contract`
         pins the review contract new runs start with (the user config's review.contract)."""
         self.approved = False
+        # A suite that patches an in-process seam (gates.run_reviewer) sets this to hide every agy row from routing.
+        self.hide_agy = False
         self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
         self.tmp = tmp
         self.home = tmp / "home"
@@ -228,13 +230,16 @@ class Env:
         from office import candidates, dispatch
         from office.util import claim_identity
         # The scripted fakes assume the default executor is not agy: its worker profile has a wall cap, so
-        # an agy executor runs as a real process that no in-process patch reaches, and its `office submit` then
-        # drains the convergence jobs there, past a test's monkeypatch. Every dispatchable agy row is hidden
-        # from routing here, Gemini as well as Claude: #809 made agy Gemini the preferred S route, and the
-        # routing-seed draw picked it about half the time, so such a test passed or failed per run.
+        # an agy executor runs as a real process that no in-process patch reaches. The Claude rows agy
+        # launches with banner evidence are dispatchable in the seed; a test hides them from routing here.
+        # A suite that patches `gates.run_reviewer` also needs the Gemini rows hidden (`env.hide_agy`): its agy
+        # worker's `office submit` would drain the convergence jobs in that real process, past the patch, and
+        # #809 made agy Gemini the preferred S route, so the routing-seed draw picked it about half the time (#841).
+        # Other suites keep those rows: several dispatch `--as agy/gemini-...` explicitly.
         seed_rows = candidates.catalog_rows
         monkeypatch.setattr(candidates, "catalog_rows", lambda: [
-            {**r, "dispatchable": False} if r.get("invocation_harness") == "agy" else r for r in seed_rows()])
+            {**r, "dispatchable": False} if r.get("invocation_harness") == "agy"
+            and (self.hide_agy or str(r.get("model_id", "")).startswith("claude-")) else r for r in seed_rows()])
         # The shipped reviewer seed is strict (luna > deepseek > opus@low, #815) and the fake env has no deepseek
         # route, so a scripted reviewer chain would end after two routes. The suites that walk a chain need the
         # fakes' other routes; the strict seed itself is covered by test_route_discovery_routing.
