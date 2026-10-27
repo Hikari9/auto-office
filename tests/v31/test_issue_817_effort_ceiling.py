@@ -94,6 +94,23 @@ def test_omitted_effort_that_resolves_above_the_ceiling_is_refused(monkeypatch):
     monkeypatch.setattr(candidates, "declared_candidate", lambda *a, **k: {"effort": "high"})
     with pytest.raises(Refused) as exc:
         dispatch.enforce_effort_ceiling(task, "codex/gpt-6-astra", QUOTE)
-    assert "effort-above-user-quote" in exc.value.code
+    assert "effort-above-user-quote" in exc.value.category
     monkeypatch.setattr(candidates, "declared_candidate", lambda *a, **k: {"effort": "none"})
     assert dispatch.enforce_effort_ceiling(task, "codex/gpt-6-astra", QUOTE)["effort"] == "low"
+
+
+def test_reroute_selecting_the_same_model_above_the_ceiling_is_refused(monkeypatch):
+    from office import candidates, dispatch, state
+    from office.state import Refused
+    task = {"id": "T1", "route_json": json.dumps({
+        "candidate": {"model_id": "gpt-6-astra", "effort": "low"},
+        "override_ceiling": {"model": "gpt-6-astra", "effort": "low", "quote": QUOTE}})}
+    monkeypatch.setattr(state, "pinned_config", lambda run: {})
+    pick = {"status": "selected", "selected": "codex@1/gpt-6-astra@high",
+            "candidate": {"model_id": "gpt-6-astra", "effort": "high"}}
+    monkeypatch.setattr(candidates, "route_role", lambda *a, **k: dict(pick))
+    with pytest.raises(Refused) as exc:
+        dispatch.planned_route(None, {}, task, reroute=True)
+    assert exc.value.category == "effort-above-user-quote" and "ask the user for new words" in exc.value.next_step
+    pick["candidate"]["effort"] = "low"
+    assert dispatch.planned_route(None, {}, task, reroute=True)["route_source"] == "reroute"

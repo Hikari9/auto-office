@@ -359,6 +359,18 @@ def _prior_override_ceiling(task: dict) -> dict | None:
     return None
 
 
+def _refuse_above_ceiling(task: dict, what: str, prior: dict, effort: str) -> None:
+    new, old = _effort_rank(effort), _effort_rank(prior["effort"])
+    if new is None or old is None or new <= old:
+        return
+    raise Refused("effort-above-user-quote",
+                  f"{task['id']}: {what} raises {prior.get('model')} from the @{prior['effort']} the user's quote "
+                  f"set ({prior['quote'][:80]!r}); re-using that quote is not authorization for @{effort}",
+                  scope=task["id"], preserved="the recorded route",
+                  next_step=f"ask the user for new words and pass them as --quote, or stay at or below "
+                            f"@{prior['effort']}")
+
+
 def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: str = "--as",
                            effort: str | None = None) -> dict | None:
     """Refuse a higher effort on the same model than a quoted user override set, unless the
@@ -374,15 +386,8 @@ def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: st
         except (Refused, Usage):
             effort = None
     same_quote = bool(prior and quote is not None and quote.strip() == prior["quote"].strip())
-    if prior and prior.get("model") == model and effort:
-        new, old = _effort_rank(effort), _effort_rank(prior["effort"])
-        if new is not None and old is not None and new > old and not (quote is not None and not same_quote):
-            raise Refused("effort-above-user-quote",
-                          f"{task['id']}: {flag} {text} raises {model} from the @{prior['effort']} the user's quote "
-                          f"set ({prior['quote'][:80]!r}); re-using that quote is not authorization for @{effort}",
-                          scope=task["id"], preserved="the recorded route",
-                          next_step=f"ask the user for new words and pass them as --quote, or stay at or below "
-                                    f"@{prior['effort']}")
+    if prior and prior.get("model") == model and effort and not (quote is not None and not same_quote):
+        _refuse_above_ceiling(task, f"{flag} {text}", prior, effort)
     if quote is None or (same_quote and prior.get("model") == model):
         return prior
     return {"model": model, "effort": effort, "quote": quote} if effort else None
@@ -538,6 +543,10 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
                                   exclude=exclude, discovery_input=discovery_input)
     fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
+        prior = _prior_override_ceiling(task)
+        cand = fresh.get("candidate") or {}
+        if prior and cand.get("model_id") == prior.get("model") and cand.get("effort"):
+            _refuse_above_ceiling(task, f"--reroute (selected {fresh.get('selected')})", prior, cand["effort"])
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if discovery_input and fresh.get("status") == "selected" and (fresh.get("discovery") or {}).get("intent") == "trial":
         fresh.setdefault("route_source", "router")
