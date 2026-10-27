@@ -42,6 +42,14 @@ def test_s_is_inline_only_on_a_measured_estimate_that_beats_dedicated_dispatch()
     assert task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), {"classification": "elevated"})["mode"] == "delegated"
 
 
+@pytest.mark.parametrize("gear", ["S", "M"])
+def test_equal_or_dearer_inline_cost_never_runs_inline(gear):
+    for est in ("inline=22 dedicated=22 minutes: tie", "inline=22.00001 dedicated=22 minutes: dearer",
+                "inline=1.00001 dedicated=1.00002 minutes: a saving that rounds to zero"):
+        mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
+        assert mode["mode"] == "delegated", est
+
+
 def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
     assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=1)["mode"] == "delegated"
     good = task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=1)
@@ -64,7 +72,9 @@ def test_the_estimate_must_be_a_structured_measurement():
     for bad in (None, "", "cheaper", "inline=1 dedicated=2", "inline=a dedicated=2 min: x",
                 "inline=0 dedicated=22 minutes: free", "inline=0.0 dedicated=22 minutes: free",
                 "inline=5 dedicated=0 minutes: free", "inline=-1 dedicated=22 minutes: negative",
-                "inline=1e1 dedicated=22 minutes: exponent", "inline=NaN dedicated=22 minutes: nan"):
+                "inline=1e1 dedicated=22 minutes: exponent", "inline=NaN dedicated=22 minutes: nan",
+                f"inline={'9' * 400} dedicated={'9' * 400} minutes: both overflow to inf",
+                f"inline=5 dedicated={'9' * 400} minutes: overflow to inf"):
         assert task_sizing.inline_estimate(bad) is None, bad
     assert task_sizing.inline_estimate("inline=0.5 dedicated=22 minutes: a measured half minute")["savings"] == 21.5
     assert task_descriptors.parse_field("inline_advantage", EST) == EST

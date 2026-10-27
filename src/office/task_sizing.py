@@ -6,6 +6,7 @@ Versioned records are deterministic so plan revisions and dispatches can diff.
 """
 from __future__ import annotations
 
+import math
 import re
 
 SIZES = ("XS", "S", "M", "L", "XL")
@@ -113,7 +114,7 @@ def inline_estimate(text: str | None) -> dict | None:
     if not m:
         return None
     inline, dedicated = float(m[1]), float(m[2])
-    if inline <= 0 or dedicated <= 0:
+    if not (math.isfinite(inline) and math.isfinite(dedicated)) or inline <= 0 or dedicated <= 0:
         return None
     return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
             "savings": round(dedicated - inline, 4)}
@@ -148,7 +149,7 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
     if estimate is None:
         return record("delegated", "dedicated executor: an S run goes inline only on a measured "
                                    "inline=<n> dedicated=<n> <unit> cost-to-success estimate")
-    if estimate["savings"] <= 0:
+    if estimate["inline"] >= estimate["dedicated"] or estimate["savings"] <= 0:
         return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline']:g} does not beat "
                                    f"dedicated {estimate['dedicated']:g} {estimate['unit']}")
     return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline']:g} vs dedicated "
