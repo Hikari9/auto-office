@@ -25,7 +25,7 @@ from office import (adapters, adaptive, candidates, config as cfg, db, dispatch,
 from office.util import dumps, now_iso
 
 from test_discovery_dispatch import (Tree, _audit, _between, _blast_radius, _irreversible, _large_task, _live_leases,
-                                     _quarantined_fallback, _quarantined_trial_route, _route_json, _spent_quota, _until,
+                                     _denied_fallback, _denied_trial_route, _route_json, _spent_quota, _until,
                                      cold, in_flight, launched, recover, task_row, trees)  # noqa: F401 (the two fixtures)
 from test_route_discovery_consumer_contract import (BASE_EAF155A, EFFORTS, SOL, World, categories, recorded_requests,
                                                     skipped, world)  # noqa: F401 (the fixture)
@@ -355,10 +355,11 @@ def test_s05_overkill_skips_a_route_only_in_the_automatic_selection_its_scope_ma
 def test_s05_shipped_defaults_hold_no_denied_or_overkill_entries(monkeypatch, tmp_path):
     import yaml
     shipped = yaml.safe_load((paths.resources_root() / "config" / "config.default.yaml").read_text())
-    assert shipped["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
+    empty = {"denied_models": [], "overkill_rules": [], "version_ceilings": {}, "role_rules": [], "strict_allow_roles": []}
+    assert shipped["routing"]["user_policy"] == empty
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
-    assert cfg.resolve(None)[0]["routing"]["user_policy"] == {"denied_models": [], "overkill_rules": [], "version_ceilings": {}}
+    assert cfg.resolve(None)[0]["routing"]["user_policy"] == empty
     assert candidates.current_user_policies() == []
     # nothing in the shipped catalog or config marks a route denied or overkill by brand, price, size or age
     assert "overkill" not in json.dumps({k: v for k, v in shipped.items() if k != "routing"}).lower()
@@ -456,7 +457,7 @@ def test_s07_risky_tasks_never_get_a_trial_and_nothing_is_probed(world, size, bl
 
 @pytest.mark.parametrize("change,blocked", [
     (_large_task, "risk"), (_irreversible, "risk"), (_blast_radius, "risk"), (_spent_quota, "quota-reserve"),
-    (_quarantined_fallback, "no-fallback"), (_quarantined_trial_route, "quarantined")])
+    (_denied_fallback, "no-fallback"), (_denied_trial_route, "role-deny")])
 def test_s07_each_authority_gate_is_rechecked_at_dispatch_and_holds(cold, monkeypatch, change, blocked):
     _between(cold, monkeypatch, change)
     cold.dispatch("T1")
@@ -777,12 +778,11 @@ def test_s09_a_user_pinned_route_is_never_switched_silently(cold):
 
 def test_s09_no_trial_is_dispatched_without_a_known_working_fallback(cold, monkeypatch):
     pin_policy(cold, require_known_fallback=False)  # routing alone would allow it; the dispatch transaction still refuses
-    real = scoring.evaluate_trust_state
+    from office import route_policy
+    from test_discovery_dispatch import _deny_for_executor
 
-    def unproven(con, triple):
-        return (0, "valid-unverified") if SOL not in triple else real(con, triple)
-
-    _between(cold, monkeypatch, lambda cold, decision: monkeypatch.setattr(scoring, "evaluate_trust_state", unproven))
+    _between(cold, monkeypatch, lambda cold, decision: monkeypatch.setattr(
+        route_policy, "effective_role_state", _deny_for_executor(decision["trial"]["fallback"]["selected"])))
     cold.dispatch("T1")
     (d,) = cold.dispatches()
     assert not cold.trials() and d["triple"].startswith(f"codex@0/{ASTRA}@")

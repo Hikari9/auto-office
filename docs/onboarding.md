@@ -37,7 +37,7 @@ A route is offered or accepted only if all of these hold:
 - It has a catalog row with that effort, and the model is not below a `model_family_floors` entry.
 - The harness adapter has a launch profile for the role, and the harness binary is on PATH.
 - A sign-in is found. A binary is not a sign-in. Office checks the stored credential each harness uses, without reading any secret: Claude via the credentials file, the keychain entry or an API/cloud env var; Codex via `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`; agy via its OAuth token file; Gemini via `oauth_creds.json` or an API key. Hermes has no check and reads as `unknown`, which is offered.
-- It passes routing stages 1-5 (`routing.route`): hard exclusions, derived trust for trust-gated roles (`executor`, `code_reviewer`), required capabilities, and the role floor. Trust is never granted here. An unproven route is listed as unavailable, with the `office approve trust` command only the user may run. Onboarding does not apply adaptive routing's learned eligibility, so it may offer fewer executor routes than dispatch would accept.
+- It passes routing stages 1-5 (`routing.route`): hard exclusions, role policy (#837: only a `deny` excludes; new routes are `neutral`), required capabilities, and the role floor. A denied route is listed as unavailable with its source, and `office route policy --effective --role <role>` shows how to change it. Onboarding does not apply adaptive routing's learned eligibility, so it may offer fewer executor routes than dispatch would accept.
 
 A reviewer route must be eligible for both plan and code review. Quota and task fit are not judged at onboarding; the router decides
 them at dispatch. Unavailable routes appear in `unavailable` with a reason, as diagnostics only.

@@ -161,16 +161,18 @@ def test_a_declared_unverified_route_still_stops_on_quota(env, monkeypatch):
     assert "adapter trust" not in out, out  # trust passed; the later quota stage stopped it
 
 
-def test_a_declared_quarantined_route_is_never_launched(env, monkeypatch):
+def test_a_declared_route_denied_for_the_executor_is_never_launched(env, monkeypatch):
+    """#837: a quote cannot lift a role deny; the user's deny wins and nothing launches."""
+    from office import routecmd
     _approve(env)
-    _trust(monkeypatch, CODEX, "quarantined")
     env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    routecmd.change("deny", role="executor", route="codex/gpt-6-astra@low")
     code, out = env.office("dispatch", "T1", env=_quota(env))
-    assert code != 0 and "quarantined" in out, out
+    assert code != 0 and "deny" in out.lower(), out
     assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
 
 
-def test_a_recorded_unverified_route_gets_no_declared_pass(env, monkeypatch):
+def test_a_recorded_unverified_route_stays_eligible_under_role_policy(env, monkeypatch):
     _approve(env)
     env.office("dispatch", "T1", env=_quota(env), check=0)
     primary = _triple(env)
@@ -178,7 +180,7 @@ def test_a_recorded_unverified_route_gets_no_declared_pass(env, monkeypatch):
     env.office("revoke", "T1", env=EXTERNAL, check=0)
     _trust(monkeypatch, primary)
     code, out = env.office("dispatch", "T1", env=_quota(env))
-    assert code == 0 and _triple(env) != primary, out  # fell back: only a declared route passes unverified trust
+    assert code == 0 and _triple(env) == primary, out  # #837: missing trust history never vetoes a neutral route
 
 
 def test_a_task_between_rounds_can_be_rerouted_and_rerun_follows_it(env):

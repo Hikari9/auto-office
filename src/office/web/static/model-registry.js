@@ -121,6 +121,8 @@ function evidence(ctx, g, data, opts = {}) {
       text: e.user_denied ? "Denied by you" : "Allowed by you" }),
     h("td", { text: defined(e.benchmark_score) ? String(e.benchmark_score) : "Unknown" }),
     h("td", { text: caption(e) }),
+    h("td", { title: "Role policy (allow/neutral/deny) and where it comes from; neutral roles are omitted",
+      text: Object.entries(e.role_policy || {}).map(([role, p]) => role + ": " + p.state + " (" + p.source + ")").join("; ") || "all roles neutral" }),
     h("td", { text: show(e.source_name) + " / " + show(e.source_identifier) })));
   return h("div", { class: "model-evidence", dataset: { testid: opts.mobile ? "model-card-evidence" : "model-inspector" } },
     h("h3", { text: title(g) }),
@@ -143,9 +145,9 @@ function evidence(ctx, g, data, opts = {}) {
     h("div", { class: "model-effort-scroll" },
       h("table", { class: "model-efforts" },
         h("thead", {}, h("tr", {},
-          ...["Effort", "User permission", "Score", "Technical state", "Source / identifier"].map((s) => h("th", { scope: "col", text: s })))),
+          ...["Effort", "User permission", "Score", "Technical state", "Role policy", "Source / identifier"].map((s) => h("th", { scope: "col", text: s })))),
         h("tbody", {}, rows))),
-    h("p", { class: "model-reason", text: "Benchmark: " + data.index + ". A score never grants harness conformance or trust. Live availability is separately verified at launch." }),
+    h("p", { class: "model-reason", text: "Benchmark: " + data.index + ". A score never changes role policy. Edit role policy with office route allow|neutral|deny. Live availability is separately verified at launch." }),
     h("div", { class: "model-actions", "aria-label": "Global user model policy" },
       g.legacy_overlay_denied ? h("p", { class: "model-reason", text: "Legacy overlay denial: use office model enable " + rule + " from the CLI, then re-read Settings." }) :
         (directDenied ? action("Remove direct denial", "allow") : action("Deny this model", "deny")),

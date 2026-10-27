@@ -4,14 +4,14 @@ without editing Python (#499).
     office harness scaffold <id> --binary <path>   draft a user-level adapter with TODOs
     office harness validate <id>                   schema plus semantic checks
     office harness smoke <id> --model <m>          one throwaway-repo launch, recorded as launch evidence
-    office harness list                            installed, version, sign-in, trust per harness
+    office harness list                            installed, version, sign-in, audit trust history per harness
     office model add <harness>/<slug> --effort E   append rows to the user catalog overlay
     office model list [<harness>]
     office model disable <harness>/<model>[@effort]
 
-Nothing here promotes trust. A harness and every route on it stay
-`valid-unverified` until a recorded trust act (`office approve trust`).
-`smoke` writes launch evidence only: never trust, never conformance.
+Nothing here sets routing policy. Every route on a new harness is `neutral` for every role
+(eligible, not denied) once it launches for real; `office route allow|deny <route> --role <role>`
+changes that (#837). `smoke` writes launch evidence only, never conformance.
 """
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def scaffold(ident: str | None, binary: str | None, *, force: bool = False, over
     lines = [f"drafted {target} from {exe} ({version_text[0] if version_text else 'no --version output'})",
              f"fake-binary test stub: {stub}",
              f"{len(flags)} flags seen in --help" + (f"; permission/trust flags to justify or avoid: {', '.join(risky)}" if risky else ""),
-             "trust: valid-unverified (nothing in this flow promotes trust)"]
+             "trust: unchanged (routes start neutral for every role; set policy with office route allow|deny)"]
     return Result(lines=lines, next=f"fill every TODO in {target}, then office harness validate {ident}",
                   data={"adapter": str(target), "test_stub": str(stub), "flags": flags, "risky_flags": risky})
 
@@ -181,8 +181,8 @@ def _wrap_comment(prefix: str, items: list[str], width: int = 100) -> list[str]:
 def _draft(ident: str, exe: str, version: str, flags: list[str], risky: list[str], override_seed: bool) -> str:
     q = json.dumps
     head = [f"# Drafted by `office harness scaffold {ident}` on {now_iso()[:10]} from {exe} ({version}).",
-            f"# Fill every TODO, then run `office harness validate {ident}`. Nothing in this file is trust:",
-            "# the harness stays valid-unverified until a recorded trust act.",
+            f"# Fill every TODO, then run `office harness validate {ident}`. Nothing in this file is routing policy:",
+            "# its routes start neutral for every role; set allow or deny with `office route`.",
             "# Read docs or --help for each flag you use; record what a permission flag grants under",
             "# trust_justifications. A herdr_kind needs an interactive form."]
     if flags:
@@ -471,7 +471,7 @@ def validate(ident: str | None, *, file: str | None = None) -> Result:
     if origin == "seed" and shadow.is_file():
         notes.append(f"{shadow} is ignored: {aid} is a seed adapter and the user file does not set override_seed: true")
     notes += [f"warning: {w}" for w in warnings]
-    trust = "trust: unchanged (only a recorded trust act moves a route past valid-unverified)"
+    trust = "trust: unchanged (routing policy is allow/neutral/deny per role: office route policy --effective --role <role>)"
     if problems:
         return Result(lines=[f"{head}: {len(problems)} problem(s)"] + [f"  - {p}" for p in problems] + notes + [trust],
                       next=f"fix {where}, then office harness validate {aid}", exit_code=1,
@@ -644,7 +644,7 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
                + (f", exit {code}" if code is not None else "") + f", {rec['output_bytes']} output bytes in {rec['duration_s']}s")
     lines = [summary, f"recorded as launch evidence in {smoke_log()}; trust and conformance unchanged"]
     if result == "launched":
-        nxt = f"record trust only by an explicit user act: office approve trust <route> --quote \"<user's words>\""
+        nxt = f"the route is neutral for every role; to change that: office route allow|deny {aid}/{slug}@{effort} --role <role>"
         if not rows:
             nxt = f"office model add {aid}/{slug} --effort {effort}"
         return Result(lines=lines, next=nxt, data=rec)
@@ -685,7 +685,7 @@ def harness_list(con) -> Result:
         last = (_smoke_records(aid) or [None])[-1]
         smoke_txt = f"{last['result']} {last['at'][:10]}" if last else "never"
         lines.append(f"{aid:<8} {origin:<13} {'installed ' + (version or 'unknown') if installed else 'not installed':<22}"
-                     f" sign-in {auth:<8} rows {len(mine):<3} trust {trust} | smoke {smoke_txt}")
+                     f" sign-in {auth:<8} rows {len(mine):<3} audit-trust {trust} | smoke {smoke_txt}")
         data.append({"harness": aid, "origin": origin, "path": str(where), "installed": installed, "version": version,
                      "auth": auth, "auth_detail": auth_detail, "rows": len(mine), "trust": trust, "last_smoke": last})
     registry = manifest_list()
@@ -798,7 +798,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     note = cli_runtimes.refresh_if_saved()
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
-                         "trust: valid-unverified until a recorded trust act", *([note] if note else [])],
+                         "policy: neutral for every role (eligible, not denied); change it with office route allow|deny", *([note] if note else [])],
                   next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target)})
 
 
@@ -817,17 +817,24 @@ def model_list(harness: str | None = None) -> Result:
         score = (r.get("benchmark_indexes") or {}).get(index)
         enabled = r.get("dispatchable") is not False
         denied = route_policy.is_denied({"harness": h, **r}, policy)
+        states = {role: route_policy.effective_role_state({"harness": h, **r}, role, [policy])
+                  for role in sorted(route_policy.POLICY_ROLES)}
+        role_states = {role: st["state"] for role, st in states.items() if st["state"] == "deny"}
+        # A user role allow outranks a legacy global deny for that role (#837): say so beside the deny.
+        role_allowed = sorted(role for role, st in states.items() if st["state"] == "allow" and st["source"] != "shipped")
         legacy_denied = any(user_catalog.matches(d, r) for d in overlay["disabled"])
         origin = "user" if key in user_keys else "seed"
         lines.append(f"{h}/{r.get('model_id')}@{r.get('effort')}  slug {r.get('invocation_model_id') or '-'}  "
                      f"score {score if score is not None else '-'}  {origin}"
                      + ("  user disabled (legacy overlay)" if legacy_denied else
                         ("  technically gated" if not enabled else ""))
-                     + (f"  user denied ({denied})" if denied else ""))
+                     + (f"  user denied ({denied})" if denied else "")
+                     + (f"  but allowed for roles: {', '.join(role_allowed)}" if denied and role_allowed else "")
+                     + (f"  denied for roles: {', '.join(role_states)}" if role_states and not denied else ""))
         data.append({"harness": h, "model_id": r.get("model_id"), "effort": r.get("effort"),
                      "slug": r.get("invocation_model_id"), "score": score, "origin": origin, "dispatchable": enabled,
                      "lineage_key": r.get("lineage_key"), "generation_version": r.get("generation_version"),
-                     "user_denied": bool(denied or legacy_denied), "denial_reason": denied or
+                     "user_denied": bool(denied or legacy_denied), "role_denied": sorted(role_states), "role_allowed": role_allowed, "denial_reason": denied or
                      ("legacy user-catalog overlay" if legacy_denied else None)})
     seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
     lines += [f"warning: {w}" for w in user_catalog.merge(list(seed.get("models") or []))[1]]
@@ -923,11 +930,13 @@ def model_policy() -> Result:
     p = route_policy.user_policy(cfg.resolve(None)[0])
     lines = ["global model routing policy (technical qualification is independent):",
              f"  denied routes: {', '.join(p['denied']) or '(none)'}",
-             f"  manual-only/overkill rules: {len(p['overkill'])}"]
+             f"  manual-only/overkill rules: {len(p['overkill'])}",
+             f"  role-scoped user rules: {len(p['role_rules'])}"]
+    lines.extend(f"  {r['role']}: {r['state']} {r['route']} ({p['sources'].get('role_rules') or 'user'})" for r in p['role_rules'])
     lines.extend(f"  deny {lineage} <= {version}" for lineage, version in sorted(p["ceilings"].items()))
     if not p["ceilings"]:
         lines.append("  lineage version ceilings: (none)")
-    return Result(lines=lines, next="office model ceiling openai/gpt-sol --through 5.6, or office model unceil openai/gpt-sol",
+    return Result(lines=lines, next="office route policy --effective --role code_reviewer; office model ceiling openai/gpt-sol --through 5.6",
                   data={"policy": p})
 
 

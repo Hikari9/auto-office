@@ -1,5 +1,5 @@
 """#809 R11: who executes a task. XS inline by default; S only on a measured cost-to-success estimate that beats
-dedicated dispatch; M only for a single-task run; L and XL never. The owner, reasoning, estimated savings and
+dedicated dispatch; M only when single-task with a measured cost advantage; L and XL never. The owner, reasoning, estimated savings and
 outcome are persisted on the task and shown. An inline task keeps its lease, scope, self-review subagents,
 convergence review and resume."""
 import json
@@ -42,8 +42,82 @@ def test_s_is_inline_only_on_a_measured_estimate_that_beats_dedicated_dispatch()
     assert task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), {"classification": "elevated"})["mode"] == "delegated"
 
 
+@pytest.mark.parametrize("gear", ["S", "M"])
+def test_equal_or_dearer_inline_cost_never_runs_inline(gear):
+    for est in ("inline=22 dedicated=22 minutes: equal on the measured sessions",
+                "inline=22.00001 dedicated=22 minutes: dearer on the measured sessions"):
+        mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
+        assert mode["mode"] == "delegated", est
+
+
+@pytest.mark.parametrize("gear", ["S", "M"])
+def test_a_real_saving_smaller_than_the_display_rounding_still_runs_inline(gear):
+    est = "inline=1.0000001 dedicated=1.0000002 minutes: a measured but tiny saving"
+    mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
+    assert mode["mode"] == "inline"
+    assert mode["estimated_savings"]["savings"] > 0
+    assert mode["estimated_savings"]["savings"] == pytest.approx(1e-7, abs=1e-12)
+    assert "inline 1.0000001 vs dedicated 1.0000002" in mode["why"], mode["why"]
+
+
+@pytest.mark.parametrize("inline,dedicated", [("1.0000000000001", "1.0000000000004"), ("14.1", "22"), ("0.5", "22")])
+def test_the_stored_saving_and_the_receipt_keep_the_estimates_exact_precision(inline, dedicated):
+    est = f"inline={inline} dedicated={dedicated} minutes: measured on the recorded sessions"
+    got = task_sizing.inline_estimate(est)
+    assert got["savings"] > 0
+    assert got["savings"] == float(__import__("decimal").Decimal(dedicated) - __import__("decimal").Decimal(inline))
+    why = task_sizing.execution_mode("M", _desc("M", inline_advantage=est), LOW, task_count=1)["why"]
+    assert f"inline {inline} vs dedicated {dedicated} minutes" in why, why
+    assert task_sizing.number(7.0) == "7" and task_sizing.number(7.9) == "7.9"
+
+
+def test_distinct_decimals_that_collapse_to_one_float_are_still_ordered_exactly():
+    est = "inline=1.00000000000000001 dedicated=1.00000000000000002 minutes: measured on sessions"
+    got = task_sizing.inline_estimate(est)
+    assert got["beneficial"] and got["savings"] > 0
+    mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=est), LOW, task_count=1)
+    assert mode["mode"] == "inline" and "inline 1.00000000000000001 vs dedicated 1.00000000000000002" in mode["why"]
+    flipped = "inline=1.00000000000000002 dedicated=1.00000000000000001 minutes: measured on sessions"
+    assert task_sizing.execution_mode("S", _desc("S", inline_advantage=flipped), LOW, task_count=1)["mode"] == "delegated"
+
+
+def test_an_s_run_is_not_limited_to_a_single_task():
+    for n in (2, 3, None):
+        mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=n)
+        assert mode["mode"] == "inline", n
+    assert task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=2)["estimated_savings"]["savings"] == 8
+
+
+@pytest.mark.parametrize("evidence", ["x", "n/a", "measured", "two words", "a b c", "short ev"])
+def test_a_placeholder_is_not_evidence_for_an_estimate(evidence):
+    assert task_sizing.inline_estimate(f"inline=1 dedicated=2 minutes: {evidence}") is None
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage=f"inline=1 dedicated=2 minutes: {evidence}"),
+                                      LOW, task_count=1)["mode"] == "delegated"
+    with pytest.raises(ValueError):
+        task_descriptors.parse_field("inline_advantage", f"inline=1 dedicated=2 minutes: {evidence}")
+    assert task_sizing.inline_estimate("inline=1 dedicated=2 minutes: timed on three runs")["beneficial"]
+
+
+def test_the_missing_estimate_reason_names_the_gear():
+    for gear in ("S", "M"):
+        why = task_sizing.execution_mode(gear, _desc("S"), LOW, task_count=1)["why"]
+        assert f"an {gear} run goes inline only on a measured" in why, why
+
+
+def test_execution_gear_acts_only_on_a_run_pinned_to_the_xs_xl_model():
+    assert task_sizing.execution_gear({"gear": "S", "gates": {"gear_model_version": "run-gear-1"}}) == "S"
+    for run in ({"gear": "S", "gates": {}}, {"gear": "M", "gates": {"gear_model_version": "legacy-pinned"}},
+                {"gear": "express", "gates": {"gear_model_version": "legacy-pinned"}}, {"gear": "M"}):
+        assert task_sizing.execution_gear(run) is None
+
+
 def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
-    assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=1)["mode"] == "inline"
+    assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=1)["mode"] == "delegated"
+    good = task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=1)
+    assert good["mode"] == "inline" and good["estimated_savings"]["savings"] == 8
+    bad = "inline=24 dedicated=22 minutes: measured retry overhead"
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage=bad), LOW, task_count=1)["mode"] == "delegated"
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage="not measured"), LOW, task_count=1)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=2)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M"), LOW)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=2)["mode"] == "delegated"
@@ -56,8 +130,14 @@ def test_l_xl_and_legacy_gears_never_run_inline(gear):
 
 def test_the_estimate_must_be_a_structured_measurement():
     assert task_sizing.inline_estimate(EST)["savings"] == 8
-    for bad in (None, "", "cheaper", "inline=1 dedicated=2", "inline=a dedicated=2 min: x"):
-        assert task_sizing.inline_estimate(bad) is None
+    for bad in (None, "", "cheaper", "inline=1 dedicated=2", "inline=a dedicated=2 min: x",
+                "inline=0 dedicated=22 minutes: free", "inline=0.0 dedicated=22 minutes: free",
+                "inline=5 dedicated=0 minutes: free", "inline=-1 dedicated=22 minutes: negative",
+                "inline=1e1 dedicated=22 minutes: exponent", "inline=NaN dedicated=22 minutes: nan",
+                f"inline={'9' * 400} dedicated={'9' * 400} minutes: both overflow to inf",
+                f"inline=5 dedicated={'9' * 400} minutes: overflow to inf"):
+        assert task_sizing.inline_estimate(bad) is None, bad
+    assert task_sizing.inline_estimate("inline=0.5 dedicated=22 minutes: a measured half minute")["savings"] == 21.5
     assert task_descriptors.parse_field("inline_advantage", EST) == EST
     for bad in ("it is cheaper", EST + "\x1b[31m"):
         with pytest.raises(ValueError):
@@ -77,6 +157,12 @@ def test_the_executor_brief_states_what_the_runtime_reviews():
 def _xs_plan():
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: XS\n"
                             "task_size_rationale: bounded local change with no external interfaces\n", 1)
+
+
+def _m_plan(estimate=EST):
+    return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
+                            "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
+                            f"inline_advantage: {estimate}\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -150,6 +236,89 @@ def test_a_single_task_s_run_without_an_estimate_is_delegated(env):
     assert _mode(env)["mode"] == "delegated"
 
 
+def test_m_without_measured_advantage_delegates_at_dispatch(env):
+    _approved(env, PLAN_ONE, "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "measured" in _mode(env)["why"]
+
+
+def test_m_with_measured_advantage_records_savings_at_dispatch(env):
+    _approved(env, _m_plan(), "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
+    assert _mode(env)["estimated_savings"]["savings"] == 8
+
+
+def test_m_with_a_non_beneficial_estimate_delegates_at_dispatch(env):
+    _approved(env, _m_plan("inline=24 dedicated=22 minutes: retries and a second review round cost more than a launch"), "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "does not beat" in _mode(env)["why"]
+
+
+@pytest.mark.parametrize("bad", ["inline=0 dedicated=22 minutes: free", "inline=-3 dedicated=22 minutes: negative",
+                                 "cheaper than dedicated", "inline=14 dedicated=22", "inline=14 dedicated=22 minutes: x"])
+def test_a_plan_whose_m_estimate_is_unmeasured_is_refused_and_never_runs_inline(env, bad):
+    env.trust()
+    code, out = env.office("start", "fixture goal", "--gear", "M", "--planner", "inline")
+    assert code == 0, out
+    env.write_plan(_m_plan(bad))
+    code, out = env.office("submit")
+    assert code != 0 and "inline_advantage" in out, out
+    assert _q(env, "SELECT COUNT(*) n FROM dispatches")[0]["n"] == 0
+
+
+def test_a_run_pinned_before_the_xs_xl_model_never_dispatches_inline(env):
+    _approved(env, _m_plan(), "M")
+    con = env.con()
+    rid = _q(env, "SELECT id FROM runs")[0]["id"]
+    run = state.get_run(con, rid)
+    state.update_run(con, rid, gates={k: v for k, v in run["gates"].items() if k != "gear_model_version"})
+    con.commit()
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "legacy" in _mode(env)["why"]
+
+
+def test_a_relaunch_of_an_m_inline_task_keeps_its_measured_estimate(env):
+    _approved(env, _m_plan(), "M")
+    env.office("dispatch", "T1", check=0)
+    before = _mode(env)
+    env.office("revoke", "T1", check=0)  # the first inline worker ends; the relaunch gets a new fenced lease
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" in out, out
+    after = _mode(env)
+    assert after["mode"] == "inline" and after["why"] == before["why"]
+    assert after["estimated_savings"] == before["estimated_savings"] and after["estimated_savings"]["savings"] == 8
+
+
+def test_a_relaunch_of_a_delegated_m_task_never_becomes_inline(env):
+    _approved(env, PLAN_ONE, "M")
+    env.office("dispatch", "T1", check=0)
+    assert _mode(env)["mode"] == "delegated"
+    env.office("revoke", "T1", check=0)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline" not in out, out
+    assert _mode(env)["mode"] == "delegated"
+
+
+def test_a_multi_task_s_run_dispatches_inline_on_a_measured_estimate_and_delegates_without_one(env):
+    with_estimate = PLAN_TWO.replace("visual: none\n\n### T2", f"visual: none\ntask_size: S\n"
+                                     "task_size_rationale: one bounded function in one file\n"
+                                     f"inline_advantage: {EST}\n\n### T2", 1)
+    with_estimate = with_estimate.replace("visual: none\n", "visual: none\ntask_size: S\n"
+                                          "task_size_rationale: one bounded function in one file\n", 3)
+    _approved(env, with_estimate, "S")
+    env.office("dispatch", "T1", check=0)
+    assert _mode(env)["mode"] == "inline" and _mode(env)["estimated_savings"]["savings"] == 8
+    env.office("dispatch", "T2", check=0)
+    con = env.con()
+    rows = {r["id"]: json.loads(r["route_json"])["execution_mode"]["mode"]
+            for r in con.execute("SELECT id, route_json FROM tasks")}
+    assert rows == {"T1": "inline", "T2": "delegated"}, rows
+
+
 def test_m_with_two_tasks_is_delegated(env):
     _approved(env, PLAN_TWO, "M")
     env.office("dispatch", "T1", check=0)
@@ -165,7 +334,7 @@ def test_an_explicit_launch_override_beats_inline(env):
 
 def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
     env.script(convergence_reviewer=[{"reply": APPROVED}], code_reviewer=[{"reply": APPROVED}])
-    _approved(env, PLAN_ONE, "M")  # one task: M runs it inline
+    _approved(env, _m_plan(), "M")  # one task with measured cost advantage
     env.office("dispatch", "T1", check=0)
     assert _mode(env)["mode"] == "inline"
     con = env.con()
@@ -187,7 +356,7 @@ def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
 
 
 def test_a_scope_violation_by_an_inline_worker_is_still_refused(env):
-    _approved(env, PLAN_ONE, "M")
+    _approved(env, _m_plan(), "M")
     env.office("dispatch", "T1", check=0)
     con = env.con()
     d = dict(con.execute("SELECT * FROM dispatches WHERE role='executor'").fetchone())

@@ -93,7 +93,7 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
                 res.add(routing_drift)
         newest = frontdoor.installed_lines()[0]
         for line, ids in sorted(pinned.items(), key=lambda kv: version.release_key(kv[0])):
-            ok = version.same_line(line, ver) or frontdoor.newest_on_line(line)
+            ok = version.serves(line, ver) or frontdoor.newest_on_line(line)
             if not ok:
                 problems += 1
             res.add(f"on {line}: {len(ids)} active run(s) {'ok' if ok else 'RUNTIME MISSING — install and register a ' + line + '.x runtime'}")

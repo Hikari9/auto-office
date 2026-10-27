@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from office import adapters, candidates, configcmd, db, discovery, install, paths, routing
+from office import adapters, candidates, route_policy, configcmd, db, discovery, install, paths, routing
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError
@@ -338,6 +338,7 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
     result = routing.route({
         "role": role, "adaptive": False, "candidates": usable, "runs_db": str(paths.runs_db()),
         "allow_free_models": free_models_enabled(),
+        "user_policies": [route_policy.user_policy(config), *candidates.current_user_policies()],
         "policy": {"required_capabilities": list(policy.get("required_capabilities") or []),
                    "floor": policy.get("floor")},
     })
@@ -346,8 +347,6 @@ def role_routes(con, config: dict, role: str) -> tuple[list[dict], dict[str, str
     for c in usable:
         reason = rejected.get(routing.candidate_id(c))
         if reason:
-            if "trust" in reason:
-                reason += f" (only you promote trust: office approve trust {routing.candidate_id(c)} --quote \"<words>\")"
             why_not[route_text(c)] = reason
         else:
             eligible.append(c)

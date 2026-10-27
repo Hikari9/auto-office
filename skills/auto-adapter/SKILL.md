@@ -34,8 +34,7 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
 
 ## Trust posture
 
-- Trust stays `valid-unverified` until a recorded trust act (`office approve trust <route>
-  --quote "<user's words>"`). Validate, model add and smoke never record trust or conformance.
+- Every new route starts `neutral` for every role (eligible, not denied). Validate, model add and smoke never set policy or record conformance; set `allow` or `deny` with `office route allow|deny <route> --role <role>`.
   Never write `verified_state: proven`.
 - Never auto-approve a login, trust or permission prompt. A smoke that stops on one fails.
 - For each permission flag, answer before using it: what it lets the agent do unprompted

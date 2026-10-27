@@ -299,26 +299,27 @@ def _spent_quota(cold, decision):
     decision["candidate"]["quota"] = {"status": "ok", "tightest_remaining_percent": 4.0, "projected_burn_percent": 0.0}
 
 
-def _quarantine(triple):
-    """The route's trust state reads `quarantined` from now on (the real state comes from adapter-attributed
-    failure evidence: derived, never written by an act)."""
-    from office import scoring
-    real = scoring.evaluate_trust_state
+def _deny_for_executor(triple):
+    """The user denies this exact route for the executor role (#837); other routes keep their policy."""
+    from office import route_policy
+    real = route_policy.effective_role_state
 
-    def evaluate(con, target):
-        return (1, "quarantined") if target == triple else real(con, target)
+    def effective(cand, role, policies):
+        if role == "executor" and routing.candidate_id(cand) == triple:
+            return {"state": "deny", "source": "user", "rule": triple}
+        return real(cand, role, policies)
 
-    return evaluate
-
-
-def _quarantined_fallback(cold, decision):
-    from office import scoring
-    cold.monkeypatch.setattr(scoring, "evaluate_trust_state", _quarantine(decision["trial"]["fallback"]["selected"]))
+    return effective
 
 
-def _quarantined_trial_route(cold, decision):
-    from office import scoring
-    cold.monkeypatch.setattr(scoring, "evaluate_trust_state", _quarantine(decision["selected"]))
+def _denied_fallback(cold, decision):
+    from office import route_policy
+    cold.monkeypatch.setattr(route_policy, "effective_role_state", _deny_for_executor(decision["trial"]["fallback"]["selected"]))
+
+
+def _denied_trial_route(cold, decision):
+    from office import route_policy
+    cold.monkeypatch.setattr(route_policy, "effective_role_state", _deny_for_executor(decision["selected"]))
 
 
 def _stale_probe(cold, _decision):
@@ -344,8 +345,8 @@ def _changed_fingerprint(cold, _decision):
 
 @pytest.mark.parametrize("change,blocked,others", [
     (_take_the_trial, "trial-cap", ["other"]), (_large_task, "risk", []), (_irreversible, "risk", []),
-    (_blast_radius, "risk", []), (_spent_quota, "quota-reserve", []), (_quarantined_fallback, "no-fallback", []),
-    (_quarantined_trial_route, "quarantined", []), (_stale_probe, "probe-stale", []),
+    (_blast_radius, "risk", []), (_spent_quota, "quota-reserve", []), (_denied_fallback, "no-fallback", []),
+    (_denied_trial_route, "role-deny", []), (_stale_probe, "probe-stale", []),
     (_changed_fingerprint, "probe-stale", []), (_disabled, "discovery-disabled", [])])
 def test_any_recheck_that_fails_in_the_transaction_dispatches_the_fallback_and_writes_no_trial(cold, monkeypatch, change, blocked, others):
     _between(cold, monkeypatch, change)
@@ -391,18 +392,14 @@ def test_the_rolling_cap_is_rechecked_in_the_transaction(cold, monkeypatch):
 def test_no_trial_is_launched_without_a_known_working_fallback_even_when_routing_would_allow_it(cold, monkeypatch):
     # `require_known_fallback: false` lets routing draw a trial whose fallback is unproven. The dispatch
     # transaction still refuses: a trial needs a recorded known-working fallback, whoever launches it.
-    from office import scoring
     cold.config = cold.policy(require_known_fallback=False)
     cold.con.execute("UPDATE runs SET policy_json=? WHERE id='run-A'", (dumps(cold.config),))
-    real = scoring.evaluate_trust_state
 
-    def unproven(con, triple):
-        return (0, "valid-unverified") if "gpt-6.1-sol" not in triple else real(con, triple)
+    def fallback_becomes_denied(cold, decision):
+        from office import route_policy
+        monkeypatch.setattr(route_policy, "effective_role_state", _deny_for_executor(decision["trial"]["fallback"]["selected"]))
 
-    def fallback_loses_its_proof(cold, decision):
-        monkeypatch.setattr(scoring, "evaluate_trust_state", unproven)
-
-    _between(cold, monkeypatch, fallback_loses_its_proof)
+    _between(cold, monkeypatch, fallback_becomes_denied)
     cold.dispatch("T1")
     (d,) = cold.dispatches()
     (attempt,) = cold.attempts()

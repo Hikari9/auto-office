@@ -1947,7 +1947,8 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
             raise Refused("no-visual-override", f"{scope['id']}: a visual review has no user-chosen reviewer route (no harness "
                           "declares the vision capability); it re-runs on the next fallback route", scope=scope["id"],
                           next_step=f"office review {scope['id']}:visual")
-        candidates.declared_decision(pin["as"], flag="--as", role="code_reviewer", config=state.pinned_config(run))
+        candidates.declared_decision(pin["as"], flag="--as", role="code_reviewer", config=state.pinned_config(run),
+                                    run_id=run["id"])
         for tid in scope["tasks"]:  # a visual gate of the same call takes the next fallback route
             state.update_task(con, run["id"], tid, review_override=pin)
     st = scope_state(run, scope["id"])

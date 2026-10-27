@@ -54,7 +54,7 @@ class Resolver:
             return {"version": None, "controls": False,
                     "reason": f"Auto Office {line} run: web controls need the {CONTROL_LINE} line"}
         best = self.registry(line)
-        mine = version.same_line(self.current, line)
+        mine = version.serves(line, self.current)
         if mine and (best is None or version.release_key(best["office_version"]) <= version.release_key(self.current)):
             return {"version": self.current, "controls": True, "reason": None}
         if best is None:

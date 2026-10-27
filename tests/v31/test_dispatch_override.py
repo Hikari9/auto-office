@@ -221,7 +221,8 @@ def test_default_reviewer_seeds_and_fallbacks():
         assert seed == [{"model_id": "luna", "effort": "high"},
                         {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode"},
                         {"model_id": "opus", "harness": "claude", "effort": "low"}], role
-        assert roles[role]["strict_seed"] is True, role
+        # #837: the seeded order is a preference; strict allow-only is an explicit user opt-in (strict_allow_roles)
+        assert roles[role]["strict_seed"] is False, role
     visual = roles["visual_reviewer"]["preferred_seed"]
     assert visual[0] == {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}
     assert visual[1] == {"model_id": "sonnet", "harness": "claude", "effort": "high"}

@@ -85,14 +85,14 @@ def test_unquoted_as_does_not_bypass_registry_or_trust(env):
     assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
 
 
-def test_unquoted_known_route_still_requires_current_trust(env):
+def test_unquoted_known_route_does_not_need_historical_trust(env):
     _approve(env)
     con = env.con()
     con.execute("DELETE FROM adapter_trust_acts WHERE triple LIKE 'codex@%'")
     con.commit()
     code, out = env.office("dispatch", "T1", "--as", FB1, env=_quota(env))
-    assert code == 4 and "trust" in out.lower(), out
-    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
+    assert code == 0 and "approve trust" not in out.lower(), out  # #837: no trust history, still neutral and eligible
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("flags", [["--as", FB1, "--quote", "  "], ["--quote", "Use Astra"]])
@@ -128,11 +128,7 @@ def test_legacy_unquoted_override_is_not_inherited_as_user_authority(env, still_
     count = con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0]
     code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
     assert dict(con.execute("SELECT * FROM dispatches WHERE id=?", (old["id"],)).fetchone()) == old
-    if not still_trusted:
-        assert code == 4 and "trust" in out.lower(), out
-        assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == count
-        return
-    assert code == 0 and "user override" not in out, out
+    assert code == 0 and "user override" not in out, out  # #837: trust history is irrelevant either way
     inherited = json.loads(_latest(env)["route_json"])
     assert not inherited.get("override") and not inherited.get("declared"), inherited
     assert inherited["route_authority"]["actor"] == "orchestrator"
@@ -166,7 +162,7 @@ def test_route_keeps_model_only_selector_and_family_floor_exception_without_user
     con.execute("DELETE FROM adapter_trust_acts WHERE triple LIKE 'codex@%'")
     con.commit()
     code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
-    assert code == 4 and "trust" in out.lower(), out
+    assert code == 0 and "approve trust" not in out.lower(), out  # #837: no trust rows, still eligible
 
 
 @pytest.mark.parametrize("schema_present", [False, True])
@@ -188,7 +184,7 @@ def test_ensuring_trust_schema_preserves_the_callers_atomic_rollback(schema_pres
         con.close()
 
 
-def test_route_admission_reads_uncommitted_trust_and_rolls_back_with_its_caller(env):
+def test_route_admission_ignores_trust_rows_and_rolls_back_with_its_caller(env):
     from office import db, dispatch, state
     from office.state import Refused
     _approve(env)
@@ -200,10 +196,11 @@ def test_route_admission_reads_uncommitted_trust_and_rolls_back_with_its_caller(
     task = state.get_task(con, run["id"], "T1")
     before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple LIKE 'codex@%'").fetchone()[0]
     assert before > 0
-    with pytest.raises(Refused, match="trust"):
+    with pytest.raises(RuntimeError, match="roll back the caller"):
         with db.transaction(con):
             con.execute("DELETE FROM adapter_trust_acts WHERE triple LIKE 'codex@%'")
-            dispatch.qualify_recorded_route(con, run, task, parent["route"])
+            dispatch.qualify_recorded_route(con, run, task, parent["route"])  # no trust refusal (#837)
+            raise RuntimeError("roll back the caller")
     assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple LIKE 'codex@%'").fetchone()[0] == before
     assert not con.in_transaction
 
@@ -242,7 +239,7 @@ def test_sticky_recovery_observation_reports_unreadable_evidence_as_a_blocker(mo
     assert "route evidence could not be read" in rerun._sticky_check(None, {}, {}, {"role": "executor"})
 
 
-def test_quoted_rerun_checks_quarantine_of_the_current_harness_version(env, monkeypatch):
+def test_derived_quarantine_of_the_current_harness_version_no_longer_blocks_a_quoted_rerun(env, monkeypatch):
     from office import adapters, scoring
     _approve(env)
     env.office("dispatch", "T1", "--as", FB1, "--quote", "Use Astra.", env=_quota(env), check=0)
@@ -262,8 +259,8 @@ def test_quoted_rerun_checks_quarantine_of_the_current_harness_version(env, monk
                         "2.0.0" if harness == "codex" else real(harness, *args, **kwargs))
     before = con.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0]
     code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
-    assert code == 4 and current in out and "quarantined" in out, out
-    assert con.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == before
+    assert code == 0 and "quarantined" not in out, out  # #837: derived trust is audit evidence, not a gate
+    assert con.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == before + 1
     assert dict(con.execute("SELECT * FROM dispatches WHERE id=?", (prior["id"],)).fetchone()) == prior
 
 

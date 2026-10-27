@@ -117,15 +117,57 @@ def test_unknown_size_is_conservative_m_and_never_guessed_xs(env):
     assert "conservative M" in _run(env)[1]["gates"]["run_gear_rationale"]
 
 
+def test_new_cli_help_promotes_canonical_xs_xl_gear_names(env):
+    code, out = env.office("start", "--help")
+    assert code == 0 and "--gear {XS,S,M,L,XL}" in out, out
+    assert "historical aliases" in out
+
+
 def test_legacy_name_starts_an_explicit_preset_and_names_its_closest_gear(env):
     env.trust()
     code, out = env.office("start", "fixture goal", "--gear", "full", "--planner", "inline")
     assert code == 0 and "closest to XL" in out, out
+    assert "compatibility notice: full is a historical preset" in out, out
     assert config.LEGACY_EQUIVALENT == {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M",
                                         "express": "M", "full": "XL"}
     _, run = _run(env)
     assert run["gear"] == "full" and run["gates"]["gear_model_version"] == "legacy-pinned"
     assert not run["risk"].get("complexity_only"), "a legacy start keeps its historical size and risk reading"
+
+
+# (plan_review, code_review, dedicated_planner) each historical preset funded before XS-XL, by blast radius
+LEGACY_GATES = {
+    "direct": {"repo": (False, False, False), "production": (True, True, False)},
+    "direct+review": {"repo": (False, True, False), "production": (False, True, False)},
+    "light": {"repo": (False, True, False), "production": (False, True, False)},
+    "quick": {"repo": (False, True, False), "production": (False, True, False)},
+    "express": {"repo": (True, True, False), "production": (True, True, False)},
+    "full": {"repo": (True, True, True), "production": (True, True, True)},
+}
+
+
+@pytest.mark.parametrize("blast", ["repo", "production"])
+@pytest.mark.parametrize("alias", config.LEGACY_GEARS)
+def test_every_legacy_alias_starts_with_its_historical_gates_and_a_compatibility_notice(env, alias, blast):
+    env.trust()
+    code, out = env.office("start", "fixture goal", "--gear", alias, "--blast-radius", blast, "--planner", "inline")
+    assert code == 0, out
+    assert f"compatibility notice: {alias} is a historical preset, not an XS-XL run gear" in out, out
+    assert f"closest to {config.LEGACY_EQUIVALENT[alias]}" in out and "use --gear XS|S|M|L|XL" in out
+    _, run = _run(env)
+    gates = run["gates"]
+    assert run["gear"] == alias and gates["gear_model_version"] == "legacy-pinned"
+    assert f"explicit legacy preset {alias}" in gates["run_gear_rationale"]
+    assert (bool(gates["plan_review"]), bool(gates["code_review"]), bool(gates["dedicated_planner"])) == (
+        LEGACY_GATES[alias][blast])
+    assert not run["risk"].get("complexity_only")
+
+
+@pytest.mark.parametrize("gear", config.RUN_GEARS)
+def test_a_canonical_gear_prints_no_compatibility_notice(env, gear):
+    env.trust()
+    code, out = env.office("start", "fixture goal", "--gear", gear, "--planner", "inline")
+    assert code == 0 and "compatibility notice" not in out and "historical preset" not in out, out
 
 
 def _strip_gear_model(con, rid):

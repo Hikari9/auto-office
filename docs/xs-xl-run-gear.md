@@ -14,6 +14,8 @@ This is the normative runtime boundary for **new runs**. It complements—not re
 
 A new run's **complexity** gear is pinned by the orchestrator at intake (or explicit authorized creation) from scope, coupling, uncertainty and multiwave coordination; the **risk** classification and floor remain independent. The planner may recommend size but cannot silently weaken the run's effective gates. Risk amendments need the existing authorization path; any change to accepted user scope needs its existing approval. The plan reviewer is **not** a gear-policy reviewer and has no L-to-XL reviewer-triggered escalation or reviewer-managed swarm.
 
+Historical gear aliases are still accepted only when explicitly selected for compatibility. Such starts retain the original legacy funding contract, emit a compatibility notice, and cannot be mistaken for new XS-XL runs. CLI help advertises XS-XL as the default; removing explicit aliases would break established legacy start integrations. Existing pinned runs resume unchanged.
+
 ### Self-review subagents (`self_review_subagents.py`)
 
 Only pinned `run-gear-1` runs fund them, and each is an independently launched reviewer session on the task's accepted revision, advisory only and never a convergence verdict or round. XS funds none (the executor's inline four-lens ledger is all of it). S and M fund one `four-lens` subagent per task. L and XL fund **up to four specialists per task**: `edge-cases` and `test-strength` always, `security` when the run risk is elevated or irreversible, the blast radius is production, or the task scope names auth, security, permission, secret, token, crypt or credential paths, and `platform` when the scope touches scripts, CI, packaging or manifests or the descriptor domain is infrastructure. A missing, invalid or wrong-commit report blocks convergence review (fail closed) and spends no round. A report for the same revision, commit and rubric is reused.
@@ -27,8 +29,8 @@ Inline rules (`task_sizing.execution_mode`), applied per task, each recording ow
 | Run gear | Inline when | Otherwise |
 | --- | --- | --- |
 | XS | low risk and the task is XS or S (an M task delegates) | dedicated executor |
-| S | low risk, an XS-M task and a measured `inline=<n> dedicated=<n> <unit>: <evidence>` estimate where inline is strictly cheaper | dedicated executor |
-| M | low risk, an XS-M task and the run has exactly one task (an estimate does not change this) | dedicated executor |
+| S | low risk, an XS-M task and a measured `inline=<n> dedicated=<n> <unit>: <evidence>` estimate with both costs above zero, at least 12 characters and 3 words of evidence, and inline strictly cheaper | dedicated executor |
+| M | low risk, an XS-M task and the run has exactly one task and a measured, strictly cheaper total cost-to-success estimate | dedicated executor |
 | L, XL, legacy gears | never | dedicated executor |
 
 Elevated risk always delegates. An inline task keeps its fenced lease, scope, self-review subagents, convergence review and landing.
