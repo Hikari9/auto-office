@@ -75,6 +75,32 @@ def benchmark_gate(candidate: dict, size: str | None) -> str | None:
     return None
 
 
+# User-approved (#809, 2026-10-27) and deliberately narrow: only this exact model,
+# effort, role and subtask size may pass the AA floor while its score is unpublished.
+FLOOR_EXCEPTION = {"model_id": "gemini-4-argon", "effort": "medium", "role": "executor", "size": "L"}
+
+
+def floor_exception(candidate: dict, size: str | None, role: str | None = None) -> dict | None:
+    """The audit record when the Argon Medium L exception waives the missing-score floor.
+
+    Never fabricates a score, lowers the L floor for another model, effort or size,
+    or waives registration, conformance, trust, quota or risk gates; a published
+    score is judged on merit like any other candidate.
+    """
+    if size != FLOOR_EXCEPTION["size"] or role not in (FLOOR_EXCEPTION["role"], "worker"):
+        return None
+    model = candidate.get("alias_resolved_to") or candidate.get("model_id")
+    if model != FLOOR_EXCEPTION["model_id"] or candidate.get("effort") != FLOOR_EXCEPTION["effort"]:
+        return None
+    scores = candidate.get("benchmark_indexes")
+    if isinstance(scores, dict) and scores.get(INDEX) is not None:
+        return None
+    return {"exception": "argon-medium-l-intelligence-floor", "model_id": model,
+            "effort": candidate["effort"], "size": size, "index": INDEX,
+            "waived": f"{INDEX} >= {FLOORS[size]} (score unpublished; no score fabricated)",
+            "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
+
+
 def route_summary(preferences: list[dict], candidates: list[dict],
                   rejected: list[dict], slate: list[dict]) -> list[dict]:
     """Audit every nominated ideal without claiming unavailable routes dispatched."""

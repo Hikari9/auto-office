@@ -69,17 +69,22 @@ evidence is verified; a currently qualified agy variant may be selected instead.
 Reserve Opus 5.5 automatic executor routing for **genuinely XL subtasks**, even inside
 an XL parent run. No active MiMo routes. Haiku 5.5, Sol 6.1, Terra 6.1, Argon and
 GLM conditional rows are never promoted merely because they appear here.
-L Argon **Medium** cannot inherit Argon High's AA score; it must have its own
-pinned same-index score at least **44**, verified invocation and trust. A currently
+L Argon **Medium** cannot inherit Argon High's AA score. A user-approved, auditable
+exception (`executor_slates.floor_exception`) lets exactly `gemini-4-argon` at
+`medium`, executor role, subtask size `L` pass only the AA intelligence-floor check
+while its Medium score is unpublished: no score is fabricated, the 44 floor stays for
+every other model, effort and size, a published score is judged on merit, and
+registration, conformance, trust, quota and risk gates still apply. Each use is
+recorded as `routing.floor_exceptions` in the routing audit. A currently
 eligible route may depart from this ideal order for cost-to-success, benchmark fit,
 harness capability, quota, latency, prior rework, domain or explicit user preference.
 Preview and actual dispatch must explain that departure, the skipped candidate,
 and the correct fallbacks.
 
 GPT-6.1 Terra's six version-pinned AA scores (non-reasoning 33, low 36, medium 41,
-high 44, xhigh 45, max 48) are registered in **separate PR #811**; until it merges
-and passes conformance these are **conditional catalog entries**, not active
-dispatch claims. GPT-6.1 Sol Medium is also discovery-only until exact harness
+high 44, xhigh 45, max 48) are registered by merged PR #811 as **conditional catalog entries**
+(`dispatchable: false`, discovery-eligible), not active dispatch claims until they pass
+conformance. GPT-6.1 Sol Medium is also discovery-only until exact harness
 qualification. Bounded **discovery trials** can investigate missing benchmark
 provenance only where existing S/M discovery consent and risk rules permit, but
 must never trial a **known below-size-floor score** or violate the XL Opus rule.

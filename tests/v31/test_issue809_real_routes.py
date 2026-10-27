@@ -77,13 +77,37 @@ def test_real_sonnet_harness_self_fallback_and_unavailable_first_route(size, eff
     assert retried["candidate"]["harness"] == "agy", retried
 
 
-def test_real_argon_medium_missing_provenance_is_not_an_l_fallback():
+def test_argon_medium_unpublished_score_passes_the_l_floor_by_explicit_exception():
     argon = candidate("gemini-4-argon", "medium", None, harness="agy")
+    out = decide("L", [argon], preference=executor_slates.ideal_seed("L"))
+    assert out["status"] == "selected" and out["candidate"]["model_id"] == "gemini-4-argon", out
+    assert out["candidate"]["benchmark_indexes"] == {}, "no score is fabricated"
+    exceptions = out["routing"]["floor_exceptions"]
+    assert [(e["model_id"], e["effort"], e["size"]) for e in exceptions] == [("gemini-4-argon", "medium", "L")]
+    assert "registration" in exceptions[0]["not_waived"]
+
+
+@pytest.mark.parametrize("model,effort,size", [
+    ("gemini-4-argon", "high", "L"), ("gemini-4-argon", "medium", "XL"),
+    ("gemini-4-argon", "medium", "M"), ("gemini-4-argon", "low", "L"),
+    ("future-model", "medium", "L")])
+def test_argon_exception_is_exactly_model_effort_and_size_scoped(model, effort, size):
+    unscored = candidate(model, effort, None, harness="agy")
+    terra = candidate("gpt-6.1-terra", "high", 44 if size == "L" else 48)
+    out = decide(size, [unscored, terra])
+    assert out["candidate"]["model_id"] == "gpt-6.1-terra", out
+    assert any(r.get("stage") == 4 and model in r["candidate"] for r in out["rejected"]), out
+    assert "floor_exceptions" not in out["routing"]
+
+
+def test_argon_exception_never_waives_a_published_below_floor_score_or_other_gates():
+    low = candidate("gemini-4-argon", "medium", 40, harness="agy")
     terra = candidate("gpt-6.1-terra", "high", 44)
-    out = decide("L", [argon, terra])
-    assert out["status"] == "selected" and out["candidate"]["model_id"] == "gpt-6.1-terra", out
-    assert any(r.get("stage") == 4 and "gemini" in r["candidate"]
-               for r in out["rejected"]), out
+    out = decide("L", [low, terra])
+    assert out["candidate"]["model_id"] == "gpt-6.1-terra", out
+    assert any(r.get("stage") == 4 and "gemini" in r["candidate"] for r in out["rejected"]), out
+    untried = candidate("gemini-4-argon", "medium", None, harness="agy", available=False)
+    assert decide("L", [untried])["status"] == "no_qualifying_candidate"
 
 
 def test_discovery_never_trials_a_known_below_size_floor_or_non_xl_opus():

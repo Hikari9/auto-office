@@ -460,12 +460,14 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
-            passed, reason = scoring.evaluate_capability_floor(c, floor)
+            waiver = (executor_slates.floor_exception(c, new_policy_size, role)
+                      if role in ADAPTIVE_ROLES else None)
+            passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))
             if not passed and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": reason})
                 continue
             size_reason = (executor_slates.benchmark_gate(c, new_policy_size)
-                           if role in ADAPTIVE_ROLES else None)
+                           if role in ADAPTIVE_ROLES and not waiver else None)
             if size_reason and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": size_reason,
                                  "category": "subtask-intelligence-floor"})
@@ -890,6 +892,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
                 "caps": {k: dict(request["discovery"]["allocation"][k]) for k in ("probes", "trials", "rolling")},
                 "fallback": None}
     audit["rejected"] = rejected
+    size = executor_slates.new_gear_size(request)
+    floor_exceptions = [{"candidate": candidate_id(c), **waiver} for c in stage
+                        if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(c, size, role))]
+    if floor_exceptions:
+        audit["floor_exceptions"] = floor_exceptions
     if trial:
         c, b = trial["candidate"], trial["bounds"]
         tid = candidate_id(c)
