@@ -120,7 +120,7 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
     """Who executes a task: the orchestrator inline, or a dedicated executor (the default).
 
     XS runs go inline by default; an S run only on a measured estimate that inline beats dedicated dispatch;
-    an M run only when it is a single task; L and XL always delegate; elevated risk always delegates. The
+    an M run only when a single task has measured cost advantage; L and XL always delegate; elevated risk always delegates. The
     record carries the owner, the reason and the estimated savings. An inline task still gets the worktree,
     the fenced lease, scope, self-review subagents, convergence review and landing of a delegated one.
     """
@@ -140,9 +140,7 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
         return record("delegated", f"dedicated executor: a {size or 'unsized'} task is too large for inline in a {gear} run")
     if gear == "XS":
         return record("inline", "XS run, low risk, bounded task: inline by default to keep orchestrator context")
-    if gear == "M":
-        if task_count == 1:
-            return record("inline", "M run with a single task: nothing to parallelize, inline keeps context")
+    if gear == "M" and task_count != 1:
         return record("delegated", "dedicated executor: an M run goes inline only for a single-task run")
     if estimate is None:
         return record("delegated", "dedicated executor: an S run goes inline only on a measured "
@@ -150,5 +148,5 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
     if estimate["savings"] <= 0:
         return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline']:g} does not beat "
                                    f"dedicated {estimate['dedicated']:g} {estimate['unit']}")
-    return record("inline", f"measured cost-to-success: inline {estimate['inline']:g} vs dedicated "
+    return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline']:g} vs dedicated "
                             f"{estimate['dedicated']:g} {estimate['unit']} ({estimate['evidence']})", estimate)

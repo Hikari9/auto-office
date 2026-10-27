@@ -1,5 +1,5 @@
 """#809 R11: who executes a task. XS inline by default; S only on a measured cost-to-success estimate that beats
-dedicated dispatch; M only for a single-task run; L and XL never. The owner, reasoning, estimated savings and
+dedicated dispatch; M only when single-task with a measured cost advantage; L and XL never. The owner, reasoning, estimated savings and
 outcome are persisted on the task and shown. An inline task keeps its lease, scope, self-review subagents,
 convergence review and resume."""
 import json
@@ -43,7 +43,12 @@ def test_s_is_inline_only_on_a_measured_estimate_that_beats_dedicated_dispatch()
 
 
 def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
-    assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=1)["mode"] == "inline"
+    assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=1)["mode"] == "delegated"
+    good = task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=1)
+    assert good["mode"] == "inline" and good["estimated_savings"]["savings"] == 8
+    bad = "inline=24 dedicated=22 minutes: measured retry overhead"
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage=bad), LOW, task_count=1)["mode"] == "delegated"
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage="not measured"), LOW, task_count=1)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M"), LOW, task_count=2)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M"), LOW)["mode"] == "delegated"
     assert task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=2)["mode"] == "delegated"
@@ -77,6 +82,12 @@ def test_the_executor_brief_states_what_the_runtime_reviews():
 def _xs_plan():
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: XS\n"
                             "task_size_rationale: bounded local change with no external interfaces\n", 1)
+
+
+def _m_plan():
+    return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
+                            "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
+                            f"inline_advantage: {EST}\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -150,6 +161,20 @@ def test_a_single_task_s_run_without_an_estimate_is_delegated(env):
     assert _mode(env)["mode"] == "delegated"
 
 
+def test_m_without_measured_advantage_delegates_at_dispatch(env):
+    _approved(env, PLAN_ONE, "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "measured" in _mode(env)["why"]
+
+
+def test_m_with_measured_advantage_records_savings_at_dispatch(env):
+    _approved(env, _m_plan(), "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
+    assert _mode(env)["estimated_savings"]["savings"] == 8
+
+
 def test_m_with_two_tasks_is_delegated(env):
     _approved(env, PLAN_TWO, "M")
     env.office("dispatch", "T1", check=0)
@@ -165,7 +190,7 @@ def test_an_explicit_launch_override_beats_inline(env):
 
 def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
     env.script(convergence_reviewer=[{"reply": APPROVED}], code_reviewer=[{"reply": APPROVED}])
-    _approved(env, PLAN_ONE, "M")  # one task: M runs it inline
+    _approved(env, _m_plan(), "M")  # one task with measured cost advantage
     env.office("dispatch", "T1", check=0)
     assert _mode(env)["mode"] == "inline"
     con = env.con()
@@ -187,7 +212,7 @@ def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
 
 
 def test_a_scope_violation_by_an_inline_worker_is_still_refused(env):
-    _approved(env, PLAN_ONE, "M")
+    _approved(env, _m_plan(), "M")
     env.office("dispatch", "T1", check=0)
     con = env.con()
     d = dict(con.execute("SELECT * FROM dispatches WHERE role='executor'").fetchone())
