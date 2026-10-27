@@ -232,8 +232,23 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
             if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
                 routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
-        if launch_prefs and routes[tid].get("status") == "selected":
-            routes[tid]["launch"] = launch_prefs
+        if routes[tid].get("status") == "selected":
+            # #809: a true orchestrator-inline worker is an EXTERNAL Office
+            # worker session in the normal isolated worktree and fenced lease.
+            # It is not a simulated executor model launch, and it must still
+            # submit through preflight, review and landing like every worker.
+            from office import task_sizing
+            desc = (task.get("descriptor") or {})
+            mode = task_sizing.execution_mode(run.get("gear"), desc, run.get("risk"))
+            if mode["mode"] == "inline" and not (as_model or route or cli or external):
+                routes[tid]["launch"] = {"external": True, "inline": True}
+                routes[tid]["execution_mode"] = mode
+            elif launch_prefs:
+                routes[tid]["launch"] = launch_prefs
+                routes[tid]["execution_mode"] = {"mode": "external" if external else "delegated",
+                                                 "why": "explicit launch override"}
+            else:
+                routes[tid]["execution_mode"] = {"mode": "delegated", "why": mode["why"]}
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
@@ -320,7 +335,21 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base,
                                      extra={"base_parents": parts})
                 record_discovery(con, run, task, decision, did)
-                verb = "prepared for you to start (external; nothing launched)" if external else "launching"
+                mode = (decision.get("execution_mode") or {}).get("mode")
+                if mode == "inline":
+                    verb = "orchestrator-inline lease/worktree prepared (no model launched)"
+                    res.add(f"{tid} INLINE: {(decision.get('execution_mode') or {}).get('why')}; "
+                            "continue in the fenced task worktree and run office preflight + office submit")
+                elif (decision.get("launch") or {}).get("external"):
+                    verb = "external worker prepared (no model launched)"
+                else:
+                    verb = "launching"
+                sizing = task.get("descriptor") or {}
+                res.add(f"{tid} {sizing.get('task_size') or 'unclassified'} | profile "
+                        f"{sizing.get('profile') or 'legacy'} | why: "
+                        f"{sizing.get('task_size_rationale') or 'legacy plan has no task size'}")
+                res.add(f"ACTUAL DISPATCH {tid}: {decision['selected']} | "
+                        f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
                         + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
@@ -580,7 +609,25 @@ def _record_routing(con, run: dict, decision: dict) -> None:
         from office import plan_view
         planned = decision.get("planned") or {}
         source = decision.get("route_source") or "router"
+        task = state.get_task(con, run["id"], req.get("task_id")) if req.get("task_id") else None
+        sizing = (task or {}).get("descriptor") or {}
         audit = {**decision["routing"], "phase": "reroute" if source == "reroute" else "dispatch",
+                 "run_gear": run.get("gear"),
+                 "run_gear_rationale": (run.get("gates") or {}).get("run_gear_rationale"),
+                 "task_size": sizing.get("task_size") or (req.get("context") or {}).get("size_class"),
+                 "task_size_rationale": sizing.get("task_size_rationale"),
+                 "profile": sizing.get("profile"), "profile_version": sizing.get("profile_version"),
+                 "effective_gates": {k: (run.get("gates") or {}).get(k) for k in
+                                     ("plan_review", "code_review", "visual", "review_floor", "review_contract")},
+                 "preferred_route": planned.get("primary"),
+                 "preferred_route_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+                 "fallback_routes": planned.get("fallbacks") or [],
+                 "selected_route": ("orchestrator-inline (not an agent model launch)"
+                                    if (decision.get("execution_mode") or {}).get("mode") == "inline"
+                                    else decision.get("selected")),
+                 "execution_mode": (decision.get("execution_mode") or {}).get("mode"),
+                 "execution_reason": (decision.get("execution_mode") or {}).get("why"),
+                 "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
                  "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
                  "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
@@ -601,8 +648,19 @@ def _record_routing(con, run: dict, decision: dict) -> None:
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
-    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
-    for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
+    mode = decision.get("execution_mode") or {
+        "mode": "inline" if (decision.get("launch") or {}).get("inline") else "delegated",
+        "why": "fenced orchestrator-inline worker" if (decision.get("launch") or {}).get("inline")
+               else "dedicated executor default or route requalification",
+    }
+    out = {"candidate": decision.get("candidate"), "execution_mode": mode,
+           "selection_disclosure": decision.get("selection_disclosure"),
+           "selected_route": decision.get("selected"),
+           "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+           "preferred_route": (decision.get("planned") or {}).get("primary"),
+           "fallback_routes": (decision.get("planned") or {}).get("fallbacks") or [],
+           "size_decision": decision.get("size_decision")}
+    for key in ("override", "launch", "execution_mode", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
                 "route_authority", "route_change"):
         if decision.get(key):
             out[key] = decision[key]
@@ -659,6 +717,9 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
                                   extra=({"quote": decision["route_authority"]["quote"]}
                                          if (decision.get("route_authority") or {}).get("quote") is not None else None))
+    sizing = task.get("descriptor") or {}
+    decision["size_decision"] = {k: sizing.get(k) for k in
+                                 ("task_size", "task_size_rationale", "profile", "profile_version")}
     state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
 
 

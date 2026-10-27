@@ -225,7 +225,9 @@ def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None,
     gear = run["gear"]
     raised = bool(new.get("high")) and not cur.get("high")
     if raised and gear == "direct":
-        gear = cfg.fit_gear(None, new)
+        # The pre-809 direct preset had a pinned risk-driven upgrade. Do not
+        # reinterpret that historical rule through XS-XL complexity fitting.
+        gear = "full" if new.get("irreversible") else "express"
     base = cfg.resolve_gates(gear, new, config)
     keys = list(risk.FLOOR_KEYS)
     started = (bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))
@@ -326,8 +328,9 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                 (run["id"], p["id"], p["title"], "executor", dumps(p["scope"]), dumps(p["depends"]),
                  dumps(p["interfaces"]), dumps(p["accept"]), dumps(checks), dumps(p["visual"]) if p["visual"] else None,
                  "planned", plan_version, plan_version, plan_version, now, now))
-            if p.get("descriptor"):
-                state.update_task(con, run["id"], p["id"], descriptor=p["descriptor"])
+            from office import task_sizing
+            desc = {**(p.get("descriptor") or {}), **task_sizing.classify(p, run_gear=run.get("gear"))}
+            state.update_task(con, run["id"], p["id"], descriptor=desc)
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
@@ -338,8 +341,10 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
         checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
+        from office import task_sizing
+        desc = {**(p.get("descriptor") or {}), **task_sizing.classify(p, run_gear=run.get("gear"))}
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
-                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=p.get("descriptor") or {})
+                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=desc)
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])
@@ -571,9 +576,13 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
-    outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
-                                       plan_review=True, exclude=job["payload"].get("exclude"),
-                                       resume_from=job["payload"].get("resume_from"))
+    if run.get("gear") == "XL" and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1":
+        from office import xl_review
+        outcome = xl_review.audit_plan(con, run, gate, plan, brief, Path(run["repo_root"]))
+    else:
+        outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
+                                           plan_review=True, exclude=job["payload"].get("exclude"),
+                                           resume_from=job["payload"].get("resume_from"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}

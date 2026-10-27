@@ -736,10 +736,10 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
-def _preferred_seed(policy_cfg: dict, run: dict):
+def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None):
     """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
     run's size class (start --size-class) has an entry there."""
-    size = (run.get("risk") or {}).get("size_class")
+    size = task_size or (run.get("risk") or {}).get("size_class")
     by_size = policy_cfg.get("preferred_seed_by_size") or {}
     return by_size.get(size) or policy_cfg.get("preferred_seed")
 
@@ -784,11 +784,16 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
         # pinned before provenance existed keeps its own ceiling (or the old default) untouched.
         ceiling = route_policy.budget_ceiling(config)
         adaptive_cfg = {**adaptive_cfg, "budget_ceiling_usd": ceiling["usd"]}
-    context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
-               "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
     task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
-    if (task or {}).get("descriptor"):
-        context["task_descriptor"] = task["descriptor"]
+    desc = (task or {}).get("descriptor") or {}
+    task_size = desc.get("task_size") or (run.get("risk") or {}).get("size_class")
+    context = {"role": role, "playbook": run.get("playbook"), "size_class": task_size,
+               "gear": run.get("gear"), "dispatch_kind": dispatch_kind,
+               "task_size_rationale": desc.get("task_size_rationale"),
+               "dispatch_profile": desc.get("profile"),
+               "dispatch_profile_version": desc.get("profile_version")}
+    if desc:
+        context["task_descriptor"] = desc
     as_of = as_of or datetime.now(timezone.utc).isoformat()
     route_learning.ensure_schema(con)
     # Executor and worker dispatches are the same kind of work; they pool.
@@ -860,7 +865,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[])
-    seed = None if override else _preferred_seed(policy_cfg, run)
+    task_for_route = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
+    descriptor_for_route = (task_for_route or {}).get("descriptor") or {}
+    sized_work = role in routing.ADAPTIVE_ROLES
+    effective_task_size = (descriptor_for_route.get("task_size") if sized_work else None) or \
+        (run.get("risk") or {}).get("size_class")
+    seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
@@ -941,7 +951,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                 if pol["denied"] or pol["overkill"] or pol["ceilings"]]
     if policies:
         request["user_policies"] = policies
-        request["size_class"] = (run.get("risk") or {}).get("size_class")
+        request["size_class"] = effective_task_size
         if override or manual:
             request["manual_route"] = True
     result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)

@@ -54,7 +54,7 @@ def requirement_key(raw: str) -> str:
 
 
 BLAST = ("local", "repo", "production", "production-data")
-SIZES = ("S", "M", "L", "XL")
+SIZES = ("XS", "S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")

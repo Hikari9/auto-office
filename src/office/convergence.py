@@ -773,28 +773,40 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
             dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
-        exclude = list(st.get("exclude_routes") or [])
-        resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
-        # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
-        pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
-        away = job["payload"].get("exclude_routes")
-        # A review-only re-run starts a new reviewer, never the earlier session.
-        resume = resume if not (exclude or job["payload"].get("review_only")) else None
-        reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
-        for attempt in range(reprompts + 1):
-            outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                         exclude=exclude or None, resume_from=resume, review_override=pinned,
-                                         prefer_not=away)
-            problem = _stamp_reviewed_commit(run, commit, outcome)
-            if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
-                break  # ingest turns a still-wrong commit into INVALID_RESULT
-            # The same reviewer is asked again, in its own session when the harness can resume it: a stale
-            # checkout path or commit from an earlier round is the usual cause (#706).
-            resume = outcome["dispatch_id"]
-            role_line, _, rest = brief.partition("\n")
-            brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
-                     f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
-                     f"REVIEWED_COMMIT {commit}.\n{rest}")
+        # #809: funded, genuinely launched self-review subagents precede the
+        # ONE independent convergence verdict. Missing/invalid agent output is
+        # runtime evidence failure, not a pass and not a substantive round.
+        from office import self_review_subagents
+        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout)
+        if precheck["status"] != contract.COMPLETED:
+            outcome = {"status": contract.EVIDENCE_BLOCKED, "verdict": None,
+                       "parsed": None, "summary": precheck["reason"]}
+        else:
+            if precheck["reports"]:
+                brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify/deduplicate in your one verdict):\n"
+                brief += "\n".join(str(r) for r in precheck["reports"])
+            exclude = list(st.get("exclude_routes") or [])
+            resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
+            # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
+            pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
+            away = job["payload"].get("exclude_routes")
+            # A review-only re-run starts a new reviewer, never the earlier session.
+            resume = resume if not (exclude or job["payload"].get("review_only")) else None
+            reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
+            for attempt in range(reprompts + 1):
+                outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
+                                             exclude=exclude or None, resume_from=resume, review_override=pinned,
+                                             prefer_not=away)
+                problem = _stamp_reviewed_commit(run, commit, outcome)
+                if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
+                    break  # ingest turns a still-wrong commit into INVALID_RESULT
+                # The same reviewer is asked again, in its own session when the harness can resume it: a stale
+                # checkout path or commit from an earlier round is the usual cause (#706).
+                resume = outcome["dispatch_id"]
+                role_line, _, rest = brief.partition("\n")
+                brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
+                         f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
+                         f"REVIEWED_COMMIT {commit}.\n{rest}")
     finally:
         gates.remove_checkout(run, checkout)
     with db.transaction(con):

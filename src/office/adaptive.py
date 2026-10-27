@@ -63,6 +63,26 @@ DEFAULTS = {
     },
 }
 
+# Profile weights supplement—not override—the qualified catalog, benchmark
+# calibration, quota reserve, trust floor, or an explicit cost policy. They
+# change expected-cost-to-success tradeoffs, never hard-code a model by size.
+PROFILE_WEIGHTS_VERSION = "task-dispatch-profile-1"
+PROFILE_WEIGHTS = {
+    "lean": {"effectiveness": .34, "cost": .34, "speed": .20, "quota": .06, "preference": .06},
+    "balanced": DEFAULTS["weights"]["balanced"],
+    "deep": {"effectiveness": .56, "cost": .13, "speed": .12, "quota": .10, "preference": .09},
+    "discovery": {"effectiveness": .52, "cost": .14, "speed": .14, "quota": .12, "preference": .08},
+}
+
+
+def _effective_weights(request: dict, policy: str, weights: dict) -> dict:
+    d = (request.get("context") or {}).get("task_descriptor") or {}
+    profile = (request.get("context") or {}).get("dispatch_profile") or d.get("profile")
+    if (policy == "balanced" and profile in PROFILE_WEIGHTS
+            and (request.get("context") or {}).get("dispatch_profile_version") == PROFILE_WEIGHTS_VERSION):
+        return PROFILE_WEIGHTS[profile]
+    return weights
+
 SLATE_SIZE = 3
 RANK_LABELS = ("PRIMARY", "FALLBACK 1", "FALLBACK 2")
 
@@ -259,6 +279,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
     s = settings(config or {"routing": {"adaptive": request.get("adaptive_config") or {}}})
     policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
     weights = s["weights"].get(policy) or s["weights"]["balanced"]
+    weights = _effective_weights(request, policy, weights)
     candidates, aliases = _dedupe(candidates)
     rows = score(candidates, request, s)
     by_id = {r["route"]: c for r, c in zip(rows, candidates)}
@@ -361,6 +382,7 @@ def trial_rows(pool: list[dict], rec: dict, request: dict, config: dict | None =
     s = settings(config or {"routing": {"adaptive": request.get("adaptive_config") or {}}})
     policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
     weights = s["weights"].get(policy) or s["weights"]["balanced"]
+    weights = _effective_weights(request, policy, weights)
     kept, _ = _dedupe(pool)
     scored = score(kept, request, s)
     main = rec.get("rows") or []
