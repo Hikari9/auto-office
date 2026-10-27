@@ -400,7 +400,8 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
 def test_planner_free_text_rejects_control_characters():
     from office import task_descriptors
     for bad in ("evidence with \x1b[2K escape", "evidence with \r carriage return", "evidence with \x7f delete",
-                "evidence with \x9b2J c1 csi", "evidence with \u202e bidi override", "evidence with \u200b zero width"):
+                "evidence with \x9b2J c1 csi", "evidence with \u202e bidi override", "evidence with \u200b zero width",
+                "evidence with \u061c arabic mark", "evidence with \U000e0041 tag char", "evidence with \ufeff bom"):
         with pytest.raises(ValueError):
             task_descriptors.parse_field("task_size_rationale", bad)
         if "\r" in bad:
@@ -408,6 +409,8 @@ def test_planner_free_text_rejects_control_characters():
         plan = planfile.parse(_plan_with(f"run_gear: L\nrun_gear_why: {bad}\n"))
         assert any("no control characters" in e for e in plan.errors), plan.errors
     assert task_descriptors.parse_field("task_size_rationale", "one bounded reversible file") == "one bounded reversible file"
+    for fine in ("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 persian word", "family \U0001F468\u200d\U0001F469\u200d\U0001F467 emoji"):
+        assert task_descriptors.parse_field("task_size_rationale", fine) == fine
 
 
 def test_plan_warns_about_unpaired_size_and_gear_fields():

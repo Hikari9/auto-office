@@ -4,14 +4,15 @@ No model-brand-specific routing rules. Unknown fields remain neutral.
 """
 from __future__ import annotations
 import math
-import re
+import unicodedata
 
-# Planner prose is echoed to terminals: no C0/C1 controls (ESC, CSI, CR) and no bidi or zero-width formatting.
-_UNSAFE_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+# ZWNJ and ZWJ are needed for Persian, Indic scripts and emoji sequences.
+_ALLOWED_FORMAT = "\u200c\u200d"
 
 
 def unsafe_text(text: str) -> bool:
-    return bool(_UNSAFE_TEXT.search(text))
+    """Planner prose is echoed to terminals: no control (ESC, CSI, CR), bidi, tag or invisible format characters."""
+    return any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") and c not in _ALLOWED_FORMAT for c in text)
 
 OPTIONS = {
  "domain": ("ui", "backend", "data", "infrastructure", "mixed"),
