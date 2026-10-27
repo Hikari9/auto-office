@@ -94,7 +94,7 @@ def test_unknown_model_refusal_lists_catalog_add_remediation(request):
     assert "names reported by <harness> models need a catalog row" in output
 
 
-def test_approve_trust_is_retired_and_policy_inspection_names_the_agy_route(request):
+def test_approve_trust_is_a_deprecated_noop_that_names_the_agy_route_policy_command(request):
     # #837: no trust act is recorded for an Agy alias; role policy (allow/neutral/deny) replaces it.
     env = request.getfixturevalue("env")
     approved_run(env, executor=[{"write": {"calc.py": "def add(a, b):\n    return a + b\n"},
@@ -102,6 +102,6 @@ def test_approve_trust_is_retired_and_policy_inspection_names_the_agy_route(requ
     con = env.con()
     before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
     code, output = env.office("approve", "trust", "agy/claude-opus-5-5@low", "--quote", "Approve this cataloged Agy route")
-    assert code != 0 and "retired" in output.lower(), output
-    assert "office route policy" in output
+    assert code == 0 and "deprecated" in output.lower(), output
+    assert "office route policy" in output and "office route allow|deny agy/claude-opus-5-5@low" in output
     assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == before

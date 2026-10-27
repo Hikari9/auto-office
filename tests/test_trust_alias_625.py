@@ -1,4 +1,4 @@
-"""#625 alias trust approval is retired by #837; the audit table and its atomic writer remain."""
+"""#625 alias trust approval is a deprecated no-op under #837; the audit table and its atomic writer remain."""
 from __future__ import annotations
 
 import sqlite3
@@ -22,14 +22,14 @@ def test_db(monkeypatch):
 
 
 @pytest.mark.parametrize("spec", ["codex/luna@medium", "codex@0/gpt-6-luna@high", "claude/sonnet@high", "bogus"])
-def test_approve_trust_is_retired_and_writes_no_act(test_db, spec):
-    """#837: the approval ceremony is gone. Role policy (office route allow|deny) replaces it,
-    and a refused attempt leaves the audit table untouched."""
+def test_approve_trust_is_a_deprecated_noop_and_writes_no_act(test_db, spec):
+    """#837: the approval ceremony is gone but the command still runs, so old scripts keep working.
+    It warns, points at `office route allow|deny`, and leaves the audit table untouched."""
     con = test_db
-    with pytest.raises(OfficeError) as exc:
-        authority.approve(con, {"id": "run-retired-001"}, "trust", "approve it, I said so", [spec])
-    assert exc.value.category == "legacy-trust-retired"
-    assert "office route policy" in exc.value.next_step
+    res = authority.approve(con, {"id": "run-retired-001"}, "trust", "approve it, I said so", [spec])
+    assert res.data["deprecated"] is True and res.data["recorded"] is False
+    assert "deprecated" in res.lines[0] and "office route allow|deny" in res.lines[0]
+    assert "office route policy" in res.next
     assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == 0
 
 

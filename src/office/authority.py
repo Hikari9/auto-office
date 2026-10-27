@@ -111,11 +111,13 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
 
 
 def _trust(con, run, triple: str, quote: str) -> Result:
-    """#837: the old approval ceremony is retired, including for a named user."""
-    raise Refused("legacy-trust-retired",
-                  "office approve trust is retired by #837; set a role-scoped user "
-                  "allow/neutral/deny rule instead. Historical trust acts stay audit-only.",
-                  next_step="office route policy --effective --role code_reviewer")
+    """#837: deprecated no-op. Accepted so old scripts keep working; it records nothing and gates nothing."""
+    route = triple or "<harness/model@effort>"
+    return Result(lines=[f"deprecated: office approve trust is a no-op since #837 (nothing was recorded). Routes are "
+                         f"neutral by default; set a per-role policy with `office route allow|deny {route} --role <role>`.",
+                         "historical trust acts stay as audit evidence only"],
+                  next="office route policy --effective --role code_reviewer",
+                  data={"deprecated": True, "recorded": False, "route": triple or None})
 
 
 def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:
