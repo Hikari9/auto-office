@@ -260,28 +260,9 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
     policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
     weights = s["weights"].get(policy) or s["weights"]["balanced"]
     candidates, aliases = _dedupe(candidates)
-    # Only after routing stages 1-7 have qualified exact routes, prefer 6.1
-    # over 5.6 within each Sol/Terra lineage and identical harness/effort.
-    # User-declared/exact routes or explicit old-generation preferences win.
-    explicit = bool(request.get("manual_route") or request.get("declared_route")
-                    or request.get("exact_route"))
-    preserved = set()
-    for preference in request.get("preferred_seed") or []:
-        if preference.get("model_id") == "gpt-5.6-sol":
-            preserved.add("openai/gpt-sol")
-        if preference.get("model_id") == "gpt-5.6-terra":
-            preserved.add("openai/gpt-terra")
-    suppressed = []
-    if not explicit:
-        candidates, suppressed = model_lineages.prefer_qualified_generation(
-            candidates, preserved=preserved)
     rows = score(candidates, request, s)
     by_id = {r["route"]: c for r, c in zip(rows, candidates)}
-    rejected = [
-        {"candidate": f"{d['harness']}/{d['model_id']}@{d['effort']}", "stage": 7,
-         "category": "superseded-qualified-generation", "reason": d["reason"]}
-        for d in suppressed
-    ]
+    rejected = []
 
     # Budget ceiling: the only cost-based removal. It is absolute (per task), so a
     # very cheap route never makes every stronger route "too expensive".
@@ -296,6 +277,32 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
             else:
                 kept.append(r)
         rows = kept
+    if not rows:
+        return {"rows": [], "rejected": rejected, "slate": [], "audit": {}}
+
+    # Supersession runs AFTER the hard budget ceiling: a newer route that is
+    # unaffordable cannot suppress an otherwise qualified older generation.
+    # The remaining candidates already passed trust, size/role, quota and cost.
+    explicit = bool(request.get("manual_route") or request.get("declared_route")
+                    or request.get("exact_route"))
+    preserved = set()
+    for preference in request.get("preferred_seed") or []:
+        if preference.get("model_id") == "gpt-5.6-sol":
+            preserved.add("openai/gpt-sol")
+        if preference.get("model_id") == "gpt-5.6-terra":
+            preserved.add("openai/gpt-terra")
+    suppressed = []
+    if not explicit:
+        qualified = [by_id[r["route"]] for r in rows]
+        selected_candidates, suppressed = model_lineages.prefer_qualified_generation(
+            qualified, preserved=preserved)
+        retained = {id(c) for c in selected_candidates}
+        rows = [r for r in rows if id(by_id[r["route"]]) in retained]
+        by_id = {r["route"]: by_id[r["route"]] for r in rows}
+        rejected.extend({
+            "candidate": f"{d['harness']}/{d['model_id']}@{d['effort']}", "stage": 8,
+            "category": "superseded-qualified-generation", "reason": d["reason"]
+        } for d in suppressed)
     if not rows:
         return {"rows": [], "rejected": rejected, "slate": [], "audit": {}}
 

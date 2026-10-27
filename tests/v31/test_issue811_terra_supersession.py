@@ -72,3 +72,18 @@ def test_adaptive_prefers_newer_only_within_comparable_qualified_lineage():
     pinned = {**request, "preferred_seed": [{"model_id": "gpt-5.6-terra", "effort": "high"}]}
     kept = adaptive.recommend([old, new], pinned)
     assert len(kept["by_id"]) == 2
+
+
+def test_budget_ineligible_newer_does_not_suppress_affordable_older():
+    old = row("gpt-5.6-sol", "medium", score=42)
+    new = row("gpt-6.1-sol", "medium", score=48)
+    new["price_fields"] = {"input_per_mtok": 1000.0, "output_per_mtok": 5000.0}
+    req = {"role": "executor", "policy": {"quota_reserve_percent": 5.0},
+           "run_id": "budget", "task_id": "T2", "routing_seed": "budget-case",
+           "adaptive_config": {"budget_ceiling_usd": 5.0,
+                               "exploration": {"rate": 0.0}},
+           "cost_policy": "balanced"}
+    rec = adaptive.recommend([old, new], req)
+    assert [r["model_id"] for r in rec["by_id"].values()] == ["gpt-5.6-sol"]
+    assert any("budget ceiling" in r["reason"] for r in rec["rejected"])
+    assert not rec["audit"]["lineage_supersession"]
