@@ -2757,31 +2757,22 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                             "reported_cwd": reported["cwd"], "reported_agent": reported["agent"],
                             "reported_session": reported["session"], "mismatch": mismatch}
     landed = False
+    guard = _send_guard(run, dispatch, pane)
     if not mismatch:
         try:
-            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
-                                     guard=_send_guard(run, dispatch, pane))
+            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb, guard=guard)
         except PaneMismatch as exc:
             mismatch = str(exc)
+            spec["pane_evidence"]["mismatch"] = mismatch
+    if not landed and not mismatch:
+        landed, mismatch = _settle_unlanded_pointer(run, dispatch, spec, name, pane, pointer, seen_cb, guard, worker=worker)
+        if mismatch:
             spec["pane_evidence"]["mismatch"] = mismatch
     if mismatch:
         # Once an agent starts, never launch a racing headless copy.
         spec["identity_failure"] = mismatch
         _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; brief NOT sent; "
                        f"inspect pane {pane} and use office revoke {dispatch.get('task_id') or dispatch['id']}")
-    if not landed and not mismatch:
-        # A pi-harness pane can keep the already-submitted brief in scrollback.
-        # Never promote a stale composer match into an actionable "send Enter"
-        # notice while Herdr says the agent is doing work (#583).
-        sample = _herdr_agent_sample(name)
-        working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
-        view = _pane_view(name)
-        if working and _composer_holds(view, pointer):
-            # The pointer also occurs in a working agent's recent scrollback.
-            # A matching substring cannot prove its composer is waiting.
-            spec["landing_unconfirmed_working"] = True
-        else:
-            _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
     spec["prompt_landed"] = landed
     write_launch_spec(run, dispatch["id"], spec)
     if not session and landed and not dispatch.get("resumed_from"):
@@ -2808,13 +2799,51 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
 
 
+def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, pane: str, pointer: str, seen,
+                             guard, *, worker: bool) -> tuple[bool, str | None]:
+    """(landed, pane mismatch) after the delivery gave up on `pointer`. An idle agent whose composer holds it gets
+    Enter through the fenced, bounded path `submit_prompt` uses, never the text again (#790). A pointer Enter cannot
+    submit is reported and a reviewer is marked for one retry on the same route (`retry_same_route`)."""
+    # A pi-harness pane can keep the already-submitted brief in scrollback.
+    # Never promote a stale composer match into an actionable "send Enter"
+    # notice while Herdr says the agent is doing work (#583).
+    sample = _herdr_agent_sample(name)
+    working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
+    view = _pane_view(name)
+    # No Enter for an agent herdr no longer reports: the key would go to the pane's shell.
+    if sample is None or not _composer_holds(view, pointer):
+        _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
+        return False, None
+    if working:
+        # The pointer also occurs in a working agent's recent scrollback.
+        # A matching substring cannot prove its composer is waiting.
+        spec["landing_unconfirmed_working"] = True
+        return False, None
+    try:
+        got = _submit_held(name, pane, pointer, _land_timeout(), baseline_ctx=_ctx_k(view), baseline_screen=view,
+                           seen=seen, herdr=_guarded_herdr(guard))
+    except PaneMismatch as exc:
+        return False, str(exc)
+    if got == "landed":
+        return True, None
+    if not worker:
+        spec["retry_same_route"] = "held-pointer"
+    _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, _pane_view(name),
+                                 enter_tried=True, retry=not worker)
+    return False, None
+
+
 def _describe_unconfirmed_prompt(run: dict, dispatch: dict, name: str, pane: str, pointer: str,
-                                 view: str | None) -> None:
-    """Emit action only after liveness proved the agent is not working (#583)."""
+                                 view: str | None, *, enter_tried: bool = False, retry: bool = False) -> None:
+    """Emit action only after liveness proved the agent is not working (#583). `enter_tried`: Office already
+    pressed Enter and the pointer is still there; `retry`: the reviewer gate runs it again on the same route."""
     if _composer_holds(view, pointer):
         # Prompting again would submit the pointer twice.
-        _launch_notice(run, dispatch, f"brief pointer is typed but unsubmitted in herdr agent {name} (pane "
-                                      f"{pane}); submit it: herdr pane send-keys {pane} Enter")
+        typed = f"brief pointer is typed but unsubmitted in herdr agent {name} (pane {pane})"
+        if enter_tried:
+            typed += " after Office pressed Enter"
+        again = "; the reviewer gate retries it once on the same route if it stays unsubmitted" if retry else ""
+        _launch_notice(run, dispatch, f"{typed}; submit it: herdr pane send-keys {pane} Enter{again}")
     else:
         screen = _startup_screen(view)
         title = ("folder-trust dialog" if screen == TRUST_SCREEN else screen if screen == EXTERNAL_IMPORTS_SCREEN
@@ -4402,6 +4431,7 @@ def supervise(dispatch_id: str) -> int:
     the supervisor itself cannot start the agent."""
     started = time.time()
     code, sig, classification = None, None, None
+    empty_reply = False
     child = None
     state_box = {"signal": None, "watching": False}
 
@@ -4437,6 +4467,7 @@ def supervise(dispatch_id: str) -> int:
             state_box["watching"] = True
             code, classification = watch_external_output(dispatch_id, spec)
             state_box["watching"] = False
+            empty_reply = _reply_file_missing(spec, classification)
             return 0 if classification == "success" else 1
         if spec.get("herdr_agent"):
             # The agent runs in its herdr pane; this process only watches for the end.
@@ -4444,6 +4475,7 @@ def supervise(dispatch_id: str) -> int:
             state_box["watching"] = True
             code, classification = watch_herdr_agent(dispatch_id, spec)
             state_box["watching"] = False
+            empty_reply = _reply_file_missing(spec, classification)
             return 0 if classification == "success" else 1
         log_path = Path(d.get("log_path") or spec.get("log_path"))
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4544,6 +4576,8 @@ def supervise(dispatch_id: str) -> int:
             # A worker with no reply file ended cleanly but said nothing: the
             # prompt may never have been consumed (adapter failure_signatures).
             _note(log_path, "the harness exited 0 with no output; the prompt may not have been consumed")
+        # A headless reviewer's reply can come from its stdout (#399), so only silence counts.
+        empty_reply = not wrote and _reply_file_missing(spec, classification)
     except _Stopped as stop:
         sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:
@@ -4555,7 +4589,8 @@ def supervise(dispatch_id: str) -> int:
     finally:
         try:
             if classification != "duplicate_ignored":
-                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
+                        empty_reply=empty_reply)
         finally:
             if timer:
                 timer.cancel()
@@ -4593,7 +4628,15 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
     _record_identity(run_id, dispatch_id, "supervisor", os.getpid())
 
 
-def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:
+def _reply_file_missing(spec: dict, classification: str) -> bool:
+    """A reader (reviewer, vision) that ended cleanly without writing its reply file."""
+    if classification != "success" or spec.get("kind") not in read_scope.READER_KINDS or not spec.get("output"):
+        return False
+    out = Path(spec["output"])
+    return not (out.is_file() and out.stat().st_size > 0)
+
+
+def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False) -> None:
     accepted = False
     con = db.connect()
     try:
@@ -4609,10 +4652,13 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                 d["terminal_classification"] = classification
                 if _quota_wall(run, d):
                     _record_route_cooldown(con, run, d)
+            # A reviewer that ended without a reply is not a plain success: the gate re-prompts or retries it.
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
+                       + (" with an empty reply: no reply file was written" if empty_reply else "")
                        + (f" (exit {code})" if code not in (None, 0) else ""), audience="runtime",
                        task_id=d["task_id"], dispatch_id=dispatch_id,
-                       payload={"exit_code": code, "signal": sig, "classification": classification})
+                       payload={"exit_code": code, "signal": sig, "classification": classification,
+                                **({"empty_reply": True} if empty_reply else {})})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
             if d["kind"] == "planner" and _submitted(con, d):

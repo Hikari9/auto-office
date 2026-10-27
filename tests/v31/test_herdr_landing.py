@@ -195,9 +195,12 @@ def test_enter_that_never_submits_is_bounded_then_reported(env, monkeypatch):
     state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=reads)
     assert res["prompt_landed"] is False
     prompts, enters, typed = _sends(_calls(state_file))
-    assert len(prompts) == 1 and len(enters) == 3 and typed == []
+    # Three Enters in the delivery, then three more once the launch re-samples the still-held pointer (#790).
+    assert len(prompts) == 1 and len(enters) == 6 and typed == []
     events = _launch_events(env, run)
-    assert len(events) == 1 and "typed but unsubmitted" in events[0]
+    assert len(events) == 1 and "typed but unsubmitted" in events[0] and "after Office pressed Enter" in events[0]
+    assert "retries it once on the same route" in events[0]
+    assert json.loads((ddir / "launch.json").read_text())["retry_same_route"] == "held-pointer"
     assert f"herdr pane send-keys {res['pane']} Enter" in events[0] and "agent prompt" not in events[0]
 
 
