@@ -35,7 +35,7 @@ from office import adapters, briefs, candidates, contract, db, executor_slates, 
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
-                         pid_alive, pid_state,
+                         pid_alive, pid_gone, pid_state,
                          process_is, process_start, sha256_obj, short, loads)
 
 LEASE_TTL_SECONDS = 4 * 3600
@@ -1644,29 +1644,68 @@ REAP_GRACE_SECONDS = 60
 
 
 def reap_orphans(con, run: dict) -> list[str]:
-    """End review dispatches whose process and herdr agent are gone (a host
-    reboot leaves them `running` forever). Probes herdr, so call it outside a
-    transaction. Returns one note per dispatch reaped."""
-    from office import rerun
+    """Settle review dispatches whose supervisor is gone (a host reboot, or a
+    reinstall under a running supervisor, leaves them `running` forever): ingest
+    a reply that settled, end one whose process and herdr agent are gone. Probes
+    herdr, so call it outside a transaction. Returns one note per dispatch settled."""
     notes = []
     for row in con.execute("SELECT * FROM dispatches WHERE run_id=? AND launcher='herdr' AND gate_id IS NOT NULL "
                            "AND ended_at IS NULL AND status='running'", (run["id"],)).fetchall():
-        d = dict(row)
-        if pid_alive(d.get("pid")):
-            continue
-        started = parse_iso(d.get("launched_at") or d["started_at"])
-        if (datetime.now(timezone.utc) - started).total_seconds() < REAP_GRACE_SECONDS:
-            continue
-        reply = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "reply.txt"
-        if reply.is_file() and reply.stat().st_size > 0:
-            continue  # the review finished; its reader will record it
-        if rerun.agent_alive(d) is not False:
-            continue  # alive, or herdr could not say
-        if _end_dispatch(con, run, d, "lost", "its process and herdr agent are gone (no reply)", stop=False):
-            notes.append(f"{d['id']} reviewer is gone")
+        note = settle_dead_supervisor(con, run, dict(row))
+        if note:
+            notes.append(note)
     with db.transaction(con):
         notes += [f"gate {g} closed: its reviewer had ended" for g in repair_orphaned_gates(con, run)]
     return notes
+
+
+# A reply untouched this long is the finished review: the dead supervisor was the only thing that would have
+# waited for the agent to stop rewriting it.
+REPLY_SETTLE_SECONDS = 30
+
+
+def _launch_spec(run: dict, dispatch_id: str) -> dict:
+    try:
+        return json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _pid_reused(run: dict, dispatch_id: str, pid: int) -> bool:
+    """The recorded supervisor's pid is now another process (a reboot). Only a readable record and a
+    readable start time prove it; anything else is not reuse."""
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, "supervisor").read_text())
+    except (OSError, ValueError):
+        return False
+    now = _c_start(pid)
+    return rec.get("pid") == pid and bool(rec.get("c_start")) and now is not None and now != rec["c_start"]
+
+
+def settle_dead_supervisor(con, run: dict, d: dict) -> str | None:
+    """Record the end of a running pane reviewer whose supervisor exited (a zombie counts as exited). A
+    settled reply file is the review, so the end is `success` and its reader ingests it; no reply, and an
+    agent herdr says is gone, ends it `lost`. Anything else is left: unknown is never gone."""
+    from office import rerun
+    if d.get("pid") and not pid_gone(d["pid"]) and not _pid_reused(run, d["id"], d["pid"]):
+        return None
+    started = parse_iso(d.get("launched_at") or d["started_at"])
+    if (datetime.now(timezone.utc) - started).total_seconds() < REAP_GRACE_SECONDS:
+        return None
+    reply = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "reply.txt"
+    if reply.is_file() and reply.stat().st_size > 0:
+        if time.time() - reply.stat().st_mtime < REPLY_SETTLE_SECONDS:
+            return None  # the agent may still be writing it
+        sample = _herdr_agent_sample(_launch_spec(run, d["id"]).get("herdr_agent") or d.get("herdr_agent") or "")
+        if sample is not None and sample.get("text_busy", sample.get("busy")) is True:
+            return None  # still mid-turn: it may rewrite the reply
+        _finish(d["id"], 0, None, "success", (datetime.now(timezone.utc) - started).total_seconds(), only_if_open=True)
+        return f"{d['id']} reviewer finished; its supervisor was gone, so its reply was ingested"
+    if rerun.agent_alive(d) is not False:
+        return None  # alive, or herdr could not say
+    if _end_dispatch(con, run, d, "lost", "its process and herdr agent are gone (no reply)", stop=False):
+        return f"{d['id']} reviewer is gone"
+    return None
 
 
 def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
@@ -4420,6 +4459,14 @@ def _wait_terminal(dispatch_id: str, timeout: float | None = None) -> dict:
         if d.get("pid") and d.get("launcher") in ("process", "process-fallback") and not pid_alive(d["pid"]) and d["status"] == "running":
             time.sleep(1)
             continue
+        if d.get("launcher") == "herdr" and d.get("gate_id") and d["status"] == "running" and not d.get("ended_at"):
+            # The supervisor that records this end may have died (a reinstall under it): settle it here too.
+            con = db.connect()
+            try:
+                with contextlib.suppress(Exception):  # a failed probe leaves the wait as it was
+                    settle_dead_supervisor(con, state.get_run(con, d["run_id"]), d)
+            finally:
+                con.close()
         time.sleep(2)
     return {"exit_code": None, "terminal": "timeout"}
 
@@ -4434,6 +4481,8 @@ def supervise(dispatch_id: str) -> int:
     empty_reply = False
     child = None
     state_box = {"signal": None, "watching": False}
+    with contextlib.suppress(Exception):
+        version.current()  # cached now: ending the dispatch must not depend on the install still being on disk (#830)
 
     def forward(signum, _frame):
         state_box["signal"] = signum
@@ -4636,12 +4685,15 @@ def _reply_file_missing(spec: dict, classification: str) -> bool:
     return not (out.is_file() and out.stat().st_size > 0)
 
 
-def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False) -> None:
+def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False,
+            only_if_open: bool = False) -> None:
     accepted = False
     con = db.connect()
     try:
         with db.transaction(con):
             d = state.get_dispatch(con, dispatch_id)
+            if only_if_open and d.get("ended_at"):
+                return  # another process recorded the end first; a recovery never overwrites it
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
             status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")

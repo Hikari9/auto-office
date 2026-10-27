@@ -97,6 +97,73 @@ def test_a_live_supervisor_a_reply_or_a_fresh_launch_is_never_reaped(env, monkey
 
 
 @pytest.mark.approved
+def test_a_settled_reply_with_a_dead_supervisor_is_ingested(env, monkeypatch):
+    """#830: the supervisor died (a reinstall under it) after the agent wrote its reply."""
+    con, run = _orphan(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "alive")  # the agent is not what decides it
+    ddir = dispatch_mod.paths.run_dir(run["id"]) / "dispatches" / "Dorph"
+    ddir.mkdir(parents=True, exist_ok=True)
+    reply = ddir / "reply.txt"
+    reply.write_text("VERDICT: APPROVED\n")
+    assert dispatch_mod.reap_orphans(con, run) == []  # still fresh: the agent may be writing
+    os.utime(reply, (1, 1))
+    notes = dispatch_mod.reap_orphans(con, run)
+    d = _dispatch(con)
+    assert notes and "ingested" in notes[0], notes
+    assert d["ended_at"] and d["status"] == "exited" and d["terminal_classification"] == "success", d
+    assert dispatch_mod.reap_orphans(con, run) == []  # recorded once
+
+
+@pytest.mark.approved
+def test_a_busy_agent_or_an_already_ended_dispatch_is_not_ingested(env, monkeypatch):
+    con, run = _orphan(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "alive")
+    ddir = dispatch_mod.paths.run_dir(run["id"]) / "dispatches" / "Dorph"
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "reply.txt").write_text("VERDICT: APPROVED\n")
+    os.utime(ddir / "reply.txt", (1, 1))
+    monkeypatch.setattr(dispatch_mod, "_herdr_agent_sample", lambda name: {"busy": True, "text_busy": True})
+    assert dispatch_mod.reap_orphans(con, run) == []  # mid-turn: the draft is not the review
+    assert _dispatch(con)["ended_at"] is None
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='failed', terminal_classification='lost'")
+    con.commit()
+    monkeypatch.setattr(dispatch_mod, "_herdr_agent_sample", lambda name: None)
+    dispatch_mod._finish("Dorph", 0, None, "success", 1.0, only_if_open=True)
+    assert _dispatch(con)["terminal_classification"] == "lost"  # a recovery never overwrites a recorded end
+
+
+@pytest.mark.approved
+def test_a_supervisor_pid_reused_by_another_process_is_gone(env, monkeypatch):
+    con, run = _orphan(env, monkeypatch, pid=os.getpid())
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
+    ident = dispatch_mod._identity_file(run["id"], "Dorph", "supervisor")
+    ident.parent.mkdir(parents=True, exist_ok=True)
+    ident.write_text(json.dumps({"pid": os.getpid(), "start": "x", "c_start": "Thu Jan  1 00:00:00 1970"}))
+    assert dispatch_mod.reap_orphans(con, run)
+    assert _dispatch(con)["terminal_classification"] == "lost"
+
+
+@pytest.mark.approved
+def test_a_zombie_supervisor_is_a_dead_supervisor(env, monkeypatch):
+    """#830: the job that started the supervisor outlives it, so the pid stays a zombie and still answers a signal."""
+    import subprocess
+    from office.util import pid_alive, pid_gone
+    zombie = subprocess.Popen([sys.executable, "-c", "pass"])  # never waited on
+    for _ in range(100):
+        if subprocess.run(["ps", "-o", "stat=", "-p", str(zombie.pid)], capture_output=True, text=True).stdout.startswith("Z"):
+            break
+        import time
+        time.sleep(0.05)
+    assert pid_alive(zombie.pid) and pid_gone(zombie.pid)
+    assert not pid_gone(os.getpid())
+    con, run = _orphan(env, monkeypatch, pid=zombie.pid)
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
+    assert dispatch_mod.reap_orphans(con, run)
+    assert _dispatch(con)["terminal_classification"] == "lost"
+    zombie.wait()
+
+
+@pytest.mark.approved
 def test_status_reaps_and_a_superseded_integration_review_does_not_block_close(env, monkeypatch):
     con, run = _orphan(env, monkeypatch)
     monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")

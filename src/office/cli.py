@@ -642,8 +642,11 @@ def main(argv: list[str] | None = None) -> int:
             err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args, _refusal_hints(err, args, argv))
     except Exception as err:
-        from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
-        print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        try:
+            from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
+            print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        except ImportError:
+            pass  # the install is being replaced under this process: show the original error, not this one (#830)
         raise
     except KeyboardInterrupt:
         return 130
