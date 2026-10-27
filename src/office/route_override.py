@@ -2,8 +2,8 @@
 
 A `--quote` is text an orchestrator can write, so it never overrides a policy
 deny. A receipt is issued only by a person at a terminal (`office route
-override`): it is bound to one run, one role and one exact route, expires
-quickly, is HMAC-signed with a per-user key, and every use is appended to an
+override`): it is bound to one run, one role and one exact route, is consumed by the
+first dispatch that records it, expires quickly, is HMAC-signed with a per-user key, and every use is appended to an
 audit table. A receipt overrides policy only. It never widens capability,
 sandbox, reviewer-independence or landing checks, which run after it.
 
@@ -158,6 +158,8 @@ def find_valid(run_id: str | None, role: str, cand: dict, *, con: sqlite3.Connec
         for row in rows:
             receipt = dict(row)
             if hmac.compare_digest(receipt["mac"], _mac(receipt)) and _route_matches(receipt["route"], cand):
+                if _launched(con, receipt):
+                    continue  # one-off: a dispatch that carries this receipt consumed it
                 return receipt
         return None
     except sqlite3.Error:
@@ -165,6 +167,16 @@ def find_valid(run_id: str | None, role: str, cand: dict, *, con: sqlite3.Connec
     finally:
         if own and con is not None:
             con.close()
+
+
+def _launched(con: sqlite3.Connection, receipt: dict) -> bool:
+    """True once any dispatch of the run recorded this receipt id in its route (launch consumes it)."""
+    try:
+        like = f"%{receipt['id']}%"
+        return any(con.execute(f"SELECT 1 FROM {table} WHERE run_id=? AND route_json LIKE ? LIMIT 1",
+                               (receipt["run_id"], like)).fetchone() for table in ("dispatches", "gates"))
+    except sqlite3.Error:
+        return True  # an unreadable dispatch table never grants an override
 
 
 def record_use(receipt: dict, context: str, *, con: sqlite3.Connection | None = None) -> bool:

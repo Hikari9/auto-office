@@ -321,10 +321,10 @@ def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | Non
         live = candidates.live_user_policies((run or {}).get("repo_root"))
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return "policy-unreadable", f"the live user or repo policy cannot be read ({exc}), so a denial cannot be ruled out"
-    for policy in (route_policy.user_policy(config), *live):
-        denied = route_policy.is_denied(cand, policy)
-        if denied:
-            return "route-denied", denied
+    # A probe serves the executor role (#837): a role allow supersedes a legacy global deny, a role deny holds.
+    verdict = route_policy.effective_role_state(cand, "executor", [route_policy.user_policy(config), *live])
+    if verdict["state"] == "deny":
+        return "route-denied", verdict.get("reason") or f"executor is denied by {verdict['source']}: {verdict.get('rule')}"
     return None
 
 

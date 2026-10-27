@@ -201,3 +201,28 @@ def test_migrate_dry_run_writes_nothing_then_apply_and_rollback(home):
     assert routecmd.migrate().data["pending"] == []  # idempotent
     routecmd.migrate(rollback=True)
     assert cfg.read_text() == before
+
+
+def test_probe_denial_is_role_aware(monkeypatch, tmp_path):
+    """A role allow supersedes a legacy global deny for the probe's executor role; a role deny holds."""
+    from office import route_probe
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    row = cand("gpt-6-astra", "low", "codex", version="0.157.1")
+    legacy = {"routing": {"user_policy": {"denied_models": ["harness:codex"]}}}
+    assert route_probe._denial(row, None, legacy)[0] == "route-denied"
+    allowed = {"routing": {"user_policy": {"denied_models": ["harness:codex"], "role_rules": [
+        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "allow"}]}}}
+    assert route_probe._denial(row, None, allowed) is None
+    denied = {"routing": {"user_policy": {"role_rules": [
+        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "deny"}]}}}
+    assert route_probe._denial(row, None, denied)[0] == "route-denied"
+
+
+def test_receipt_is_consumed_by_the_first_dispatch_that_records_it(home):
+    _, con = home
+    receipt = issue(con)
+    c = {"harness": "claude", "model_id": "claude-opus-5-5", "invocation_model_id": "claude-opus-5-5", "effort": "high"}
+    assert route_override.find_valid("run-aaaa1111", "code_reviewer", c, con=con)["id"] == receipt["id"]
+    con.execute("INSERT INTO dispatches(id, run_id, route_json) VALUES('D1','run-aaaa1111',?)",
+                ('{"candidate": {"policy_override": {"receipt": "%s"}}}' % receipt["id"],))
+    assert route_override.find_valid("run-aaaa1111", "code_reviewer", c, con=con) is None
