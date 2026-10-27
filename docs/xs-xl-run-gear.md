@@ -33,19 +33,57 @@ The four versioned profiles only change the adaptive router's relative weighting
 
 Eligibility, trust, verified invocation model/effort, the role capability floor, user denials, reserves, live quota, benchmark context, domain/work matching, historical comparable **subtask** size, critical-path latency, expected rework, same-wave spread and per-task overkill still come from the existing adaptive router. The weights never assign a fixed model to a size. Versioned profiles are audit evidence, not new run gears.
 
-### Catalog qualification at 100% quota (illustrations, not executed dispatches)
+### Pinned Intelligence Index floors and ideal executor slates
 
-An unlimited quota does **not** grant adapter trust, harness availability, role eligibility, or a missing model effort setting. Actual ordered slates are produced from the pinned catalog and live proof on each dispatch. An illustrative **eligible-candidate seed** (rather than a claim of a live ranked choice) based on the current active catalog is:
+Only **new XS–XL run gears** apply the following intelligence safeguards to each
+independently sized *implementation subtask*, using **Artificial Analysis Intelligence
+Index v4.3.2**. A parent XL run can dispatch an S task against the **S floor 38**; the
+parent gear never supplies a stronger/weaker subtask floor. An equal score passes.
+Missing, wrong-version, nonnumeric, or below-floor evidence fails ordinary execution.
+Legacy pinned run presets retain their historical contracts.
 
-| Subtask size | First model to evaluate | Additional model candidates (qualify live and rank by adaptive result) |
-| --- | --- | --- |
-| XS | `agy/gemini-3.8-flash@low` | `codex/gpt-6-luna@medium`, `agy/claude-sonnet-5-5@low` |
-| S | `agy/gemini-3.8-flash@medium` | `agy/claude-sonnet-5-5@medium`, `codex/gpt-6-astra@low` |
-| M | `agy/claude-sonnet-5-5@medium` | `codex/gpt-6-astra@medium`, `agy/gemini-3.8-flash@medium` |
-| L | `codex/gpt-6-astra@high` | `agy/claude-sonnet-5-5@high`, `claude/claude-opus-5-5@medium` |
-| XL implementation task | `claude/claude-opus-5-5@high` | `codex/gpt-6-astra@high`, `agy/claude-opus-5-5@high` |
+| Subtask size | Minimum intelligence |
+| --- | ---: |
+| XS | 31 |
+| S | 38 |
+| M | 40 |
+| L | 44 |
+| XL | 47 |
 
-**Do not publish this illustration as a selected or qualified slate.** Selection requires actual installed harness version, trust proof, catalog status and live role qualification, under the currently pinned user policy. Haiku candidates are **retained but conformance-gated**, not promoted merely from model-name speculation. All four decommissioned MiMo V2.6 Pi/Kilo routes are non-dispatchable; their benchmark and old dispatch records remain in the catalog/history for reproducibility.
+User-approved soft **ideal executor ordering**, assuming all exact model+effort+harness
+routes qualify and quota is available. This is **not** a command to launch unavailable
+models, override factual gates, or prefer an expensive model regardless of task fit.
+
+| Size | Preferred | Immediate same-model harness self-fallback | Next qualified alternative | Last qualified alternative |
+| --- | --- | --- | --- | --- |
+| XS | Claude Haiku 5.5 medium (34; conditional) | — | Gemini 3.8 Flash low (33) | GPT-6.1 Terra low (36; conditional) |
+| S | Gemini 3.8 Flash medium (40) | — | Claude Haiku 5.5 high (38; conditional) | GPT-6.1 Terra medium (41; conditional) |
+| M | **Claude Code** Sonnet 5.5 medium (41; currently non-dispatchable) | **agy** Sonnet 5.5 medium (41; exact same model/effort) | GPT-6.1 Terra medium (41; conditional) | OpenCode GLM-5.3-Flash max (42; conditional) |
+| L | **Claude Code** Sonnet 5.5 high (47) | **agy** Sonnet 5.5 high (47; same effort) | GPT-6.1 Terra high (44; conditional) | Gemini 4 Argon **medium** (conditional, exact score not yet verified) |
+| XL | Claude Code Opus 5.5 medium (51) | — | Codex GPT-6.1 Sol medium (48; discovery-only) | Gemini 4 Argon **high** (53; conditional) |
+
+**Required guardrails:** Sonnet 5.5 Claude Code → agy is the only same-model
+harness fallback, at the **same effort**, immediately before switching model family.
+Claude Code Sonnet Medium cannot dispatch until its missing exact invocation/effort
+evidence is verified; a currently qualified agy variant may be selected instead.
+Reserve Opus 5.5 automatic executor routing for **genuinely XL subtasks**, even inside
+an XL parent run. No active MiMo routes. Haiku 5.5, Sol 6.1, Terra 6.1, Argon and
+GLM conditional rows are never promoted merely because they appear here.
+L Argon **Medium** cannot inherit Argon High's AA score; it must have its own
+pinned same-index score at least **44**, verified invocation and trust. A currently
+eligible route may depart from this ideal order for cost-to-success, benchmark fit,
+harness capability, quota, latency, prior rework, domain or explicit user preference.
+Preview and actual dispatch must explain that departure, the skipped candidate,
+and the correct fallbacks.
+
+GPT-6.1 Terra's six version-pinned AA scores (non-reasoning 33, low 36, medium 41,
+high 44, xhigh 45, max 48) are registered in **separate PR #811**; until it merges
+and passes conformance these are **conditional catalog entries**, not active
+dispatch claims. GPT-6.1 Sol Medium is also discovery-only until exact harness
+qualification. Bounded **discovery trials** can investigate missing benchmark
+provenance only where existing S/M discovery consent and risk rules permit, but
+must never trial a **known below-size-floor score** or violate the XL Opus rule.
+A discovery probe is not ordinary dispatch eligibility.
 
 ### Example: mixed-size XL run (illustrative, not a live dispatch)
 
