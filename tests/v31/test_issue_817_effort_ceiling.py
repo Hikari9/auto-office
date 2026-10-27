@@ -114,3 +114,10 @@ def test_reroute_selecting_the_same_model_above_the_ceiling_is_refused(monkeypat
     assert exc.value.category == "effort-above-user-quote" and "ask the user for new words" in exc.value.next_step
     pick["candidate"]["effort"] = "low"
     assert dispatch.planned_route(None, {}, task, reroute=True)["route_source"] == "reroute"
+
+
+def test_reused_quote_cannot_authorize_another_model_above_the_ceiling(env):
+    _pin(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", "claude/claude-opus-5-5@high", "--quote", QUOTE,
+                           env=_quota(env))
+    assert code != 0 and "effort-above-user-quote" in out, out

@@ -386,7 +386,8 @@ def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: st
         except (Refused, Usage):
             effort = None
     same_quote = bool(prior and quote is not None and quote.strip() == prior["quote"].strip())
-    if prior and prior.get("model") == model and effort and not (quote is not None and not same_quote):
+    # An unquoted raise on the same model, or a re-used quote on any model, is not new user authority.
+    if prior and effort and (same_quote or (quote is None and prior.get("model") == model)):
         _refuse_above_ceiling(task, f"{flag} {text}", prior, effort)
     if quote is None or (same_quote and prior.get("model") == model):
         return prior
