@@ -746,7 +746,8 @@ def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
         return by_size[size]
     if policy_cfg.get("preferred_seed"):
         return policy_cfg["preferred_seed"]
-    if role in routing.ADAPTIVE_ROLES and size in executor_slates.FLOORS:
+    if (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
+            and size in executor_slates.FLOORS):
         return executor_slates.ideal_seed(size)
     return None
 

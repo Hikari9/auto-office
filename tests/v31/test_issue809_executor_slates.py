@@ -62,3 +62,11 @@ def test_conditional_missing_and_unqualified_ideal_routes_are_audited():
     assert [entry["status"] for entry in summary] == [
         "not-in-catalog", "selected", "not-in-catalog", "not-in-catalog"]
     assert summary[1]["qualified_routes"] == [cid]
+
+
+def test_old_pinned_gears_do_not_inherit_new_task_size_restrictions():
+    for gear in ("direct", "direct+review", "light", "quick", "express", "full"):
+        req = {"context": {"gear": gear, "size_class": "S"}}
+        assert slates.new_gear_size(req) is None
+    assert slates.new_gear_size({"context": {"gear": "XL", "size_class": "S"}}) == "S"
+    assert slates.new_gear_size({"context": {"gear": "M", "size_class": "XL"}}) == "XL"

@@ -359,6 +359,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         # automatic selection and only where its role and size scope match.
         policies = request.get("user_policies") or []
         size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
+        new_policy_size = executor_slates.new_gear_size(request)
         pool = []  # discovery candidates: never in the eligible slate, whatever the role
         # An explicit caller value wins; otherwise the user's consent decides, so a caller that
         # omits the key cannot silently drop an opted-in user's free routes.
@@ -381,7 +382,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             elif overkill:
                 rejected.append({"candidate": cid, "stage": 1, "reason": overkill, "category": "overkill"})
             elif (role in ADAPTIVE_ROLES and
-                  (restriction := executor_slates.model_restriction(c, size_class)) and
+                  (restriction := executor_slates.model_restriction(c, new_policy_size)) and
                   not (request.get("manual_route") and cid in
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
@@ -459,7 +460,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if not passed and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": reason})
                 continue
-            size_reason = (executor_slates.benchmark_gate(c, size_class)
+            size_reason = (executor_slates.benchmark_gate(c, new_policy_size)
                            if role in ADAPTIVE_ROLES else None)
             if size_reason and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": size_reason,
