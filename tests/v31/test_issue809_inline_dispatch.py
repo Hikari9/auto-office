@@ -52,7 +52,11 @@ def test_equal_or_dearer_inline_cost_never_runs_inline(gear):
 @pytest.mark.parametrize("gear", ["S", "M"])
 def test_a_real_saving_smaller_than_the_display_rounding_still_runs_inline(gear):
     est = "inline=1.0000001 dedicated=1.0000002 minutes: a measured but tiny saving"
-    assert task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)["mode"] == "inline"
+    mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
+    assert mode["mode"] == "inline"
+    assert mode["estimated_savings"]["savings"] > 0
+    assert mode["estimated_savings"]["savings"] == pytest.approx(1e-7, abs=1e-12)
+    assert "inline 1.0000001 vs dedicated 1.0000002" in mode["why"], mode["why"]
 
 
 def test_the_missing_estimate_reason_names_the_gear():
