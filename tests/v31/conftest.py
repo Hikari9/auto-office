@@ -234,6 +234,12 @@ class Env:
         monkeypatch.setattr(candidates, "catalog_rows", lambda: [
             {**r, "dispatchable": False} if r.get("invocation_harness") == "agy"
             and str(r.get("model_id", "")).startswith("claude-") else r for r in seed_rows()])
+        # The shipped reviewer seed is strict (luna > deepseek > opus@low, #815) and the fake env has no deepseek
+        # route, so a scripted reviewer chain would end after two routes. The suites that walk a chain need the
+        # fakes' other routes; the strict seed itself is covered by test_route_discovery_routing.
+        seed_role_policy = candidates.role_policy
+        monkeypatch.setattr(candidates, "role_policy", lambda config, role: (
+            {k: v for k, v in seed_role_policy(config, role).items() if k != "strict_seed"}))
         # A disposable state home: reporters working it are reclaimed when this
         # owner process ends, even if the directory survives an interrupted
         # teardown (#501).
