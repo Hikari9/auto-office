@@ -789,6 +789,29 @@ def _effective_task_descriptor(run: dict, task: dict | None) -> dict:
     return d
 
 
+def seeded_fallback_blockers(decision: dict) -> str:
+    """Seeded reviewer routes cut by the trust floor when the chain stopped on the protected quota.
+
+    The quota status alone hides fallbacks cut at an earlier stage (e.g. an unproven
+    trust state), which read as if no fallback existed. Empty when nothing was cut."""
+    req = decision.get("request") or {}
+    seed = req.get("preferred_seed")
+    if not seed:
+        return ""
+    by_id = {routing.candidate_id(c): c for c in req.get("candidates") or []}
+    out = []
+    for r in decision.get("rejected") or []:
+        cid = r.get("candidate")
+        c = by_id.get(cid)
+        # Only a trust cut is something `office approve trust` fixes; probe and pool cuts are not.
+        if (c is None or r.get("stage") != 2 or not str(r.get("reason", "")).startswith("adapter trust is derived as")
+                or routing.preferred_rank(c, seed) is None or cid in out):
+            continue
+        out.append(cid)
+    # Kept short: the caller's failure text is truncated.
+    return "; ".join(f"{cid} is not trusted (office approve trust {cid} --quote ...)" for cid in out[:2])
+
+
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
                     task_id: str | None, dispatch_kind: str,
                     wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
