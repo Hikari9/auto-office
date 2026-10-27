@@ -324,7 +324,7 @@ def test_uninstalled_harness_routes_are_unavailable(h):
     # MiMo is decommissioned (#809): its rows are never candidates, installed harness or not.
     assert why["pi/mimo-v2.6-pro@medium"].startswith("not a candidate: decommissioned model")
     assert not [r for r in planner["eligible"] if r.startswith(("pi/", "kilo/"))]
-    assert any(reason.endswith(" not installed") for reason in why.values()), why
+    assert why["kilo/step-5-preview-free@high"] == "kilo not installed"
 
 
 def test_credentials_checks_files_not_binaries(h, monkeypatch):

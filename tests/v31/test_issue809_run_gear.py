@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from conftest import PLAN_ONE, start_inline
+from conftest import PLAN_ONE, PLAN_TWO, start_inline
 from office import config, contract, executor_slates, planfile, risk, state, task_sizing
 
 
@@ -121,23 +121,43 @@ def test_legacy_name_starts_an_explicit_preset_and_names_its_closest_gear(env):
     env.trust()
     code, out = env.office("start", "fixture goal", "--gear", "full", "--planner", "inline")
     assert code == 0 and "closest to XL" in out, out
-    assert set(config.LEGACY_EQUIVALENT) == set(config.LEGACY_GEARS)
-    assert set(config.LEGACY_EQUIVALENT.values()) <= set(config.RUN_GEARS)
+    assert config.LEGACY_EQUIVALENT == {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M",
+                                        "express": "M", "full": "XL"}
+    _, run = _run(env)
+    assert run["gear"] == "full" and run["gates"]["gear_model_version"] == "legacy-pinned"
+    assert not run["risk"].get("complexity_only"), "a legacy start keeps its historical size and risk reading"
+
+
+def _strip_gear_model(con, rid):
+    """A run pinned before XS-XL existed: its gates JSON has none of the gear-model keys."""
+    run = state.get_run(con, rid)
+    gates = {k: v for k, v in run["gates"].items()
+             if k not in ("gear_model_version", "run_gear", "run_gear_rationale")}
+    state.update_run(con, rid, gates=gates)
+    con.commit()
+    return state.get_run(con, rid)["gates"]
 
 
 def test_legacy_pinned_run_resumes_with_its_original_gear_and_gates(env):
     env.trust()
     start_inline(env, plan=PLAN_ONE, gear="express")
     env.office("approve", "plan", "--quote", "approved", check=0)
-    con, before = _run(env)
-    assert before["gear"] == "express" and before["gates"]["gear_model_version"] == "legacy-pinned"
+    con, run = _run(env)
+    before = _strip_gear_model(con, run["id"])
     env.office("resume", check=0)
+    code, out = env.office("inspect", "plan")
     _, after = _run(env)
-    assert after["gear"] == "express"
-    for key in ("gear_model_version", "run_gear", "plan_review", "code_review", "dedicated_planner",
-                "review_floor", "review_contract", "run_gear_rationale"):
-        assert after["gates"].get(key) == before["gates"].get(key), key
-    assert "RUN DISPATCH gear express" in env.office("inspect", "plan")[1]
+    assert code == 0 and after["gear"] == "express" and after["gates"] == before
+    assert "gear_model_version" not in after["gates"]
+    from office import plan_view
+    pv = plan_view.preview(env.con(), after, state.current_plan(env.con(), after["id"])["tasks"])
+    assert pv["gear_model_version"] == "legacy-pinned", "a run with no gear-model key is never treated as XS-XL"
+    assert plan_view.render(after, 1, pv)[3].endswith("legacy pinned run; no new gear fit applied")
+    # A plan revision on that run must not give its tasks an XS-XL size or profile.
+    env.write_plan(PLAN_ONE.replace("done:\n", "done:\n- legacy run revised after the XS-XL upgrade\n", 1))
+    env.office("amend", "plan", "--contract", "--", "revise the plan", check=0)
+    desc = state.get_task(env.con(), after["id"], "T1")["descriptor"]
+    assert not {"task_size", "profile", "profile_version", "task_size_source"} & set(desc), desc
 
 
 # ---------------------------------------------------------------- R2: planner run-gear recommendation
@@ -182,13 +202,22 @@ def test_recommendation_below_the_intake_gear_is_refused(env, intake, rec, refus
 
 def test_recommendation_below_the_risk_floor_is_refused_even_at_the_intake_gear(env):
     env.trust()
-    env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline", check=0)
-    plan = _plan_with(REC.format(gear="XS")).replace("blast_radius: repo", "blast_radius: production")
-    env.write_plan(plan)
-    code, out = env.office("submit")
-    assert code != 0 and "run gear recommendation refused" in out and "below the S floor" in out, out
+    env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline", "--blast-radius", "local", check=0)
     con, run = _run(env)
+    assert run["risk"]["classification"] == "low"
+    env.write_plan(_plan_with(REC.format(gear="XS")).replace("blast_radius: repo", "blast_radius: production"))
+    code, out = env.office("submit")
+    # Intake called it low and XS; the plan's production blast radius raises risk, so XS is now under the floor.
+    assert code != 0 and "run gear recommendation refused" in out and "below the S floor" in out, out
     assert not state.current_plan(con, run["id"])
+
+
+def test_a_low_risk_recommendation_at_the_intake_gear_is_accepted(env):
+    env.trust()
+    env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline", "--blast-radius", "local", check=0)
+    env.write_plan(_plan_with(REC.format(gear="XS")))
+    code, out = env.office("submit")
+    assert code == 0 and "planner recommends run gear XS" in out, out
 
 
 def test_risk_module_run_gear_problem_is_order_and_risk_aware():
@@ -198,6 +227,9 @@ def test_risk_module_run_gear_problem_is_order_and_risk_aware():
     assert risk.run_gear_problem("M", low, "S") and "intake gear M" in risk.run_gear_problem("M", low, "S")
     assert risk.run_gear_problem("XS", elevated, "XS") and "floor" in risk.run_gear_problem("XS", elevated, "XS")
     assert risk.run_gear_problem("XS", elevated, "S") is None
+    unknown = {"classification": "unknown"}
+    assert "floor" in risk.run_gear_problem("XS", unknown, "XS") and risk.run_gear_problem("XS", unknown, "S") is None
+    assert risk.run_gear_problem("XS", low, "XS") is None
     assert risk.run_gear_problem("full", low, "XS") is None  # a legacy pin has no gear order to undercut
     assert risk.run_gear_problem("S", low, "XXL")
 
@@ -210,7 +242,17 @@ def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env
     out = _approved_dispatch(env, body, "M")
     assert "RUN DISPATCH gear M" in out and "funded gates: plan review=no, convergence=yes" in out, out
     assert "T1 S | profile balanced | why: one bounded file with no interfaces" in out, out
-    assert "ACTUAL DISPATCH T1:" in out, out
+    con, run = _run(env)
+    route = state.recorded_route(state.get_task(con, run["id"], "T1"))["candidate"]
+    dispatched = con.execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at LIMIT 1").fetchone()[0]
+    line = next(l for l in out.splitlines() if l.startswith("ACTUAL DISPATCH T1: "))
+    assert line.startswith(f"ACTUAL DISPATCH T1: {dispatched} | ") and route, line
+    # S's ideal slate starts with Gemini Flash at medium: every ideal that did not run says why.
+    skipped = [l for l in out.splitlines() if l.startswith("  ideal route skipped: #")]
+    assert 2 <= len(skipped) <= 3, out  # the adaptive pick is one of three ideals, or none of them
+    assert any("claude/claude-haiku-5-5@high (unqualified): claude@1/claude-haiku-5-5@high" in l for l in skipped), skipped
+    assert any("codex/gpt-6.1-terra@medium (unqualified)" in l for l in skipped), skipped
+    assert all(" (selected)" not in l for l in skipped), skipped
 
 
 def test_routing_audit_records_every_809_field(env):
@@ -224,12 +266,27 @@ def test_routing_audit_records_every_809_field(env):
     assert audit["run_gear"] == "M" and audit["run_gear_rationale"] == run["gates"]["run_gear_rationale"]
     assert audit["task_size"] == "S" and audit["task_size_rationale"] == "one bounded file with no interfaces"
     assert audit["profile"] == "balanced" and audit["profile_version"] == task_sizing.PROFILE_VERSION
-    assert audit["preferred_route"] and audit["preferred_route_reason"] and audit["selection_reason"]
-    assert isinstance(audit["fallback_routes"], list)
+    planned = json.loads(con.execute("SELECT preview_json FROM plans WHERE run_id=?", (run["id"],)).fetchone()[0])["tasks"]["T1"]
+    assert audit["preferred_route"] == planned["route_plan"]["primary"]
+    assert audit["fallback_routes"] == planned["route_plan"]["fallbacks"] and audit["fallback_routes"]
+    assert audit["preferred_route_reason"] == audit["selection_reason"]
     assert audit["selected_route"] == audit["dispatch"]["dispatched"]
+    assert audit["effective_gates"] == {k: run["gates"].get(k) for k in (
+        "plan_review", "code_review", "visual", "review_floor", "review_contract")}
     assert audit["effective_gates"]["code_review"] is True and audit["effective_gates"]["plan_review"] is False
+    assert audit["effective_gates"]["review_contract"] == contract.CONVERGENCE
     assert audit["plan_version"] == run["plan_version"] == 1
     assert audit["wave"] == 1 and audit["dispatch_version"] == 1
+    # A later decision for the same task is dispatch 2, from the dispatches already recorded.
+    from office import dispatch
+    decision = {"request": {"role": "executor", "task_id": "T1", "context": {"size_class": "S"}}, "routing": {"slate": []},
+                "selected": audit["selected_route"], "selection_disclosure": {"reason": "second try"}}
+    with con:
+        dispatch._record_routing(con, state.get_run(con, run["id"]), decision)
+    again = json.loads(con.execute("SELECT disclosure_json FROM route_audit WHERE run_id=? ORDER BY created_at DESC LIMIT 1",
+                                   (run["id"],)).fetchone()[0])
+    assert again["dispatch_version"] == len(state.task_dispatches(con, run["id"], "T1")) + 1 >= 2
+    assert again["preferred_route"] == audit["selected_route"] and again["fallback_routes"] == []
     # The same facts ride on the task's stored route, so a relaunch reproduces them.
     stored = json.loads(con.execute("SELECT route_json FROM tasks WHERE run_id=? AND id='T1'", (run["id"],)).fetchone()[0])
     assert stored["selected_route"] == audit["selected_route"] and stored["size_decision"]["task_size"] == "S"
@@ -258,8 +315,10 @@ def test_plan_diagram_shows_run_gear_header_size_profile_and_every_fallback_rati
     assert "RUN DISPATCH gear M" in out and "funded gates:" in out, out
     assert "size: S | one bounded file with no interfaces" in out and "profile: balanced" in out, out
     con, run = _run(env)
-    slate = json.loads(con.execute("SELECT preview_json FROM plans WHERE run_id=?", (run["id"],)).fetchone()[0])["tasks"]["T1"]["slate"]
+    task = json.loads(con.execute("SELECT preview_json FROM plans WHERE run_id=?", (run["id"],)).fetchone()[0])["tasks"]["T1"]
+    slate = task["slate"]
     assert len(slate) >= 2
+    assert task["fallback_routes"] == slate[1:] and task["preferred_route"], task
     for entry in slate[1:]:
         assert entry["reason"] and entry["reason"] in out, entry
 
@@ -275,14 +334,6 @@ def test_replan_delta_reports_size_and_profile_changes():
 
 
 # ---------------------------------------------------------------- self-review fixes
-
-def test_legacy_pinned_run_keeps_the_descriptor_its_plan_wrote(env):
-    env.trust()
-    start_inline(env, plan=PLAN_ONE, gear="direct+review")
-    con, run = _run(env)
-    desc = state.get_task(con, run["id"], "T1")["descriptor"]
-    assert not {"task_size", "profile", "profile_version", "task_size_source"} & set(desc), desc
-
 
 def test_inferred_size_is_marked_and_never_counts_as_a_planner_declared_size():
     base = {"id": "T1", "scope": ["a.py"], "depends": [], "interfaces": []}
@@ -355,3 +406,63 @@ def test_plan_warns_about_unpaired_size_and_gear_fields():
     assert any("without `task_size:`" in w for w in planfile.parse(no_size).warnings)
     assert planfile.parse(_plan_with("run_gear: l   (optional note)\nrun_gear_why: three coupled packages here\n")
                           ).requirements["run_gear"]["gear"] == "L"
+
+
+
+def test_planner_size_raise_is_complexity_not_risk_for_xs_xl_runs_only():
+    xs_xl = {"classification": "low", "classified_by": "intake", "blast_radius": "repo", "size_class": "M",
+             "complexity_only": True, "high": False, "irreversible": False}
+    assert risk.planner_reclassify(xs_xl, {"size_class": "XL"}) is None or \
+        not risk.planner_reclassify(xs_xl, {"size_class": "XL"})["high"]
+    legacy = {k: v for k, v in xs_xl.items() if k != "complexity_only"}
+    raised = risk.planner_reclassify(legacy, {"size_class": "XL"})
+    assert raised and raised["high"] and raised["classification"] == "elevated"
+    assert risk.planner_reclassify(xs_xl, {"blast_radius": "production"})["high"], "blast radius still raises risk"
+
+
+def test_intake_fit_uses_declared_size_then_signals_and_never_guesses_xs():
+    assert config.fit_gear(None, {"size_class": "S"}) == "S"
+    assert config.fit_gear(None, {}) == "M"
+    assert config.fit_gear(None, {}, volume=True) == "M"
+    assert config.fit_gear(None, {}, volume=True, interview=True) == "L"
+    assert config.fit_gear(None, {}, adversarial=True, interview=True, volume=True) == "L"
+    assert config.fit_gear("full", {"size_class": "S"}) == "full"
+    assert "multiwave volume and discovery/interview" in config.gear_rationale("L", {}, volume=True, interview=True)
+    assert "conservative M" in config.gear_rationale("M", {})
+    assert config.gear_rationale("S", {"size_class": "S"}).startswith("intake complexity S")
+
+
+def test_replan_delta_is_silent_for_an_unchanged_task():
+    from office import plan_view
+    task = {"title": "t", "task_size": "S", "profile": "balanced", "route": "a", "depends": [], "wave": 1,
+            "base": None, "needs": []}
+    assert plan_view.diff({"tasks": {"T1": dict(task)}}, {"tasks": {"T1": dict(task)}}, 1) == ["diagram unchanged from p1"]
+    unsized = {k: v for k, v in task.items() if k not in ("task_size", "profile")}
+    lines = plan_view.diff({"tasks": {"T1": unsized}}, {"tasks": {"T1": dict(task)}}, 1)
+    assert "  T1 size: unknown -> S (new evidence)" in lines and "  T1 profile: unknown -> balanced" in lines, lines
+
+
+def test_audit_wave_follows_the_stored_plan_layout(env):
+    from office import plan_view
+    env.trust()
+    stacked = PLAN_TWO.replace("### T2: Implement mul\nscope: mul.py\ndepends: none",
+                               "### T2: Implement mul\nscope: mul.py\ndepends: T1")
+    start_inline(env, plan=stacked, gear="M")
+    con, run = _run(env)
+    assert [plan_view.task_wave(con, run, t) for t in ("T1", "T2", "T9", None)] == [1, 2, None, None]
+    code, out = env.office("approve", "plan", "--quote", "approved")
+    assert code == 0, out
+    code, out = env.office("dispatch", "T1", "T2")
+    assert code == 0, out
+    waves = {r[0]: r[1] for r in con.execute(
+        "SELECT task_id, json_extract(disclosure_json, '$.wave') FROM route_audit WHERE phase='dispatch'")}
+    assert waves == {"T1": 1, "T2": 2}, waves
+
+
+def test_preferred_routes_prefer_the_plan_then_the_router_slate_then_the_selection():
+    from office import dispatch
+    planned = {"planned": {"primary": "a@1/x@low", "fallbacks": ["b@1/y@low"]},
+               "routing": {"slate": [{"route": "r1"}, {"route": "r2"}]}, "selected": "z"}
+    assert dispatch._preferred_routes(planned) == ("a@1/x@low", ["b@1/y@low"])
+    assert dispatch._preferred_routes({**planned, "planned": {}}) == ("r1", ["r2"])
+    assert dispatch._preferred_routes({"selected": "z"}) == ("z", [])
