@@ -766,6 +766,29 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     return f"fix: {fix}; {pinned}"
 
 
+def seeded_fallback_blockers(decision: dict) -> str:
+    """Why each other preferred_seed route was out when the chain stopped on the protected quota.
+
+    The quota status alone hides fallbacks cut at an earlier stage (e.g. an unproven
+    trust state), which read as if no fallback existed. Empty when nothing was cut."""
+    req = decision.get("request") or {}
+    seed = req.get("preferred_seed")
+    if not seed:
+        return ""
+    by_id = {routing.candidate_id(c): c for c in req.get("candidates") or []}
+    out, seen = [], set()
+    for r in decision.get("rejected") or []:
+        c = by_id.get(r.get("candidate"))
+        if c is None or routing.preferred_rank(c, seed) is None or r["candidate"] in seen:
+            continue
+        seen.add(r["candidate"])
+        line = f"{r['candidate']}: {r.get('reason')}"
+        if r.get("stage") == 2:
+            line += f" (a user may promote it: office approve trust {r['candidate']} --quote \"<user's words>\")"
+        out.append(line)
+    return "; ".join(out)
+
+
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
                     task_id: str | None, dispatch_kind: str,
                     wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
