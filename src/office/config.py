@@ -1,6 +1,7 @@
 """Effective configuration and gate resolution.
 
-Precedence is prompt/CLI > repo > user > plugin default, unchanged from v3.
+Precedence is prompt/CLI > repo > user > shipped for ordinary preferences.
+Role-specific policy decisions belong to the global user, not an implicit repo override.
 A run pins the resolved result in runs.db at start; later reads come from the
 pinned snapshot, never from the live files.
 """
@@ -125,6 +126,14 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
                 warnings.append({"tier": tier, "key": k, "reason": "not-configurable-ignored"})
             elif k not in allowed:
                 warnings.append({"tier": tier, "key": k, "reason": "unknown-key-ignored"})
+            elif tier == "prompt_cli" and k == "routing" and isinstance(v, dict) and "user_policy" in v:
+                # Orchestrator `--set` is a run preference, not an authenticated
+                # change to the global user's persistent routing firewall.
+                raise ValueError("routing.user_policy belongs to the user config; --set cannot override user authority")
+            elif tier == "repo" and k == "routing" and isinstance(v, dict) and isinstance(v.get("user_policy"), dict) and "role_rules" in v["user_policy"]:
+                # Do not silently grant a repository authority over the user's
+                # firewall-style role policy. Refuse rather than discard a deny.
+                raise ValueError("repository routing.user_policy.role_rules is not authoritative; move role rules into the user config")
             elif tier == "repo" and k == "onboarding":
                 # Onboarding completion is the user's, not a repository's (#484).
                 warnings.append({"tier": tier, "key": k, "reason": "user-level-key-not-repo-configurable"})
