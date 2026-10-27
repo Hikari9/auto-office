@@ -372,6 +372,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
         for c in request.get("candidates", []):
             cid = candidate_id(c)
             role_rule = route_policy.effective_role_state(c, role, policies)
+            if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
+                role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
             denied = role_rule.get("reason") or f"{role} policy deny by {role_rule['source']}: {role_rule.get('rule', cid)}" if role_rule["state"] == "deny" else None
             overkill = None if request.get("manual_route") else next(
@@ -417,7 +419,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
             # Mature, replay-validated evidence influences selection preference;
             # it is not a second permission tier or an automatic policy deny.
             learned_allow = rule["state"] == "neutral" and event.get("state") == "learned-eligible"
-            eligibility[cid] = {"policy": rule["state"], "source": "learned" if learned_allow else rule["source"]}
+            source = "learned" if learned_allow else ("declared" if cid == request.get("declared_route") else rule["source"])
+            eligibility[cid] = {"policy": rule["state"], "source": source}
             if learned_allow:
                 eligibility[cid]["event_id"] = event.get("event_id")
 

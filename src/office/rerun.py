@@ -396,7 +396,7 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
     if as_model is not None:
         if resume:
             cand = candidates.declared_decision(as_model, role="executor", config=state.pinned_config(run),
-                                                repo_root=run.get("repo_root"))["candidate"]
+                                                repo_root=run.get("repo_root"), run_id=run["id"])["candidate"]
             if cand["harness"] != (parent.get("adapter_id") or parent.get("harness")):
                 raise Refused("resume-impossible", f"cannot resume {task['id']} on {cand['harness']}: "
                               f"{parent['id']}'s session belongs to {parent.get('adapter_id') or parent.get('harness')}",
@@ -476,7 +476,8 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
     if review_as is not None:
         # the route's shape and capability, before any pin is written
-        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer", config=state.pinned_config(run))
+        candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer", config=state.pinned_config(run),
+                                    run_id=run["id"])
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")

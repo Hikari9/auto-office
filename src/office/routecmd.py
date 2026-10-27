@@ -121,3 +121,104 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
         lines.append(f"commented source backed up at {backup}")
     return Result(lines=lines, next="office route policy --effective --role " + (role if role != "*" else "code_reviewer"),
                   data={"changed": True, "role": role, "route": route, "action": action, "path": str(path)})
+
+
+def override(*, route: str | None, role: str | None, run: str | None, reason: str | None, ttl: str | None,
+             revoke: str | None = None, list_receipts: bool = False) -> Result:
+    """The user's one-off override of a role deny. Only a person at a terminal can issue one."""
+    from office import db, route_override
+    con = db.connect()
+    try:
+        if list_receipts:
+            rows = route_override.list_receipts(con, run)
+            lines = [f"{r['id']} run {r['run_id'][:8]} {r['role']} {r['route']} until {r['expires_at']}"
+                     + (" (revoked)" if r["revoked_at"] else "") for r in rows] or ["no override receipts"]
+            return Result(lines=lines, data={"receipts": [{k: v for k, v in r.items() if k != "mac"} for r in rows]})
+        if revoke:
+            ok = route_override.revoke(con, revoke)
+            return Result(lines=[f"{revoke}: " + ("revoked" if ok else "not found or already revoked")], data={"revoked": ok})
+        if not (route and role and run):
+            raise configcmd._usage("override needs <route>, --role and --run")
+        receipt = route_override.issue(con, run_id=run, role=role, route=route, reason=reason or "",
+                                       ttl_s=route_override.parse_ttl(ttl))
+    finally:
+        con.close()
+    return Result(lines=[f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
+                         f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
+                         "landing checks still apply."],
+                  next=f"the orchestrator re-dispatches with --as/--review-as {receipt['route']}",
+                  data={"receipt": {k: v for k, v in receipt.items() if k != "mac"}})
+
+
+_MIGRATION_BACKUP = ".pre-837-migrate.bak"
+
+
+def migrate(*, apply: bool = False, rollback: bool = False) -> Result:
+    """Dry-run by default: what #837 changes for existing settings and which routes stop being trust-blocked.
+
+    `--apply` rewrites only the user config: each legacy global `denied_models` entry also becomes an
+    explicit all-role deny rule (same meaning, now editable per role). Nothing is removed, so rollback
+    is the backup copy. Historical trust acts, runs and pinned policies are never rewritten."""
+    import shutil
+    path = configcmd._tier_path("user", Path.cwd())
+    backup = path.with_name(path.name + _MIGRATION_BACKUP)
+    if rollback:
+        if not backup.is_file():
+            raise configcmd._usage(f"no migration backup at {backup}")
+        shutil.copy2(backup, path)
+        return Result(lines=[f"restored {path} from {backup}"], data={"rolled_back": True})
+    raw = configcmd._load(path)
+    user_policy = ((raw.get("routing") or {}).get("user_policy") or {})
+    legacy = [d for d in (user_policy.get("denied_models") or []) if isinstance(d, str)]
+    existing = {(r.get("role"), r.get("route")) for r in user_policy.get("role_rules") or [] if isinstance(r, dict)}
+    pending = [d for d in legacy if ("*", d) not in existing]
+    lines = [f"legacy global denied_models: {len(legacy)} (all roles, still enforced); {len(pending)} not yet explicit role rules"]
+    lines += [f"  deny * {d}  (wildcard, every role)" for d in pending]
+    data = {"legacy_denied": legacy, "pending": pending, "applied": False}
+    trust = _legacy_trust_diff()
+    lines += trust["lines"]
+    data["trust_diff"] = trust["data"]
+    if apply and pending:
+        routing = raw.setdefault("routing", {})
+        up = routing.setdefault("user_policy", {})
+        rules = list(up.get("role_rules") or [])
+        rules += [{"role": "*", "route": d, "state": "deny", "wildcard": True} for d in pending]
+        up["role_rules"] = rules
+        configcmd._validate(raw, "user", Path.cwd())
+        if path.is_file():
+            shutil.copy2(path, backup)
+        configcmd._write(path, raw)
+        lines.append(f"applied; undo with `office route migrate --rollback` (backup {backup})")
+        data["applied"] = True
+    elif not apply:
+        lines.append("dry run: nothing written. `office route migrate --apply` writes the rules above.")
+    return Result(lines=lines, next="office route policy --effective --role code_reviewer", data=data)
+
+
+def _legacy_trust_diff() -> dict:
+    """Routes the old trust gate blocked that role policy now admits. Read-only; audit rows untouched."""
+    from office import db, routing as routing_mod
+    out = {"lines": [], "data": {"newly_eligible": 0, "quarantined_by_user": []}}
+    try:
+        con = db.connect()
+    except Exception:  # no runs.db yet: nothing historical to compare
+        return out
+    try:
+        scoring.ensure_trust_schema(con)
+        acts = con.execute("SELECT triple, target_state, actor_id FROM adapter_trust_acts").fetchall()
+        out["lines"].append(f"historical trust acts: {len(acts)} (audit only; never converted into a deny)")
+        quarantined = sorted({a["triple"] for a in acts if a["target_state"] == "quarantined" and a["actor_id"] == "user"})
+        for triple in quarantined:
+            out["lines"].append(f"  you once quarantined {triple}: keep it denied with `office route deny <route> --role <role>`")
+        out["data"]["quarantined_by_user"] = quarantined
+        blocked = 0
+        for role in sorted(routing_mod.MUTABLE_TRUST_ROLES):
+            cands, _ = candidates.build_candidates(con, role, probe=False, user_policies=[])
+            for c in cands:
+                if scoring.evaluate_trust_state(con, routing_mod.candidate_id(c))[1] != "proven":
+                    blocked += 1
+        out["data"]["newly_eligible"] = blocked
+        out["lines"].append(f"routes the old trust gate blocked that are now neutral/eligible: {blocked} (role x route pairs)")
+    finally:
+        con.close()
+    return out

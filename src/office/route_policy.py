@@ -155,12 +155,14 @@ def user_policy(config: dict) -> dict:
     provenance = config.get(PROVENANCE_KEY) or {}
     return {"denied": deepcopy(raw.get("denied_models") or []),
             "role_rules": deepcopy(raw.get("role_rules") or []),
+            "strict_roles": list(raw.get("strict_allow_roles") or []),
             "ceilings": deepcopy(raw.get("version_ceilings") or {}),
             "ceiling_sources": {lineage: provenance.get(f"routing.user_policy.version_ceilings.{lineage}")
                                 for lineage in (raw.get("version_ceilings") or {})},
             "overkill": deepcopy(raw.get("overkill_rules") or []),
             "sources": {key: provenance.get(f"routing.user_policy.{key}")
-                        for key in ("denied_models", "version_ceilings", "overkill_rules", "role_rules")}}
+                        for key in ("denied_models", "version_ceilings", "overkill_rules", "role_rules",
+                                    "strict_allow_roles")}}
 
 
 def _valid_spec(spec) -> bool:
@@ -198,6 +200,9 @@ def validate_user_policy(config: dict) -> list[str]:
             if key in rule and (not isinstance(rule[key], list) or
                                 any(not isinstance(v, str) or not v for v in rule[key])):
                 problems.append(f"routing.user_policy.overkill_rules.{key} must be a list of nonempty strings")
+    strict = raw.get("strict_allow_roles", [])
+    if not isinstance(strict, list) or any(r not in POLICY_ROLES for r in strict):
+        problems.append("routing.user_policy.strict_allow_roles must be a list of known roles")
     rules = raw.get("role_rules", [])
     if not isinstance(rules, list):
         return problems + ["routing.user_policy.role_rules must be a list"]
@@ -252,13 +257,15 @@ def _is_exact_spec(spec) -> bool:
     return bool(match and match["harness"] and match["effort"])
 
 
-def _rule_matches(cand: dict, spec: str) -> bool:
+def _rule_matches(cand: dict, spec: str, *, state: str | None = None) -> bool:
     if not isinstance(spec, str):
         return False
     if match := _CANONICAL.fullmatch(spec):
         from office import scoring
-        return (cand.get("harness") == match["harness"] and
-                scoring.harness_major(cand.get("harness_version")) == match["major"] and
+        major = scoring.harness_major(cand.get("harness_version"))
+        # A deny must not fail open because the installed major cannot be read.
+        major_ok = major == match["major"] or (state == "deny" and not major.isdigit())
+        return (cand.get("harness") == match["harness"] and major_ok and
                 match["model"] in {cand.get("model_id"), cand.get("alias_resolved_to")} and
                 cand.get("effort") == match["effort"])
     return _matches(cand, spec)
@@ -272,16 +279,14 @@ def effective_role_state(cand: dict, role: str, policies: list[dict]) -> dict:
     """
     for policy in reversed(policies):
         matching = [rule for rule in policy.get("role_rules", ())
-                    if rule.get("role") in (role, "*") and _rule_matches(cand, rule["route"])]
+                    if rule.get("role") in (role, "*") and _rule_matches(cand, rule["route"], state=rule.get("state"))]
         if matching:
             # Specific role always beats a deliberate all-role wildcard.
             matching.sort(key=lambda r: (r["role"] != role, not _is_exact_spec(r["route"])))
             best = [r for r in matching if r["role"] == matching[0]["role"]
                     and _is_exact_spec(r["route"]) == _is_exact_spec(matching[0]["route"])]
-            states = {r["state"] for r in best}
-            if len(states) > 1:
-                raise ValueError(f"conflicting role rules for {role}: {sorted(states)}")
-            rule = best[0]
+            # Equivalent spellings of one route can disagree; fail closed, deterministically.
+            rule = next((r for r in best if r["state"] == "deny"), None) or sorted(best, key=lambda r: r["state"])[0]
             source = (policy.get("sources") or {}).get("role_rules") or "user"
             return {"state": rule["state"], "source": source, "rule": rule["route"]}
     for policy in reversed(policies):

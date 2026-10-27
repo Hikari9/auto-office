@@ -103,12 +103,13 @@ def test_discovery_off_ignores_pool_candidates_and_hashes_exactly_as_before():
 
 
 # decision_hash and a digest of the whole result, computed by routing.route at 341b48b (before #494)
-# for requests that carry no discovery input.
+# for requests that carry no discovery input. The decision hashes are unchanged (replay parity); the whole-result
+# digests were regenerated for #837, which replaced the per-route `trust` eligibility record with `policy`.
 GOLDEN_BEFORE_494 = {
-    "two": ("sha256:ff3c41ae5690c965d11f4599ccca6a22714035e6751374c4a90a4ee9398acf2a", "049814e09be95432"),
-    "three": ("sha256:811e29d6fbaf68a6337c594860b7db95093e57d126214cdb8dcb03ad9bdca5a9", "275109a3750be881"),
-    "worker": ("sha256:40ab10639a2b4e71fa048b2d5a8ff496a24e9d1c78fc8c8573484c51e31ad894", "47afc75e129d1149"),
-    "explore": ("sha256:ea98364617d5102b827b2a025a28bd56120372c536c6202dd9f82367bdf7b700", "8ae898fdd5006f56"),
+    "two": ("sha256:ff3c41ae5690c965d11f4599ccca6a22714035e6751374c4a90a4ee9398acf2a", "9494701bd45cf5cb"),
+    "three": ("sha256:811e29d6fbaf68a6337c594860b7db95093e57d126214cdb8dcb03ad9bdca5a9", "25e556810cbc1660"),
+    "worker": ("sha256:40ab10639a2b4e71fa048b2d5a8ff496a24e9d1c78fc8c8573484c51e31ad894", "850d746eb8f21fc1"),
+    "explore": ("sha256:ea98364617d5102b827b2a025a28bd56120372c536c6202dd9f82367bdf7b700", "cb2ee4bc183b05f6"),
 }
 
 
@@ -948,13 +949,19 @@ def test_a_strict_seed_never_falls_to_an_unseeded_route():
     other = cand("opencode", "glm-flash", idx=40, caps=("review",))
     rq = trusted(req([other], disc=None, role="plan_reviewer"))
     rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}], strict_seed=True)
+    rq["strict_seed_user_authorized"] = True  # #837: strict allow-only is an explicit user opt-in
     d = routing.route(rq)
     assert d["selected"] is None and d["status"] == "no_qualifying_candidate"
     rq = trusted(req([other, seeded], disc=None, role="plan_reviewer"))
     rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}], strict_seed=True)
+    rq["strict_seed_user_authorized"] = True
     assert routing.route(rq)["selected"] == "codex@2/luna@medium"
     rq = trusted(req([other], disc=None, role="plan_reviewer"))
     rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}])
+    assert routing.route(rq)["selected"] == "opencode@2/glm-flash@medium"
+    # without the user's opt-in a strict seed no longer narrows the pool (#837)
+    rq = trusted(req([other], disc=None, role="plan_reviewer"))
+    rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}], strict_seed=True)
     assert routing.route(rq)["selected"] == "opencode@2/glm-flash@medium"
 
 

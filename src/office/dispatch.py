@@ -196,7 +196,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
     if review_as:
         candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer",
-                                    config=state.pinned_config(run))  # validates shape and role fit
+                                    config=state.pinned_config(run), run_id=run["id"])  # validates shape and role fit
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs, queuecmd
@@ -455,20 +455,24 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
                  **({"quote": quote} if quote is not None else {})}
     if quote is not None:
         decision = candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                repo_root=run.get("repo_root"))
+                                                repo_root=run.get("repo_root"), run_id=run["id"])
         decision["selection_disclosure"]["reason"] = reason
     else:
         # --route historically allows a model-only selector and is exempt from
         # the default model-family version floor. Neither exception grants trust.
         selection = {"override": text} if flag == "--route" else {
             "exact": candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                  repo_root=run.get("repo_root"))["selected"]}
+                                                  repo_root=run.get("repo_root"), run_id=run["id"])["selected"]}
         decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
                                          **selection, manual=True,
                                          dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
         if decision.get("status") == "selected":
             decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}), "reason": reason}
             decision["route_note"] = "orchestrator choice"
+            granted = (decision.get("request") or {}).get("policy_overrides") or {}
+            if receipt := granted.get(decision.get("selected")):
+                authority["policy_override_receipt"] = receipt
+                decision["selection_disclosure"]["reason"] = f"{reason}; deny overridden by user receipt {receipt}"
     decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
                     _qualified=True)
     resolved = (decision.get("candidate") or {}).get("effort")
@@ -521,7 +525,8 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     quote = _route_quote(route)
     authority = origin.get("route_authority") or {}
     if quote and not route.get("route_change"):
-        decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"))
+        decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
+                                                run_id=run["id"])
         triple = routing.candidate_id(decision["candidate"])
         # Historical adapter trust is audit-only under #837. Actual quota and
         # capability checks still apply to this explicitly selected route.
@@ -958,7 +963,8 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     # No trial without a known-working fallback on record, whoever launched this dispatch.
     if (fallback.get("status") != "selected" or not fallback.get("candidate")
             or routing.candidate_id(fallback["candidate"]) == link["candidate"]
-            or not _known_working(con, fallback["candidate"])):
+            or not _known_working(con, fallback["candidate"])
+            or route_policy.effective_role_state(fallback["candidate"], "executor", policies)["state"] == "deny"):
         return "no-fallback"
     return None
 

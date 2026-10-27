@@ -94,33 +94,14 @@ def test_unknown_model_refusal_lists_catalog_add_remediation(request):
     assert "names reported by <harness> models need a catalog row" in output
 
 
-def test_approve_trust_resolves_agy_alias_and_refuses_unknown_without_writing(request):
-    # claude-opus-5-5@low is the one Agy Claude row still gated, so its trust act reports the remaining gate.
+def test_approve_trust_is_retired_and_policy_inspection_names_the_agy_route(request):
+    # #837: no trust act is recorded for an Agy alias; role policy (allow/neutral/deny) replaces it.
     env = request.getfixturevalue("env")
     approved_run(env, executor=[{"write": {"calc.py": "def add(a, b):\n    return a + b\n"},
                                   "submit": False}] * 3)
-
-    route = "agy@1/claude-opus-5-5@low"
-    alias = "agy/claude-opus-5-5@low"
     con = env.con()
-    canonical_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
-    alias_before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
-    code, output = env.office("approve", "trust", "agy/claude-opus-5-5@low",
-                              "--quote", "Approve this cataloged Agy route")
-    assert code == 0, output
-    assert f"{route} trust recorded as proven" in output
-    assert "remaining gate: conformance probe required" in output
-    assert "remedy: office doctor --probe-route agy/claude-opus-5-5@low" in output
-    canonical_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (route,)).fetchone()[0]
-    alias_after = con.execute("SELECT COUNT(*) FROM adapter_trust_acts WHERE triple=?", (alias,)).fetchone()[0]
-    assert canonical_after == canonical_before + 1
-    assert alias_after == alias_before
-    _, trust = scoring.evaluate_trust_state(con, route)
-    assert trust == "proven"
-    recorded = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
-
-    code, output = env.office("approve", "trust", "agy/not-in-catalog@medium",
-                              "--quote", "Refuse this unknown route")
-    assert code != 0
-    assert "unknown route" in output.lower()
-    assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == recorded
+    before = con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0]
+    code, output = env.office("approve", "trust", "agy/claude-opus-5-5@low", "--quote", "Approve this cataloged Agy route")
+    assert code != 0 and "retired" in output.lower(), output
+    assert "office route policy" in output
+    assert con.execute("SELECT COUNT(*) FROM adapter_trust_acts").fetchone()[0] == before
