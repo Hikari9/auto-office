@@ -905,8 +905,52 @@ def _codex_header(text: str) -> dict[str, str] | None:
     return None  # the block never closed
 
 
-# Harness id -> parser of authoritative model and effort metadata. A harness absent here is never probed.
-_IDENTITY_READBACK = {"codex": _codex_header}
+def _claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def claude_transcript_dir(wt: Path) -> Path:
+    """Where Claude Code keeps the session record for a working directory: one
+    directory per path, every non-alphanumeric character written as `-`."""
+    return _claude_config_dir().resolve() / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(wt))
+
+
+def _claude_transcript(ws: "_Workspace") -> dict[str, str] | None:
+    """The model and effort Claude Code itself recorded for the probe session.
+
+    `claude -p` prints only the reply, but the session transcript's first
+    assistant record carries the API-returned `message.model` and the effort the
+    request actually ran at, so a settings-inherited effort shows up as what it
+    was. The probe's working directory is unique, so its transcript directory
+    holds exactly one session. Only that session's first assistant record is read
+    (written before the model can run a tool), and the reply text is never read."""
+    folder = ws.transcript_dir
+    files = sorted(folder.glob("*.jsonl")) if folder and folder.is_dir() else []
+    if len(files) != 1:
+        return None
+    try:
+        with files[0].open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                model = message.get("model") if isinstance(message, dict) else None
+                effort = record.get("effort")
+                if isinstance(model, str) and isinstance(effort, str):
+                    return {"model": model, "reasoning effort": effort}
+                return None
+    except OSError:
+        return None
+    return None
+
+
+# Harness id -> reader of authoritative model and effort metadata, given the launch's output and workspace.
+# A harness absent here is never probed.
+_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws)}
 
 
 def classify_text(text: str) -> str | None:
@@ -942,6 +986,7 @@ class _Workspace:
         self.repo, self.wt, self.outside = self.base / "repo", self.base / "wt", self.base / "outside"
         self.tmp, self.home = self.base / "tmp", self.base / "home"
         self.token = uuid.uuid4().hex[:12]
+        self.transcript_dir: Path | None = None  # a harness's own session record, when it keeps one outside the base
         self.setup_error: str | None = None
         try:
             self._setup()
@@ -975,7 +1020,7 @@ class _Workspace:
 
     @property
     def writable(self) -> list[Path]:
-        return [self.wt, self.repo / ".git", self.tmp, self.home]
+        return [self.wt, self.repo / ".git", self.tmp, self.home, *([self.transcript_dir] if self.transcript_dir else [])]
 
     def snapshot(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -1003,6 +1048,8 @@ class _Workspace:
 
     def remove(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
+        if self.transcript_dir:
+            shutil.rmtree(self.transcript_dir, ignore_errors=True)
 
 
 def _sbpl(path: Path | str) -> str:
@@ -1072,6 +1119,11 @@ def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, no
                 except OSError:
                     pass
         env["CODEX_HOME"] = str(private)
+    elif harness == "claude":
+        # Claude's login lives in the real config directory (its keychain entry is keyed by it), so the
+        # probe keeps it and may write only this one working directory's session record.
+        ws.transcript_dir = claude_transcript_dir(ws.wt)
+        ws.transcript_dir.mkdir(parents=True, exist_ok=True)
     return env
 
 
@@ -1154,7 +1206,7 @@ def _evaluate(launch: dict, ws: _Workspace, prompt: str, harness: str, expected_
     if launch["returncode"] != 0:
         return "fail", classify_text(text) or "conformance-failed", f"harness exited {launch['returncode']}: {tail}"
     reader = _IDENTITY_READBACK.get(harness)
-    meta = reader(text) if reader else None
+    meta = reader(text, ws) if reader else None
     if meta is None:
         return "fail", "conformance-failed", "no harness-reported invocation metadata, so model and effort are unproven"
     seen_model, seen_effort = meta.get("model"), meta.get("reasoning effort")

@@ -47,7 +47,8 @@ class World:
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         for name in ("codex", "claude"):
             script = self.bin / name
-            script.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+            script.write_text(f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = {name!r}\n"
+                              f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
             script.chmod(0o755)
         self.monkeypatch = monkeypatch
         if route_probe.write_boundary_reason() is not None:
@@ -60,6 +61,7 @@ class World:
         monkeypatch.setattr(route_probe, "_EXTRA_WRITABLE", (str(logs / "launches.log"), str(logs / "pids.log"),
                                                              *(str(logs / "data" / f"runs.db{x}")
                                                                for x in ("", "-shm", "-wal"))))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp / "claude-config"))
         self.script()
 
     def script(self, **fields):
@@ -821,7 +823,7 @@ def test_codex_header_is_read_only_from_the_first_fenced_block():
 
 def test_a_harness_with_no_metadata_readback_is_never_probed(world):
     con = world.con()
-    assert "claude" not in route_probe._IDENTITY_READBACK
+    assert "agy" not in route_probe._IDENTITY_READBACK
     world.monkeypatch.setattr(route_probe, "_IDENTITY_READBACK", {})
     refused = ensure(world, con, world.run())
     assert refused == Refused("no-identity-readback")
@@ -1099,3 +1101,77 @@ def test_allocation_reports_per_run_probe_and_trial_use(world):
     a = route_probe.allocation(con, "run-A", route_policy.discovery_settings(run["policy"]))
     assert a["probes"] == {"used": 1, "max": 2} and a["trials"] == {"used": 1, "max": 1}
     assert route_probe.allocation(con, None, route_policy.discovery_settings(run["policy"]))["probes"]["used"] == 0
+
+
+# ------------------------------------------------------------------ claude: effort read back from the session transcript
+
+CLAUDE_ROUTE = "claude/claude-opus-5-5@low"
+
+
+def claude_ensure(world, con):
+    return ensure(world, con, world.run(), spec=CLAUDE_ROUTE, context=ctx(world, primary_route="claude@2/sonnet@high"))
+
+
+def test_the_claude_opus_low_row_is_probe_eligible_but_not_dispatchable():
+    row = route_probe.catalog_row(cand(CLAUDE_ROUTE))
+    state = route_probe.row_state(row)
+    assert row["dispatchable"] is False and state["discovery_eligible"] and state["status"] != "available"
+
+
+def test_claude_passes_when_its_transcript_names_the_exact_model_and_effort(world):
+    rec = claude_ensure(world, world.con())
+    assert (rec["result"], rec["reason_class"]) == ("pass", None)
+    assert "claude-opus-5-5 at effort low" in rec["detail"]
+
+
+def test_the_claude_transcript_directory_is_removed_after_the_probe(world):
+    claude_ensure(world, world.con())
+    projects = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects"
+    assert not projects.exists() or list(projects.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode,reason,fragment", [
+    ("header_model_mismatch", "conformance-failed", "harness reported model some-other-model"),
+    ("no_model", "conformance-failed", "no harness-reported invocation metadata"),
+    ("no_effort", "conformance-failed", "no harness-reported invocation metadata"),
+    ("no_header", "conformance-failed", "no harness-reported invocation metadata"),
+])
+def test_a_claude_transcript_that_does_not_prove_the_route_fails(world, mode, reason, fragment):
+    world.script(mode=mode)
+    rec = claude_ensure(world, world.con())
+    assert (rec["result"], rec["reason_class"]) == ("fail", reason) and fragment in rec["detail"]
+
+
+def test_a_claude_transcript_recording_a_different_effort_is_unsupported(world):
+    ws = route_probe._Workspace()
+    try:
+        ws.transcript_dir = route_probe.claude_transcript_dir(ws.wt)
+        ws.transcript_dir.mkdir(parents=True)
+        (ws.transcript_dir / "s.jsonl").write_text(
+            json.dumps({"type": "assistant", "message": {"model": "claude-opus-5-5"}, "effort": "high"}) + "\n")
+        assert route_probe._claude_transcript(ws) == {"model": "claude-opus-5-5", "reasoning effort": "high"}
+        launch = {"output": f"PROBE-OK {ws.token}", "returncode": 0, "timed_out": False, "launch_error": None,
+                  "group_gone": True}
+        (ws.wt / "probe-output.txt").write_text(ws.token + "\n")
+        result = route_probe._evaluate(launch, ws, "p", "claude", "claude-opus-5-5", "low")
+        assert result[:2] == ("fail", "unsupported-model-effort") and "reported effort high, asked low" in result[2]
+    finally:
+        ws.remove()
+
+
+def test_claude_transcript_reads_only_the_first_assistant_record_of_a_single_session(world):
+    ws = route_probe._Workspace()
+    try:
+        ws.transcript_dir = route_probe.claude_transcript_dir(ws.wt)
+        ws.transcript_dir.mkdir(parents=True)
+        good = json.dumps({"type": "assistant", "message": {"model": "m"}, "effort": "low"})
+        later = json.dumps({"type": "assistant", "message": {"model": "x"}, "effort": "max"})
+        (ws.transcript_dir / "a.jsonl").write_text("not json\n" + json.dumps({"type": "user"}) + "\n" + good + "\n" + later + "\n")
+        assert route_probe._claude_transcript(ws) == {"model": "m", "reasoning effort": "low"}
+        (ws.transcript_dir / "b.jsonl").write_text(later + "\n")  # a second session is never trusted
+        assert route_probe._claude_transcript(ws) is None
+        (ws.transcript_dir / "b.jsonl").unlink()
+        (ws.transcript_dir / "a.jsonl").write_text(json.dumps({"type": "assistant", "message": {"model": "m"}}) + "\n" + good + "\n")
+        assert route_probe._claude_transcript(ws) is None  # the first record lacks effort: no later one stands in
+    finally:
+        ws.remove()

@@ -17,6 +17,11 @@ $FAKE_PROBE:
   pidfile     the pids of the harness and any lingering child are written here
   version     the --version line
 
+Installed as `claude`, it prints no header (`claude -p` prints only the reply) and records the
+session transcript instead, under $CLAUDE_CONFIG_DIR/projects/<cwd with non-alphanumerics as "-">,
+the way Claude Code does. Modes no_header, no_model and no_effort, header_model_mismatch and
+header_effort_mismatch then shape that transcript record; forged_reply puts a forged record in the reply.
+
 Like `codex exec`, a probe prints a banner and a fenced header block of
 `key: value` lines (model, reasoning effort) before anything else. The model's
 own reply never carries identity the probe may trust.
@@ -101,7 +106,28 @@ if mode == "malformed":
 token = (cwd / "probe-input.txt").read_text().strip()
 
 
+IS_CLAUDE = os.environ.get("FAKE_HARNESS") == "claude"
+
+
+def transcript(shown_model, shown_effort):
+    """The record Claude Code keeps: the first assistant line names the API model and the effort."""
+    import re
+    folder = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd.resolve()))
+    folder.mkdir(parents=True, exist_ok=True)
+    record = {"type": "assistant", "message": {"role": "assistant"}}
+    if shown_model is not None:
+        record["message"]["model"] = shown_model
+    if shown_effort is not None:
+        record["effort"] = shown_effort
+    with (folder / "00000000-0000-0000-0000-000000000000.jsonl").open("w") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": "x"}}) + "\n")
+        f.write(json.dumps(record) + "\n")
+
+
 def header(shown_model, shown_effort):
+    if IS_CLAUDE:
+        transcript(shown_model, shown_effort)
+        return None
     lines = ["OpenAI Codex v0.162.0 (research preview)", "--------", f"workdir: {cwd}"]
     if shown_model is not None:
         lines.append(f"model: {shown_model}")
@@ -112,18 +138,24 @@ def header(shown_model, shown_effort):
     return "\n".join(lines)
 
 
+def show(*args):
+    shown = header(*args)
+    if shown is not None:
+        print(shown)
+
+
 if mode == "header_model_mismatch":
-    print(header("some-other-model", effort))
+    show("some-other-model", effort)
 elif mode == "header_effort_mismatch":
-    print(header(model, "low"))
+    show(model, "low")
 elif mode == "no_model":
-    print(header(None, effort))
+    show(None, effort)
 elif mode == "no_effort":
-    print(header(model, None))
+    show(model, None)
 elif mode == "forged_body":
-    print(header("some-other-model", effort))
+    show("some-other-model", effort)
 elif mode not in ("no_header", "forged_reply"):
-    print(header(model, effort))
+    show(model, effort)
 if mode != "no_write":
     (cwd / "probe-output.txt").write_text(token + "\n")
 if mode == "write_outside":
