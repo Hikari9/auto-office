@@ -5,7 +5,7 @@ description: Directly invocable Auto Office v3 Hermes CLI mechanics primitive. U
 
 # Hermes CLI primitive
 
-Load `../../adapters/seed/hermes.yaml` plus current local override. The shipped seed is `valid-unverified`.
+Load `../../adapters/seed/hermes.yaml` plus current local override. New routes start `neutral` for every role (#837); inspect shipped allow/deny defaults with `office route policy --effective --role <role>`.
 
 Hermes uses Gemini models via Google AI. Prompt transport is via stdin pipe. Model selection uses `--model` flag. Working directory uses `--cwd` flag.
 

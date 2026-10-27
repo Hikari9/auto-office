@@ -1,8 +1,8 @@
 """Derived routing: harness@version x model x effort.
 
-Ported from the v3 `scripts/office_routing.py`. Trust, floors and local reward
-are derived from runs.db evidence and the pinned role floor; a candidate's own
-claims about them are read nowhere. The quota reserve comes from the pinned
+Ported from the v3 `scripts/office_routing.py`. Role-scoped allow/neutral/deny
+policy is independent of historical trust. Capability, technical safety and
+local reward remain separately derived from verified facts. The quota reserve comes from the pinned
 policy (5% by default), never a literal.
 
 Executor and worker routes (#300) keep stages 1-6 as qualification, then
@@ -95,7 +95,7 @@ def invocation_provenance(candidate: dict) -> str:
 def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: str) -> dict:
     """Build the durable, user-visible explanation for a selected route."""
     rank = preferred_rank(chosen, preferred_seed)
-    reasons = ["cleared the applicable trust, capability, role-floor, and task-shape gates"]
+    reasons = ["cleared the applicable role policy, capability, technical and task-shape gates"]
     quota = chosen.get("quota", {})
     if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
         reasons.append("fit within the protected quota reserve")
@@ -319,7 +319,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
     allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))
     preferred_seed = request.get("preferred_seed") or policy.get("preferred_seed")
-    strict_seed = bool(policy.get("strict_seed"))
+    strict_seed = bool(policy.get("strict_seed"))  # only explicitly user-selected strict mode can restrict neutral
     floor = policy.get("floor")
     rejected = []
     stage = []
@@ -362,6 +362,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
         new_policy_size = executor_slates.new_gear_size(request)
         pool = []  # discovery candidates: never in the eligible slate, whatever the role
+        role_states = {}
         # An explicit caller value wins; otherwise the user's consent decides, so a caller that
         # omits the key cannot silently drop an opted-in user's free routes.
         allow_free = request.get("allow_free_models")
@@ -370,7 +371,11 @@ def route(request: dict, discovery_input: dict | None = None, *,
             allow_free = onboarding.free_models_enabled()
         for c in request.get("candidates", []):
             cid = candidate_id(c)
-            denied = next((why for pol in policies if (why := route_policy.is_denied(c, pol))), None)
+            role_rule = route_policy.effective_role_state(c, role, policies)
+            if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
+                role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
+            role_states[cid] = role_rule
+            denied = role_rule.get("reason") or f"{role} policy deny by {role_rule['source']}: {role_rule.get('rule', cid)}" if role_rule["state"] == "deny" else None
             overkill = None if request.get("manual_route") else next(
                 (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
             if c.get("hard_excluded") or c.get("local_hard_excluded"):
@@ -379,7 +384,9 @@ def route(request: dict, discovery_input: dict | None = None, *,
                 rejected.append({"candidate": cid, "stage": 1, "reason": "free model opt-in is disabled",
                                  "category": "free-model-opt-in"})
             elif denied:
-                rejected.append({"candidate": cid, "stage": 1, "reason": denied, "category": "denied"})
+                rejected.append({"candidate": cid, "stage": 1, "reason": denied,
+                                 "category": "denied" if role_rule["source"] == "legacy-user-deny" else "role-deny",
+                                 "policy": role_rule})
             elif overkill:
                 rejected.append({"candidate": cid, "stage": 1, "reason": overkill, "category": "overkill"})
             elif (role in ADAPTIVE_ROLES and
@@ -396,49 +403,26 @@ def route(request: dict, discovery_input: dict | None = None, *,
             else:
                 stage.append(c)
 
-        # 2 adapter validity/trust -- derived (§7.1). A caller-supplied `adapter_state`
-        # is read nowhere below; only `evaluate_trust_state` against `runs_db` decides.
+        # 2 role-policy admission (#837). Only a DENY above excludes automatically;
+        # missing historical trust never vetoes neutral routes. Provenance and prior
+        # failures remain available as evidence, not a shadow permission tier.
         adaptive_role = role in ADAPTIVE_ROLES and request.get("adaptive", True) is not False
         discovering = bool(adaptive_role and pool and (request.get("discovery") or {}).get("settings", {}).get("enabled"))
         if pool and not discovering:
             _reject_pool(pool, rejected, "discovery is not enabled for this role or run")
         learned = request.get("learned_eligibility") or {}
         eligibility: dict[str, dict] = {}
-        nxt = []
         for c in stage:
             cid = candidate_id(c)
-            eligibility[cid] = {"trust": None, "source": "factual gates"}
-            if role in MUTABLE_TRUST_ROLES:
-                if con is not None:
-                    _, trust_state = scoring.evaluate_trust_state(con, cid)
-                else:
-                    trust_state = "valid-unverified"
-                eligibility[cid]["trust"] = trust_state
-                event = learned.get(route_learning.candidate_key(c)) or {}
-                if (adaptive_role and trust_state == "valid-unverified" and event.get("state") == "learned-eligible"):
-                    # Mature, replay-validated local evidence promotes an unverified
-                    # route (#300). Quarantine is never lifted this way.
-                    eligibility[cid].update(source="learned", event_id=event.get("event_id"))
-                    nxt.append(c)
-                    continue
-                if trust_state == "valid-unverified" and cid == request.get("declared_route"):
-                    # The user declared this route (--as, amend route): their authority covers
-                    # unverified trust, and later stages still apply. Quarantine is never lifted.
-                    eligibility[cid]["source"] = "declared"
-                    nxt.append(c)
-                    continue
-                if trust_state != "proven" and not override_applies(cid, 2):
-                    rejected.append({
-                        "candidate": cid,
-                        "stage": 2,
-                        "reason": (
-                            f"adapter trust is derived as '{trust_state}', not proven "
-                            "for normal mutable/gate authority"
-                        ),
-                    })
-                    continue
-            nxt.append(c)
-        stage = nxt
+            rule = role_states[cid]
+            event = learned.get(route_learning.candidate_key(c)) or {}
+            # Mature, replay-validated evidence influences selection preference;
+            # it is not a second permission tier or an automatic policy deny.
+            learned_allow = rule["state"] == "neutral" and event.get("state") == "learned-eligible"
+            source = "learned" if learned_allow else ("declared" if cid == request.get("declared_route") else rule["source"])
+            eligibility[cid] = {"policy": rule["state"], "source": source}
+            if learned_allow:
+                eligibility[cid]["event_id"] = event.get("event_id")
 
         # 3 required capabilities
         nxt = []
@@ -558,7 +542,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         if preferred_seed:
             matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
             advisory = matched if matched else stage
-            if stage and not matched and strict_seed:
+            if stage and not matched and strict_seed and request.get("strict_seed_user_authorized") is True:
                 # A strict seed is the whole review order: when every seeded route is excluded, tried or
                 # unavailable, no unseeded route is substituted silently (bcf80833: a free flash route).
                 for c in stage:
@@ -912,7 +896,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
             slate[i] = {**e, "rank": adaptive.RANK_LABELS[i]}
         audit["candidates"] = [*audit["candidates"], {**b["row"], "rank": 0}]
         audit["slate"] = slate
-        eligibility[tid] = {"trust": "valid-unverified", "source": "trial", "probe_key": disc["probe_key"],
+        eligibility[tid] = {"policy": "neutral", "source": "trial", "probe_key": disc["probe_key"],
                             "attempt_id": disc.get("attempt_id")}
     if disc:
         audit["discovery"] = disc

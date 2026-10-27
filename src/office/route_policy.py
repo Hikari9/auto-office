@@ -14,7 +14,7 @@ import re
 from office.util import dumps, new_run_id, now_iso, sha256_obj
 from office import model_lineages
 
-POLICY_VERSION = "route-discovery-2"
+POLICY_VERSION = "route-discovery-3"
 PROVENANCE_KEY = "_provenance"
 DIGEST_KEY = "_route_policy_digest"
 CEILING_KEY = "routing.adaptive.budget_ceiling_usd"
@@ -154,12 +154,15 @@ def user_policy(config: dict) -> dict:
     raw = (config.get("routing") or {}).get("user_policy") or {}
     provenance = config.get(PROVENANCE_KEY) or {}
     return {"denied": deepcopy(raw.get("denied_models") or []),
+            "role_rules": deepcopy(raw.get("role_rules") or []),
+            "strict_roles": list(raw.get("strict_allow_roles") or []),
             "ceilings": deepcopy(raw.get("version_ceilings") or {}),
             "ceiling_sources": {lineage: provenance.get(f"routing.user_policy.version_ceilings.{lineage}")
                                 for lineage in (raw.get("version_ceilings") or {})},
             "overkill": deepcopy(raw.get("overkill_rules") or []),
             "sources": {key: provenance.get(f"routing.user_policy.{key}")
-                        for key in ("denied_models", "version_ceilings", "overkill_rules")}}
+                        for key in ("denied_models", "version_ceilings", "overkill_rules", "role_rules",
+                                    "strict_allow_roles")}}
 
 
 def _valid_spec(spec) -> bool:
@@ -197,7 +200,102 @@ def validate_user_policy(config: dict) -> list[str]:
             if key in rule and (not isinstance(rule[key], list) or
                                 any(not isinstance(v, str) or not v for v in rule[key])):
                 problems.append(f"routing.user_policy.overkill_rules.{key} must be a list of nonempty strings")
+    strict = raw.get("strict_allow_roles", [])
+    if not isinstance(strict, list) or any(r not in POLICY_ROLES for r in strict):
+        problems.append("routing.user_policy.strict_allow_roles must be a list of known roles")
+    rules = raw.get("role_rules", [])
+    if not isinstance(rules, list):
+        return problems + ["routing.user_policy.role_rules must be a list"]
+    seen = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) - {"role", "route", "state", "wildcard"}:
+            problems.append("routing.user_policy.role_rules entries must contain only role, route, state, wildcard")
+            continue
+        role, spec, state = rule.get("role"), rule.get("route"), rule.get("state")
+        if role not in POLICY_ROLES and not (role == "*" and rule.get("wildcard") is True):
+            problems.append(f"routing.user_policy.role_rules invalid role: {role!r}")
+        if state not in ROLE_STATES:
+            problems.append(f"routing.user_policy.role_rules invalid state: {state!r}")
+        if not _valid_spec(spec) and not _canonical_spec(spec):
+            problems.append(f"routing.user_policy.role_rules invalid route: {spec!r}")
+        elif not _is_exact_spec(spec) and rule.get("wildcard") is not True:
+            problems.append(f"routing.user_policy.role_rules broad route {spec!r} requires wildcard: true")
+        if "wildcard" in rule and type(rule["wildcard"]) is not bool:
+            problems.append("routing.user_policy.role_rules wildcard must be a boolean")
+        key = (role, spec)
+        if key in seen:
+            problems.append(f"routing.user_policy.role_rules duplicate rule: {role}/{spec}")
+        seen.add(key)
     return problems
+
+
+ROLE_STATES = ("allow", "neutral", "deny")
+POLICY_ROLES = frozenset(("executor", "worker", "planner", "plan_reviewer", "code_reviewer",
+                          "browser_verifier", "visual_reviewer", "closeout_verifier", "integration_reviewer"))
+_CANONICAL = re.compile(r"(?P<harness>[A-Za-z0-9_.-]+)@(?P<major>[0-9]+)/(?P<model>[A-Za-z0-9_.-]+)@(?P<effort>[a-z]+)\Z")
+# Only these reviewed default *preferences* ship. Legacy trust history does not grant admission.
+SEED_ROLE_RULES = (
+    {"role": "executor", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
+    {"role": "code_reviewer", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
+    {"role": "plan_reviewer", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
+    {"role": "code_reviewer", "route": "claude@2/claude-opus-5-5@low", "state": "allow"},
+    {"role": "code_reviewer", "route": "codex@0/gpt-6-luna@high", "state": "allow"},
+    {"role": "plan_reviewer", "route": "codex@0/gpt-6-luna@high", "state": "allow"},
+    {"role": "visual_reviewer", "route": "agy@1/gemini-3.8-flash@low", "state": "allow"},
+)
+
+
+def _canonical_spec(spec) -> bool:
+    return isinstance(spec, str) and bool(_CANONICAL.fullmatch(spec))
+
+
+def _is_exact_spec(spec) -> bool:
+    # Intentionally require both harness and effort for an unambiguous non-wildcard rule.
+    if _canonical_spec(spec):
+        return True
+    match = _ROUTE.fullmatch(spec) if isinstance(spec, str) else None
+    return bool(match and match["harness"] and match["effort"])
+
+
+def _rule_matches(cand: dict, spec: str, *, state: str | None = None) -> bool:
+    if not isinstance(spec, str):
+        return False
+    if match := _CANONICAL.fullmatch(spec):
+        from office import scoring
+        major = scoring.harness_major(cand.get("harness_version"))
+        # A deny must not fail open because the installed major cannot be read.
+        major_ok = major == match["major"] or (state == "deny" and not major.isdigit())
+        return (cand.get("harness") == match["harness"] and major_ok and
+                match["model"] in {cand.get("model_id"), cand.get("alias_resolved_to")} and
+                cand.get("effort") == match["effort"])
+    return _matches(cand, spec)
+
+
+def effective_role_state(cand: dict, role: str, policies: list[dict]) -> dict:
+    """Effective role policy; newest user rules > legacy denies > shipped allow > neutral.
+
+    Policy evaluation is independent of technical availability, quotas and review safety.
+    A list entry is exact unless its author deliberately set `wildcard: true`.
+    """
+    for policy in reversed(policies):
+        matching = [rule for rule in policy.get("role_rules", ())
+                    if rule.get("role") in (role, "*") and _rule_matches(cand, rule["route"], state=rule.get("state"))]
+        if matching:
+            # Specific role always beats a deliberate all-role wildcard.
+            matching.sort(key=lambda r: (r["role"] != role, not _is_exact_spec(r["route"])))
+            best = [r for r in matching if r["role"] == matching[0]["role"]
+                    and _is_exact_spec(r["route"]) == _is_exact_spec(matching[0]["route"])]
+            # Equivalent spellings of one route can disagree; fail closed, deterministically.
+            rule = next((r for r in best if r["state"] == "deny"), None) or sorted(best, key=lambda r: r["state"])[0]
+            source = (policy.get("sources") or {}).get("role_rules") or "user"
+            return {"state": rule["state"], "source": source, "rule": rule["route"]}
+    for policy in reversed(policies):
+        if reason := is_denied(cand, policy):
+            return {"state": "deny", "source": "legacy-user-deny", "reason": reason}
+    for rule in SEED_ROLE_RULES:
+        if rule["role"] == role and _rule_matches(cand, rule["route"]):
+            return {"state": rule["state"], "source": "shipped", "rule": rule["route"]}
+    return {"state": "neutral", "source": "default", "reason": "no role-specific deny"}
 
 
 def _matches(cand: dict, spec: str) -> bool:
@@ -261,7 +359,7 @@ def budget_ceiling(config: dict) -> dict:
 
 def policy_digest(config: dict) -> str:
     return sha256_obj({"version": POLICY_VERSION, "discovery": discovery_settings(config),
-                       "user_policy": user_policy(config), "budget_ceiling": budget_ceiling(config)})
+                       "user_policy": user_policy(config), "seeded_role_rules": SEED_ROLE_RULES, "budget_ceiling": budget_ceiling(config)})
 
 
 def new_attempt_id() -> str:

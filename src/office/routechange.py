@@ -48,7 +48,8 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
     effort = want["effort"] or d.get("effort")
     _require_known(harness, want["model_id"], effort)
     ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as", effort=effort)
-    cand = candidates.declared_candidate(harness, want["model_id"], effort)
+    cand = candidates.declared_candidate(harness, want["model_id"], effort, repo_root=run.get("repo_root"),
+                                         run_id=run["id"])
     after = routing.candidate_id(cand)
     before = d.get("triple")
     if after == before:
@@ -136,7 +137,8 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
     effort = want["effort"] or (rec.get("candidate") or {}).get("effort")
     _require_known(harness, want["model_id"], effort)
     ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as", effort=effort)
-    cand = candidates.declared_candidate(harness, want["model_id"], effort)
+    cand = candidates.declared_candidate(harness, want["model_id"], effort, repo_root=run.get("repo_root"),
+                                         run_id=run["id"])
     after = routing.candidate_id(cand)
     if before and scoring.normalize_triple(after) == scoring.normalize_triple(before):
         raise Refused("route-unchanged", f"{tid} already runs {before}", scope=tid)

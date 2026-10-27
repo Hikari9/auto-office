@@ -56,6 +56,12 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
   office harness scaffold|validate|smoke|list|sync|manifest
                                     register a harness: draft a user adapter, check it, one throwaway-repo launch
+  office route policy --effective --role <role> | allow|neutral|deny|clear <route> --role <role>
+                                    role-scoped user allow/neutral/deny (no active run required)
+  office route override <route> --role <role> --run <id> --reason "<why>"
+                                    user-issued one-off deny override (interactive terminal only)
+  office route migrate [--apply|--rollback]
+                                    dry-run, apply or roll back the legacy trust/deny -> role policy migration
   office model add|list|disable|enable|registry|policy|ceiling|unceil
                                     catalog, global user policy and lineage retention
 
@@ -370,6 +376,18 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, help="smoke: seconds before the launch is stopped (default 300)")
     s.add_argument("--allow-unsafe-flags", action="store_true",
                    help="smoke: launch a form carrying a permission/trust flag when no safer form exists")
+    s = sp.add_parser("route", parents=[common])
+    s.add_argument("action", choices=["policy", "allow", "neutral", "deny", "clear", "override", "migrate"])
+    s.add_argument("ident", nargs="?", help="harness/model@effort or harness@major/model@effort")
+    s.add_argument("--reason", help="override: why this denied route should run")
+    s.add_argument("--ttl", help="override: lifetime of the receipt, 1m to 24h (default 30m)")
+    s.add_argument("--revoke", metavar="ID", help="override: revoke a receipt")
+    s.add_argument("--list", dest="list_receipts", action="store_true", help="override: list receipts")
+    s.add_argument("--apply", action="store_true", help="migrate: write the migration (default is a dry run)")
+    s.add_argument("--rollback", action="store_true", help="migrate: restore the pre-migration user config")
+    s.add_argument("--role", help="one role, e.g. code_reviewer")
+    s.add_argument("--effective", action="store_true", help="inspect effective allow/neutral/deny with origin")
+    s.add_argument("--wildcard", action="store_true", help="deliberately apply broad route/role rule")
     s = sp.add_parser("model", parents=[common])
     s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
@@ -718,6 +736,9 @@ def _target(con, args, require_run=True):
                                state_dir=args.state_dir, harness=args.harness, session=args.session)
     if target.run is not None:
         frontdoor.ensure_runtime(target.run)
+        from office import state, upgrade
+        if upgrade.auto_adopt(con, target.run):
+            target.run = state.get_run(con, target.run["id"])
     if target.dispatch is not None:
         # An executor that lost its env: act as that dispatch (the lease still fences it).
         for key, value in (("OFFICE_RUN_ID", target.run["id"]), ("OFFICE_TASK_ID", target.dispatch["task_id"] or ""),
@@ -734,7 +755,7 @@ def _legacy_result(target) -> Result:
 
 
 # Commands that never read runs.db, so they never sweep it either.
-_NO_SWEEP = ("config", "setup", "onboard", "update", "install", "uninstall", "web")
+_NO_SWEEP = ("route", "config", "setup", "onboard", "update", "install", "uninstall", "web")
 
 
 def _run(args, unknown) -> int:
@@ -808,6 +829,21 @@ def _run(args, unknown) -> int:
             return emit(cleanup.command(con, run_id=args.run_arg, apply=args.apply, decline=args.decline), args)
         finally:
             con.close()
+    if cmd == "route":
+        from office import routecmd
+        if args.action == "policy":
+            if args.ident or args.wildcard:
+                raise OfficeError("usage", "route policy accepts --role and --effective only", exit_code=2)
+            return emit(routecmd.policy(role=args.role), args)
+        if args.action == "override":
+            return emit(routecmd.override(route=args.ident, role=args.role, run=getattr(args, "run_arg", None),
+                                          reason=args.reason, ttl=args.ttl, revoke=args.revoke,
+                                          list_receipts=args.list_receipts), args)
+        if args.action == "migrate":
+            return emit(routecmd.migrate(apply=args.apply, rollback=args.rollback), args)
+        if args.effective:
+            raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
+        return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard), args)
     if cmd == "config" and args.apply_routing:
         from office import configcmd
         if args.key or args.value or args.unset or args.list_ or args.edit or args.path:

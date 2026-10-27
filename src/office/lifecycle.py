@@ -264,14 +264,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             res.add(f"derived from {short(source['id'])}: requirements carried over; "
                     + (f"its plan p{source['plan']['version']} is the draft at {planpath.display(run)} (review it, then "
                        "office submit)" if source.get("plan") else "no plan to carry"))
-        from office import candidates
-        report_con = db.connect()
-        try:
-            trust_summary, _ = candidates.trust_report(report_con)
-        finally:
-            report_con.close()
-        for line in trust_summary:
-            res.add(line)
+        res.add("routing policy: allow / neutral / deny per role; a new route is neutral and eligible | "
+                "office route policy --effective --role <role>")
         if planner_problem:
             res.notices.append(planner_problem)
         if top != caller_top:
@@ -755,7 +749,7 @@ def list_runs(con, *, all_runs: bool = False, cwd: Path | None = None) -> Result
         runs = [r for r in runs if not state.is_terminal(r)]
     lines = []
     for r in runs:
-        tag = "" if version.same_line(r["office_version"], version.current()) else f"  [on {version.release_line(r['office_version'])}]"
+        tag = "" if version.serves(r["office_version"], version.current()) else f"  [on {version.release_line(r['office_version'])}]"
         pr = " pruned" if r.get("pruned_at") else ""
         lines.append(f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}{tag}{pr}")
     legacy_rows = []

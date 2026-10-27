@@ -28,7 +28,7 @@ it never investigates or files. Issues only: never fix the bug or open a PR as p
 
 ## Asking the user
 
-Take every decision to the user through the harness's native question tool when it has one, not free text in chat: intake questions, plan `## Questions`, plan/merge/trust/waive authorization, escalations, and route notices. Show the plan or notice first; the tool carries the decision.
+Take every decision to the user through the harness's native question tool when it has one, not free text in chat: intake questions, plan `## Questions`, plan/merge/waive authorization, escalations, and route notices. Show the plan or notice first; the tool carries the decision.
 - Claude Code: `AskUserQuestion` (1-4 questions, 2-4 options each; list your recommendation first with "(Recommended)" in its label; "Other" is added automatically).
 - Codex: `request_user_input`, when the session exposes it. Antigravity (`agy`): `ask_question`. Hermes: `clarify` (up to 4 choices; "Other" is added automatically).
 - Any other harness, or when the tool is unavailable: concise numbered plain-text questions in one batch.
@@ -81,11 +81,11 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   planned route is out, it stops: `office dispatch <task> --reroute`. The effective route (harness, model, effort) is recorded at
   dispatch; `office status` lists it and `office inspect route <task>` adds every change (old/new, reason, actor, time). To change a
   pending, running, or accepted task's future route: `office amend route <task> --as <harness>/<model>[@effort] --quote "<words>"`. Office follows the
-  recorded route on redispatch and rerun, never swaps it silently, and waives only unverified trust for a declared one; every later routing stage applies. Builder discovery and failed-trial recovery: `docs/route-discovery.md`; explicit pins skip discovery.
+  recorded route on redispatch and rerun, never swaps it silently; every later routing stage applies. A user-declared route is not blocked by missing history, and a role deny yields only to a user-issued receipt (`office route override`), never to a quote. Builder discovery and failed-trial recovery: `docs/route-discovery.md`; explicit pins skip discovery.
 - When the user names an executor model, dispatch or rerun with `--as <harness>/<model>[@effort] --quote "<user's words>"`; unquoted `--as` is an orchestrator choice under ordinary routing gates. `--cli "<argv>"` selects an exact command (exact argv only; Office records the harness that executable is); `--external` only prints how to start it. A Claude-model executor on pi is pinned with `--as pi/<claude-model>@<effort>`, never `--as claude/<model> --cli "pi ..."`.
   `--review-as` pins the reviewer of the task (v3.1) or lane (convergence-v1). A reviewer is always a
   fresh session, never the executor's, though it may share the executor's model. `office rerun <task> --resume|--fresh [--as <route>] [--review-as <route>]` relaunches on a named route; `--resume` needs the route it ran on (another route needs `--fresh`).
-- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files. User denial blocks automatic and convenience manual routes; scoped user overkill affects matching automatic choices only. Probe passes, learned quality and adapter trust stay separate; only bounded builders trial, never reviewers or final gate roles. Policy, caps, inspect and rollback: `docs/route-discovery.md`.
+- Route and config changes reach a live run only on opt-in: `office config --run <id> --apply-routing --quote "<words>"` re-pins that run from the current config files. Role policy is allow/neutral/deny (`office route policy --effective --role <role>`): a deny blocks automatic and orchestrator-pinned routes for that role only, and only the user (config or `office route override`) can lift it; scoped user overkill affects matching automatic choices only. Probe passes and learned quality stay separate from policy; only bounded builders trial, never reviewers or final gate roles. Policy, caps, inspect and rollback: `docs/route-discovery.md`.
 - A dispatch failure is a recovery checkpoint, not permission to abandon the run: read the launch notice, `office inspect task <T> --verbose`
   and any pane Office names, then follow the printed `next:` (re-prompt, `office resume`, `office rerun <task> --resume|--fresh`,
   `office dispatch <task> --reroute`). Never approve hook trust, other directories, credentials, irreversible actions or user authority for
@@ -126,8 +126,8 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   (`--set scope=...` / `--set interfaces=...` need `--contract`; a changed scope or interface reopens the task and its dependants):
   `office amend <scope> --contract -- "<request>"`. Requirements change only on the user's words:
   `office amend requirements --quote "<words>" -- "<change>"` (`--drop-criterion` / `--add-criterion` edit done criteria; `--drop-non-goal` / `--add-non-goal` edit non-goals; reauthorize the new version).
-- A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user. A missing route or trust
-  shows a route notice; only the user promotes trust (`office approve trust <route> --quote "<words>"`).
+- A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user. A missing or denied route
+  shows a route notice; only the user changes role policy (`office route allow|deny|neutral <route> --role <role>`).
 
 ## Review
 

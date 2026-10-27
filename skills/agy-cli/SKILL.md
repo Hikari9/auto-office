@@ -5,7 +5,7 @@ description: Directly invocable Auto Office v3 Agy CLI mechanics primitive. Use 
 
 # Agy CLI primitive
 
-Load `../../adapters/seed/agy.yaml` plus current local override. The shipped seed is `valid-unverified`.
+Load `../../adapters/seed/agy.yaml` plus current local override. New routes start `neutral` for every role (#837); inspect shipped allow/deny defaults with `office route policy --effective --role <role>`.
 
 ```bash
 agy --dangerously-skip-permissions --print-timeout 45m \

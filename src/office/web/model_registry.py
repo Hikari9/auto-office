@@ -28,6 +28,7 @@ def view() -> dict:
     for row in catalog["active"]:
         by_identity[(row["lineage_key"], row["generation_version"], row["model_id"],
                      row.get("invocation_harness"))].append(row)
+    harness_versions = {h: (adapters.route_version(h, installed_adapters[h]) if installed.get(h) else None) for h in harnesses}
     generations = []
     for (lineage, version, model_id, harness), variants in sorted(by_identity.items()):
         variants = sorted(variants, key=lambda r: (str(r.get("effort")), str(r.get("source_identifier"))))
@@ -44,9 +45,19 @@ def view() -> dict:
             legacy_effort_denied = any(user_catalog.matches(denial, r)
                                        for denial in overlay["disabled"])
             legacy_denied |= legacy_effort_denied
+            probe = {**r, "harness": harness, "harness_version": harness_versions.get(harness)}
+            role_states = {}
+            for role in sorted(route_policy.POLICY_ROLES):
+                eff = route_policy.effective_role_state(probe, role, [policy])
+                if eff["state"] != "neutral":
+                    role_states[role] = {"state": eff["state"], "source": eff["source"]}
+            role_allowed = sorted(role for role, st in role_states.items()
+                                  if st["state"] == "allow" and st["source"] != "shipped")
             specs.append({
+                "role_policy": role_states, "role_allowed_over_deny": role_allowed if permission else [],
                 "user_denied": bool(permission or legacy_effort_denied),
-                "user_denial_reason": permission or ("legacy user-catalog overlay deny" if legacy_effort_denied else None),
+                "user_denial_reason": ((permission + (f" (but allowed for roles: {', '.join(role_allowed)})" if role_allowed else ""))
+                                       if permission else ("legacy user-catalog overlay deny" if legacy_effort_denied else None)),
                 "legacy_overlay_denied": legacy_effort_denied,
                 "effort": r.get("effort"),
                 "invocation_model_id": r.get("invocation_model_id"),
@@ -116,6 +127,9 @@ def view() -> dict:
         "policy": {
             "denied_models": policy["denied"], "version_ceilings": policy["ceilings"],
             "overkill_rules": policy["overkill"], "sources": policy["sources"],
+            "role_rules": policy["role_rules"], "strict_allow_roles": policy["strict_roles"],
+            "edit_hint": "Role policy is edited with `office route allow|neutral|deny|clear <route> --role <role>`; "
+                         "this screen shows the effective state and its source.",
         },
         "authority": "Office model registry / global user config (read-only projection)",
         "quota_probed": False,

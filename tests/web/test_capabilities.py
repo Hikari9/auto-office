@@ -46,8 +46,14 @@ def test_newer_registered_patch_is_probed_for_the_new_commands():
     assert not missing["pause"]["allowed"] and "office queue" in missing["pause"]["reason"]
 
 
-def test_other_process_line_without_registration_is_read_only():
+def test_a_later_compatible_line_serves_a_run_without_registration():
+    """#843: a later MINOR of the same MAJOR serves a pinned run, so its web controls stay available."""
     caps = for_run(run("3.3.1"), resolver(current="3.4.0"))
+    assert caps["pause"]["allowed"]
+
+
+def test_other_major_line_without_registration_is_read_only():
+    caps = for_run(run("3.3.1"), resolver(current="4.0.0"))
     assert not caps["pause"]["allowed"] and "no 3.3.x runtime" in caps["pause"]["reason"]
 
 
