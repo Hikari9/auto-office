@@ -280,7 +280,8 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
     if state.is_terminal(run):
         raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
     if review_as:  # the route's shape and capability, before any pin is written
-        candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run))
+        candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run),
+                                    run_id=run["id"])
     pin = review_pin(review_as, review_cli, review_external)
     if ":" in target and not re.match(r"[LS]-", target, re.I):
         raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
@@ -652,7 +653,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                           else (None, None))
     if pinned and same_route and routing.candidate_id(
             candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
-                                         config=state.pinned_config(run))["candidate"]) != same_route:
+                                         config=state.pinned_config(run), run_id=run["id"])["candidate"]) != same_route:
         resume, same_route = None, None  # the pin names another reviewer than the one that would be resumed
     # (route, why) of the attempt the next route replaces: first the route this review was asked to start away from
     started_away = [r for r in [*(exclude or []), *(prefer_not or [])] if not r.startswith("harness:")]
@@ -681,7 +682,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                                  task_id=gate.get("task_id"), exclude=excluded)
         elif pinned:
             decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
-                                                    config=state.pinned_config(run))
+                                                    config=state.pinned_config(run), run_id=run["id"],
+                                                    scope=gate["id"], claim=True)
             decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
         else:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),

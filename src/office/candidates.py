@@ -218,7 +218,7 @@ def live_user_policies(repo_root=None) -> list[dict]:
         policy = route_policy.user_policy(effective)
         _POLICY_CACHE.clear()
         _POLICY_CACHE[cache_key] = policy
-    return [policy] if policy["denied"] or policy["overkill"] or policy["ceilings"] else []
+    return [policy] if policy["denied"] or policy["overkill"] or policy["ceilings"] or policy["role_rules"] or policy["strict_roles"] else []
 
 
 def required_user_policies(repo_root=None) -> list[dict]:
@@ -545,9 +545,11 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         }
         if row.get("alias_resolved_to"):
             cand["alias_resolved_to"] = row["alias_resolved_to"]
-        denied = next((why for pol in policies if (why := route_policy.is_denied(cand, pol))), None)
-        if denied:
-            skipped.append({"candidate": label, "category": "denied", "reason": denied})
+        # Role-aware (#837): a role allow outranks a legacy global deny, a role deny stays role-scoped.
+        role_rule = route_policy.effective_role_state(cand, role, policies) if policies else None
+        if role_rule and role_rule["state"] == "deny":
+            skipped.append({"candidate": label, "category": "denied",
+                            "reason": role_rule.get("reason") or f"{role} is denied by {role_rule['source']}: {role_rule.get('rule')}"})
             continue
         if state["discovery_eligible"]:
             cand["probe_key"] = route_probe.key(cand, adapter)
@@ -642,7 +644,8 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     return family_result if isinstance(family_result, dict) else result
 
 
-def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None) -> dict:
+def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
+                       run_id: str | None = None, scope: str | None = None, claim: bool = False) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
@@ -679,12 +682,28 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
-    for policy in required_user_policies(repo_root):
-        denied = route_policy.is_denied(named, policy)
-        if denied:
+    active_policy = route_policy.effective_role_state(named, role, required_user_policies(repo_root))
+    policy_override = None
+    if active_policy["state"] == "deny":
+        from office import route_override
+        receipt = route_override.find_valid(run_id, role, named)
+        context = f"{role} {harness}/{named['model_id']}@{named['effort']}"
+        # Validation only checks the receipt is free for this scope; a launch (claim=True) takes it atomically.
+        if receipt and (route_override.record_use(receipt, context, scope=scope) if claim
+                        else route_override.available_for(receipt, scope)):
+            # A genuine, signed user receipt overrides policy only; the capability, sandbox and
+            # independence checks the caller applies next are untouched.
+            policy_override = {"receipt": receipt["id"], "overrides": active_policy}
+        else:
+            denied = active_policy.get("reason") or f"{role} is denied by {active_policy['source']}: {active_policy.get('rule')}"
+            way_back = ("it stays denied until you change the policy: office config routing.user_policy.denied_models "
+                        f"--user (or --repo) to remove {harness}/{model}"
+                        if active_policy["source"] == "legacy-user-deny" else
+                        f"it stays denied until you change the policy: office route neutral|allow {harness}/{model}@{named['effort']} --role {role}")
             raise state.Refused("route-denied", denied, next_step=(
-                f"it stays denied until you change the policy: office config routing.user_policy.denied_models "
-                f"--user (or --repo) to remove {harness}/{model}"))
+                f"{way_back}. A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
+                f"in their own terminal: office route override {harness}/{model}@{named['effort']} --role {role} "
+                "--run <run> --reason \"<why>\""))
     return {
         "harness": harness,
         "harness_version": adapters.route_version(harness, adapter),
@@ -703,11 +722,13 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "free_model": free_model,
         "quota": {"status": "unknown", "tightest_remaining_percent": None},
         "override": True,
+        **({"policy_override": policy_override} if policy_override else {}),
     }
 
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
-                      config: dict | None = None, repo_root=None) -> dict:
+                      config: dict | None = None, repo_root=None, run_id: str | None = None,
+                      scope: str | None = None, claim: bool = False) -> dict:
     """A routing decision for a user-declared `harness/model[@effort]`.
 
     A user override bypasses the registry, trust and floors, but not what the
@@ -718,7 +739,8 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
     want = parse_route_override(text)
     if not want["harness"] or not want["model_id"]:
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
-    cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root)
+    cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root, role=role or "executor",
+                          run_id=run_id, scope=scope, claim=claim)
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -790,26 +812,12 @@ def _effective_task_descriptor(run: dict, task: dict | None) -> dict:
 
 
 def seeded_fallback_blockers(decision: dict) -> str:
-    """Seeded reviewer routes cut by the trust floor when the chain stopped on the protected quota.
+    """Legacy compatibility hook: trust-only fallback blocks do not exist after #837.
 
-    The quota status alone hides fallbacks cut at an earlier stage (e.g. an unproven
-    trust state), which read as if no fallback existed. Empty when nothing was cut."""
-    req = decision.get("request") or {}
-    seed = req.get("preferred_seed")
-    if not seed:
-        return ""
-    by_id = {routing.candidate_id(c): c for c in req.get("candidates") or []}
-    out = []
-    for r in decision.get("rejected") or []:
-        cid = r.get("candidate")
-        c = by_id.get(cid)
-        # Only a trust cut is something `office approve trust` fixes; probe and pool cuts are not.
-        if (c is None or r.get("stage") != 2 or not str(r.get("reason", "")).startswith("adapter trust is derived as")
-                or routing.preferred_rank(c, seed) is None or cid in out):
-            continue
-        out.append(cid)
-    # Kept short: the caller's failure text is truncated.
-    return "; ".join(f"{cid} is not trusted (office approve trust {cid} --quote ...)" for cid in out[:2])
+    All current failures appear in the ordinary per-route `rejected` reasons.
+    Never suggest a second trust approval ceremony.
+    """
+    return ""
 
 
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
@@ -870,11 +878,9 @@ def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: 
     known, quarantined = [], []
     for c in candidates:
         cid = routing.candidate_id(c)
-        _, trust = scoring.evaluate_trust_state(con, cid)
-        if trust == "quarantined":
-            quarantined.append(cid)
-        elif c.get("route_status", "available") == "available" and (
-                trust == "proven" or (learned.get(route_learning.candidate_key(c)) or {}).get("state") == "learned-eligible"):
+        # Known working is a factual available invocation, not an old trust grant.
+        # Confirmed-unsupported and fresh failed probes stay outside this list.
+        if c.get("route_status", "available") == "available":
             known.append(cid)
     risk = run.get("risk") or {}
     return {"settings": settings, "allocation": route_probe.allocation(con, run.get("id"), settings),
@@ -1000,10 +1006,27 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         if discovery_input:
             request["discovery_input"] = discovery_input
     policies = [pol for pol in (route_policy.user_policy(config), *live)
-                if pol["denied"] or pol["overkill"] or pol["ceilings"]]
+                if pol["denied"] or pol["overkill"] or pol["ceilings"] or pol["role_rules"] or pol["strict_roles"]]
     if policies:
         request["user_policies"] = policies
         request["size_class"] = effective_task_size
+        if (exact or override) and run.get("id"):
+            from office import route_override
+            granted = {}
+            for c in candidates:
+                if receipt := route_override.find_valid(run["id"], role, c, con=con):
+                    # A planning/inspection call only checks the receipt is free for this task; a real
+                    # routing call claims it atomically so a second task cannot reuse it.
+                    free = (route_override.available_for(receipt, task_id, con=con) if observe else
+                            route_override.record_use(receipt, f"{role} {routing.candidate_id(c)}", scope=task_id, con=con))
+                    if free:
+                        granted[routing.candidate_id(c)] = receipt["id"]
+            if granted:
+                request["policy_overrides"] = granted
+        if any(role in pol["strict_roles"] for pol in policies):
+            # Explicit user opt-in (#837): the seeded order is the whole order for this role.
+            request["policy"]["strict_seed"] = True
+            request["strict_seed_user_authorized"] = True
         if override or manual:
             request["manual_route"] = True
     result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
@@ -1034,9 +1057,11 @@ def learner_priors(con: sqlite3.Connection, config: dict) -> dict[str, dict[str,
 
 
 def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
-    """Return (summary, detail) for each trust-gated role. Summary is one line per role
-    with counts per trust state; detail is one line per candidate route with its derived
-    state, the approve command for non-proven routes, and a vision note for vision roles."""
+    """Historic derived trust evidence, kept for audits only after #837.
+
+    These observations never admit or exclude a route; `office route policy`
+    is the authoritative user policy inspection command.
+    """
     from office import routing, scoring
     scoring.ensure_trust_schema(con)
     summary, detail = [], []
@@ -1050,14 +1075,12 @@ def trust_report(con: sqlite3.Connection) -> tuple[list[str], list[str]]:
             triple = routing.candidate_id(c)
             _, state = scoring.evaluate_trust_state(con, triple)
             counts[state] = counts.get(state, 0) + 1
-            line = f"trust {role} {triple}: {state}"
-            if state != "proven":
-                line += f" | office approve trust {triple} --quote \"<user's words>\""
+            line = f"legacy trust evidence (audit only) {role} {triple}: {state}"
             if KIND_FOR_ROLE.get(role) == "vision" and "vision" not in c["capabilities"]:
                 line += f" | {vision_note(con, c)}"
             detail.append(line)
         tally = ", ".join(f"{n} {state}" for state, n in sorted(counts.items()))
-        summary.append(f"trust {role}: {len(cands)} routes ({tally}) | per-route detail: office inspect trust")
+        summary.append(f"legacy trust audit {role}: {len(cands)} routes ({tally}) | current policy: office route policy --effective --role {role}")
     return summary, detail
 
 

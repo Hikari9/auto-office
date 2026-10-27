@@ -953,7 +953,8 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None,
         raise Refused("legacy-contract", f"this run keeps the {contract.of(run)} review contract; it has no "
                       "user-requested plan review", next_step="office status")
     if pin:  # the route's shape and capability, before any pin is written
-        candidates.declared_decision(pin["as"], flag="--as", role="plan_reviewer", config=state.pinned_config(run))
+        candidates.declared_decision(pin["as"], flag="--as", role="plan_reviewer", config=state.pinned_config(run),
+                                    run_id=run["id"])
     if pin and review_required(run) and not _pr(run).get("ended") and run.get("plan_version"):
         if rounds is not None:
             raise Usage("rounds-with-open-review", f"plan review is open with a cap of {round_cap(run)} round(s); a re-pin "

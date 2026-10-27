@@ -5,7 +5,7 @@ description: Directly invocable Auto Office v3 Codex CLI mechanics primitive. Us
 
 # Codex CLI primitive
 
-Load `../../adapters/seed/codex.yaml` and the current local adapter override. The shipped seed is `valid-unverified`; normal mutable/final-gate authority requires promotion by v3 conformance/evidence or explicit user override.
+Load `../../adapters/seed/codex.yaml` and the current local adapter override. New routes start `neutral` for every role (#837); shipped allow/deny defaults show in `office route policy --effective --role <role>`. Final-gate authority still needs independent review and exact-revision verification.
 
 Always pass explicit model and canonical effort — `codex exec` has no `--effort` flag; effort is a config key. An invocation carrying only `-m` silently inherits `model_reasoning_effort` from `~/.codex/config.toml`, and an unrecognised value is not rejected at launch (the banner prints it and the session runs anyway). Read the effort back out of the launch banner; never infer it from the command you meant to type.
 

@@ -225,11 +225,12 @@ def _trust_db(tmp_path, *proven):
     return str(db)
 
 
-def test_untrusted_newer_executor_route_falls_back_to_the_proven_older_one(tmp_path):
+def test_newer_executor_route_without_trust_history_is_neutral_and_eligible(tmp_path):
+    """#837: missing historical trust never vetoes a route; it is neutral and stays in the slate."""
     o, n = cand("gpt-5.6-terra", "high"), cand("gpt-6.1-terra", "high")
     d = routing.route(req([o, n], role="executor", runs_db=_trust_db(tmp_path, o)))
-    assert labels(d) == [lab("gpt-5.6-terra", "high")]
-    assert any(r["stage"] == 2 and "gpt-6.1-terra" in r["candidate"] for r in d["rejected"])
+    assert lab("gpt-6.1-terra", "high") in labels(d) and lab("gpt-5.6-terra", "high") in labels(d)
+    assert not any(r["stage"] == 2 for r in d["rejected"])
 
 
 def test_proven_newer_executor_route_supersedes(tmp_path):

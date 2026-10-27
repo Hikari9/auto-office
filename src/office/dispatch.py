@@ -196,7 +196,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     launch_prefs = {k: v for k, v in (("cli", cli), ("external", external)) if v}
     if review_as:
         candidates.declared_decision(review_as, flag="--review-as", role="code_reviewer",
-                                    config=state.pinned_config(run))  # validates shape and role fit
+                                    config=state.pinned_config(run), run_id=run["id"])  # validates shape and role fit
     if state.is_terminal(run):
         raise Refused("run-terminal", f"run is {run['phase']}")
     from office import guide, plan_view, plans, prs, queuecmd
@@ -455,20 +455,26 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
                  **({"quote": quote} if quote is not None else {})}
     if quote is not None:
         decision = candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                repo_root=run.get("repo_root"))
+                                                repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"],
+                                                claim=True)
         decision["selection_disclosure"]["reason"] = reason
     else:
         # --route historically allows a model-only selector and is exempt from
         # the default model-family version floor. Neither exception grants trust.
         selection = {"override": text} if flag == "--route" else {
             "exact": candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                  repo_root=run.get("repo_root"))["selected"]}
+                                                  repo_root=run.get("repo_root"), run_id=run["id"],
+                                                  scope=task["id"], claim=True)["selected"]}
         decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
                                          **selection, manual=True,
                                          dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
         if decision.get("status") == "selected":
             decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}), "reason": reason}
             decision["route_note"] = "orchestrator choice"
+            granted = (decision.get("request") or {}).get("policy_overrides") or {}
+            if receipt := granted.get(decision.get("selected")):
+                authority["policy_override_receipt"] = receipt
+                decision["selection_disclosure"]["reason"] = f"{reason}; deny overridden by user receipt {receipt}"
     decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
                     _qualified=True)
     resolved = (decision.get("candidate") or {}).get("effort")
@@ -521,12 +527,11 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     quote = _route_quote(route)
     authority = origin.get("route_authority") or {}
     if quote and not route.get("route_change"):
-        decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"))
+        decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
+                                                run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
-        # Explicit consent bypasses registry/trust/floors, not a standing
-        # quarantine or a known exhausted reserve on a later automatic launch.
-        if scoring.evaluate_trust_state(con, triple)[1] == "quarantined":
-            raise Refused("route-unavailable", f"{triple} is quarantined", scope=task["id"])
+        # Historical adapter trust is audit-only under #837. Actual quota and
+        # capability checks still apply to this explicitly selected route.
         quota = candidates.quota_for_candidate(
             decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
         decision["candidate"]["quota"] = quota
@@ -675,9 +680,8 @@ def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
         return (f"office dispatch {tid} --reroute routes from current evidence; office inspect route {tid} shows "
                 "the planned slate")
     for r in decision.get("rejected") or []:
-        if r.get("stage") == 2:
-            return (f"a user may promote a route: office approve trust {r['candidate']} --quote \"<user's words>\"; "
-                    "or office inspect route for details")
+        if r.get("category") == "role-deny":
+            return "check the user-owned allow/neutral/deny policy: office route policy --effective --role executor"
     if decision.get("status") == "protected_quota_would_be_consumed":
         remedy = candidates.protected_quota_remedy(run, "executor", tid) if run else ""
         return ("wait for quota, choose a cheaper strategy, or obtain explicit user authority"
@@ -925,16 +929,12 @@ def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: b
 
 
 def _known_working(con, cand: dict) -> bool:
-    """The routing's own definition (`candidates.discovery_inputs`): an available route that is proven, or
-    learned eligible, and not quarantined."""
-    from office import route_learning
-    _, trust = scoring.evaluate_trust_state(con, routing.candidate_id(cand))
-    if trust == "quarantined" or cand.get("route_status", "available") != "available":
-        return False
-    if trust == "proven":
-        return True
-    learned = route_learning.current_eligibility(con, "executor")
-    return (learned.get(route_learning.candidate_key(cand)) or {}).get("state") == "learned-eligible"
+    """An available, factual invocation is a fallback; legacy trust is not a gate.
+
+    The fallback already passed role capability and task gates when selected.
+    A candidate with a pending/failed probe is not an available invocation.
+    """
+    return cand.get("route_status", "available") == "available"
 
 
 def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | None = None) -> str | None:
@@ -958,12 +958,15 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     probe = route_probe.status(con, cand)
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
         return "probe-stale"
-    if scoring.evaluate_trust_state(con, link["candidate"])[1] == "quarantined":
-        return "quarantined"
+    from office import candidates as candidate_builder
+    policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
+    if route_policy.effective_role_state(cand, "executor", policies)["state"] == "deny":
+        return "role-deny"
     # No trial without a known-working fallback on record, whoever launched this dispatch.
     if (fallback.get("status") != "selected" or not fallback.get("candidate")
             or routing.candidate_id(fallback["candidate"]) == link["candidate"]
-            or not _known_working(con, fallback["candidate"])):
+            or not _known_working(con, fallback["candidate"])
+            or route_policy.effective_role_state(fallback["candidate"], "executor", policies)["state"] == "deny"):
         return "no-fallback"
     return None
 

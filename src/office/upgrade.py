@@ -11,6 +11,8 @@ on before.
 """
 from __future__ import annotations
 
+import sqlite3
+
 from office import db, frontdoor, state, version
 from office.result import Result
 from office.state import Refused
@@ -140,11 +142,29 @@ def upgrade(con, run: dict, *, to: str | None = None, apply: bool = False) -> Re
     return Result(lines=[f"upgraded run {rid}: Auto Office {src} -> {dest}", *plan[1:]], data=data)
 
 
+def auto_adopt(con, run: dict) -> bool:
+    """Move a run onto this runtime's line at a safe boundary (#843). Only a compatible later MINOR of the
+    same MAJOR, with no registered migration, no plan-review blocker and nothing live in flight. Anything
+    else leaves the run on its pinned line, still served by this runtime. Never raises."""
+    pinned = run.get("office_version") or ""
+    cur = version.current()
+    if state.is_terminal(run) or version.same_line(pinned, cur) or not version.serves(pinned, cur):
+        return False
+    src, dest = version.release_line(pinned), version.release_line(cur)
+    try:
+        if MIGRATIONS.get((src, dest)) or _plan_review_blocker(con, run, dest) or blockers(con, run["id"]):
+            return False
+        upgrade(con, run, apply=True)
+        return True
+    except (Refused, OSError, sqlite3.Error):
+        return False
+
+
 def notice(run: dict) -> str | None:
-    """One line when a newer release line than the run's is installed."""
+    """One line when a newer, incompatible release line than the run's is installed."""
     line = version.release_line(run.get("office_version") or "")
     newest = frontdoor.installed_lines()[0]
-    if line and version.release_key(newest) > version.release_key(line):
+    if line and version.release_key(newest) > version.release_key(line) and not version.serves(line, newest):
         return f"run {short(run['id'])} is on Auto Office {line}; {newest} is installed: office upgrade {short(run['id'])}"
     return None
 

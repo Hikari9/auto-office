@@ -51,9 +51,7 @@ def approve(con, run: dict, target: str, quote: str | None, extra: list[str] | N
     if re.fullmatch(r"x\d+", t):
         return _envelope_entry(con, run, target.upper(), quote)
     if t == "trust":
-        if not extra:
-            raise Usage("missing-route", "name the route to promote", next_step="office approve trust <harness@ver/model@effort> --quote ...")
-        return _trust(con, run, extra[0], quote)
+        return _trust(con, run, extra[0] if extra else "", quote)
     if t == "waive":
         if not extra:
             raise Usage("missing-gate", "name what to waive", next_step="office approve waive <T2:visual|plan-review|P3> --quote ...")
@@ -113,21 +111,13 @@ def _envelope_entry(con, run, entry_id, quote) -> Result:
 
 
 def _trust(con, run, triple: str, quote: str) -> Result:
-    """#134, #625: the CLI path for an explicit, attributed trust act."""
-    from office import candidates, paths
-    triples, gate_lines, next_action = candidates.resolve_trust_targets(triple, con=con, run=run)
-    db_target = con if isinstance(con, sqlite3.Connection) else paths.runs_db()
-    run_id = (run or {}).get("id")
-    ev_ref = f"run:{run_id}" if run_id else None
-    run_label = f" in run {short(run_id)}" if run_id else ""
-    reason = f"user authorized{run_label}: {quote.strip()}"
-    acts = scoring.record_trust_acts(db_target, triples, "proven", "user", reason,
-                                     evidence_reference=ev_ref)
-    lines = [f"{t} trust recorded as proven (attributed to the user)" for t in triples] + gate_lines
-    return Result(lines=lines,
-                  next=next_action,
-                  data={"trust_act_id": acts[0]["trust_act_id"],
-                        "trust_act_ids": [a["trust_act_id"] for a in acts]})
+    """#837: deprecated no-op. Accepted so old scripts keep working; it records nothing and gates nothing."""
+    route = triple or "<harness/model@effort>"
+    return Result(lines=[f"deprecated: office approve trust is a no-op since #837 (nothing was recorded). Routes are "
+                         f"neutral by default; set a per-role policy with `office route allow|deny {route} --role <role>`.",
+                         "historical trust acts stay as audit evidence only"],
+                  next="office route policy --effective --role code_reviewer",
+                  data={"deprecated": True, "recorded": False, "route": triple or None})
 
 
 def _waive(con, run, spec: str, quote: str, root_cause: str | None = None) -> Result:

@@ -2,9 +2,10 @@
 
 The globally installed `office` resolves the target run first. A run is pinned
 to a MAJOR.MINOR release line; the newest installed PATCH on that line serves
-it. When this process is on another line, or a newer patch of the run's line
-is registered, the command is re-executed under that runtime. A run never
-crosses a MINOR or MAJOR implicitly: that takes `office upgrade`.
+it, and so does a later MINOR of the same MAJOR (`version.serves`, #843). A
+newer patch of the run's own line that is registered re-executes the command.
+A MAJOR bump (or a `version.BREAKING_LINES` line) is never crossed implicitly:
+that takes `office upgrade`.
 """
 from __future__ import annotations
 
@@ -106,6 +107,8 @@ def ensure_runtime(run: dict) -> None:
     line = version.release_line(pinned)
     cur = version.current()
     best = newest_on_line(line)
+    if version.serves(pinned, cur) and not version.same_line(cur, line):
+        return  # a later compatible MINOR serves the run; auto_adopt restamps it at an idle boundary
     if version.same_line(cur, line) and (best is None or version.release_key(best["office_version"])
                                           <= version.release_key(cur)):
         return
