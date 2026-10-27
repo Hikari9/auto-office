@@ -39,7 +39,7 @@ Take every decision to the user through the harness's native question tool when 
 
 Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
 - **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
-- **Release differs from this directory's `VERSION`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
+- **Release differs from this directory's `src/office/_version.py`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
 
