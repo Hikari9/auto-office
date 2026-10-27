@@ -153,7 +153,7 @@ def test_config_command_edits_discovery_and_user_policy_at_existing_tiers(home, 
     ("max_trial_percent_rolling_20", "101"), ("max_trial_percent_rolling_20", ".nan"),
     ("probe_timeout_s", "0"), ("probe_timeout_s", "901"), ("probe_ttl_days", "366"),
     ("trial_size_classes", "[L]"), ("trial_blast_radius", "[production]"),
-    ("enabled", "null"), ("require_known_fallback", "null"),
+    ("enabled", "null"), ("require_known_fallback", "null"), ("trial_bounded_production_tasks", "null"),
 ])
 def test_discovery_invalid_values_rejected_without_writing(home, key, value):
     with pytest.raises(OfficeError) as exc:

@@ -44,6 +44,7 @@ Config precedence is explicit run/prompt > repo > user > shipped defaults. The r
 | `routing.discovery.max_trial_percent_rolling_20` | 15 percent of the last 20 builder dispatch decisions across all runs |
 | `routing.discovery.trial_size_classes` | `[S, M]` |
 | `routing.discovery.trial_blast_radius` | `[local, repo]` |
+| `routing.discovery.trial_bounded_production_tasks` | `true`. A `production` run (never `production-data`, never irreversible) may trial a route on one task declared `task_size` S/M, `bounds: bounded`, not `domain: infrastructure`. Review floors, the known-working fallback and every prod-write gate are unchanged |
 | `routing.discovery.require_known_fallback` | `true` |
 | `routing.discovery.probe_ttl_days` | 7 |
 | `routing.discovery.probe_timeout_s` | 120 |

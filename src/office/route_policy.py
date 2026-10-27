@@ -26,6 +26,7 @@ DISCOVERY_DEFAULTS = {
     "max_trial_percent_rolling_20": 15,
     "trial_size_classes": ["S", "M"], "trial_blast_radius": ["local", "repo"],
     "require_known_fallback": True, "probe_ttl_days": 7, "probe_timeout_s": 120,
+    "trial_bounded_production_tasks": True,
 }
 _ROUTE = re.compile(r"(?:(?P<harness>[A-Za-z0-9_.-]+)/)?(?P<model>[A-Za-z0-9_.-]+)(?:@(?P<effort>[a-z]+))?\Z")
 _HARNESSES = re.compile(r"harness:([A-Za-z0-9_.-]+)\Z")
@@ -91,13 +92,32 @@ def discovery_settings(config: dict) -> dict:
     return settings
 
 
+def trial_risk_blocked(settings: dict, risk: dict, task: dict | None = None) -> bool:
+    """Whether the run/task risk bars a discovery trial. One definition for routing and the dispatch recheck.
+
+    The run-level gate is unchanged: an S/M run with a local/repo blast radius, nothing irreversible. A
+    `production` run (never `production-data`, never irreversible) may still trial a builder on one task
+    that is itself declared small and bounded: `task_size` S/M, `bounds: bounded`, and not infrastructure.
+    Executor tasks run in an isolated worktree and never deploy or write production, review and landing
+    floors are untouched, and the known-working fallback stays required (`no-fallback`)."""
+    if risk.get("irreversible"):
+        return True
+    if risk.get("size_class") in settings["trial_size_classes"] and risk.get("blast_radius") in settings["trial_blast_radius"]:
+        return False
+    if not settings.get("trial_bounded_production_tasks", True) or risk.get("blast_radius") != "production":
+        return True
+    task = task or {}
+    return not (task.get("task_size") in settings["trial_size_classes"] and task.get("bounds") == "bounded"
+                and task.get("domain") != "infrastructure")
+
+
 def validate_discovery(config: dict) -> list[str]:
     raw = (config.get("routing") or {}).get("discovery", {})
     if not isinstance(raw, dict):
         return ["routing.discovery must be a mapping"]
     settings = {**DISCOVERY_DEFAULTS, **raw}
     problems = []
-    for key in ("enabled", "require_known_fallback"):
+    for key in ("enabled", "require_known_fallback", "trial_bounded_production_tasks"):
         if type(settings[key]) is not bool:
             problems.append(f"routing.discovery.{key} must be a boolean")
     for key, allowed in (("roles", {"executor", "worker"}), ("trial_size_classes", {"S", "M"}),
