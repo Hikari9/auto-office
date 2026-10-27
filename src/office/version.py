@@ -43,10 +43,8 @@ def base_version() -> str:
             pass
     except ImportError:  # pragma: no cover - stdlib on 3.11+
         pass
-    for candidate in (SOURCE_ROOT / "VERSION", PACKAGE_ROOT / "_resources" / "VERSION"):
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8").strip()
-    raise RuntimeError("Auto Office cannot determine its own version")
+    from office._version import __version__
+    return __version__
 
 
 def _is_source_checkout() -> bool:
@@ -142,7 +140,7 @@ def current() -> str:
 
 
 # A wheel carries these source paths under office/_resources (pyproject force-include).
-_RESOURCE_PATHS = ("config", "schemas", "catalog", "adapters", "skills", "SKILL.md", "VERSION")
+_RESOURCE_PATHS = ("config", "schemas", "catalog", "adapters", "skills", "SKILL.md")
 
 
 def install_source() -> Path | None:

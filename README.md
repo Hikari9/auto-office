@@ -95,7 +95,7 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. Keep `VERSION`, `plugin.json`, `.claude-plugin/*.json`, and `pyproject.toml` in sync; `scripts/check_ecosystem.py` enforces it.
+Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it and the plugin manifests carry no version. `scripts/check_ecosystem.py` enforces it.
 
 ### 1. Install the CLI
 

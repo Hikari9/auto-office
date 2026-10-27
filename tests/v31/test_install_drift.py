@@ -17,7 +17,6 @@ def _source(tmp_path):
     (src / "adapters").mkdir()
     (src / "adapters" / "codex.yaml").write_text("id: codex\n")
     (src / "SKILL.md").write_text("# skill\n")
-    (src / "VERSION").write_text("3.1.0\n")
     return src
 
 
@@ -28,7 +27,6 @@ def _wheel_from(src, tmp_path):
     res = pkg / "_resources"
     shutil.copytree(src / "adapters", res / "adapters")
     shutil.copy(src / "SKILL.md", res / "SKILL.md")
-    shutil.copy(src / "VERSION", res / "VERSION")
     (pkg / "__pycache__").mkdir()
     (pkg / "__pycache__" / "dispatch.cpython-314.pyc").write_bytes(b"\0")
     return pkg
