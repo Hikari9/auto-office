@@ -119,8 +119,11 @@ def inline_estimate(text: str | None) -> dict | None:
         return None
     # The saving is taken from the decimal text, so it neither gains float noise (22 - 14.1) nor rounds a real
     # advantage to zero.
-    return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
-            "savings": float(Decimal(m[2]) - Decimal(m[1]))}
+    # Ordering is decided on the decimals: two distinct texts can collapse to one float. The original texts are
+    # kept for the receipt.
+    saving = Decimal(m[2]) - Decimal(m[1])
+    return {"inline": inline, "dedicated": dedicated, "inline_text": m[1], "dedicated_text": m[2],
+            "beneficial": saving > 0, "unit": m[3], "evidence": m[4].strip(), "savings": float(saving)}
 
 
 def number(x: float) -> str:
@@ -165,8 +168,8 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
     if estimate is None:
         return record("delegated", f"dedicated executor: an {gear} run goes inline only on a measured "
                                    "inline=<n> dedicated=<n> <unit> cost-to-success estimate")
-    if estimate["inline"] >= estimate["dedicated"]:  # the raw costs decide; the rounded saving is only displayed
-        return record("delegated", f"dedicated executor: estimated inline cost {number(estimate['inline'])} does not beat "
-                                   f"dedicated {number(estimate['dedicated'])} {estimate['unit']}")
-    return record("inline", f"measured cost-to-success ({gear} run): inline {number(estimate['inline'])} vs dedicated "
-                            f"{number(estimate['dedicated'])} {estimate['unit']} ({estimate['evidence']})", estimate)
+    if not estimate["beneficial"]:  # the exact decimal costs decide
+        return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline_text']} does not beat "
+                                   f"dedicated {estimate['dedicated_text']} {estimate['unit']}")
+    return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline_text']} vs dedicated "
+                            f"{estimate['dedicated_text']} {estimate['unit']} ({estimate['evidence']})", estimate)

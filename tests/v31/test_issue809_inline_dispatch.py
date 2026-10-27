@@ -70,6 +70,23 @@ def test_the_stored_saving_and_the_receipt_keep_the_estimates_exact_precision(in
     assert task_sizing.number(7.0) == "7" and task_sizing.number(7.9) == "7.9"
 
 
+def test_distinct_decimals_that_collapse_to_one_float_are_still_ordered_exactly():
+    est = "inline=1.00000000000000001 dedicated=1.00000000000000002 minutes: measured sessions"
+    got = task_sizing.inline_estimate(est)
+    assert got["beneficial"] and got["savings"] > 0
+    mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=est), LOW, task_count=1)
+    assert mode["mode"] == "inline" and "inline 1.00000000000000001 vs dedicated 1.00000000000000002" in mode["why"]
+    flipped = "inline=1.00000000000000002 dedicated=1.00000000000000001 minutes: measured sessions"
+    assert task_sizing.execution_mode("S", _desc("S", inline_advantage=flipped), LOW, task_count=1)["mode"] == "delegated"
+
+
+def test_an_s_run_is_not_limited_to_a_single_task():
+    for n in (2, 3, None):
+        mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=n)
+        assert mode["mode"] == "inline", n
+    assert task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=2)["estimated_savings"]["savings"] == 8
+
+
 def test_the_missing_estimate_reason_names_the_gear():
     for gear in ("S", "M"):
         why = task_sizing.execution_mode(gear, _desc("S"), LOW, task_count=1)["why"]
@@ -273,6 +290,22 @@ def test_a_relaunch_of_a_delegated_m_task_never_becomes_inline(env):
     code, out = env.office("dispatch", "T1")
     assert code == 0 and "orchestrator-inline" not in out, out
     assert _mode(env)["mode"] == "delegated"
+
+
+def test_a_multi_task_s_run_dispatches_inline_on_a_measured_estimate_and_delegates_without_one(env):
+    with_estimate = PLAN_TWO.replace("visual: none\n\n### T2", f"visual: none\ntask_size: S\n"
+                                     "task_size_rationale: one bounded function in one file\n"
+                                     f"inline_advantage: {EST}\n\n### T2", 1)
+    with_estimate = with_estimate.replace("visual: none\n", "visual: none\ntask_size: S\n"
+                                          "task_size_rationale: one bounded function in one file\n", 3)
+    _approved(env, with_estimate, "S")
+    env.office("dispatch", "T1", check=0)
+    assert _mode(env)["mode"] == "inline" and _mode(env)["estimated_savings"]["savings"] == 8
+    env.office("dispatch", "T2", check=0)
+    con = env.con()
+    rows = {r["id"]: json.loads(r["route_json"])["execution_mode"]["mode"]
+            for r in con.execute("SELECT id, route_json FROM tasks")}
+    assert rows == {"T1": "inline", "T2": "delegated"}, rows
 
 
 def test_m_with_two_tasks_is_delegated(env):
