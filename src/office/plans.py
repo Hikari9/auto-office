@@ -924,6 +924,9 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None,
     if pin:  # the route's shape and capability, before any pin is written
         candidates.declared_decision(pin["as"], flag="--as", role="plan_reviewer", config=state.pinned_config(run))
     if pin and review_required(run) and not _pr(run).get("ended") and run.get("plan_version"):
+        if rounds is not None:
+            raise Usage("rounds-with-open-review", f"plan review is open with a cap of {round_cap(run)} round(s); a re-pin "
+                        "(--as) keeps it, so --rounds cannot change it", next_step="office review plan --as <route>")
         return _repin_open_review(con, run, pin)
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "another plan review is the user's request; record their words",

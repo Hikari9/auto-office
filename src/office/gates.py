@@ -701,6 +701,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             dispatch_id = _reviewer_dispatch(con, run, gate, role, decision)
             if last_failed and last_failed[0] != triple:
                 review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
+            elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
+                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id)
             con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
                         "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
         ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
@@ -744,7 +746,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             if never_replied:
                 with db.transaction(con):
                     state.emit(con, run, "review.empty_reply", f"{gate.get('task_id') or gate.get('scope') or 'plan'} {role} "
-                               f"{dispatch_id} on {triple} ended {d.get('terminal_classification')} with an empty reply: "
+                               f"{dispatch_id} on {triple} ended: {d.get('terminal_classification')} with an empty reply: "
                                "no reply file was written", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
                                payload={"route": triple, "gate": gate["id"], "classification": d.get("terminal_classification")})
             if attention and never_replied and triple not in retried and _launch_spec(ddir).get("retry_same_route"):
@@ -847,6 +849,21 @@ def _launch_spec(ddir: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return spec if isinstance(spec, dict) else {}
+
+
+def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
+    """(route, why) when routing passed over the review's preferred primary route for `chosen`: the first
+    preferred_seed entry matched a candidate that selection rejected (quota cooldown, trust, capability) and
+    `chosen` is not that entry's route."""
+    seed = ((decision.get("request") or {}).get("preferred_seed") or [])[:1]
+    if not seed or routing.preferred_rank(chosen, seed) is not None:
+        return None
+    wanted = {routing.candidate_id(c) for c in (decision.get("request") or {}).get("candidates") or []
+              if routing.preferred_rank(c, seed) is not None}
+    for r in decision.get("rejected") or []:
+        if r.get("candidate") in wanted:
+            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}"
+    return None
 
 
 def review_route_notice(con, run: dict, gate: dict, role: str, before: str | None, after: str, reason: str, *,

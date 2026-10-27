@@ -28,11 +28,14 @@ def test_a_reviewer_that_wrote_no_reply_file_ends_with_an_event_naming_the_empty
     events = _events(env, "review.empty_reply")
     assert len(events) == 1, [e["summary"] for e in _q(env, "SELECT summary FROM events")]
     assert "empty reply" in events[0]["summary"] and "no reply file was written" in events[0]["summary"]
-    assert "ended success" in events[0]["summary"] and events[0]["audience"] == "orchestrator"
+    assert "with an empty reply" in events[0]["summary"] and events[0]["audience"] == "orchestrator"
     payload = json.loads(events[0]["payload_json"])
     assert payload["classification"] == "success"
     first = _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")[0]["triple"]
     assert payload["route"] == first and first in events[0]["summary"]
+    # the dispatch's own end line names the empty reply too, never a plain success
+    ended = [e["summary"] for e in _events(env, "dispatch.ended") if e["dispatch_id"] == events[0]["dispatch_id"]]
+    assert ended and all("empty reply" in line for line in ended), ended
 
 
 def test_a_reviewer_that_replied_unreadably_is_not_called_empty(env):
@@ -153,3 +156,34 @@ def test_a_review_only_rerun_that_starts_away_from_its_earlier_route_announces_t
     moves = [c for c in _lane_route_changes(env) if c["after"] == last]  # the pool may recycle a tried route
     assert moves and moves[-1]["before"] in tried and moves[-1]["before"] != last, moves
     assert "did not settle" in moves[-1]["reason"] and moves[-1]["kind"] == "reviewer-fallback", moves
+
+
+def _cool_down(env, triple):
+    """A quota cooldown on `triple`'s harness invocation, as a quota wall in an earlier run leaves it."""
+    from datetime import datetime, timedelta, timezone
+    from office import candidates, routing
+    con = env.con()
+    try:
+        cands, _ = candidates.build_candidates(con, "code_reviewer", probe=False)
+        (cand,) = [c for c in cands if routing.candidate_id(c) == triple]
+        with con:
+            con.execute("INSERT OR REPLACE INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
+                        (routing.cooldown_key(cand["harness"], cand["invocation_model_id"]),
+                         (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                         datetime.now(timezone.utc).isoformat()))
+    finally:
+        con.close()
+
+
+def test_a_review_whose_preferred_primary_is_rejected_at_selection_announces_the_route_it_started_on(env):
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    primary = "codex@1/luna@high"  # the first preferred_seed entry of the code_reviewer role
+    _cool_down(env, primary)
+    env.office("dispatch", "T1", check=0)
+    (first,) = [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")]
+    assert first != primary
+    (change,) = _lane_route_changes(env)
+    assert change["before"] == primary and change["after"] == first and change["kind"] == "reviewer-fallback"
+    assert "rejected" in change["reason"] and "rate-limited" in change["reason"], change
+    code, status = env.office("status")
+    assert f"{primary} -> {first}" in status, status

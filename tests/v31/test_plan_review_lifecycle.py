@@ -397,8 +397,18 @@ def test_review_plan_as_re_pins_and_re_runs_only_the_plan_review_without_spendin
     assert REPIN in status and "review route change" in status, status
     code, route = _o(env, "inspect", "route")
     assert REPIN in route and "[repin]" in route, route
+    code, route = _o(env, "inspect", "ROUTE")  # the verb is case-insensitive; the notices come with it
+    assert REPIN in route and "[repin]" in route, route
     _ingest(env, APPROVED)
     assert [g["round"] for g in _plan_gates(env) if g["review_status"] == "COMPLETED"] == [1]
+
+
+def test_review_plan_as_with_rounds_while_open_is_refused_not_silently_ignored(env):
+    _start(env)
+    _ingest(env, status="UNAVAILABLE")
+    code, out = _o(env, "review", "plan", "--as", REPIN, "--rounds", "5")
+    assert code == 2 and "rounds-with-open-review" in out and "cap of 3" in out, out
+    assert not _queued(env) and "review_override" not in _run(env)["plan_review"]
 
 
 def test_review_plan_as_after_a_verdict_queues_the_next_round_and_says_so(env):

@@ -1035,7 +1035,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "inspect":
         from office import gates, inspect_cmd
         res = inspect_cmd.inspect(con, run, args.what, args.ident)
-        if args.what == "route":  # plan and lane reviews that left their route (a task's own changes are listed already)
+        if (args.what or "").lower() == "route":  # plan and lane reviews that left their route (a task's own changes are listed already)
             notices = gates.review_route_lines(con, run["id"], skip_task=(args.ident or "").upper() or None)
             res.lines += notices
             if isinstance(res.data, dict):
