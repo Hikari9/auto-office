@@ -264,3 +264,13 @@ def test_model_list_shows_role_specific_denies(home):
     row = next(r for r in res.data["rows"] if r["model_id"] == "claude-opus-5-5" and r["effort"] == "high")
     assert row["role_denied"] == ["code_reviewer"] and row["user_denied"] is False
     assert any("denied for roles: code_reviewer" in l for l in res.lines if "claude-opus-5-5" in l and "high" in l)
+
+
+def test_a_receipt_revoked_after_lookup_cannot_be_claimed(home):
+    _, con = home
+    receipt = issue(con)
+    c = {"harness": "claude", "model_id": "claude-opus-5-5", "invocation_model_id": "claude-opus-5-5", "effort": "high"}
+    found = route_override.find_valid("run-aaaa1111", "code_reviewer", c, con=con)
+    assert found
+    route_override.revoke(con, receipt["id"])  # the user revokes between lookup and claim
+    assert not route_override.record_use(found, "ctx", scope="T1", con=con)

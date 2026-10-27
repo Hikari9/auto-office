@@ -205,8 +205,11 @@ def record_use(receipt: dict, context: str, *, scope: str | None = None, con: sq
     try:
         con = con or db.connect()
         ensure_schema(con)
-        con.execute("INSERT OR IGNORE INTO route_override_claims(receipt_id, scope, claimed_at) VALUES(?,?,?)",
-                    (receipt["id"], scope or "", now_iso()))
+        # The claim re-checks revocation and expiry in the same statement, so a revoke that lands
+        # between lookup and claim wins.
+        con.execute("INSERT OR IGNORE INTO route_override_claims(receipt_id, scope, claimed_at) "
+                    "SELECT id, ?, ? FROM route_override_receipts WHERE id=? AND revoked_at IS NULL AND expires_at>?",
+                    (scope or "", now_iso(), receipt["id"], datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
         winner = con.execute("SELECT scope FROM route_override_claims WHERE receipt_id=?", (receipt["id"],)).fetchone()
         if winner is None or winner[0] != (scope or ""):
             return False
