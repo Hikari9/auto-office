@@ -100,6 +100,32 @@ A hypothetical cross-service reconciliation run: effective **XL** gear because 3
 
 The Elephant owns discovery, decomposition and the effective plan. The runtime—not the plan reviewer—funds XL. Exactly **three mandatory, independently launched** Goldfish review (1) frozen requirements and comprehension, (2) actual repository architecture, reuse and failure modes, and (3) implementation readiness and integration. The runtime selects **at most two** safety/interaction/security hazard auditors from evidence and logs each reason. The lead receives the independent structured findings, deduplicates and emits **the one normal plan verdict**. Missing or invalid Goldfish output blocks the lead; it is never synthesized as an approval. Reviewers see frozen requirements, the plan and repository evidence, never the planner's private conversation. L runs, including L runs with XL-sized tasks, never invoke the XL fanout.
 
+## Read-only rollout observations (not release authorization)
+
+To inspect the settled results of an XS–XL pilot on a **copy** of `runs.db`:
+
+```bash
+python scripts/issue809_rollout_report.py --runs-db /path/to/COPY/runs.db
+```
+
+The report aggregates the current learner's **settled executor/worker outcomes**
+by run and task, includes only newly pinned XS–XL gears, and records accepted
+tasks, first-pass acceptance, additional attempts, *observed* upward task-size
+reclassifications, actual-money coverage and cost per accepted task (only when
+**every recorded attempt** has an actual spend value). Worker-active elapsed
+seconds are provided separately and never mislabeled end-to-end latency.
+Missing money does **not** become $0; missing gate attestations do **not** become
+"zero violations." A replay is observational and cannot prove how an unexecuted
+alternative model would have performed.
+
+**Still required before production/default rollout:** trustworthy end-to-end
+completion timestamps including queue/wait periods; a review/permission/landing
+gate audit that actually certifies **zero** violations; representative local
+history and first-pass/rework calibration; exact Codex/Claude/agy/Opencode
+harness conformance; staged rollout owner and rollback/monitoring. Neither a
+synthetic replay, a benchmark page, nor a report against an empty database
+authorizes model promotion, reviewer bypass or release.
+
 ## Legacy migration and pin safety
 
 The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) continue to parse and retain their prior gating. Their `gear_model_version` is `legacy-pinned`; they are never silently mapped to XS–XL, and `direct` risk-raising amendments retain their old `express`/`full` upgrade contract. The new `run-gear-1` is only for a newly selected XS–XL run. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
