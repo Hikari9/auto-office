@@ -2,6 +2,14 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.8.1
+
+PATCH: #809 conformance follow-up (#841).
+
+- An M run executes a task inline only for a one-task, low-risk run with a structured, strictly positive, beneficial `inline=<n> dedicated=<n> <unit>: <evidence>` estimate (evidence of at least 12 characters and 3 words); zero, negative, non-finite, equal, dearer and placeholder estimates delegate, and S follows the same estimate rule. Runs pinned before the XS-XL gear model never go inline.
+- New-run help prefers XS-XL; a historical gear alias prints a compatibility notice and keeps its pinned gates.
+- Tests: the scripted-fake routing hides every agy row (Gemini as well as Claude), so a fake worker no longer runs as a real process that drains convergence jobs past an in-process monkeypatch (`test_a_failed_subagent_blocks_convergence_and_spends_no_round` failed about half the runs).
+
 ## 3.8.0
 
 MINOR: role-scoped routing policy (#837, advances #627). Backward compatible.

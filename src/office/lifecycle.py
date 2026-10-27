@@ -254,6 +254,9 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res = Result()
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
         res.add(f"run gear why: {gates['run_gear_rationale']}")
+        if gear in cfg.LEGACY_GEARS:
+            res.add(f"compatibility notice: {gear} is a historical preset, not an XS-XL run gear; "
+                    "use --gear XS|S|M|L|XL for new work; original review/risk gates remain pinned")
         res.add(f"funded gates: plan review={bool(gates['plan_review'])}, independent convergence="
                 f"{bool(gates['code_review'])}, browser={bool(gates['visual'])}; "
                 "scope, checks, authorization and landing remain mandatory")

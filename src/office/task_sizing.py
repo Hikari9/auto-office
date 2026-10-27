@@ -6,7 +6,9 @@ Versioned records are deterministic so plan revisions and dispatches can diff.
 """
 from __future__ import annotations
 
+import math
 import re
+from decimal import Decimal
 
 SIZES = ("XS", "S", "M", "L", "XL")
 VERSION = "subtask-sizing-1"
@@ -106,21 +108,46 @@ _ESTIMATE = re.compile(r"inline=(\d+(?:\.\d+)?)\s+dedicated=(\d+(?:\.\d+)?)\s+([
 
 def inline_estimate(text: str | None) -> dict | None:
     """The planner's measured total cost-to-success estimate, `inline=<n> dedicated=<n> <unit>: <evidence>`,
-    or None when absent or malformed. The cost is the whole path to an accepted result (executor time,
-    retries and review rounds), so a cheap first run that needs more repair does not beat dedicated dispatch."""
+    or None when absent, malformed, not strictly positive or backed by no real evidence (under 12 characters or
+    3 words). The cost is the whole path to an accepted result
+    (executor time, retries and review rounds), so a cheap first run that needs more repair does not beat
+    dedicated dispatch, and a zero cost is a missing measurement, not a free path."""
     m = _ESTIMATE.fullmatch((text or "").strip())
     if not m:
         return None
     inline, dedicated = float(m[1]), float(m[2])
-    return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
-            "savings": round(dedicated - inline, 4)}
+    if not (math.isfinite(inline) and math.isfinite(dedicated)) or inline <= 0 or dedicated <= 0:
+        return None
+    # The saving is taken from the decimal text, so it neither gains float noise (22 - 14.1) nor rounds a real
+    # advantage to zero.
+    # Ordering is decided on the decimals: two distinct texts can collapse to one float. The original texts are
+    # kept for the receipt.
+    evidence = m[4].strip()
+    if len(evidence) < 12 or len(evidence.split()) < 3:  # a placeholder is not a measurement (as task_size_rationale)
+        return None
+    saving = Decimal(m[2]) - Decimal(m[1])
+    return {"inline": inline, "dedicated": dedicated, "inline_text": m[1], "dedicated_text": m[2],
+            "beneficial": saving > 0, "unit": m[3], "evidence": evidence, "savings": float(saving)}
+
+
+def number(x: float) -> str:
+    """A cost as the shortest text that round-trips (`22`, `14.1`, `1.0000000000001`), never a rounded one."""
+    text = repr(float(x))
+    return text[:-2] if text.endswith(".0") else text
+
+
+def execution_gear(run: dict) -> str | None:
+    """The gear execution_mode may act on: only a run pinned to the XS-XL gear model. A run pinned before it
+    (a legacy name, or a gear with no `gear_model_version`) keeps its original semantics and never goes inline."""
+    gates = run.get("gates") or {}
+    return run.get("gear") if gates.get("gear_model_version") == "run-gear-1" else None
 
 
 def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None, *, task_count: int | None = None) -> dict:
     """Who executes a task: the orchestrator inline, or a dedicated executor (the default).
 
     XS runs go inline by default; an S run only on a measured estimate that inline beats dedicated dispatch;
-    an M run only when it is a single task; L and XL always delegate; elevated risk always delegates. The
+    an M run only when a single task has measured cost advantage; L and XL always delegate; elevated risk always delegates. The
     record carries the owner, the reason and the estimated savings. An inline task still gets the worktree,
     the fenced lease, scope, self-review subagents, convergence review and landing of a delegated one.
     """
@@ -140,15 +167,13 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
         return record("delegated", f"dedicated executor: a {size or 'unsized'} task is too large for inline in a {gear} run")
     if gear == "XS":
         return record("inline", "XS run, low risk, bounded task: inline by default to keep orchestrator context")
-    if gear == "M":
-        if task_count == 1:
-            return record("inline", "M run with a single task: nothing to parallelize, inline keeps context")
+    if gear == "M" and task_count != 1:
         return record("delegated", "dedicated executor: an M run goes inline only for a single-task run")
     if estimate is None:
-        return record("delegated", "dedicated executor: an S run goes inline only on a measured "
+        return record("delegated", f"dedicated executor: an {gear} run goes inline only on a measured "
                                    "inline=<n> dedicated=<n> <unit> cost-to-success estimate")
-    if estimate["savings"] <= 0:
-        return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline']:g} does not beat "
-                                   f"dedicated {estimate['dedicated']:g} {estimate['unit']}")
-    return record("inline", f"measured cost-to-success: inline {estimate['inline']:g} vs dedicated "
-                            f"{estimate['dedicated']:g} {estimate['unit']} ({estimate['evidence']})", estimate)
+    if not estimate["beneficial"]:  # the exact decimal costs decide
+        return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline_text']} does not beat "
+                                   f"dedicated {estimate['dedicated_text']} {estimate['unit']}")
+    return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline_text']} vs dedicated "
+                            f"{estimate['dedicated_text']} {estimate['unit']} ({estimate['evidence']})", estimate)

@@ -83,7 +83,7 @@ route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accep
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
 task_size: XS | S | M | L | XL   (each task independently; the plan may omit for runtime inference)
 task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
-inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; S runs only)
+inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; S/M inline exceptions)
 """
 
 REVIEW_FORMAT = """\

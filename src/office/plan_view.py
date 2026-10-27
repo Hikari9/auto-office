@@ -167,7 +167,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
         else:
             sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
-        mode = task_sizing.execution_mode(run.get("gear"), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
+        mode = task_sizing.execution_mode(task_sizing.execution_gear(run), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "task_size": sizing.get("task_size"),
                         "task_size_rationale": sizing.get("task_size_rationale"),
@@ -248,7 +248,7 @@ def execution_line(mode: dict) -> str:
     savings = mode.get("estimated_savings")
     return (f"{mode.get('mode') or 'delegated'} (owner {mode.get('owner') or 'executor'}): "
             f"{mode.get('why') or 'dedicated executor default'}"
-            + (f"; estimated savings {savings['savings']:g} {savings['unit']}" if savings else "")
+            + (f"; estimated savings {task_sizing.number(savings['savings'])} {savings['unit']}" if savings else "")
             + (f"; outcome {mode['outcome']['status']}" if mode.get("outcome") else ""))
 
 

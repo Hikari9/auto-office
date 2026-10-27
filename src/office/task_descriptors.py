@@ -52,7 +52,8 @@ def parse_field(key: str, value: str):
         text = value.strip()
         if len(text) > 500 or unsafe_text(text) or task_sizing.inline_estimate(text) is None:
             raise ValueError("inline_advantage must be a measured estimate: "
-                             "inline=<n> dedicated=<n> <unit>: <how both costs to an accepted result were measured>")
+                             "inline=<n> dedicated=<n> <unit>: <how both costs to an accepted result were measured, at least 12 "
+                             "characters and 3 words>")
         return text
     if key in TOKENS:
         if not value.isdecimal() or int(value) > 100000000:

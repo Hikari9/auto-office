@@ -366,7 +366,7 @@ def _apply_execution_mode(con, run: dict, task: dict, decision: dict, launch_pre
     checks, convergence review and landing apply unchanged. An explicit --as/--route/--cli/--external always
     delegates (or prepares the external worker the user asked for)."""
     live = [t for t in state.tasks(con, run["id"]) if t["status"] not in ("superseded", "cancelled")]
-    mode = task_sizing.execution_mode(run.get("gear"), candidates._effective_task_descriptor(run, task),
+    mode = task_sizing.execution_mode(task_sizing.execution_gear(run), candidates._effective_task_descriptor(run, task),
                                       run.get("risk"), task_count=len(live))
     if mode["mode"] == "inline" and not explicit:
         decision["launch"] = {"external": True, "inline": True}
