@@ -39,7 +39,9 @@ done:
 - <observable criterion>
 blast_radius: local | repo | production | production-data   (classify it; undeclared risk keeps independent code review on)
 irreversible: yes | no   (optional; yes is high risk)
-size_class: S | M | L | XL   (optional; L and XL are high risk)
+size_class: XS | S | M | L | XL   (optional complexity; risk is classified independently for new runs)
+run_gear: XS | S | M | L | XL   (optional recommendation; refused below the run's intake gear or its risk floor)
+run_gear_why: <concrete reasons: scope, coupling, uncertainty or coordination>   (required with run_gear)
 lightweight: <why this work is trivial and low risk>   (optional; needs blast_radius local or repo; refused for unknown or high risk)
 non_goals:
 - <explicitly out of scope>
@@ -79,6 +81,9 @@ visual:
   selectors: header, nav                   (elements to measure)
 route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
+task_size: XS | S | M | L | XL   (each task independently; the plan may omit for runtime inference)
+task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
+inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; S runs only)
 """
 
 REVIEW_FORMAT = """\
@@ -373,6 +378,7 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
             "doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
     out += simplify_lines(base) + self_review_lines(base, self_review_tier(run.get("gear"), run.get("risk_json")))
+    out += runtime_review_lines(run)
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
             "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
             "           between shell calls, so source and submit in one command). Then stop; results are delivered.",
@@ -424,7 +430,7 @@ def self_review_tier(gear, risk_json) -> str:
     """How much self-review an executor does, from the run's stored gear and risk record only.
     Nothing in a packet or executor input reaches this. Every doubt resolves to more review:
     an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
-    if gear == "full":
+    if gear in ("L", "XL", "full"):
         return "deep"
     try:
         risk = json.loads(risk_json) if isinstance(risk_json, (str, bytes)) else risk_json
@@ -434,11 +440,26 @@ def self_review_tier(gear, risk_json) -> str:
         return "single"
     blast = risk.get("blast_radius")
     if (risk.get("high") or risk.get("irreversible") or blast in ("production", "production-data")
-            or risk.get("size_class") in _HIGH_SIZES):
+            or (not risk.get("complexity_only") and risk.get("size_class") in _HIGH_SIZES)):
         return "deep"
+    if gear == "XS" and not risk.get("high") and blast in _INLINE_BLAST:
+        return "inline"
     if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
         return "inline"
     return "single"
+
+
+def runtime_review_lines(run: dict) -> list[str]:
+    """What Office itself funds after the executor submits (#809), so the executor never claims it. The
+    executor's own self-review above stays required; the runtime subagents are independent of it."""
+    gear = run.get("gear")
+    if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1" or gear not in ("S", "M", "L", "XL"):
+        return []
+    funded = ("one independent self-review subagent" if gear in ("S", "M")
+              else "up to four independent specialist self-review subagents")
+    return [f"OFFICE RUNTIME REVIEW (gear {gear}): after deterministic checks Office launches {funded} on the "
+            "immutable accepted revision, then the convergence review. They are separate sessions, not yours: do not "
+            "claim them because your harness lacks nested agents. A missing or invalid report blocks acceptance."]
 
 
 def self_review_lines(base: str, tier: str = "deep") -> list[str]:
@@ -552,6 +573,31 @@ def code_review_brief(run: dict, task: dict, revision: dict, diff: str, checks_s
         out += ["", "EXECUTOR EVIDENCE (this task changes no files; the posted comment or edit is recorded here):",
                 evidence or "(none recorded: the executor left no evidence file; report that as a finding)"]
     out += ["", REVIEW_FORMAT, "", "DIFF (base -> revision):", diff]
+    return "\n".join(out) + "\n"
+
+
+def self_review_subagent_brief(run: dict, task: dict, revision: dict, commit: str, diff: str, checks_summary: str,
+                               checkout: str, rubric: str, rubric_text: str) -> str:
+    """One runtime self-review subagent (#809): an advisory read of one task revision, stamped with the
+    commit it examined. Its role line is a code reviewer's; its verdict is not the convergence verdict."""
+    out = [
+        "ROLE independent code reviewer (runtime self-review subagent, read-only). Change nothing except your reply file.",
+        "You did not write this change, and you are not the convergence reviewer that follows you.",
+        f"RUBRIC {rubric}: {rubric_text}",
+        f"TASK {task['id']} {task['title']}",
+        *_lines("ACCEPT", task.get("accept")),
+        f"SCOPE {', '.join(task.get('scope') or []) or 'none (external work)'}",
+        f"REVISION {revision['id']}; a read-only checkout is at {checkout}",
+        f"REVIEWED_COMMIT {commit} is the commit under review. State it on a `REVIEWED_COMMIT <sha>` line of your "
+        "reply; a reply without it, or naming another commit, is discarded and blocks acceptance.",
+        f"DETERMINISTIC CHECKS {checks_summary}",
+    ]
+    if revision.get("self_review_json"):
+        from office import submit
+        out.append("PRODUCER SELF-REVIEW (not an approval; try to falsify it): "
+                   + submit.describe_receipt(json.loads(revision["self_review_json"])))
+    out += ["Your verdict is ADVISORY evidence for the one authoritative convergence review.",
+            "", CONVERGENCE_REVIEW_FORMAT, "", f"DIFF (base -> revision {revision['commit_sha'][:12]}):", diff]
     return "\n".join(out) + "\n"
 
 

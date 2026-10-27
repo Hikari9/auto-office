@@ -190,6 +190,10 @@ def _run(snap, ctx: Context, r: dict, rows: _Rows) -> dict:
         "goal": r.get("goal"),
         "phase": r.get("phase") or r.get("status"),
         "gear": r.get("gear"),
+        "run_gear": r.get("gear"),
+        "run_gear_rationale": (_loads(r.get("gates_json"), {}) or {}).get("run_gear_rationale"),
+        "effective_gates": {k: (_loads(r.get("gates_json"), {}) or {}).get(k) for k in
+                            ("plan_review", "code_review", "visual", "review_floor", "review_contract")},
         "created_at": r.get("created_at"),
         "updated_at": r.get("updated_at"),
         "office_version": ver,
@@ -287,11 +291,16 @@ def _progress(tasks: list[dict]) -> dict | None:
 
 def _task(run_id: str, t: dict, audits: list[dict], executor: dict | None) -> dict:
     pr = _loads(t.get("pr_json"), None)
+    descriptor = _loads(t.get("descriptor_json"), {}) or {}
     return {"id": identity.task(run_id, t["id"]), "task_id": t["id"], "title": t.get("title"), "role": t.get("role"),
             "status": t.get("status"), "pause_reason": t.get("pause_reason"), "stack_after": t.get("stack_after"),
             "depends": _loads(t.get("depends_json"), []),
             "current_dispatch": identity.dispatch(t["current_dispatch_id"]) if t.get("current_dispatch_id") else None,
             "pr": pr.get("number") if isinstance(pr, dict) else None,
+            "task_size": descriptor.get("task_size"),
+            "task_size_rationale": descriptor.get("task_size_rationale"),
+            "profile": descriptor.get("profile"),
+            "profile_version": descriptor.get("profile_version"),
             "route": route(t["id"], audits, executor)}
 
 
@@ -321,6 +330,15 @@ def route(task_id: str, audits: list[dict], dispatch: dict | None) -> dict:
         "weakness": head.get("weakness"),
         "dispatched": disp.get("dispatched") or rows[-1].get("dispatched_route") or _candidate(dispatch_route),
         "fallbacks_taken": [{"route": f.get("route"), "reason": f.get("reason")} for f in taken if isinstance(f, dict)],
+        "run_gear": latest.get("run_gear"),
+        "run_gear_rationale": latest.get("run_gear_rationale"),
+        "task_size": latest.get("task_size"),
+        "task_size_rationale": latest.get("task_size_rationale"),
+        "profile": latest.get("profile"),
+        "profile_version": latest.get("profile_version"),
+        "preferred_route_reason": latest.get("preferred_route_reason"),
+        "selection_reason": latest.get("selection_reason"),
+        "effective_gates": latest.get("effective_gates"),
         "planner_override": ({"why": planner.get("why"), "departs_from_ranking": planner.get("departs_from_ranking")}
                              if planner.get("override") else None),
         "audits": [{"id": a["id"], "phase": a.get("phase"), "plan_version": a.get("plan_version"),

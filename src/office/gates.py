@@ -693,7 +693,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})"
                             + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
-                               if decision.get("status") == "protected_quota_would_be_consumed" else ""))
+                               if decision.get("status") == "protected_quota_would_be_consumed" else "")
+                            + (f"; other seeded routes were out: {blockers}"
+                               if (blockers := candidates.seeded_fallback_blockers(decision)) else ""))
             break
         cand = decision["candidate"]
         triple = routing.candidate_id(cand)

@@ -118,7 +118,15 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("bad-config", f"config is invalid: {exc}",
                     next_step="fix ~/.config/auto-office/config.yaml or .auto-office/config.yaml, then retry")
     pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(caller_top, files)}
-    risk = cfg.resolve_risk(config, blast_radius, size_class, irreversible)
+    # For new XS-XL runs complexity is not a risk signal. Existing explicit
+    # legacy presets retain their exact historical size/risk interpretation.
+    legacy = gear in cfg.LEGACY_GEARS
+    risk = cfg.resolve_risk(config, blast_radius, size_class if legacy else None, irreversible)
+    if not legacy:
+        risk["size_class"] = size_class
+        risk["complexity_only"] = True
+        if size_class and not risk.get("classified_by"):
+            risk["classified_by"] = "intake"
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
@@ -126,6 +134,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         gates = cfg.resolve_gates(gear, risk, config)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
+    gates["run_gear_rationale"] = cfg.gear_rationale(gear, risk, volume=volume,
+                                                      interview=interview, adversarial=adversarial)
     if plan_review_rounds is not None:
         # The user's intake choice (#418): the initial plan review's round cap,
         # pinned for the run's life. Config never stands in for it.
@@ -243,6 +253,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             jobs.kick(con, run_id)
         res = Result()
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
+        res.add(f"run gear why: {gates['run_gear_rationale']}")
+        res.add(f"funded gates: plan review={bool(gates['plan_review'])}, independent convergence="
+                f"{bool(gates['code_review'])}, browser={bool(gates['visual'])}; "
+                "scope, checks, authorization and landing remain mandatory")
         if source:
             res.add(f"derived from {short(source['id'])}: requirements carried over; "
                     + (f"its plan p{source['plan']['version']} is the draft at {planpath.display(run)} (review it, then "

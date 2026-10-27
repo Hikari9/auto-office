@@ -62,12 +62,10 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
-3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
-   as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class S|M|L|XL`,
-   `--irreversible` from your provisional read;
-   unset is unknown, never low risk: an unknown run keeps independent code review under every gear until the plan
-   classifies it; see "Risk floor and the lightweight path" below). Never ask about benchmark refreshes; that is the
-   `auto-update-benchmarks` skill, run only when the user explicitly calls it.
+3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
+   `--gear XS|S|M|L|XL` (complexity and coordination, never risk; an unknown size is M), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
+   unset risk is unknown, never low: an unknown run keeps independent code review under every gear until the plan classifies it, see "Risk floor and the lightweight path").
+   Never ask about benchmark refreshes; that is the `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.
    Linked callers retain their selected base/configuration; the run and inline draft use the durable main/common-Git root. Format: `office submit --help`; then `office submit`.
    On `repository-unavailable`, restore the named repository, then `office resume`; never edit run state to redirect it. Detail: `docs/orchestrator-reference.md`.
@@ -167,13 +165,15 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 
 ### Risk floor and the lightweight path
 
+- A run gear (`XS` to `XL`, pinned at intake) funds planning and review ceremony from complexity; `office start`, `office inspect plan` and every dispatch print it with its
+  funded gates. Risk is separate: a gear never lowers the floor below. Legacy names (`direct` to `full`) only resume runs already pinned to them. Task sizes, size floors and planner gear recommendations: `skills/auto-planning`.
 - Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high), `elevated` (irreversible, production
-  blast radius, size L/XL) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
+  blast radius, or size L/XL on a legacy-pinned run; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
   `unknown` and `elevated` imply.
 - The plan classifies it in Requirements (`blast_radius: local|repo|production|production-data`, optional `irreversible: yes`,
-  `size_class: S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
-- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, gear `full`,
-  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review).
+  `size_class: XS|S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
+- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, legacy gear `full`,
+  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review; XS-XL gears fund their own).
   Scope, `checks:`, self-review, the evidence receipt and human landing authority all stay. Runs from before this keep their gates.
 
 ## Herdr agents

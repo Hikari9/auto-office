@@ -48,6 +48,15 @@ def model_tag(harness, model, effort) -> str:
     return '[' + alias + (' ' + level if level else '') + ']' if alias else ''
 
 
+SIZES = ("XS", "S", "M", "L", "XL")
+
+
+def size_tag(size: object) -> str:
+    """`[L]` for a valid XS-XL task size; nothing for an unsized task."""
+    clean = str(size or "").strip().upper()
+    return f"[{clean}]" if clean in SIZES else ""
+
+
 def role_label(role) -> str:
     if role in ('executor', 'worker', 'planner'):
         return ''
@@ -64,11 +73,11 @@ def shell_label(run, dispatch) -> str:
     return ' '.join(p for p in (repo_short(run), dispatch.get('task_id') or 'plan', 'shell') if p)
 
 
-def format_label(run, dispatch, scope, title, pr) -> str:
+def format_label(run, dispatch, scope, title, pr, size=None) -> str:
     match = re.search(r'(?<!\S)#([0-9]+)', title or '')
     issue = match.group(1) if match else issue_number((run.get('landing') or {}).get('issue'))
     reference = '#' + issue if issue else 'PR#' + str(pr) if pr else ''
     role = dispatch.get('role') or dispatch.get('kind')
     return ' '.join(p for p in (repo_short(run), scope, reference, short_title(title),
-                                role_label(role), model_tag(dispatch.get('harness'), dispatch.get('model'),
+                                role_label(role), size_tag(size), model_tag(dispatch.get('harness'), dispatch.get('model'),
                                                             dispatch.get('effort'))) if p)

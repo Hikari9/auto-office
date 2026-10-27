@@ -350,7 +350,8 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
     rows = con.execute(
         "SELECT d.id, d.run_id, d.role, d.task_id, d.triple, d.harness, d.model, d.effort, d.started_at, d.ended_at, "
         f"{opt('terminal_classification')}, {opt('exit_code')}, d.outcome, d.attribution, {opt('stall_kind')}, "
-        f"d.money_actual, {opt('descriptor_json')} FROM dispatches d WHERE d.role IN ('executor','worker') AND d.ended_at IS NOT NULL "
+        f"d.money_actual, {opt('descriptor_json')}, {opt('size_class')} FROM dispatches d "
+        "WHERE d.role IN ('executor','worker') AND d.ended_at IS NOT NULL "
         "ORDER BY d.ended_at, d.id").fetchall()
     if not rows:
         return []
@@ -405,7 +406,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
 
     out = []
     for (did, run_id, role, task_id, triple, harness, model, effort, started, ended, term, exit_code, outcome,
-         attribution, stall, money, descriptor_raw) in rows:
+         attribution, stall, money, descriptor_raw, dispatched_size) in rows:
         t_h, t_major, t_model, t_effort = _split_triple(triple or "")
         harness, model, effort = harness or t_h, model or t_model, effort or t_effort
         if not harness or not model:
@@ -447,7 +448,8 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
             "dispatch_id": did, "run_id": run_id, "task_id": task_id, "role": role,
             "descriptor": descriptor,
             "route": route_key(harness, model, effort), "harness_major": t_major,
-            "playbook": run.get("playbook"), "size_class": run.get("size_class"),
+            "playbook": run.get("playbook"),
+            "size_class": dispatched_size or descriptor.get("task_size") or run.get("size_class"),
             "kind": "fix" if len(starts.get((run_id, task_id), [])) > 1 and
                     min(starts[(run_id, task_id)]) < (started or "") else "fresh",
             "success": success, "attribution": attr, "attribution_confidence": round(conf, 2),

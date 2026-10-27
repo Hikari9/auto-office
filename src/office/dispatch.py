@@ -31,7 +31,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -232,13 +232,18 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
             if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
                 routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
-        if launch_prefs and routes[tid].get("status") == "selected":
-            routes[tid]["launch"] = launch_prefs
+        if routes[tid].get("status") == "selected":
+            _apply_execution_mode(con, run, task, routes[tid], launch_prefs, explicit=bool(as_model or route or cli or external))
     res = Result()
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         previous = None
+        if run.get("gear"):
+            gates = run.get("gates") or {}
+            for line in plan_view.run_dispatch_lines(run["gear"], gates.get("run_gear_rationale"), gates,
+                                                     gates.get("run_gear_recommendation")):
+                res.add(line)
         for tid in task_ids:
             task = state.get_task(con, run["id"], tid)
             if tid not in routes:
@@ -320,7 +325,27 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 did = request_launch(con, run, tid, role="executor", decision=decision, base=base,
                                      extra={"base_parents": parts})
                 record_discovery(con, run, task, decision, did)
-                verb = "prepared for you to start (external; nothing launched)" if external else "launching"
+                mode = decision.get("execution_mode") or {}
+                if mode.get("mode") == "inline":
+                    verb = "orchestrator-inline lease/worktree prepared (no model launched)"
+                elif external:
+                    verb = "prepared for you to start (external; nothing launched)"
+                else:
+                    verb = "launching"
+                sizing = task.get("descriptor") or {}
+                res.add(f"{tid} {sizing.get('task_size') or 'unclassified'} | profile "
+                        f"{sizing.get('profile') or 'legacy'} | why: "
+                        f"{sizing.get('task_size_rationale') or 'legacy plan has no task size'}")
+                res.add(f"EXECUTION {tid}: {plan_view.execution_line(mode)}")
+                if mode.get("mode") == "inline":
+                    res.add(f"ACTUAL DISPATCH {tid}: orchestrator-inline (no model launched); continue in the fenced "
+                            f"task worktree, then office preflight + office submit; qualified candidate preview: "
+                            f"{decision['selected']}")
+                else:
+                    res.add(f"ACTUAL DISPATCH {tid}: {decision['selected']} | "
+                            f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
+                for skip in executor_slates.skip_lines(decision.get("ideal_route_order")):
+                    res.add(f"  ideal route skipped: {skip}")
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
                         + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
@@ -333,6 +358,25 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     jobs.kick(con, run["id"])
     res.next = "exceptions only; office status"
     return res
+
+
+def _apply_execution_mode(con, run: dict, task: dict, decision: dict, launch_prefs: dict, *, explicit: bool) -> None:
+    """Record who executes the task (#809 R11) on its route decision. An inline task is an EXTERNAL Office
+    worker in the normal isolated worktree and fenced lease: no model is launched, but scope, self-review,
+    checks, convergence review and landing apply unchanged. An explicit --as/--route/--cli/--external always
+    delegates (or prepares the external worker the user asked for)."""
+    live = [t for t in state.tasks(con, run["id"]) if t["status"] not in ("superseded", "cancelled")]
+    mode = task_sizing.execution_mode(run.get("gear"), candidates._effective_task_descriptor(run, task),
+                                      run.get("risk"), task_count=len(live))
+    if mode["mode"] == "inline" and not explicit:
+        decision["launch"] = {"external": True, "inline": True}
+        decision["execution_mode"] = mode
+    else:
+        if launch_prefs:
+            decision["launch"] = launch_prefs
+        decision["execution_mode"] = (mode if mode["mode"] == "delegated" else
+                                      {**mode, "mode": "delegated", "owner": "executor",
+                                       "why": "dedicated executor: an explicit route or launch override was given"})
 
 
 def validate_route_quote(quote: str | None, route: str | None) -> None:
@@ -499,6 +543,10 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
             raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
                           next_step=_route_next(decision, task["id"], run))
     decision.update(origin)
+    # The exact-route re-qualification above ranks one route; the dispatch keeps the ranking it was first given.
+    for key in ("preferred_route", "fallback_routes"):
+        if route.get(key) is not None:
+            decision[key] = route[key]
     decision["route_source"] = route.get("route_source") or "router"
     if authority.get("actor") == "orchestrator":
         decision["route_source"], decision["route_note"] = "orchestrator", "orchestrator choice"
@@ -507,6 +555,8 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
                                              "reason": authority["reason"]}
     if route.get("launch"):
         decision["launch"] = route["launch"]
+    if route.get("execution_mode"):  # a relaunch keeps who executes the task, and why
+        decision["execution_mode"] = {k: v for k, v in route["execution_mode"].items() if k != "outcome"}
     decision["_qualified"] = True
     return decision
 
@@ -645,7 +695,30 @@ def _record_routing(con, run: dict, decision: dict) -> None:
         from office import plan_view
         planned = decision.get("planned") or {}
         source = decision.get("route_source") or "router"
+        task = state.get_task(con, run["id"], req.get("task_id")) if req.get("task_id") else None
+        sizing = (task or {}).get("descriptor") or {}
+        preferred, fallbacks = _preferred_routes(decision)
         audit = {**decision["routing"], "phase": "reroute" if source == "reroute" else "dispatch",
+                 "run_gear": run.get("gear"),
+                 "plan_version": run.get("plan_version"),
+                 "wave": plan_view.task_wave(con, run, req.get("task_id")),
+                 "dispatch_version": len(state.task_dispatches(con, run["id"], req["task_id"])) + 1
+                                     if req.get("task_id") else None,
+                 "run_gear_rationale": (run.get("gates") or {}).get("run_gear_rationale"),
+                 "task_size": sizing.get("task_size") or (req.get("context") or {}).get("size_class"),
+                 "task_size_rationale": sizing.get("task_size_rationale"),
+                 "profile": sizing.get("profile"), "profile_version": sizing.get("profile_version"),
+                 "effective_gates": {k: (run.get("gates") or {}).get(k) for k in
+                                     ("plan_review", "code_review", "visual", "review_floor", "review_contract")},
+                 "preferred_route": preferred, "preferred_route_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+                 "fallback_routes": fallbacks,
+                 "selected_route": (task_sizing.INLINE_ROUTE if (decision.get("execution_mode") or {}).get("mode") == "inline"
+                                    else decision.get("selected")),
+                 "execution_mode": (decision.get("execution_mode") or {}).get("mode"),
+                 "execution_owner": (decision.get("execution_mode") or {}).get("owner"),
+                 "execution_reason": (decision.get("execution_mode") or {}).get("why"),
+                 "estimated_savings": (decision.get("execution_mode") or {}).get("estimated_savings"),
+                 "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
                  "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
                  "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
@@ -663,10 +736,33 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                                                       dispatched=decision.get("selected"), explored=explored)
 
 
+def _preferred_routes(decision: dict) -> tuple[str | None, list]:
+    """The route the plan or router ranked first, and the ranked fallbacks behind it, whatever was dispatched.
+    A relaunch rebuilds its decision from the stored route, which already carries both."""
+    planned = decision.get("planned") or {}
+    if planned.get("primary"):
+        return planned["primary"], planned.get("fallbacks") or []
+    if decision.get("preferred_route"):
+        return decision["preferred_route"], decision.get("fallback_routes") or []
+    slate = [e.get("route") for e in (decision.get("routing") or {}).get("slate") or []]
+    return (slate[0], slate[1:]) if slate else (decision.get("selected"), [])
+
+
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
-    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
+    preferred, fallbacks = _preferred_routes(decision)
+    mode = decision.get("execution_mode") or {
+        "mode": "inline" if (decision.get("launch") or {}).get("inline") else "delegated",
+        "owner": "orchestrator" if (decision.get("launch") or {}).get("inline") else "executor",
+        "why": "fenced orchestrator-inline worker" if (decision.get("launch") or {}).get("inline")
+               else "dedicated executor default or route requalification"}
+    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure"),
+           "execution_mode": mode,
+           "selected_route": (task_sizing.INLINE_ROUTE if mode["mode"] == "inline" else decision.get("selected")),
+           "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+           "preferred_route": preferred, "fallback_routes": fallbacks,
+           "size_decision": decision.get("size_decision")}
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
                 "route_authority", "route_change", "override_ceiling"):
         if decision.get(key):
@@ -724,6 +820,9 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
                                   extra=({"quote": decision["route_authority"]["quote"]}
                                          if (decision.get("route_authority") or {}).get("quote") is not None else None))
+    sizing = task.get("descriptor") or {}
+    decision["size_decision"] = {k: sizing.get(k) for k in
+                                 ("task_size", "task_size_rationale", "profile", "profile_version")}
     payload = _route_payload(decision)
     ceiling = decision.get("override_ceiling") or _prior_override_ceiling(task)
     if ceiling:  # a reroute or relaunch never drops the user's quoted effort ceiling (#817)
@@ -846,7 +945,8 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     risk = run.get("risk") or {}
     if not (settings["enabled"] and "executor" in settings["roles"]):
         return "discovery-disabled"
-    if route_policy.trial_risk_blocked(settings, risk, (task or {}).get("descriptor")):
+    if route_policy.trial_risk_blocked(
+            settings, risk, task_sizing.planner_declared((task or {}).get("descriptor"))):
         return "risk"
     alloc = route_probe.allocation(con, run["id"], settings)
     if alloc["trials"]["used"] >= alloc["trials"]["max"]:
@@ -3624,6 +3724,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
     scope = dispatch.get("task_id")
     title = dispatch.get("task_title")
     pr = None
+    size = None
     role = dispatch.get("role") or kind
     try:
         con = db.connect()
@@ -3633,6 +3734,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
                 if task:
                     title = task.get("title") or title
                     pr = ((task.get("pr") or {}).get("number"))
+                    size = (task.get("descriptor") or {}).get("task_size")
 
             else:
                 gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
@@ -3647,7 +3749,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
     except Exception:
         pass  # A label must not prevent or interrupt a launch.
     scope = scope or ("integration" if role == "integration_reviewer" else "plan")
-    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr)
+    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr, size)
 
 
 

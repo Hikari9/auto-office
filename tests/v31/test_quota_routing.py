@@ -71,3 +71,62 @@ def test_all_known_unsafe_candidates_keep_the_protected_quota_stop():
 
     assert decision["status"] == "protected_quota_would_be_consumed"
     assert decision["selected"] is None
+
+
+def _reviewer_request(role, luna, deepseek):
+    return {"role": role, "candidates": [luna, deepseek],
+            "policy": {"required_capabilities": ["review"], "quota_reserve_percent": 5.0, "strict_seed": True},
+            "preferred_seed": [{"model_id": "luna"}, {"model_id": "deepseek"}]}
+
+
+import pytest
+from office import candidates
+
+
+def test_protected_luna_falls_through_to_the_next_seeded_plan_reviewer():
+    luna = _candidate("codex", "luna", quota="ok", remaining=0, caps=("review",))
+    deepseek = _candidate("opencode", "deepseek", caps=("review",))
+    decision = routing.route(_reviewer_request("plan_reviewer", luna, deepseek))
+
+    assert decision["status"] == "selected"
+    assert decision["selected"] == routing.candidate_id(deepseek)
+
+
+def test_protected_luna_falls_through_to_a_proven_deepseek_code_reviewer(tmp_path):
+    from office import db, scoring
+    luna = _candidate("codex", "luna", quota="ok", remaining=0, caps=("review",))
+    deepseek = _candidate("opencode", "deepseek", caps=("review",))
+    path = tmp_path / "runs.db"
+    request = {**_reviewer_request("code_reviewer", luna, deepseek), "runs_db": str(path)}
+    scoring.record_trust_acts(path, [routing.candidate_id(luna), routing.candidate_id(deepseek)], "proven", "user", "test trust act for the fallthrough")
+    con = db.connect(path)
+
+    decision = routing.route(request, connection=con)
+
+    assert decision["status"] == "selected"
+    assert decision["selected"] == routing.candidate_id(deepseek)
+
+
+@pytest.mark.parametrize("role", ["plan_reviewer", "code_reviewer"])
+def test_protected_stop_names_the_seeded_fallback_cut_by_the_trust_floor(role):
+    luna = _candidate("codex", "luna", quota="ok", remaining=0, caps=("review",))
+    deepseek = _candidate("opencode", "deepseek", caps=("review",))
+    request = _reviewer_request(role, luna, deepseek)
+    decision = routing.route(request)
+    decision["request"] = request
+    decision["rejected"] = list(decision.get("rejected") or []) + [
+        {"candidate": routing.candidate_id(deepseek), "stage": 2,
+         "reason": "adapter trust is derived as 'valid-unverified', not proven for normal mutable/gate authority"}]
+
+    text = candidates.seeded_fallback_blockers(decision)
+
+    assert f"office approve trust {routing.candidate_id(deepseek)}" in text
+
+
+def test_seeded_fallback_blockers_ignore_non_trust_cuts():
+    deepseek = _candidate("opencode", "deepseek", caps=("review",))
+    decision = {"request": {"preferred_seed": [{"model_id": "deepseek"}], "candidates": [deepseek]},
+                "rejected": [{"candidate": routing.candidate_id(deepseek), "stage": 2,
+                              "reason": "no fresh exact probe pass yet"}]}
+
+    assert candidates.seeded_fallback_blockers(decision) == ""
