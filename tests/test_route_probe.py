@@ -1175,3 +1175,45 @@ def test_claude_transcript_reads_only_the_first_assistant_record_of_a_single_ses
         assert route_probe._claude_transcript(ws) is None  # the first record lacks effort: no later one stands in
     finally:
         ws.remove()
+
+
+def test_a_claude_transcript_rewritten_after_it_was_first_observed_fails(world):
+    ws = route_probe._Workspace()
+    try:
+        ws.transcript_dir = route_probe.claude_transcript_dir(ws.wt)
+        ws.transcript_dir.mkdir(parents=True)
+        record = lambda model, effort: json.dumps({"type": "assistant", "message": {"model": model}, "effort": effort}) + "\n"
+        path = ws.transcript_dir / "s.jsonl"
+        path.write_text(record("claude-sonnet-5-5", "high"))
+        route_probe.watch_claude_transcript(ws)
+        path.write_text(record("claude-opus-5-5", "low"))  # the agent rewrites the record it is judged by
+        route_probe.watch_claude_transcript(ws)  # a later poll never replaces what was first seen
+        assert route_probe._claude_transcript(ws) is None
+    finally:
+        ws.remove()
+
+
+def test_the_probe_sandbox_opens_only_the_one_claude_transcript_folder(world):
+    ws = route_probe._Workspace()
+    try:
+        route_probe._probe_env("a", "k", ws, "claude", "n")
+        profile = " ".join(route_probe._boundary_argv(ws))
+        projects = Path(os.environ["CLAUDE_CONFIG_DIR"]).resolve() / "projects"
+        assert str(ws.transcript_dir) in profile and ws.transcript_dir.parent == projects
+        assert f'(subpath "{projects}")' not in profile
+    finally:
+        ws.remove()
+
+
+def test_recovery_removes_a_dead_claude_probes_transcript_folder(world):
+    ws = route_probe._Workspace()
+    folder = route_probe.claude_transcript_dir(ws.wt)
+    folder.mkdir(parents=True)
+    attempt = "dead-attempt"
+    route_probe.atomic_write_json(route_probe._sidecar(attempt), {"attempt_id": attempt, "timeout_s": 1, "pid": None,
+                                                                  "start": None, "nonce": "n", "base": str(ws.base)})
+    try:
+        route_probe._kill_recorded_children(attempt)
+        assert not folder.exists()
+    finally:
+        ws.remove()
