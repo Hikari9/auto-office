@@ -325,7 +325,8 @@ def test_builder_only_kilo_is_refused_as_planner_and_reviewer_at_routing_and_set
         with pytest.raises(Refused) as exc:
             candidates.declared_decision(ROUTE, flag="--as", role=role, config=config)
         assert f"['{capability}']" in str(exc.value), exc.value
-        seeds = [{"model_id": MODEL_ID, "harness": "kilo", "effort": "medium"}]
+        # MiMo is decommissioned (#809), so the role gate is checked on the one dispatchable kilo row.
+        seeds = [{"model_id": "step-5-preview-free", "harness": "kilo", "effort": "high"}]
         problems = configcmd.validate_seed(seeds, role=role, config=config)
         assert problems and f"cannot serve role {role}" in problems[0], problems
         assert not [r for r in configcmd.known_routes(role, config=config) if r.startswith("kilo/")]

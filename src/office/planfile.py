@@ -13,6 +13,8 @@ lines per task so a planner never writes JSON:
     actions:
     - deploy preview | preconditions: tests pass
     checks: pytest -q
+    run_gear: M   (optional recommendation; never lowers the intake gear or risk floor)
+    run_gear_why: coupled auth and API changes across three packages
     end_state: e2e
     deploy_prod: vercel deploy --prod
     deploy_verify: curl -fsS https://example.test/health
@@ -44,7 +46,7 @@ REQ_KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ -]*?)\s*:\s*(.*)$")
 # Run-level Requirements fields; an indented `key:` line with one of these ends a wrapped list item.
 REQUIREMENT_KEYS = frozenset({
     "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible",
-    "size_class", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
+    "size_class", "run_gear", "run_gear_why", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
 })
 
 
@@ -54,7 +56,7 @@ def requirement_key(raw: str) -> str:
 
 
 BLAST = ("local", "repo", "production", "production-data")
-SIZES = ("S", "M", "L", "XL")
+SIZES = ("XS", "S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
@@ -268,6 +270,8 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "blast_radius": req.get("blast_radius"),
         "irreversible": req.get("irreversible"),
         "size_class": req.get("size_class"),
+        "run_gear": ({"gear": str(req["run_gear"]).strip().upper(), "why": str(req.get("run_gear_why") or "").strip()}
+                     if req.get("run_gear") else None),
         "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
         "non_goals": (req.get("non_goals") or []),
         "named_actions": actions,
@@ -363,6 +367,11 @@ def _validate(plan: ParsedPlan) -> None:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
     if r.get("size_class") and r["size_class"] not in SIZES:
         plan.errors.append(f"requirements size_class must be one of {', '.join(SIZES)}")
+    if r.get("run_gear"):
+        if r["run_gear"]["gear"] not in SIZES:
+            plan.errors.append(f"requirements run_gear must be one of {', '.join(SIZES)}")
+        if not 12 <= len(r["run_gear"]["why"]) <= 500:
+            plan.errors.append("requirements `run_gear:` needs a `run_gear_why:` line with concrete reasons (12-500 characters)")
     if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):
         plan.errors.append("requirements irreversible must be yes or no")
     if r.get("lightweight") is not None and not r["lightweight"]["rationale"]:

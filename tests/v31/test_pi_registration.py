@@ -107,7 +107,9 @@ def test_mimo_rows_pin_the_provider_and_claim_no_conformance():
     for model_id, row in rows.items():
         # pi's documented provider/id syntax: never an ambiguous global default.
         assert row["invocation_model_id"] == f"xiaomi-token-plan-sgp/{model_id}"
-        assert row["dispatchable"] is True and row["effort"] == "medium"
+        # Decommissioned (#809): the row stays for historical evidence but is never dispatchable.
+        assert row["dispatchable"] is False and row["discovery"] == "ineligible" and row["effort"] == "medium"
+        assert "decommissioned" in row["discovery_reason"]
         source = row["invocation_source"]
         assert source.startswith("local-evidence:")
         assert f"xiaomi-token-plan-sgp/{model_id}" in source
@@ -123,7 +125,21 @@ def test_deprecated_pi_gpt5codex_row_is_disabled_and_not_a_candidate(monkeypatch
     monkeypatch.setattr(adapters, "harness_version", lambda a: "1.1.0")
     cands, _ = candidates.build_candidates(None, "executor", probe=False)
     assert not [c for c in cands if c["model_id"] == "gpt-5-codex"], "deprecated route reached candidate selection"
-    assert [c for c in cands if c["model_id"] == "mimo-v2.6-pro"]
+    assert not [c for c in cands if c["model_id"].startswith("mimo")], "decommissioned MiMo reached candidate selection"
+
+
+def test_mimo_is_excluded_from_every_routing_pool(monkeypatch):
+    """#809 R16: a decommissioned MiMo row is neither an eligible nor a discovery candidate for any role,
+    while its rows stay in the catalog so historical audit evidence still resolves."""
+    monkeypatch.setattr(adapters, "installed", lambda a: True)
+    monkeypatch.setattr(adapters, "harness_version", lambda a: "9.9.9")
+    rows = [r for r in candidates.catalog_rows() if str(r["model_id"]).startswith("mimo")]
+    assert {(r["invocation_harness"], r["model_id"]) for r in rows} == {
+        (h, m) for h in ("pi", "kilo") for m in ("mimo-v2.6-pro", "mimo-v2.6-flash")}
+    for role in ("executor", "worker", "planner", "code_reviewer"):
+        cands, _ = candidates.build_candidates(None, role, probe=False)
+        assert not [c for c in cands if str(c["model_id"]).startswith("mimo")], role
+    assert not [r for r in configcmd.known_routes("executor") if "mimo" in r]
 
 
 # ---------------------------------------------------------------- preflight validation
@@ -222,24 +238,20 @@ def test_routed_candidates_fail_the_capability_stage_for_planner(monkeypatch):
     monkeypatch.setattr(adapters, "harness_version", lambda a: "1.1.0")
     cands, _ = candidates.build_candidates(None, "planner", probe=False)
     pi = [c for c in cands if c["harness"] == "pi"]
-    assert pi, "pi rows should be candidates before role filtering"
-    result = routing.route({"role": "planner", "required_capabilities": ["planning"],
-                           "candidates": pi, "policy": {}})
-    assert result["selected"] is None and result["status"] == "no_qualifying_candidate"
-    assert any("missing capabilities ['planning']" in r["reason"] for r in result["rejected"]), result["rejected"]
+    # The only pi rows are decommissioned MiMo (#809) and the deprecated gpt-5-codex: none is a candidate.
+    assert not pi, [routing.candidate_id(c) for c in pi]
+    row = next(r for r in _rows() if r["model_id"] == "mimo-v2.6-flash")
+    assert "planning" not in (row.get("capabilities") or []), "the builder-only gate stays on the retained row"
 
 
 def test_setup_offers_pi_only_for_roles_it_can_serve():
     seeds = [{"model_id": "mimo-v2.6-flash", "harness": "pi", "effort": "medium"}]
-    problems = configcmd.validate_seed(seeds, role="planner", config=PLANNER_CAPS)
-    assert problems and "cannot serve role planner" in problems[0], problems
-    problems = configcmd.validate_seed(seeds, role="code_reviewer", config=REVIEW_CAPS)
-    assert problems and "cannot serve role code_reviewer" in problems[0], problems
-    assert configcmd.validate_seed(seeds, role="executor", config=EXECUTOR_CAPS) == []
-    assert configcmd.validate_seed(seeds) == []
-    for role, config in (("planner", PLANNER_CAPS), ("code_reviewer", REVIEW_CAPS)):
+    # MiMo is decommissioned (#809): setup refuses it for every role and never offers it.
+    for role, config in (("planner", PLANNER_CAPS), ("code_reviewer", REVIEW_CAPS), ("executor", EXECUTOR_CAPS),
+                         (None, None)):
+        problems = configcmd.validate_seed(seeds, role=role, config=config)
+        assert problems and "is not dispatchable" in problems[0], (role, problems)
         assert not [r for r in configcmd.known_routes(role, config=config) if r.startswith("pi/")], role
-    assert [r for r in configcmd.known_routes(None) if r.startswith("pi/mimo-v2.6-flash")]
 
 
 def test_setup_never_offers_the_deprecated_route():

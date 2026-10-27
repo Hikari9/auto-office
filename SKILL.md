@@ -63,7 +63,8 @@ never wait or `--skip`; continue on the current preferences and tell the user to
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"`
-   as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class S|M|L|XL`,
+   as confirmed; `--blast-radius local|repo|production|production-data`, `--size-class XS|S|M|L|XL`,
+   `--gear XS|S|M|L|XL` (the run gear: complexity, coupling and coordination, never risk; omit it and an unknown size is M),
    `--irreversible` from your provisional read;
    unset is unknown, never low risk: an unknown run keeps independent code review under every gear until the plan
    classifies it; see "Risk floor and the lightweight path" below). Never ask about benchmark refreshes; that is the
@@ -164,15 +165,28 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   per-task review and `--redirect`: follow their `next:` lines and `docs/v31-rolling-review-gates.md`. Runs started before #423 and #418 keep
   their older cap, waiver and plan-review behavior until `office upgrade`.
 
+### Run gears XS-XL
+
+- New runs pin one run gear, `XS`, `S`, `M`, `L` or `XL`, at intake. It funds planning and review ceremony from scope, coupling, uncertainty and
+  coordination. Risk is classified separately: a risk floor never lowers and a gear never raises it. `office start` and `office inspect plan`
+  print the gear, why it was chosen and the funded gates; every dispatch prints the task size, dispatch profile, actual route and why it won.
+- The legacy names still start a run as explicit compatibility presets, shown with their closest gear (`direct` XS, `direct+review` and
+  `light` S, `quick` and `express` M, `full` XL). Runs pinned to a legacy name resume with their original gates and are never rewritten.
+  Do not teach or offer legacy names for new work.
+- The planner may recommend a gear in Requirements (`run_gear: <XS-XL>` plus `run_gear_why:`). A recommendation below the intake gear or the
+  risk floor is refused, and an accepted one is advisory: the pinned gear does not change.
+- Each task carries its own `task_size` (XS-XL) with `task_size_rationale`, independent of the run gear. Sizes set the intelligence floor an
+  executor route must meet (AA Intelligence Index v4.3.2: XS 31, S 38, M 40, L 44, XL 47) and pick the ideal executor slate; Opus is XL-subtask only.
+
 ### Risk floor and the lightweight path
 
 - Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high), `elevated` (irreversible, production
-  blast radius, size L/XL) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
+  blast radius, or size L/XL on a legacy-pinned run; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
   `unknown` and `elevated` imply.
 - The plan classifies it in Requirements (`blast_radius: local|repo|production|production-data`, optional `irreversible: yes`,
-  `size_class: S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
-- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, gear `full`,
-  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review).
+  `size_class: XS|S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
+- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, legacy gear `full`,
+  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review; XS-XL gears fund their own).
   Scope, `checks:`, self-review, the evidence receipt and human landing authority all stay. Runs from before this keep their gates.
 
 ## Herdr agents

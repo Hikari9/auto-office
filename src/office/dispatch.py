@@ -31,7 +31,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -239,6 +239,11 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         run = state.get_run(con, run["id"])
         graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
         previous = None
+        if run.get("gear"):
+            gates = run.get("gates") or {}
+            for line in plan_view.run_dispatch_lines(run["gear"], gates.get("run_gear_rationale"), gates,
+                                                     gates.get("run_gear_recommendation")):
+                res.add(line)
         for tid in task_ids:
             task = state.get_task(con, run["id"], tid)
             if tid not in routes:
@@ -321,6 +326,14 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                                      extra={"base_parents": parts})
                 record_discovery(con, run, task, decision, did)
                 verb = "prepared for you to start (external; nothing launched)" if external else "launching"
+                sizing = task.get("descriptor") or {}
+                res.add(f"{tid} {sizing.get('task_size') or 'unclassified'} | profile "
+                        f"{sizing.get('profile') or 'legacy'} | why: "
+                        f"{sizing.get('task_size_rationale') or 'legacy plan has no task size'}")
+                res.add(f"ACTUAL DISPATCH {tid}: {decision['selected']} | "
+                        f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
+                for skip in executor_slates.skip_lines(decision.get("ideal_route_order")):
+                    res.add(f"  ideal route skipped: {skip}")
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
                         + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
@@ -645,7 +658,25 @@ def _record_routing(con, run: dict, decision: dict) -> None:
         from office import plan_view
         planned = decision.get("planned") or {}
         source = decision.get("route_source") or "router"
+        task = state.get_task(con, run["id"], req.get("task_id")) if req.get("task_id") else None
+        sizing = (task or {}).get("descriptor") or {}
+        preferred, fallbacks = _preferred_routes(decision)
         audit = {**decision["routing"], "phase": "reroute" if source == "reroute" else "dispatch",
+                 "run_gear": run.get("gear"),
+                 "plan_version": run.get("plan_version"),
+                 "wave": plan_view.task_wave(con, run, req.get("task_id")),
+                 "dispatch_version": len(state.task_dispatches(con, run["id"], req["task_id"])) + 1
+                                     if req.get("task_id") else None,
+                 "run_gear_rationale": (run.get("gates") or {}).get("run_gear_rationale"),
+                 "task_size": sizing.get("task_size") or (req.get("context") or {}).get("size_class"),
+                 "task_size_rationale": sizing.get("task_size_rationale"),
+                 "profile": sizing.get("profile"), "profile_version": sizing.get("profile_version"),
+                 "effective_gates": {k: (run.get("gates") or {}).get(k) for k in
+                                     ("plan_review", "code_review", "visual", "review_floor", "review_contract")},
+                 "preferred_route": preferred, "preferred_route_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+                 "fallback_routes": fallbacks,
+                 "selected_route": decision.get("selected"),
+                 "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
                  "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
                  "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
@@ -663,10 +694,24 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                                                       dispatched=decision.get("selected"), explored=explored)
 
 
+def _preferred_routes(decision: dict) -> tuple[str | None, list]:
+    """The route the plan or router ranked first, and the ranked fallbacks behind it, whatever was dispatched."""
+    planned = decision.get("planned") or {}
+    if planned.get("primary"):
+        return planned["primary"], planned.get("fallbacks") or []
+    slate = [e.get("route") for e in (decision.get("routing") or {}).get("slate") or []]
+    return (slate[0], slate[1:]) if slate else (decision.get("selected"), [])
+
+
 def _route_payload(decision: dict) -> dict:
     """What a dispatch keeps of its decision, so a stacked start or a relaunch
     reproduces the same route, override, and launch form."""
-    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
+    out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure"),
+           "selected_route": decision.get("selected"),
+           "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
+           "preferred_route": _preferred_routes(decision)[0],
+           "fallback_routes": _preferred_routes(decision)[1],
+           "size_decision": decision.get("size_decision")}
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
                 "route_authority", "route_change", "override_ceiling"):
         if decision.get(key):
@@ -724,6 +769,9 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
                                   extra=({"quote": decision["route_authority"]["quote"]}
                                          if (decision.get("route_authority") or {}).get("quote") is not None else None))
+    sizing = task.get("descriptor") or {}
+    decision["size_decision"] = {k: sizing.get(k) for k in
+                                 ("task_size", "task_size_rationale", "profile", "profile_version")}
     payload = _route_payload(decision)
     ceiling = decision.get("override_ceiling") or _prior_override_ceiling(task)
     if ceiling:  # a reroute or relaunch never drops the user's quoted effort ceiling (#817)

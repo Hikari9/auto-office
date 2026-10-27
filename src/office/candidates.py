@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, model_lineages, paths, route_policy, routing, state
+from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, state
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -736,12 +736,20 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
-def _preferred_seed(policy_cfg: dict, run: dict):
-    """roles.<role>.preferred_seed_by_size.<size_class> replaces preferred_seed when the
-    run's size class (start --size-class) has an entry there."""
-    size = (run.get("risk") or {}).get("size_class")
+def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
+                    role: str = "executor"):
+    """A pinned explicit seed wins; otherwise nominate #809 ideal size routes.
+    Qualification is independently enforced downstream at actual dispatch."""
+    size = task_size or (run.get("risk") or {}).get("size_class")
     by_size = policy_cfg.get("preferred_seed_by_size") or {}
-    return by_size.get(size) or policy_cfg.get("preferred_seed")
+    if size in by_size:
+        return by_size[size]
+    if policy_cfg.get("preferred_seed"):
+        return policy_cfg["preferred_seed"]
+    if (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
+            and size in executor_slates.FLOORS):
+        return executor_slates.ideal_seed(size)
+    return None
 
 
 def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> str:
@@ -766,6 +774,22 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     return f"fix: {fix}; {pinned}"
 
 
+def _effective_task_descriptor(run: dict, task: dict | None) -> dict:
+    """Route on a task's effective size, even for a partially migrated descriptor.
+
+    Historical pinned-run descriptors remain untouched. Classification is
+    side-effect-free for planning previews, reroutes and retries.
+    """
+    if not task:
+        return {}
+    d = task.get("descriptor") or {}
+    if ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+            and (not d.get("task_size") or not d.get("profile_version"))):
+        from office import task_sizing
+        return {**d, **task_sizing.classify({**task, "descriptor": d}, run_gear=run.get("gear"))}
+    return d
+
+
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
                     task_id: str | None, dispatch_kind: str,
                     wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
@@ -784,11 +808,16 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
         # pinned before provenance existed keeps its own ceiling (or the old default) untouched.
         ceiling = route_policy.budget_ceiling(config)
         adaptive_cfg = {**adaptive_cfg, "budget_ceiling_usd": ceiling["usd"]}
-    context = {"role": role, "playbook": run.get("playbook"), "size_class": (run.get("risk") or {}).get("size_class"),
-               "gear": run.get("gear"), "dispatch_kind": dispatch_kind}
     task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
-    if (task or {}).get("descriptor"):
-        context["task_descriptor"] = task["descriptor"]
+    desc = _effective_task_descriptor(run, task)
+    task_size = desc.get("task_size") or (run.get("risk") or {}).get("size_class")
+    context = {"role": role, "playbook": run.get("playbook"), "size_class": task_size,
+               "gear": run.get("gear"), "dispatch_kind": dispatch_kind,
+               "task_size_rationale": desc.get("task_size_rationale"),
+               "dispatch_profile": desc.get("profile"),
+               "dispatch_profile_version": desc.get("profile_version")}
+    if desc:
+        context["task_descriptor"] = desc
     as_of = as_of or datetime.now(timezone.utc).isoformat()
     route_learning.ensure_schema(con)
     # Executor and worker dispatches are the same kind of work; they pool.
@@ -862,7 +891,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[])
-    seed = None if override else _preferred_seed(policy_cfg, run)
+    task_for_route = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
+    descriptor_for_route = _effective_task_descriptor(run, task_for_route)
+    sized_work = role in routing.ADAPTIVE_ROLES
+    effective_task_size = (descriptor_for_route.get("task_size") if sized_work else None) or \
+        (run.get("risk") or {}).get("size_class")
+    seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
@@ -946,10 +980,18 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                 if pol["denied"] or pol["overkill"] or pol["ceilings"]]
     if policies:
         request["user_policies"] = policies
-        request["size_class"] = (run.get("risk") or {}).get("size_class")
+        request["size_class"] = effective_task_size
         if override or manual:
             request["manual_route"] = True
     result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
+    if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_slates.FLOORS and seed:
+        ideal = executor_slates.route_summary(seed, candidates, result.get("rejected") or [],
+                                              result.get("slate") or [])
+        result["ideal_route_order"] = ideal
+        if isinstance(result.get("selection_disclosure"), dict):
+            result["selection_disclosure"]["ideal_route_order"] = ideal
+        if isinstance(result.get("audit"), dict):
+            result["audit"]["ideal_route_order"] = ideal
     result["benchmark_snapshot"] = snapshot
     result["skipped"] = skipped
     result["request"] = request

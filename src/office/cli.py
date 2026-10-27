@@ -217,10 +217,10 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("start", parents=[common], add_help=True)
     s.add_argument("goal", nargs="?")
-    s.add_argument("--gear", choices=["direct", "direct+review", "light", "quick", "express", "full"])
+    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "direct", "direct+review", "light", "quick", "express", "full"])
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
-    s.add_argument("--size-class", choices=["S", "M", "L", "XL"])
+    s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])
     s.add_argument("--irreversible", action="store_true")
     s.add_argument("--volume", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--interview", action="store_true", help=argparse.SUPPRESS)

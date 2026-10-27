@@ -1350,7 +1350,9 @@ models:
     invocation_model_id: xiaomi-token-plan-sgp/mimo-v2.6-pro
     invocation_harness: pi
     invocation_source: 'local-evidence: provider-pinned slug xiaomi-token-plan-sgp/mimo-v2.6-pro is listed by pi --offline --list-models and passes pi auth check --model <slug>; printf <prompt> | pi --print --no-approve --no-extensions --no-mcp --model xiaomi-token-plan-sgp/mimo-v2.6-pro --thinking medium --no-session answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09 (exit 0 is launch evidence, not model conformance: no model identity readback yet)'
-    dispatchable: true
+    dispatchable: false
+    discovery: ineligible
+    discovery_reason: "decommissioned model: retained only for historical routing/benchmark evidence (#809)"
     source_identifier: mimo-v2-6-pro
     source_name: artificial-analysis
     effort: medium
@@ -1367,7 +1369,9 @@ models:
     invocation_model_id: xiaomi-token-plan-sgp/mimo-v2.6-flash
     invocation_harness: pi
     invocation_source: 'local-evidence: provider-pinned slug xiaomi-token-plan-sgp/mimo-v2.6-flash is listed by pi --offline --list-models and passes pi auth check --model <slug>; printf <prompt> | pi --print --no-approve --no-extensions --no-mcp --model xiaomi-token-plan-sgp/mimo-v2.6-flash --thinking medium --no-session answered a stdin prompt and wrote+ran a file in a throwaway repo on 2026-10-09 (exit 0 is launch evidence, not model conformance: no model identity readback yet)'
-    dispatchable: true
+    dispatchable: false
+    discovery: ineligible
+    discovery_reason: "decommissioned model: retained only for historical routing/benchmark evidence (#809)"
     source_identifier: mimo-v2-6-flash
     source_name: artificial-analysis
     effort: medium
@@ -1417,7 +1421,9 @@ models:
     invocation_model_id: kilo/xiaomi/mimo-v2.6-pro
     invocation_harness: kilo
     invocation_source: 'local-evidence: `kilo models` on 2026-10-15 listed kilo/xiaomi/mimo-v2.6-pro; Artificial Analysis index v4.3.2 data is recorded in this row; launch has not been exercised because it requires `kilo auth login`'
-    dispatchable: true
+    dispatchable: false
+    discovery: ineligible
+    discovery_reason: "decommissioned model: retained only for historical routing/benchmark evidence (#809)"
     source_identifier: mimo-v2-6-pro
     source_name: artificial-analysis
     effort: medium
@@ -1434,7 +1440,9 @@ models:
     invocation_model_id: kilo/xiaomi/mimo-v2.6-flash
     invocation_harness: kilo
     invocation_source: 'local-evidence: `kilo models` on 2026-10-15 listed kilo/xiaomi/mimo-v2.6-flash; Artificial Analysis index v4.3.2 data is recorded in this row; launch has not been exercised because it requires `kilo auth login`'
-    dispatchable: true
+    dispatchable: false
+    discovery: ineligible
+    discovery_reason: "decommissioned model: retained only for historical routing/benchmark evidence (#809)"
     source_identifier: mimo-v2-6-flash
     source_name: artificial-analysis
     effort: medium

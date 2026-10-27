@@ -23,6 +23,24 @@ def classification(risk: dict | None) -> str | None:
     return c if c in (LOW, ELEVATED, UNKNOWN) else None
 
 
+RUN_GEAR_ORDER = ("XS", "S", "M", "L", "XL")
+ELEVATED_GEAR_FLOOR = "S"  # XS runs plan and execute inline; unproven or high risk needs at least a dedicated executor
+
+
+def run_gear_problem(intake_gear: str | None, risk: dict | None, recommended: str) -> str | None:
+    """Why a planner's run-gear recommendation is refused, or None. The planner may recommend a gear with
+    reasons, never one below the gear intake pinned or the floor the run's risk implies."""
+    rank = RUN_GEAR_ORDER.index
+    if recommended not in RUN_GEAR_ORDER:
+        return f"run_gear must be one of {', '.join(RUN_GEAR_ORDER)}"
+    if intake_gear in RUN_GEAR_ORDER and rank(recommended) < rank(intake_gear):
+        return f"recommended gear {recommended} is below the intake gear {intake_gear}"
+    if classification(risk) in (ELEVATED, UNKNOWN) and rank(recommended) < rank(ELEVATED_GEAR_FLOOR):
+        return (f"recommended gear {recommended} is below the {ELEVATED_GEAR_FLOOR} floor that "
+                f"{classification(risk)} risk implies")
+    return None
+
+
 def classify(blast_radius: str | None, size_class: str | None, irreversible: bool, high: bool) -> dict:
     if high:
         c, basis = ELEVATED, "a high-risk signal (irreversible, production blast radius, or L/XL size)"
@@ -79,7 +97,8 @@ def planner_reclassify(risk: dict, req: dict, raise_only: bool = False) -> dict 
         merged["irreversible"] = bool(risk.get("irreversible")) or irreversible
     # Same thresholds as intake's defaults.
     merged["high"] = bool(risk.get("high")) or bool(merged["irreversible"]) or \
-        merged.get("blast_radius") in ("production", "production-data") or merged.get("size_class") in ("L", "XL")
+        merged.get("blast_radius") in ("production", "production-data") or (not risk.get("complexity_only") and
+                                                                            merged.get("size_class") in ("L", "XL"))
     # #422: a planner raise to irreversible or production is integration risk too (size is not).
     merged["integration"] = bool(risk.get("integration")) or bool(merged["irreversible"]) or \
         merged.get("blast_radius") in ("production", "production-data")
