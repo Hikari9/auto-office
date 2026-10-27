@@ -13,6 +13,7 @@ generations:
   gpt-6-luna: {lineage_key: openai/gpt-luna, generation_version: '6', release_status: released, provenance: shipped-catalog}
   gpt-6-astra: {lineage_key: openai/gpt-astra, generation_version: '6', release_status: released, provenance: shipped-catalog}
   gpt-5.6-terra: {lineage_key: openai/gpt-terra, generation_version: '5.6', release_status: released, provenance: shipped-catalog}
+  gpt-6.1-terra: {lineage_key: openai/gpt-terra, generation_version: '6.1', release_status: released, provenance: 'OpenAI release 2026-10-26'}
   gpt-5-codex: {lineage_key: openai/gpt-codex, generation_version: '5', release_status: released, provenance: shipped-catalog}
   gemini-3.8-flash: {lineage_key: google/gemini-flash, generation_version: '3.8', release_status: released, provenance: shipped-catalog}
   mimo-v2.6-pro: {lineage_key: xiaomi/mimo-pro, generation_version: '2.6', release_status: released, provenance: shipped-catalog}

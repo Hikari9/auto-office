@@ -122,6 +122,22 @@
         }
       }
     },
+    "lineage_supersession": {
+      "description": "Present only when a qualifying newer generation moved ahead of its predecessor of the same lineage and effort (#811).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["route", "supersedes", "lineage_key", "effort"],
+        "properties": {
+          "route": {"type": "string"},
+          "label": {"type": "string"},
+          "supersedes": {"type": "string"},
+          "supersedes_label": {"type": "string"},
+          "lineage_key": {"type": "string"},
+          "effort": {"type": ["string", "null"]}
+        }
+      }
+    },
     "exploration": {
       "type": "object",
       "required": [

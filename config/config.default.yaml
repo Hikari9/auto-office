@@ -138,6 +138,9 @@ roles:
       min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
+    # No seed. adaptive.py moves 5.6 Sol/Terra to directly behind a qualifying 6.1 route
+    # of the same harness and effort, as its fallback (#811).
+    # Size-specific ideal slates are funded by issue #809 independently.
     required_capabilities: [builder]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
