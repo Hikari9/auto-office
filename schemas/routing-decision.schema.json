@@ -122,7 +122,7 @@
         }
       }
     },
-    "supersession": {
+    "lineage_supersession": {
       "description": "Present only when a qualifying newer generation moved ahead of its predecessor of the same lineage and effort (#811).",
       "type": "array",
       "items": {

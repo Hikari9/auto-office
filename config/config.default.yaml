@@ -138,8 +138,9 @@ roles:
       min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
-    # No seed: adaptive routing compares routes, and a qualifying newer generation
-    # ranks directly ahead of its predecessor at the same effort (catalog/lineages.yaml).
+    # No seed. adaptive.py moves a qualifying 6.1 Sol/Terra route directly ahead of
+    # 5.6 of the same harness and effort, and 5.6 stays behind it as a fallback (#811).
+    # Size-specific ideal slates are funded by issue #809 independently.
     required_capabilities: [builder]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;

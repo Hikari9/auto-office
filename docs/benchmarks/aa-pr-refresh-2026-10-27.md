@@ -4,14 +4,19 @@
 
 The medium-only `roles.executor.preferred_seed` from the first commit of #811 is removed. Executor and worker routing (`office.adaptive.recommend`) now applies lineage supersession after the utility ranking, the close-call draw and exploration:
 
-- Within one named lineage (`catalog/lineages.yaml`) and one effort, a newer released generation that *qualified* takes its predecessor's place in the order. The predecessor follows directly behind it, so it stays in the slate as a fallback.
+- For the Sol and Terra lineages (`model_lineages.EXECUTOR_SUPERSESSION_LINEAGES`), a newer released generation that *qualified* on the same harness and effort takes its predecessor's place in the order. The predecessor follows directly behind it, so it stays in the slate as a fallback that a planned dispatch tries without a reroute. Other lineages, Luna included, are not affected.
 - Only qualifying rows move. A 6.1 route that is denied, size-scoped overkill, untrusted, missing a capability, below the floor, over the quota reserve, rate-limited, learned-ineligible, held out by a gear's seed retention, or still in discovery never enters the comparison, and 5.6 keeps its own rank.
 - An effort the newer generation lacks is never invented. 6.1 Sol has no `none` row, so Sol@none stays 5.6.
-- A predecessor the user declared (`--as`), or seeded ahead of its successor in `preferred_seed`, is not moved.
+- It runs after the budget ceiling, so an unaffordable 6.1 route never displaces an affordable 5.6 one.
+- A manual, declared (`--as`) or exact route turns supersession off. A predecessor the user's `preferred_seed` ranks ahead of its successor is not moved.
 - Routes of different lineages keep the utility order. Sol is not forced above Terra.
-- The audit record carries `supersession` (each move: route, supersedes, lineage, effort), and the slate reasons name it. A decision with no move hashes as before.
+- The audit record carries `lineage_supersession` (each move: route, supersedes, lineage, effort), and the slate reasons name it. A decision with no move hashes as before.
 
-Tests: `tests/v31/test_lineage_supersession_811.py`.
+Tests: `tests/v31/test_lineage_supersession_811.py` and `tests/v31/test_issue811_terra_supersession.py`.
+
+### Reconciliation with the parallel implementation
+
+Commits `5da71eb`..`f985580` (pushed concurrently) implemented supersession by removing 5.6 from the slate when 6.1 qualified, so 5.6 returned only when routing recomputed. Rico chose to merge: the reorder above keeps 5.6 in the slate, and from that work it keeps the explicit Sol/Terra allowlist, the same-harness rule, the manual/declared/exact-route opt-out, the after-budget-ceiling ordering and the `lineage_supersession` audit key. Its `prefer_qualified_generation` filter is replaced and its tests are adapted to the in-slate fallback. Its validation record, kept verbatim: standalone PR #811 at `5da71eb745e9ddaa8a27a299b1b690bb38dded33` passed 28 selected benchmark/routing tests and `scripts/check_ecosystem.py` in an isolated Vercel Sandbox (exit 0). An isolated, unpushed compatibility merge with #809 at `b471019076dd22543c7346157a7d39277d8edae0` passed 62 combined tests (exit 0) and exposed one trivial merge conflict in `src/office/adaptive.py` audit keys, resolved by preserving both `lineage_supersession` and `sonnet_self_fallbacks`.
 
 ## Terra AA verification
 

@@ -102,7 +102,7 @@ def test_newer_generation_takes_the_older_slot_even_when_the_older_scores_better
     assert d["selected"] == routing.candidate_id(n)
     assert d["slate"][0]["reason"] == f"newer generation of {lab(old, effort)} (same lineage and effort)"
     assert d["slate"][1]["reason"].startswith(f"superseded by {lab(new, effort)}")
-    assert d["routing"]["supersession"] == [{
+    assert d["routing"]["lineage_supersession"] == [{
         "route": routing.candidate_id(n), "label": lab(new, effort), "supersedes": routing.candidate_id(o),
         "supersedes_label": lab(old, effort), "lineage_key": n["lineage_key"], "effort": effort}]
 
@@ -122,14 +122,14 @@ def test_supersession_is_per_effort_and_never_invents_a_missing_effort():
     assert ("gpt-6.1-sol", "none") not in ROWS
     cs = [cand("gpt-5.6-sol", "none"), cand("gpt-5.6-sol", "low"), cand("gpt-6.1-sol", "low")]
     d = routing.route(req(cs, evidence=favour(cs[0], cs[1])))
-    moved = d["routing"]["supersession"]
+    moved = d["routing"]["lineage_supersession"]
     assert [(m["label"], m["supersedes_label"]) for m in moved] == [
         (lab("gpt-6.1-sol", "low"), lab("gpt-5.6-sol", "low"))]
     assert lab("gpt-5.6-sol", "none") in labels(d)
     # A different effort is not a successor: 6.1@high does not displace 5.6@medium.
     d = routing.route(req([cand("gpt-5.6-sol", "medium"), cand("gpt-6.1-sol", "high")],
                           evidence=favour(cand("gpt-5.6-sol", "medium"))))
-    assert "supersession" not in d["routing"] and labels(d)[0] == lab("gpt-5.6-sol", "medium")
+    assert "lineage_supersession" not in d["routing"] and labels(d)[0] == lab("gpt-5.6-sol", "medium")
 
 
 # ------------------------------------------------------------------ older fallback when 6.1 cannot qualify
@@ -137,7 +137,7 @@ def test_supersession_is_per_effort_and_never_invents_a_missing_effort():
 def test_absent_newer_generation_leaves_the_older_route_selected():
     d = routing.route(req([cand("gpt-5.6-terra", "high")]))
     assert d["selected"] == routing.candidate_id(cand("gpt-5.6-terra", "high"))
-    assert "supersession" not in d["routing"]
+    assert "lineage_supersession" not in d["routing"]
 
 
 def test_denied_newer_generation_falls_back_to_older():
@@ -157,7 +157,7 @@ def test_version_ceiling_denying_the_older_generation_is_respected():
     # A ceiling denies generations at or below it, so 5.6 is gone and 6.1 runs alone.
     pol = {"denied": [], "ceilings": {"openai/gpt-terra": "5.6"}, "overkill": [], "sources": {}}
     d = routing.route(req([cand("gpt-5.6-terra", "max"), cand("gpt-6.1-terra", "max")], user_policies=[pol]))
-    assert labels(d) == [lab("gpt-6.1-terra", "max")] and "supersession" not in d["routing"]
+    assert labels(d) == [lab("gpt-6.1-terra", "max")] and "lineage_supersession" not in d["routing"]
 
 
 def test_missing_capability_on_newer_generation_falls_back_to_older():
@@ -231,7 +231,7 @@ def test_user_seeded_older_route_is_not_superseded():
     o, n = cand("gpt-5.6-sol", "high"), cand("gpt-6.1-sol", "high")
     d = routing.route(req([o, n], evidence=favour(o),
                           preferred_seed=[{"harness": "codex", "model_id": "gpt-5.6-sol", "effort": "high"}]))
-    assert labels(d)[0] == lab("gpt-5.6-sol", "high") and "supersession" not in d["routing"]
+    assert labels(d)[0] == lab("gpt-5.6-sol", "high") and "lineage_supersession" not in d["routing"]
 
 
 def test_seed_listing_newer_first_still_supersedes():
@@ -293,8 +293,8 @@ def test_other_lineages_keep_the_utility_order():
 
 def test_decision_hash_changes_only_when_a_generation_moved():
     plain = routing.route(req([cand("gpt-5.6-sol", "high")]))
-    assert "supersession" not in plain["routing"]
+    assert "lineage_supersession" not in plain["routing"]
     o, n = cand("gpt-5.6-sol", "high"), cand("gpt-6.1-sol", "high")
     a = routing.route(req([o, n], evidence=favour(o)))
     b = routing.route(req([o, n], evidence=favour(o)))
-    assert a["decision_hash"] == b["decision_hash"] and a["routing"]["supersession"]
+    assert a["decision_hash"] == b["decision_hash"] and a["routing"]["lineage_supersession"]
