@@ -319,6 +319,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
     allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))
     preferred_seed = request.get("preferred_seed") or policy.get("preferred_seed")
+    strict_seed = bool(policy.get("strict_seed"))
     floor = policy.get("floor")
     rejected = []
     stage = []
@@ -387,7 +388,10 @@ def route(request: dict, discovery_input: dict | None = None, *,
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
                                  "category": "size-model-restriction"})
-            elif c.get("route_status", "available") != "available":
+            elif c.get("route_status", "available") != "available" and not (
+                    c.get("route_status") == "probe-passed" and cid == request.get("declared_route")):
+                # A route the user declared (--as, amend route) whose exact probe passed is a pinned route,
+                # not a discovery candidate: stage 2 applies its trust rules and later stages still apply.
                 pool.append(c)
             else:
                 stage.append(c)
@@ -523,7 +527,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
             (safe if remaining - burn >= reserve else unsafe).append(c)
         if not (safe or unknown or unsafe):
-            _reject_pool(pool, rejected, "no known-working route qualified, so no fallback exists")
+            _reject_pool(pool, rejected, "no route survived the earlier gates, so none is left to select (a discovery trial would have no fallback)")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
@@ -552,6 +556,14 @@ def route(request: dict, discovery_input: dict | None = None, *,
         if preferred_seed:
             matched = [c for c in stage if preferred_rank(c, preferred_seed) is not None]
             advisory = matched if matched else stage
+            if stage and not matched and strict_seed:
+                # A strict seed is the whole review order: when every seeded route is excluded, tried or
+                # unavailable, no unseeded route is substituted silently (bcf80833: a free flash route).
+                for c in stage:
+                    rejected.append({"candidate": candidate_id(c), "stage": 7,
+                                     "reason": "outside the strict preferred_seed order for this role"})
+                return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected,
+                        "action": "every seeded route is unavailable; re-pin one: office review ... --as <route>"}
         else:
             advisory = stage
         if advisory and not allow_advisory_undercut:
@@ -731,10 +743,8 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
         block["blocked"] = "candidate-gone"
         return block, None
     # Global gates: the same for every candidate.
-    size_ok = risk.get("size_class") in s["trial_size_classes"]
-    blast_ok = risk.get("blast_radius") in s["trial_blast_radius"]
     global_block = None
-    if not (size_ok and blast_ok) or risk.get("irreversible"):
+    if route_policy.trial_risk_blocked(s, risk, risk.get("task")):
         global_block = "risk"
     elif alloc["trials"]["used"] >= alloc["trials"]["max"]:
         global_block = "trial-cap"
@@ -860,12 +870,12 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
             continue
         nxt.append(c)
     if not nxt:
-        _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
+        _reject_pool(pool, rejected, "no qualifying known-working route, so a discovery trial would have no fallback")
         return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
     rec = adaptive.recommend(nxt, request, config={"routing": {"adaptive": request.get("adaptive_config") or {}}})
     rejected.extend(rec["rejected"])
     if not rec["slate"]:
-        _reject_pool(pool, rejected, "no qualifying known-working route, so no fallback exists")
+        _reject_pool(pool, rejected, "no qualifying known-working route, so a discovery trial would have no fallback")
         return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected, "slate": []}
     audit = rec["audit"]
     by_id = dict(rec["by_id"])
@@ -933,6 +943,9 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     if disc:
         # In the hash only when discovery is active, so discovery-off decisions hash exactly as before.
         hashed["discovery"] = disc
+    if audit.get("lineage_supersession"):
+        # Likewise only when a predecessor was superseded, so other decisions hash as before.
+        hashed["lineage_supersession"] = audit["lineage_supersession"]
     decision_hash = sha256_obj(hashed)
     audit["decision_hash"] = decision_hash
     qualifying = [r["route"] for r in audit["candidates"]]

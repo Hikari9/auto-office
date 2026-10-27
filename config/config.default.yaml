@@ -56,6 +56,8 @@ routing:
     max_trial_percent_rolling_20: 15
     trial_size_classes: [S, M]
     trial_blast_radius: [local, repo]
+    # A production run may still trial a route on one small, bounded, non-infrastructure task.
+    trial_bounded_production_tasks: true
     require_known_fallback: true
     probe_ttl_days: 7
     probe_timeout_s: 120
@@ -128,8 +130,10 @@ roles:
   plan_reviewer:
     preferred_seed:
       - {model_id: luna, effort: high}
-      - {model_id: sonnet, harness: claude, effort: high}
+      - {model_id: deepseek-v4.1-flash-free, harness: opencode}
       - {model_id: opus, harness: claude, effort: low}
+    # The review order is the whole order: no unseeded route is substituted when these are unavailable.
+    strict_seed: true
     required_capabilities: [review]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
@@ -138,6 +142,9 @@ roles:
       min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
+    # No seed. adaptive.py moves 5.6 Sol/Terra to directly behind a qualifying 6.1 route
+    # of the same harness and effort, as its fallback (#811).
+    # Size-specific ideal slates are funded by issue #809 independently.
     required_capabilities: [builder]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
@@ -153,8 +160,10 @@ roles:
   code_reviewer:
     preferred_seed:
       - {model_id: luna, effort: high}
-      - {model_id: sonnet, harness: claude, effort: high}
+      - {model_id: deepseek-v4.1-flash-free, harness: opencode}
       - {model_id: opus, harness: claude, effort: low}
+    # The review order is the whole order: no unseeded route is substituted when these are unavailable.
+    strict_seed: true
     required_capabilities: [review]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;

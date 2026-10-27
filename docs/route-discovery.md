@@ -44,6 +44,7 @@ Config precedence is explicit run/prompt > repo > user > shipped defaults. The r
 | `routing.discovery.max_trial_percent_rolling_20` | 15 percent of the last 20 builder dispatch decisions across all runs |
 | `routing.discovery.trial_size_classes` | `[S, M]` |
 | `routing.discovery.trial_blast_radius` | `[local, repo]` |
+| `routing.discovery.trial_bounded_production_tasks` | `true` for new runs (absent in a run pinned earlier means off). A `production` run (never `production-data`, never irreversible) may trial a route on one task declared `task_size` S/M, `bounds: bounded`, not `domain: infrastructure`. Review floors, the known-working fallback and every prod-write gate are unchanged |
 | `routing.discovery.require_known_fallback` | `true` |
 | `routing.discovery.probe_ttl_days` | 7 |
 | `routing.discovery.probe_timeout_s` | 120 |
@@ -83,7 +84,7 @@ A probe that is not allocated records `probe-refused` with one of these reasons:
 
 ## Bounded assignment and recovery
 
-Only automatic `executor`/`worker` selection can allocate a trial. The task must be bounded, reversible S/M work with local or repo blast radius in an isolated worktree, with safe permissions, normal submission, tests, independent review and verification. Production, production-data, irreversible, high-risk and protected-write tasks are excluded. Planner, plan reviewer, code reviewer, integration, visual, browser and closeout verifier, and final gate roles keep their stricter rules and never take a trial.
+Only automatic `executor`/`worker` selection can allocate a trial. The task must be bounded, reversible S/M work with local or repo blast radius in an isolated worktree, with safe permissions, normal submission, tests, independent review and verification. Production-data, irreversible, high-risk and protected-write tasks are excluded. A `production` run is excluded too unless the pinned `trial_bounded_production_tasks` is true and the task is itself S/M, `bounds: bounded` and not infrastructure; a run pinned before that key existed never gets it. Planner, plan reviewer, code reviewer, integration, visual, browser and closeout verifier, and final gate roles keep their stricter rules and never take a trial.
 
 Discovery draws only when ordinary exploration is not active in the same decision. An untried candidate must pass every non-probe gate and the allocation bounds: a seeded draw at the rolling rate, then the margin and relative-cost bounds. The first decision can only choose a probe candidate (`intent: probe`) and keeps the known-working route as primary. After a fresh exact pass, the preflight recompute rechecks permissions, capabilities, quota, risk, caps and fallback for that same candidate and may then make it the trial primary. It never draws a different untried route.
 

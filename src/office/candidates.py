@@ -837,7 +837,8 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     }
 
 
-def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: list[dict], settings: dict) -> dict:
+def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: list[dict], settings: dict,
+                     task: dict | None = None) -> dict:
     """The recorded, replayable inputs the discovery allocation reads (#494): caps by
     read-only count, task risk, and which routes are known-working (proven or
     learned-eligible) or quarantined. `routing.route` stays offline."""
@@ -857,7 +858,8 @@ def discovery_inputs(con: sqlite3.Connection, run: dict, role: str, candidates: 
     return {"settings": settings, "allocation": route_probe.allocation(con, run.get("id"), settings),
             "known_working": sorted(known), "quarantined": sorted(quarantined),
             "risk": {"size_class": risk.get("size_class"), "blast_radius": risk.get("blast_radius"),
-                     "irreversible": bool(risk.get("irreversible"))}}
+                     "irreversible": bool(risk.get("irreversible")),
+                     "task": {k: ((task or {}).get("descriptor") or {}).get(k) for k in ("task_size", "bounds", "domain")}}}
 
 
 def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
@@ -943,6 +945,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "balanced_money_band_percent": float((config.get("cost_policy") or {}).get(
             "balanced_money_band_percent", routing.DEFAULT_MONEY_BAND_PERCENT)),
         "cost_policy": cost_policy,
+        "strict_seed": bool(policy_cfg.get("strict_seed")),
     }
     request = {
         "role": role,
@@ -968,7 +971,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                                        dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
                                        wave_load=wave_load, pending_explorations=pending_explorations))
     if discovering:
-        request["discovery"] = discovery_inputs(con, run, role, candidates, settings)
+        request["discovery"] = discovery_inputs(
+            con, run, role, candidates, settings,
+            state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None)
         if discovery_input:
             request["discovery_input"] = discovery_input
     policies = [pol for pol in (route_policy.user_policy(config), *live)
