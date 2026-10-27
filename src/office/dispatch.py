@@ -455,14 +455,15 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
                  **({"quote": quote} if quote is not None else {})}
     if quote is not None:
         decision = candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                repo_root=run.get("repo_root"), run_id=run["id"])
+                                                repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"])
         decision["selection_disclosure"]["reason"] = reason
     else:
         # --route historically allows a model-only selector and is exempt from
         # the default model-family version floor. Neither exception grants trust.
         selection = {"override": text} if flag == "--route" else {
             "exact": candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                  repo_root=run.get("repo_root"), run_id=run["id"])["selected"]}
+                                                  repo_root=run.get("repo_root"), run_id=run["id"],
+                                                  scope=task["id"])["selected"]}
         decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
                                          **selection, manual=True,
                                          dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")

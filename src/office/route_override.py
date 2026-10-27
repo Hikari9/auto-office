@@ -33,6 +33,8 @@ _DDL = (
     "id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL, role TEXT NOT NULL, "
     "route TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, "
     "mac TEXT NOT NULL, revoked_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS route_override_claims("
+    "receipt_id TEXT PRIMARY KEY, scope TEXT NOT NULL, claimed_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS route_override_uses("
     "id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL, used_at TEXT NOT NULL, context TEXT)",
 )
@@ -179,12 +181,20 @@ def _launched(con: sqlite3.Connection, receipt: dict) -> bool:
         return True  # an unreadable dispatch table never grants an override
 
 
-def record_use(receipt: dict, context: str, *, con: sqlite3.Connection | None = None) -> bool:
-    """Append the use to the audit table. False (no override) when it cannot be recorded."""
+def record_use(receipt: dict, context: str, *, scope: str | None = None, con: sqlite3.Connection | None = None) -> bool:
+    """Atomically claim the receipt for one scope (a task), then append the use to the audit table.
+
+    The first claim wins; another scope (a concurrent dispatch of a different task) is refused, while the
+    same scope may re-validate. False (no override) when it cannot be claimed or recorded."""
     own = con is None
     try:
         con = con or db.connect()
         ensure_schema(con)
+        con.execute("INSERT OR IGNORE INTO route_override_claims(receipt_id, scope, claimed_at) VALUES(?,?,?)",
+                    (receipt["id"], scope or "", now_iso()))
+        winner = con.execute("SELECT scope FROM route_override_claims WHERE receipt_id=?", (receipt["id"],)).fetchone()
+        if winner is None or winner[0] != (scope or ""):
+            return False
         if not con.execute("SELECT 1 FROM route_override_uses WHERE receipt_id=? AND context=?",
                            (receipt["id"], context)).fetchone():
             con.execute("INSERT INTO route_override_uses(receipt_id, used_at, context) VALUES(?,?,?)",

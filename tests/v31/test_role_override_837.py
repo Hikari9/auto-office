@@ -199,8 +199,14 @@ def test_migrate_dry_run_writes_nothing_then_apply_and_rollback(home):
     assert saved["denied_models"] == ["claude/opus@low", "harness:agy"]  # nothing removed
     assert [r["state"] for r in saved["role_rules"]] == ["deny", "deny"] and all(r["role"] == "*" for r in saved["role_rules"])
     assert routecmd.migrate().data["pending"] == []  # idempotent
+    # an unrelated edit made after the migration survives the rollback
+    edited = yaml.safe_load(cfg.read_text())
+    edited["quota"] = {"reserve_percent": 7}
+    cfg.write_text(yaml.safe_dump(edited))
     routecmd.migrate(rollback=True)
-    assert cfg.read_text() == before
+    after = yaml.safe_load(cfg.read_text())
+    assert after["quota"] == {"reserve_percent": 7} and after["routing"]["user_policy"]["role_rules"] == []
+    assert after["routing"]["user_policy"]["denied_models"] == ["claude/opus@low", "harness:agy"]
 
 
 def test_probe_denial_is_role_aware(monkeypatch, tmp_path):
@@ -226,3 +232,11 @@ def test_receipt_is_consumed_by_the_first_dispatch_that_records_it(home):
     con.execute("INSERT INTO dispatches(id, run_id, route_json) VALUES('D1','run-aaaa1111',?)",
                 ('{"candidate": {"policy_override": {"receipt": "%s"}}}' % receipt["id"],))
     assert route_override.find_valid("run-aaaa1111", "code_reviewer", c, con=con) is None
+
+
+def test_a_receipt_is_claimed_by_one_scope_only(home):
+    _, con = home
+    receipt = issue(con)
+    assert route_override.record_use(receipt, "ctx", scope="T1", con=con)
+    assert route_override.record_use(receipt, "ctx", scope="T1", con=con)  # the same task may re-validate
+    assert not route_override.record_use(receipt, "ctx", scope="T2", con=con)  # a concurrent task is refused

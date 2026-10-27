@@ -6,6 +6,7 @@ created by setting a persistent role rule.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from office import adapters, candidates, config as cfg, configcmd, route_policy, scoring
@@ -151,6 +152,7 @@ def override(*, route: str | None, role: str | None, run: str | None, reason: st
 
 
 _MIGRATION_BACKUP = ".pre-837-migrate.bak"
+_MIGRATION_ADDED = ".837-added.json"
 
 
 def migrate(*, apply: bool = False, rollback: bool = False) -> Result:
@@ -162,11 +164,21 @@ def migrate(*, apply: bool = False, rollback: bool = False) -> Result:
     import shutil
     path = configcmd._tier_path("user", Path.cwd())
     backup = path.with_name(path.name + _MIGRATION_BACKUP)
+    added_file = path.with_name(path.name + _MIGRATION_ADDED)
     if rollback:
-        if not backup.is_file():
-            raise configcmd._usage(f"no migration backup at {backup}")
-        shutil.copy2(backup, path)
-        return Result(lines=[f"restored {path} from {backup}"], data={"rolled_back": True})
+        if not added_file.is_file():
+            raise configcmd._usage(f"no migration record at {added_file}; the full pre-migration copy is {backup}")
+        added = json.loads(added_file.read_text(encoding="utf-8"))
+        raw = configcmd._load(path)
+        up = raw.setdefault("routing", {}).setdefault("user_policy", {})
+        keep = [r for r in up.get("role_rules") or [] if r not in added]
+        removed = len(up.get("role_rules") or []) - len(keep)
+        up["role_rules"] = keep
+        configcmd._validate(raw, "user", Path.cwd())
+        configcmd._write(path, raw)
+        added_file.unlink()
+        return Result(lines=[f"removed {removed} migrated rule(s) from {path}; other settings are untouched"],
+                      data={"rolled_back": True, "removed": removed})
     raw = configcmd._load(path)
     user_policy = ((raw.get("routing") or {}).get("user_policy") or {})
     legacy = [d for d in (user_policy.get("denied_models") or []) if isinstance(d, str)]
@@ -182,13 +194,16 @@ def migrate(*, apply: bool = False, rollback: bool = False) -> Result:
         routing = raw.setdefault("routing", {})
         up = routing.setdefault("user_policy", {})
         rules = list(up.get("role_rules") or [])
-        rules += [{"role": "*", "route": d, "state": "deny", "wildcard": True} for d in pending]
+        new_rules = [{"role": "*", "route": d, "state": "deny", "wildcard": True} for d in pending]
+        rules += new_rules
         up["role_rules"] = rules
         configcmd._validate(raw, "user", Path.cwd())
         if path.is_file():
             shutil.copy2(path, backup)
         configcmd._write(path, raw)
-        lines.append(f"applied; undo with `office route migrate --rollback` (backup {backup})")
+        prior = json.loads(added_file.read_text(encoding="utf-8")) if added_file.is_file() else []
+        added_file.write_text(json.dumps(prior + new_rules), encoding="utf-8")
+        lines.append(f"applied; undo with `office route migrate --rollback` (removes only these rules; full copy {backup})")
         data["applied"] = True
     elif not apply:
         lines.append("dry run: nothing written. `office route migrate --apply` writes the rules above.")
