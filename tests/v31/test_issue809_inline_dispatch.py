@@ -44,10 +44,28 @@ def test_s_is_inline_only_on_a_measured_estimate_that_beats_dedicated_dispatch()
 
 @pytest.mark.parametrize("gear", ["S", "M"])
 def test_equal_or_dearer_inline_cost_never_runs_inline(gear):
-    for est in ("inline=22 dedicated=22 minutes: tie", "inline=22.00001 dedicated=22 minutes: dearer",
-                "inline=1.00001 dedicated=1.00002 minutes: a saving that rounds to zero"):
+    for est in ("inline=22 dedicated=22 minutes: tie", "inline=22.00001 dedicated=22 minutes: dearer"):
         mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
         assert mode["mode"] == "delegated", est
+
+
+@pytest.mark.parametrize("gear", ["S", "M"])
+def test_a_real_saving_smaller_than_the_display_rounding_still_runs_inline(gear):
+    est = "inline=1.0000001 dedicated=1.0000002 minutes: a measured but tiny saving"
+    assert task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)["mode"] == "inline"
+
+
+def test_the_missing_estimate_reason_names_the_gear():
+    for gear in ("S", "M"):
+        why = task_sizing.execution_mode(gear, _desc("S"), LOW, task_count=1)["why"]
+        assert f"an {gear} run goes inline only on a measured" in why, why
+
+
+def test_execution_gear_acts_only_on_a_run_pinned_to_the_xs_xl_model():
+    assert task_sizing.execution_gear({"gear": "S", "gates": {"gear_model_version": "run-gear-1"}}) == "S"
+    for run in ({"gear": "S", "gates": {}}, {"gear": "M", "gates": {"gear_model_version": "legacy-pinned"}},
+                {"gear": "express", "gates": {"gear_model_version": "legacy-pinned"}}, {"gear": "M"}):
+        assert task_sizing.execution_gear(run) is None
 
 
 def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
@@ -206,6 +224,18 @@ def test_a_plan_whose_m_estimate_is_unmeasured_is_refused_and_never_runs_inline(
     code, out = env.office("submit")
     assert code != 0 and "inline_advantage" in out, out
     assert _q(env, "SELECT COUNT(*) n FROM dispatches")[0]["n"] == 0
+
+
+def test_a_run_pinned_before_the_xs_xl_model_never_dispatches_inline(env):
+    _approved(env, _m_plan(), "M")
+    con = env.con()
+    rid = _q(env, "SELECT id FROM runs")[0]["id"]
+    run = state.get_run(con, rid)
+    state.update_run(con, rid, gates={k: v for k, v in run["gates"].items() if k != "gear_model_version"})
+    con.commit()
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "legacy" in _mode(env)["why"]
 
 
 def test_a_relaunch_of_an_m_inline_task_keeps_its_measured_estimate(env):

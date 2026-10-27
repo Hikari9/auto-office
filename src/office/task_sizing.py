@@ -117,7 +117,14 @@ def inline_estimate(text: str | None) -> dict | None:
     if not (math.isfinite(inline) and math.isfinite(dedicated)) or inline <= 0 or dedicated <= 0:
         return None
     return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
-            "savings": round(dedicated - inline, 4)}
+            "savings": round(dedicated - inline, 6)}
+
+
+def execution_gear(run: dict) -> str | None:
+    """The gear execution_mode may act on: only a run pinned to the XS-XL gear model. A run pinned before it
+    (a legacy name, or a gear with no `gear_model_version`) keeps its original semantics and never goes inline."""
+    gates = run.get("gates") or {}
+    return run.get("gear") if gates.get("gear_model_version") == "run-gear-1" else None
 
 
 def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None, *, task_count: int | None = None) -> dict:
@@ -147,9 +154,9 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
     if gear == "M" and task_count != 1:
         return record("delegated", "dedicated executor: an M run goes inline only for a single-task run")
     if estimate is None:
-        return record("delegated", "dedicated executor: an S run goes inline only on a measured "
+        return record("delegated", f"dedicated executor: an {gear} run goes inline only on a measured "
                                    "inline=<n> dedicated=<n> <unit> cost-to-success estimate")
-    if estimate["inline"] >= estimate["dedicated"] or estimate["savings"] <= 0:
+    if estimate["inline"] >= estimate["dedicated"]:  # the raw costs decide; the rounded saving is only displayed
         return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline']:g} does not beat "
                                    f"dedicated {estimate['dedicated']:g} {estimate['unit']}")
     return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline']:g} vs dedicated "

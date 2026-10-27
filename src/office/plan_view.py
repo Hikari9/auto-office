@@ -167,7 +167,7 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
         else:
             sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
-        mode = task_sizing.execution_mode(run.get("gear"), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
+        mode = task_sizing.execution_mode(task_sizing.execution_gear(run), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "task_size": sizing.get("task_size"),
                         "task_size_rationale": sizing.get("task_size_rationale"),
