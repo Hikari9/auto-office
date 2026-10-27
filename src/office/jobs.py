@@ -394,8 +394,8 @@ def _run_attempt(con, job_id: str, token: str) -> int:
     job = state.get_job(con, job_id)
     run = state.get_run(con, job["run_id"])
     try:
-        if not (version.compatible(job["office_version"], run["office_version"])
-                and version.compatible(job["payload"].get("office_version"), run["office_version"])):
+        if not (version.serves(run["office_version"], job["office_version"])
+                and version.serves(run["office_version"], job["payload"].get("office_version"))):
             raise state.Refused("packet-version-mismatch",
                                 f"job {job_id} carries {job['payload'].get('office_version')} but run is pinned to "
                                 f"{run['office_version']}")

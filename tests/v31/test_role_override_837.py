@@ -107,7 +107,8 @@ def test_quote_or_pin_cannot_override_a_deny_but_a_receipt_can(home):
         candidates.declared_decision(ROUTE, flag="--review-as", role="code_reviewer", run_id="run-aaaa1111")
     assert exc.value.category == "route-denied" and "office route override" in exc.value.next_step
     receipt = issue(con)
-    decision = candidates.declared_decision(ROUTE, flag="--review-as", role="code_reviewer", run_id="run-aaaa1111")
+    decision = candidates.declared_decision(ROUTE, flag="--review-as", role="code_reviewer", run_id="run-aaaa1111",
+                                            scope="G1", claim=True)
     assert decision["candidate"]["policy_override"]["receipt"] == receipt["id"]
     used = con.execute("SELECT COUNT(*) FROM route_override_uses WHERE receipt_id=?", (receipt["id"],)).fetchone()[0]
     assert used == 1
@@ -240,3 +241,26 @@ def test_a_receipt_is_claimed_by_one_scope_only(home):
     assert route_override.record_use(receipt, "ctx", scope="T1", con=con)
     assert route_override.record_use(receipt, "ctx", scope="T1", con=con)  # the same task may re-validate
     assert not route_override.record_use(receipt, "ctx", scope="T2", con=con)  # a concurrent task is refused
+
+
+def test_validation_does_not_claim_but_a_launch_does(home):
+    _, con = home
+    deny_reviewer()
+    issue(con)
+    kw = dict(flag="--review-as", role="code_reviewer", run_id="run-aaaa1111")
+    candidates.declared_decision(ROUTE, **kw)  # validation, no scope
+    candidates.declared_decision(ROUTE, scope="G1", claim=True, **kw)  # the launch takes it
+    candidates.declared_decision(ROUTE, scope="G1", **kw)  # same scope still validates
+    with pytest.raises(Refused):
+        candidates.declared_decision(ROUTE, scope="G2", **kw)  # another gate cannot
+    with pytest.raises(Refused):
+        candidates.declared_decision(ROUTE, scope="G2", claim=True, **kw)
+
+
+def test_model_list_shows_role_specific_denies(home):
+    from office import harnesscmd
+    routecmd.change("deny", role="code_reviewer", route=ROUTE)
+    res = harnesscmd.model_list("claude")
+    row = next(r for r in res.data["rows"] if r["model_id"] == "claude-opus-5-5" and r["effort"] == "high")
+    assert row["role_denied"] == ["code_reviewer"] and row["user_denied"] is False
+    assert any("denied for roles: code_reviewer" in l for l in res.lines if "claude-opus-5-5" in l and "high" in l)

@@ -645,7 +645,7 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
 
 
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
-                       run_id: str | None = None, scope: str | None = None) -> dict:
+                       run_id: str | None = None, scope: str | None = None, claim: bool = False) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
@@ -687,7 +687,10 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     if active_policy["state"] == "deny":
         from office import route_override
         receipt = route_override.find_valid(run_id, role, named)
-        if receipt and route_override.record_use(receipt, f"{role} {harness}/{named['model_id']}@{named['effort']}", scope=scope):
+        context = f"{role} {harness}/{named['model_id']}@{named['effort']}"
+        # Validation only checks the receipt is free for this scope; a launch (claim=True) takes it atomically.
+        if receipt and (route_override.record_use(receipt, context, scope=scope) if claim
+                        else route_override.available_for(receipt, scope)):
             # A genuine, signed user receipt overrides policy only; the capability, sandbox and
             # independence checks the caller applies next are untouched.
             policy_override = {"receipt": receipt["id"], "overrides": active_policy}
@@ -725,7 +728,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
                       config: dict | None = None, repo_root=None, run_id: str | None = None,
-                      scope: str | None = None) -> dict:
+                      scope: str | None = None, claim: bool = False) -> dict:
     """A routing decision for a user-declared `harness/model[@effort]`.
 
     A user override bypasses the registry, trust and floors, but not what the
@@ -737,7 +740,7 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
     if not want["harness"] or not want["model_id"]:
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root, role=role or "executor",
-                          run_id=run_id, scope=scope)
+                          run_id=run_id, scope=scope, claim=claim)
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -1012,7 +1015,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             granted = {}
             for c in candidates:
                 if receipt := route_override.find_valid(run["id"], role, c, con=con):
-                    granted[routing.candidate_id(c)] = receipt["id"]
+                    # A planning/inspection call only checks the receipt is free for this task; a real
+                    # routing call claims it atomically so a second task cannot reuse it.
+                    free = (route_override.available_for(receipt, task_id, con=con) if observe else
+                            route_override.record_use(receipt, f"{role} {routing.candidate_id(c)}", scope=task_id, con=con))
+                    if free:
+                        granted[routing.candidate_id(c)] = receipt["id"]
             if granted:
                 request["policy_overrides"] = granted
         if any(role in pol["strict_roles"] for pol in policies):

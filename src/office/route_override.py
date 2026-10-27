@@ -181,6 +181,21 @@ def _launched(con: sqlite3.Connection, receipt: dict) -> bool:
         return True  # an unreadable dispatch table never grants an override
 
 
+def available_for(receipt: dict, scope: str | None, *, con: sqlite3.Connection | None = None) -> bool:
+    """True when no other scope has claimed the receipt (a read-only check for validation and inspection)."""
+    own = con is None
+    try:
+        con = con or db.connect()
+        ensure_schema(con)
+        row = con.execute("SELECT scope FROM route_override_claims WHERE receipt_id=?", (receipt["id"],)).fetchone()
+        return row is None or row[0] == (scope or "")
+    except sqlite3.Error:
+        return False
+    finally:
+        if own and con is not None:
+            con.close()
+
+
 def record_use(receipt: dict, context: str, *, scope: str | None = None, con: sqlite3.Connection | None = None) -> bool:
     """Atomically claim the receipt for one scope (a task), then append the use to the audit table.
 

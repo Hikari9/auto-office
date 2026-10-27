@@ -455,7 +455,8 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
                  **({"quote": quote} if quote is not None else {})}
     if quote is not None:
         decision = candidates.declared_decision(text, flag=flag, role="executor", config=config,
-                                                repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"])
+                                                repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"],
+                                                claim=True)
         decision["selection_disclosure"]["reason"] = reason
     else:
         # --route historically allows a model-only selector and is exempt from
@@ -463,7 +464,7 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
         selection = {"override": text} if flag == "--route" else {
             "exact": candidates.declared_decision(text, flag=flag, role="executor", config=config,
                                                   repo_root=run.get("repo_root"), run_id=run["id"],
-                                                  scope=task["id"])["selected"]}
+                                                  scope=task["id"], claim=True)["selected"]}
         decision = candidates.route_role(con, config, run, "executor", task_id=task["id"],
                                          **selection, manual=True,
                                          dispatch_kind="fix" if task.get("current_dispatch_id") else "fresh")
@@ -527,7 +528,7 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     authority = origin.get("route_authority") or {}
     if quote and not route.get("route_change"):
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
-                                                run_id=run["id"])
+                                                run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
         # Historical adapter trust is audit-only under #837. Actual quota and
         # capability checks still apply to this explicitly selected route.

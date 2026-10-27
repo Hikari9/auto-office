@@ -817,17 +817,20 @@ def model_list(harness: str | None = None) -> Result:
         score = (r.get("benchmark_indexes") or {}).get(index)
         enabled = r.get("dispatchable") is not False
         denied = route_policy.is_denied({"harness": h, **r}, policy)
+        role_states = {role: st["state"] for role in sorted(route_policy.POLICY_ROLES)
+                       if (st := route_policy.effective_role_state({"harness": h, **r}, role, [policy]))["state"] == "deny"}
         legacy_denied = any(user_catalog.matches(d, r) for d in overlay["disabled"])
         origin = "user" if key in user_keys else "seed"
         lines.append(f"{h}/{r.get('model_id')}@{r.get('effort')}  slug {r.get('invocation_model_id') or '-'}  "
                      f"score {score if score is not None else '-'}  {origin}"
                      + ("  user disabled (legacy overlay)" if legacy_denied else
                         ("  technically gated" if not enabled else ""))
-                     + (f"  user denied ({denied})" if denied else ""))
+                     + (f"  user denied ({denied})" if denied else "")
+                     + (f"  denied for roles: {', '.join(role_states)}" if role_states and not denied else ""))
         data.append({"harness": h, "model_id": r.get("model_id"), "effort": r.get("effort"),
                      "slug": r.get("invocation_model_id"), "score": score, "origin": origin, "dispatchable": enabled,
                      "lineage_key": r.get("lineage_key"), "generation_version": r.get("generation_version"),
-                     "user_denied": bool(denied or legacy_denied), "denial_reason": denied or
+                     "user_denied": bool(denied or legacy_denied), "role_denied": sorted(role_states), "denial_reason": denied or
                      ("legacy user-catalog overlay" if legacy_denied else None)})
     seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
     lines += [f"warning: {w}" for w in user_catalog.merge(list(seed.get("models") or []))[1]]

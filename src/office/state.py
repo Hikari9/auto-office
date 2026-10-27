@@ -288,7 +288,7 @@ def enqueue(con: sqlite3.Connection, run: dict, kind: str, payload: dict, *, ded
     job_id = "J" + uuid.uuid4().hex[:10]
     payload = dict(payload)
     payload.setdefault("office_version", version.current())
-    if not version.compatible(payload["office_version"], run["office_version"]):
+    if not version.serves(run["office_version"], payload["office_version"]):
         raise ValueError("job payload office_version must be compatible with the run's release line")
     cur = con.execute(
         "INSERT OR IGNORE INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
@@ -436,7 +436,7 @@ def check_packet(run: dict, packet: dict) -> None:
     """Reject a packet whose Office version is not the run's pinned version,
     and refuse to process any packet under a different runtime."""
     pv = packet.get("office_version")
-    if not version.compatible(pv, run["office_version"]):
+    if not version.serves(run["office_version"], pv):
         raise Refused("packet-version-mismatch",
                       f"packet office_version {pv!r} does not match run {run['id'][:8]} pinned {run['office_version']!r}",
                       next_step="this packet cannot be used; the runtime regenerates packets for the pinned version")
