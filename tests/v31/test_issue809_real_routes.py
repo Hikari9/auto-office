@@ -84,3 +84,24 @@ def test_real_argon_medium_missing_provenance_is_not_an_l_fallback():
     assert out["status"] == "selected" and out["candidate"]["model_id"] == "gpt-6.1-terra", out
     assert any(r.get("stage") == 4 and "gemini" in r["candidate"]
                for r in out["rejected"]), out
+
+
+def test_discovery_never_trials_a_known_below_size_floor_or_non_xl_opus():
+    known_low = candidate("gpt-6.1-terra", "low", 36, available=False)
+    reason = routing._pool_gate(known_low, {"builder"}, None, "Change", set(),
+                                policy_size="S")
+    assert reason and reason[0] == 4 and ">= 38" in reason[1]
+    blocked_opus = candidate("claude-opus-5-5", "medium", 51, harness="claude",
+                              available=False)
+    reason = routing._pool_gate(blocked_opus, {"builder"}, None, "Change", set(),
+                                policy_size="S")
+    assert reason and "reserved for XL" in reason[1]
+    qualified = candidate("gpt-6.1-terra", "medium", 41, available=False)
+    assert routing._pool_gate(qualified, {"builder"}, None, "Change", set(),
+                              policy_size="S") is None
+    unknown = candidate("future-model", "medium", None, available=False)
+    # Explicit discovery can probe unknown index provenance, but cannot grant
+    # ordinary dispatch eligibility: normal route() still fails closed.
+    assert routing._pool_gate(unknown, {"builder"}, None, "Change", set(),
+                              policy_size="S") is None
+    assert decide("S", [unknown])["status"] == "no_qualifying_candidate"

@@ -644,7 +644,8 @@ def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> No
                          "reason": f"{reason}; {why}" if why else reason})
 
 
-def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tuple[int, str, str] | None:
+def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
+               *, policy_size: str | None = None) -> tuple[int, str, str] | None:
     """The non-probe gates for a discovery candidate: (stage, reason, blocked token) or None.
     An unknown benchmark score is not a failure here (the scorer prices that uncertainty);
     a known low score, low effort, disallowed source, quarantine, missing capability and a
@@ -658,6 +659,18 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set) -> tup
     passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=True)
     if not passed:
         return 4, reason, "floor"
+    # New-gear discovery may trial an unknown (not normally dispatchable)
+    # benchmark, but it must never trial a candidate with a *known* score below
+    # the independently sized subtask floor, nor violate XL-only Opus.
+    if policy_size:
+        model_reason = executor_slates.model_restriction(c, policy_size)
+        if model_reason:
+            return 1, model_reason, "floor"
+        known = (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX)
+        if known is not None:
+            task_reason = executor_slates.benchmark_gate(c, policy_size)
+            if task_reason:
+                return 4, task_reason, "floor"
     supported = c.get("supported_playbooks")
     if supported and playbook and playbook not in supported:
         return 5, "task shape unsupported", "task-shape"
@@ -744,7 +757,9 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     survivors = []
     for c in scoped:
         probe = c.get("probe")
-        gate = _pool_gate(c, required, floor, playbook, quarantined) or _quota_gate(c, reserve)
+        gate = (_pool_gate(c, required, floor, playbook, quarantined,
+                           policy_size=executor_slates.new_gear_size(request))
+                or _quota_gate(c, reserve))
         if gate:
             stage, why, token = gate
             drop(c, token, category="floor" if token == "floor" else "untried", stage=stage, reason=why)
