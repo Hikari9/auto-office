@@ -248,7 +248,7 @@ def execution_line(mode: dict) -> str:
     savings = mode.get("estimated_savings")
     return (f"{mode.get('mode') or 'delegated'} (owner {mode.get('owner') or 'executor'}): "
             f"{mode.get('why') or 'dedicated executor default'}"
-            + (f"; estimated savings {savings['savings']:.12g} {savings['unit']}" if savings else "")
+            + (f"; estimated savings {task_sizing.number(savings['savings'])} {savings['unit']}" if savings else "")
             + (f"; outcome {mode['outcome']['status']}" if mode.get("outcome") else ""))
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import Decimal
 
 SIZES = ("XS", "S", "M", "L", "XL")
 VERSION = "subtask-sizing-1"
@@ -116,8 +117,16 @@ def inline_estimate(text: str | None) -> dict | None:
     inline, dedicated = float(m[1]), float(m[2])
     if not (math.isfinite(inline) and math.isfinite(dedicated)) or inline <= 0 or dedicated <= 0:
         return None
+    # The saving is taken from the decimal text, so it neither gains float noise (22 - 14.1) nor rounds a real
+    # advantage to zero.
     return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
-            "savings": round(dedicated - inline, 12)}
+            "savings": float(Decimal(m[2]) - Decimal(m[1]))}
+
+
+def number(x: float) -> str:
+    """A cost as the shortest text that round-trips (`22`, `14.1`, `1.0000000000001`), never a rounded one."""
+    text = repr(float(x))
+    return text[:-2] if text.endswith(".0") else text
 
 
 def execution_gear(run: dict) -> str | None:
@@ -157,7 +166,7 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
         return record("delegated", f"dedicated executor: an {gear} run goes inline only on a measured "
                                    "inline=<n> dedicated=<n> <unit> cost-to-success estimate")
     if estimate["inline"] >= estimate["dedicated"]:  # the raw costs decide; the rounded saving is only displayed
-        return record("delegated", f"dedicated executor: estimated inline cost {estimate['inline']:.12g} does not beat "
-                                   f"dedicated {estimate['dedicated']:.12g} {estimate['unit']}")
-    return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline']:.12g} vs dedicated "
-                            f"{estimate['dedicated']:.12g} {estimate['unit']} ({estimate['evidence']})", estimate)
+        return record("delegated", f"dedicated executor: estimated inline cost {number(estimate['inline'])} does not beat "
+                                   f"dedicated {number(estimate['dedicated'])} {estimate['unit']}")
+    return record("inline", f"measured cost-to-success ({gear} run): inline {number(estimate['inline'])} vs dedicated "
+                            f"{number(estimate['dedicated'])} {estimate['unit']} ({estimate['evidence']})", estimate)

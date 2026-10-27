@@ -59,6 +59,17 @@ def test_a_real_saving_smaller_than_the_display_rounding_still_runs_inline(gear)
     assert "inline 1.0000001 vs dedicated 1.0000002" in mode["why"], mode["why"]
 
 
+@pytest.mark.parametrize("inline,dedicated", [("1.0000000000001", "1.0000000000004"), ("14.1", "22"), ("0.5", "22")])
+def test_the_stored_saving_and_the_receipt_keep_the_estimates_exact_precision(inline, dedicated):
+    est = f"inline={inline} dedicated={dedicated} minutes: measured on the recorded sessions"
+    got = task_sizing.inline_estimate(est)
+    assert got["savings"] > 0
+    assert got["savings"] == float(__import__("decimal").Decimal(dedicated) - __import__("decimal").Decimal(inline))
+    why = task_sizing.execution_mode("M", _desc("M", inline_advantage=est), LOW, task_count=1)["why"]
+    assert f"inline {inline} vs dedicated {dedicated} minutes" in why, why
+    assert task_sizing.number(7.0) == "7" and task_sizing.number(7.9) == "7.9"
+
+
 def test_the_missing_estimate_reason_names_the_gear():
     for gear in ("S", "M"):
         why = task_sizing.execution_mode(gear, _desc("S"), LOW, task_count=1)["why"]
