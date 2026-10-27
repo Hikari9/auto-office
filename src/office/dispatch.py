@@ -427,6 +427,9 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
             decision["route_note"] = "orchestrator choice"
     decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
                     _qualified=True)
+    resolved = (decision.get("candidate") or {}).get("effort")
+    if resolved:  # a model-only selector or catalog default can resolve above the ceiling
+        ceiling = enforce_effort_ceiling(task, text, quote, flag=flag, effort=resolved)
     if ceiling:
         decision["override_ceiling"] = ceiling
     return decision

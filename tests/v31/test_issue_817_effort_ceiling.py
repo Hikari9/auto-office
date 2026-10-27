@@ -121,3 +121,18 @@ def test_reused_quote_cannot_authorize_another_model_above_the_ceiling(env):
     code, out = env.office("rerun", "T1", "--fresh", "--as", "claude/claude-opus-5-5@high", "--quote", QUOTE,
                            env=_quota(env))
     assert code != 0 and "effort-above-user-quote" in out, out
+
+
+def test_model_only_route_resolving_above_the_ceiling_is_refused(env, monkeypatch):
+    from office import candidates
+    _pin(env)
+    real = candidates.route_role
+
+    def high(*a, **k):
+        d = real(*a, **k)
+        if d.get("status") == "selected":
+            d["candidate"] = {**d["candidate"], "effort": "high"}
+        return d
+    monkeypatch.setattr(candidates, "route_role", high)
+    code, out = env.office("dispatch", "T1", "--route", "gpt-6-astra", env=_quota(env))
+    assert code != 0 and "effort-above-user-quote" in out, out
