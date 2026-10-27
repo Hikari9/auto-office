@@ -136,3 +136,11 @@ def test_model_only_route_resolving_above_the_ceiling_is_refused(env, monkeypatc
     monkeypatch.setattr(candidates, "route_role", high)
     code, out = env.office("dispatch", "T1", "--route", "gpt-6-astra", env=_quota(env))
     assert code != 0 and "effort-above-user-quote" in out, out
+
+
+def test_reused_quote_keeps_the_original_ceiling_across_a_model_change(env):
+    _pin(env, route=MED)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", "claude/claude-opus-5-5@low", "--quote", QUOTE,
+                           env=_quota(env))
+    assert code == 0, out
+    assert _ceiling(env) == {"model": "gpt-6-astra", "effort": "medium", "quote": QUOTE}
