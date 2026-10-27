@@ -2,6 +2,11 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.7.1
+
+- #809 conformance follow-up (#841): an M run executes a task inline only for one eligible low-risk task with a structured, strictly positive, beneficial total cost-to-success estimate; otherwise it delegates. The estimate parser rejects zero and negative costs. New-run help prefers XS-XL, and a historical gear alias prints a compatibility notice while keeping its pinned gates.
+- Tests: the scripted-fake routing hides every agy row (Gemini as well as Claude), so a fake worker no longer runs as a real process that drains convergence jobs past an in-process monkeypatch (the self-review subagent block test failed about half the runs).
+
 ## 3.7.0
 
 Rolls up everything landed on `main` since 3.6.6 (the version was not bumped per PR before this release).

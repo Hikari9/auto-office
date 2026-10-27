@@ -61,8 +61,12 @@ def test_l_xl_and_legacy_gears_never_run_inline(gear):
 
 def test_the_estimate_must_be_a_structured_measurement():
     assert task_sizing.inline_estimate(EST)["savings"] == 8
-    for bad in (None, "", "cheaper", "inline=1 dedicated=2", "inline=a dedicated=2 min: x"):
-        assert task_sizing.inline_estimate(bad) is None
+    for bad in (None, "", "cheaper", "inline=1 dedicated=2", "inline=a dedicated=2 min: x",
+                "inline=0 dedicated=22 minutes: free", "inline=0.0 dedicated=22 minutes: free",
+                "inline=5 dedicated=0 minutes: free", "inline=-1 dedicated=22 minutes: negative",
+                "inline=1e1 dedicated=22 minutes: exponent", "inline=NaN dedicated=22 minutes: nan"):
+        assert task_sizing.inline_estimate(bad) is None, bad
+    assert task_sizing.inline_estimate("inline=0.5 dedicated=22 minutes: a measured half minute")["savings"] == 21.5
     assert task_descriptors.parse_field("inline_advantage", EST) == EST
     for bad in ("it is cheaper", EST + "\x1b[31m"):
         with pytest.raises(ValueError):
@@ -84,10 +88,10 @@ def _xs_plan():
                             "task_size_rationale: bounded local change with no external interfaces\n", 1)
 
 
-def _m_plan():
+def _m_plan(estimate=EST):
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
                             "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
-                            f"inline_advantage: {EST}\n", 1)
+                            f"inline_advantage: {estimate}\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -173,6 +177,47 @@ def test_m_with_measured_advantage_records_savings_at_dispatch(env):
     code, out = env.office("dispatch", "T1")
     assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
     assert _mode(env)["estimated_savings"]["savings"] == 8
+
+
+def test_m_with_a_non_beneficial_estimate_delegates_at_dispatch(env):
+    _approved(env, _m_plan("inline=24 dedicated=22 minutes: retries and a second review round cost more than a launch"), "M")
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" not in out, out
+    assert _mode(env)["mode"] == "delegated" and "does not beat" in _mode(env)["why"]
+
+
+@pytest.mark.parametrize("bad", ["inline=0 dedicated=22 minutes: free", "inline=-3 dedicated=22 minutes: negative",
+                                 "cheaper than dedicated", "inline=14 dedicated=22"])
+def test_a_plan_whose_m_estimate_is_unmeasured_is_refused_and_never_runs_inline(env, bad):
+    env.trust()
+    code, out = env.office("start", "fixture goal", "--gear", "M", "--planner", "inline")
+    assert code == 0, out
+    env.write_plan(_m_plan(bad))
+    code, out = env.office("submit")
+    assert code != 0 and "inline_advantage" in out, out
+    assert _q(env, "SELECT COUNT(*) n FROM dispatches")[0]["n"] == 0
+
+
+def test_a_relaunch_of_an_m_inline_task_keeps_its_measured_estimate(env):
+    _approved(env, _m_plan(), "M")
+    env.office("dispatch", "T1", check=0)
+    before = _mode(env)
+    env.office("revoke", "T1", check=0)  # the first inline worker ends; the relaunch gets a new fenced lease
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline lease/worktree prepared" in out, out
+    after = _mode(env)
+    assert after["mode"] == "inline" and after["why"] == before["why"]
+    assert after["estimated_savings"] == before["estimated_savings"] and after["estimated_savings"]["savings"] == 8
+
+
+def test_a_relaunch_of_a_delegated_m_task_never_becomes_inline(env):
+    _approved(env, PLAN_ONE, "M")
+    env.office("dispatch", "T1", check=0)
+    assert _mode(env)["mode"] == "delegated"
+    env.office("revoke", "T1", check=0)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "orchestrator-inline" not in out, out
+    assert _mode(env)["mode"] == "delegated"
 
 
 def test_m_with_two_tasks_is_delegated(env):

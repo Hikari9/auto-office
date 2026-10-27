@@ -106,12 +106,15 @@ _ESTIMATE = re.compile(r"inline=(\d+(?:\.\d+)?)\s+dedicated=(\d+(?:\.\d+)?)\s+([
 
 def inline_estimate(text: str | None) -> dict | None:
     """The planner's measured total cost-to-success estimate, `inline=<n> dedicated=<n> <unit>: <evidence>`,
-    or None when absent or malformed. The cost is the whole path to an accepted result (executor time,
-    retries and review rounds), so a cheap first run that needs more repair does not beat dedicated dispatch."""
+    or None when absent, malformed or not strictly positive. The cost is the whole path to an accepted result
+    (executor time, retries and review rounds), so a cheap first run that needs more repair does not beat
+    dedicated dispatch, and a zero cost is a missing measurement, not a free path."""
     m = _ESTIMATE.fullmatch((text or "").strip())
     if not m:
         return None
     inline, dedicated = float(m[1]), float(m[2])
+    if inline <= 0 or dedicated <= 0:
+        return None
     return {"inline": inline, "dedicated": dedicated, "unit": m[3], "evidence": m[4].strip(),
             "savings": round(dedicated - inline, 4)}
 

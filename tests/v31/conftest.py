@@ -228,12 +228,13 @@ class Env:
         from office import candidates, dispatch
         from office.util import claim_identity
         # The scripted fakes assume the default executor is not agy: its worker profile has a wall cap, so
-        # an agy executor runs as a real process that no in-process patch reaches. The Claude rows agy
-        # launches with banner evidence are dispatchable in the seed; a test hides them from routing here.
+        # an agy executor runs as a real process that no in-process patch reaches, and its `office submit` then
+        # drains the convergence jobs there, past a test's monkeypatch. Every dispatchable agy row is hidden
+        # from routing here, Gemini as well as Claude: #809 made agy Gemini the preferred S route, and the
+        # routing-seed draw picked it about half the time, so such a test passed or failed per run.
         seed_rows = candidates.catalog_rows
         monkeypatch.setattr(candidates, "catalog_rows", lambda: [
-            {**r, "dispatchable": False} if r.get("invocation_harness") == "agy"
-            and str(r.get("model_id", "")).startswith("claude-") else r for r in seed_rows()])
+            {**r, "dispatchable": False} if r.get("invocation_harness") == "agy" else r for r in seed_rows()])
         # The shipped reviewer seed is strict (luna > deepseek > opus@low, #815) and the fake env has no deepseek
         # route, so a scripted reviewer chain would end after two routes. The suites that walk a chain need the
         # fakes' other routes; the strict seed itself is covered by test_route_discovery_routing.

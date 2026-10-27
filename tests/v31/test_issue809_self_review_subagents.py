@@ -110,6 +110,15 @@ def test_a_failed_subagent_blocks_convergence_and_spends_no_round(env, monkeypat
     assert _q(env, "SELECT COUNT(*) n FROM findings")[0]["n"] == 0
 
 
+def test_scripted_routing_offers_no_agy_row_so_in_process_patches_reach_the_convergence_jobs(env):
+    """An agy executor has a wall cap, so its fake worker runs as a real process and its `office submit` drains the
+    convergence jobs there, past a monkeypatch of `gates.run_reviewer`. #809 made agy Gemini the preferred S
+    route, so the test above failed whenever the routing-seed draw picked it (#841)."""
+    from office import candidates
+    offered = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "agy" and r.get("dispatchable")]
+    assert offered == [], [(r.get("model_id"), r.get("effort")) for r in offered]
+
+
 def test_a_subagent_report_about_another_commit_blocks_convergence(env):
     _s_run(env, code_reviewer=[{"reply": "REVIEWED_COMMIT deadbeefdeadbeef\nVERDICT: APPROVED\nNEXT proceed"}])
     (sub,) = _subagent_gates(env)
