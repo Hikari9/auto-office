@@ -213,6 +213,10 @@ def record_use(receipt: dict, context: str, *, scope: str | None = None, con: sq
         winner = con.execute("SELECT scope FROM route_override_claims WHERE receipt_id=?", (receipt["id"],)).fetchone()
         if winner is None or winner[0] != (scope or ""):
             return False
+        # An earlier same-scope claim is still only valid while the receipt is unrevoked and unexpired.
+        if con.execute("SELECT 1 FROM route_override_receipts WHERE id=? AND revoked_at IS NULL AND expires_at>?",
+                       (receipt["id"], datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))).fetchone() is None:
+            return False
         if not con.execute("SELECT 1 FROM route_override_uses WHERE receipt_id=? AND context=?",
                            (receipt["id"], context)).fetchone():
             con.execute("INSERT INTO route_override_uses(receipt_id, used_at, context) VALUES(?,?,?)",

@@ -183,7 +183,7 @@ def migrate(*, apply: bool = False, rollback: bool = False) -> Result:
     user_policy = ((raw.get("routing") or {}).get("user_policy") or {})
     legacy = [d for d in (user_policy.get("denied_models") or []) if isinstance(d, str)]
     existing = {(r.get("role"), r.get("route")) for r in user_policy.get("role_rules") or [] if isinstance(r, dict)}
-    pending = [d for d in legacy if ("*", d) not in existing]
+    pending = [d for d in dict.fromkeys(legacy) if ("*", d) not in existing]  # de-duplicated, order kept
     lines = [f"legacy global denied_models: {len(legacy)} (all roles, still enforced); {len(pending)} not yet explicit role rules"]
     lines += [f"  deny * {d}  (wildcard, every role)" for d in pending]
     data = {"legacy_denied": legacy, "pending": pending, "applied": False}

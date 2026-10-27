@@ -274,3 +274,19 @@ def test_a_receipt_revoked_after_lookup_cannot_be_claimed(home):
     assert found
     route_override.revoke(con, receipt["id"])  # the user revokes between lookup and claim
     assert not route_override.record_use(found, "ctx", scope="T1", con=con)
+
+
+def test_revoking_after_a_same_scope_claim_still_stops_the_route(home):
+    _, con = home
+    receipt = issue(con)
+    assert route_override.record_use(receipt, "ctx", scope="T1", con=con)
+    route_override.revoke(con, receipt["id"])
+    assert not route_override.record_use(receipt, "ctx", scope="T1", con=con)
+
+
+def test_migrate_apply_handles_duplicate_legacy_denials(home):
+    cfg, _ = home
+    cfg.write_text(yaml.safe_dump({"routing": {"user_policy": {"denied_models": ["claude/opus@low", "claude/opus@low"]}}}))
+    routecmd.migrate(apply=True)
+    rules = yaml.safe_load(cfg.read_text())["routing"]["user_policy"]["role_rules"]
+    assert [r["route"] for r in rules] == ["claude/opus@low"]
