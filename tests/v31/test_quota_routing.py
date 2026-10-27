@@ -111,7 +111,6 @@ def test_protected_luna_falls_through_to_a_proven_deepseek_code_reviewer(tmp_pat
 def test_protected_stop_names_the_seeded_fallback_cut_by_the_trust_floor(role):
     luna = _candidate("codex", "luna", quota="ok", remaining=0, caps=("review",))
     deepseek = _candidate("opencode", "deepseek", caps=("review",))
-    deepseek["adapter_trust"] = "valid-unverified"
     request = _reviewer_request(role, luna, deepseek)
     decision = routing.route(request)
     decision["request"] = request
@@ -121,5 +120,13 @@ def test_protected_stop_names_the_seeded_fallback_cut_by_the_trust_floor(role):
 
     text = candidates.seeded_fallback_blockers(decision)
 
-    assert routing.candidate_id(deepseek) in text and "valid-unverified" in text
     assert f"office approve trust {routing.candidate_id(deepseek)}" in text
+
+
+def test_seeded_fallback_blockers_ignore_non_trust_cuts():
+    deepseek = _candidate("opencode", "deepseek", caps=("review",))
+    decision = {"request": {"preferred_seed": [{"model_id": "deepseek"}], "candidates": [deepseek]},
+                "rejected": [{"candidate": routing.candidate_id(deepseek), "stage": 2,
+                              "reason": "no fresh exact probe pass yet"}]}
+
+    assert candidates.seeded_fallback_blockers(decision) == ""

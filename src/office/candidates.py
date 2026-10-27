@@ -767,7 +767,7 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
 
 
 def seeded_fallback_blockers(decision: dict) -> str:
-    """Why each other preferred_seed route was out when the chain stopped on the protected quota.
+    """Seeded reviewer routes cut by the trust floor when the chain stopped on the protected quota.
 
     The quota status alone hides fallbacks cut at an earlier stage (e.g. an unproven
     trust state), which read as if no fallback existed. Empty when nothing was cut."""
@@ -776,17 +776,17 @@ def seeded_fallback_blockers(decision: dict) -> str:
     if not seed:
         return ""
     by_id = {routing.candidate_id(c): c for c in req.get("candidates") or []}
-    out, seen = [], set()
+    out = []
     for r in decision.get("rejected") or []:
-        c = by_id.get(r.get("candidate"))
-        if c is None or routing.preferred_rank(c, seed) is None or r["candidate"] in seen:
+        cid = r.get("candidate")
+        c = by_id.get(cid)
+        # Only a trust cut is something `office approve trust` fixes; probe and pool cuts are not.
+        if (c is None or r.get("stage") != 2 or not str(r.get("reason", "")).startswith("adapter trust is derived as")
+                or routing.preferred_rank(c, seed) is None or cid in out):
             continue
-        seen.add(r["candidate"])
-        line = f"{r['candidate']}: {r.get('reason')}"
-        if r.get("stage") == 2:
-            line += f" (a user may promote it: office approve trust {r['candidate']} --quote \"<user's words>\")"
-        out.append(line)
-    return "; ".join(out)
+        out.append(cid)
+    # Kept short: the caller's failure text is truncated.
+    return "; ".join(f"{cid} is not trusted (office approve trust {cid} --quote ...)" for cid in out[:2])
 
 
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
