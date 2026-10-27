@@ -1057,6 +1057,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
     if cmd == "review" and args.target.lower() == "plan":
         from office import gates, plans
+        from office.state import Usage
+        if (args.review_cli or args.review_external) and not args.review_as:
+            raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
         return plans.request_review(con, run, args.quote, args.rounds,
                                     pin=gates.review_pin(args.review_as, args.review_cli, args.review_external))
     if cmd == "review":

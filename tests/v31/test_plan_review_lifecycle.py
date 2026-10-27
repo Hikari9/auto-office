@@ -452,3 +452,10 @@ def test_the_pinned_plan_reviewer_is_the_route_the_review_runs_on(env):
     assert _run(env)["plan_review"]["status"] == "approved"
     last = _q(env, "SELECT triple FROM dispatches WHERE role='plan_reviewer' ORDER BY started_at DESC LIMIT 1")[0]["triple"]
     assert last.split("/", 1)[1] == REPIN.split("/", 1)[1], last
+
+
+def test_review_plan_cli_and_external_need_as(env):
+    _start(env)
+    _ingest(env, status="UNAVAILABLE")
+    code, out = _o(env, "review", "plan", "--external")
+    assert code == 2 and "invalid-override" in out and not _queued(env), out

@@ -141,3 +141,15 @@ def test_review_route_lines_lists_review_notices_only_and_skips_a_task_already_l
     assert len(lines) == 2 and "L-T1" in lines[0] and "a/x@high -> b/y@high" in lines[0] and "[reviewer-fallback]" in lines[0]
     assert gates.review_route_lines(con, "r1", skip_task="T1") == lines[:1]
     assert gates.review_route_lines(con, "r1", limit=1) == lines[1:]
+
+
+def test_a_review_only_rerun_that_starts_away_from_its_earlier_route_announces_the_move(env):
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")}
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    env.office("review", "L-T1:convergence", check=0)
+    last = _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at DESC LIMIT 1")[0]["triple"]
+    moves = [c for c in _lane_route_changes(env) if c["after"] == last]  # the pool may recycle a tried route
+    assert moves and moves[-1]["before"] in tried and moves[-1]["before"] != last, moves
+    assert "did not settle" in moves[-1]["reason"] and moves[-1]["kind"] == "reviewer-fallback", moves

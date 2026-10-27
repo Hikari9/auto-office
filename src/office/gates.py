@@ -654,7 +654,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
                                          config=state.pinned_config(run))["candidate"]) != same_route:
         resume, same_route = None, None  # the pin names another reviewer than the one that would be resumed
-    last_failed: tuple[str, str] | None = None  # (route, why) of the attempt the next route replaces
+    # (route, why) of the attempt the next route replaces: first the route this review was asked to start away from
+    started_away = [r for r in [*(exclude or []), *(prefer_not or [])] if not r.startswith("harness:")]
+    last_failed: tuple[str, str] | None = ((started_away[-1], "an earlier attempt on that route did not settle this review")
+                                           if started_away and not pinned else None)
     retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
     retried: set[str] = set()
     for attempt in range(limit + 1):
