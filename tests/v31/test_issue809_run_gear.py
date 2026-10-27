@@ -237,7 +237,8 @@ def test_risk_module_run_gear_problem_is_order_and_risk_aware():
 # ---------------------------------------------------------------- R4-R8: dispatch output and routing audit
 
 def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env):
-    body = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S\n"
+    # Two tasks: a single-task M run is executed inline (R11), and this checks a delegated dispatch.
+    body = PLAN_TWO.replace("visual: none", "visual: none\ntask_size: S\n"
                             "task_size_rationale: one bounded file with no interfaces\n", 1)
     out = _approved_dispatch(env, body, "M")
     assert "RUN DISPATCH gear M" in out and "funded gates: plan review=no, convergence=yes" in out, out
@@ -258,7 +259,7 @@ def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env
 
 
 def test_routing_audit_records_every_809_field(env):
-    body = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S\n"
+    body = PLAN_TWO.replace("visual: none", "visual: none\ntask_size: S\n"
                             "task_size_rationale: one bounded file with no interfaces\n", 1)
     _approved_dispatch(env, body, "M")
     con, run = _run(env)

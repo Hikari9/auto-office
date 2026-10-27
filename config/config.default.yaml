@@ -262,6 +262,9 @@ gear_presets:
     allow_advisory_undercut: true
     plan_review_max_rounds: 3
     code_review_max_rounds: 3
+    # The initial plan review is an Elephant (one lead) over three mandatory Goldfish and up to two hazard
+    # specialists; later RECHECK rounds are the lead alone. XL only; a gear the run did not pin never gets it.
+    xl_goldfish: true
   direct:
     dedicated_planner: false
     plan_review: risk_forced

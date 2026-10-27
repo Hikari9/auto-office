@@ -596,9 +596,15 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
-    outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
-                                       plan_review=True, exclude=job["payload"].get("exclude"),
-                                       resume_from=job["payload"].get("resume_from"))
+    from office import xl_review
+    if xl_review.eligible(con, run, gate):
+        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer.
+        outcome = xl_review.audit_plan(con, run, gate, plan, brief, Path(run["repo_root"]),
+                                       exclude=job["payload"].get("exclude"))
+    else:
+        outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
+                                           plan_review=True, exclude=job["payload"].get("exclude"),
+                                           resume_from=job["payload"].get("resume_from"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
