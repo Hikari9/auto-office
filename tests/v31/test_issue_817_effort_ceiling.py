@@ -73,3 +73,27 @@ def test_amend_route_with_the_same_quote_cannot_raise_effort_either(env):
     assert code != 0 and "effort-above-user-quote" in out and "ask the user for new words" in out, out
     code, out = env.office("amend", "route", "T1", "--as", HIGH, "--quote", "new words: high is fine", env=_quota(env))
     assert code == 0, out
+
+
+def test_evidence_reroute_keeps_the_ceiling(env):
+    _pin(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--reroute", env=_quota(env))
+    assert code == 0, out
+    assert _ceiling(env)["effort"] == "low"
+    _ended(env)
+    code, out = env.office("rerun", "T1", "--fresh", "--as", HIGH, "--quote", QUOTE, env=_quota(env))
+    assert code != 0 and "effort-above-user-quote" in out, out
+
+
+def test_omitted_effort_that_resolves_above_the_ceiling_is_refused(monkeypatch):
+    from office import candidates, dispatch
+    from office.state import Refused
+    task = {"id": "T1", "route_json": json.dumps({
+        "candidate": {"model_id": "gpt-6-astra", "effort": "low"},
+        "override_ceiling": {"model": "gpt-6-astra", "effort": "low", "quote": QUOTE}})}
+    monkeypatch.setattr(candidates, "declared_candidate", lambda *a, **k: {"effort": "high"})
+    with pytest.raises(Refused) as exc:
+        dispatch.enforce_effort_ceiling(task, "codex/gpt-6-astra", QUOTE)
+    assert "effort-above-user-quote" in exc.value.code
+    monkeypatch.setattr(candidates, "declared_candidate", lambda *a, **k: {"effort": "none"})
+    assert dispatch.enforce_effort_ceiling(task, "codex/gpt-6-astra", QUOTE)["effort"] == "low"

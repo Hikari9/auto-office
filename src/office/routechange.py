@@ -47,13 +47,14 @@ def change_route(con, run: dict, target: str | None, as_route: str | None, quote
                                 f"then office dispatch {tid} --as {as_route}")
     effort = want["effort"] or d.get("effort")
     _require_known(harness, want["model_id"], effort)
-    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as")
+    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as", effort=effort)
     cand = candidates.declared_candidate(harness, want["model_id"], effort)
     after = routing.candidate_id(cand)
     before = d.get("triple")
     if after == before:
         raise Refused("route-unchanged", f"{d['id']} already records {before}", scope=tid)
-    change = {"before": before, "after": after, "quote": quote, "restart": restart, "dispatch_id": d["id"]}
+    change = {"before": before, "after": after, "quote": quote, "restart": restart, "dispatch_id": d["id"],
+              "ceiling": ceiling}
     extra = {"quote": quote, "restart": restart}
     lines = [f"{tid} {d['id']} route {before} -> {after} (recorded; lease and session kept)"]
     with db.transaction(con):
@@ -134,7 +135,7 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
                     exit_code=2)
     effort = want["effort"] or (rec.get("candidate") or {}).get("effort")
     _require_known(harness, want["model_id"], effort)
-    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as")
+    ceiling = dispatch.enforce_effort_ceiling(task, as_route, quote, flag="amend route --as", effort=effort)
     cand = candidates.declared_candidate(harness, want["model_id"], effort)
     after = routing.candidate_id(cand)
     if before and scoring.normalize_triple(after) == scoring.normalize_triple(before):
@@ -211,7 +212,8 @@ def _record(con, d: dict, cand: dict, change: dict) -> None:
     route = {**(d.get("route") or {}), "candidate": cand, "override": True,
              "selection_disclosure": {"triple": triple, "reason": reason, "override": True},
              "route_authority": {"actor": "user", "quote": change["quote"], "reason": reason},
-             "route_change": {k: change[k] for k in ("before", "after", "quote")}}
+             "route_change": {k: change[k] for k in ("before", "after", "quote")},
+             **({"override_ceiling": change["ceiling"]} if change.get("ceiling") else {})}
     route.pop("launch", None)  # a --cli argv names the old model
     route.pop("discovery", None)  # a declared route is no trial and has no discovery fallback
     with_override = {**loads(d.get("override_json"), {}), "by": "user", "declared": True, "triple": triple,

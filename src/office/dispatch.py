@@ -359,12 +359,20 @@ def _prior_override_ceiling(task: dict) -> dict | None:
     return None
 
 
-def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: str = "--as") -> dict | None:
+def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: str = "--as",
+                           effort: str | None = None) -> dict | None:
     """Refuse a higher effort on the same model than a quoted user override set, unless the
     quote is new (#817). Returns the ceiling to record on the route, or None."""
     want = candidates.parse_route_override(text)
-    model, effort = want.get("model_id"), want.get("effort")
+    model = want.get("model_id")
     prior = _prior_override_ceiling(task)
+    effort = effort or want.get("effort")
+    if not effort and prior and prior.get("model") == model and want.get("harness"):
+        # An omitted effort resolves to the catalog's own, which can sit above the ceiling.
+        try:
+            effort = candidates.declared_candidate(want["harness"], model, None).get("effort")
+        except (Refused, Usage):
+            effort = None
     same_quote = bool(prior and quote is not None and quote.strip() == prior["quote"].strip())
     if prior and prior.get("model") == model and effort:
         new, old = _effort_rank(effort), _effort_rank(prior["effort"])
@@ -703,7 +711,11 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
                                   extra=({"quote": decision["route_authority"]["quote"]}
                                          if (decision.get("route_authority") or {}).get("quote") is not None else None))
-    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
+    payload = _route_payload(decision)
+    ceiling = decision.get("override_ceiling") or _prior_override_ceiling(task)
+    if ceiling:  # a reroute or relaunch never drops the user's quoted effort ceiling (#817)
+        payload["override_ceiling"] = ceiling
+    state.update_task(con, run["id"], tid, route_json=dumps(payload))
 
 
 # ------------------------------------------------------------------ route discovery (#494)
