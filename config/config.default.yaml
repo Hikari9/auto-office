@@ -138,12 +138,8 @@ roles:
       min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
-    # Newer models precede 5.6 when trust, availability and eligibility permit.
-    preferred_seed:
-      - {harness: codex, model_id: gpt-6.1-sol, effort: medium}
-      - {harness: codex, model_id: gpt-6.1-terra, effort: medium}
-      - {harness: codex, model_id: gpt-5.6-sol, effort: medium}
-      - {harness: codex, model_id: gpt-5.6-terra, effort: medium}
+    # No seed: adaptive routing compares routes, and a qualifying newer generation
+    # ranks directly ahead of its predecessor at the same effort (catalog/lineages.yaml).
     required_capabilities: [builder]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;

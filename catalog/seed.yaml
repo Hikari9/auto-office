@@ -1235,7 +1235,7 @@ models:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1246,15 +1246,15 @@ models:
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 48}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 90.9, ttft_ms: 77960}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (max)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1265,15 +1265,15 @@ models:
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 45}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 90.9, ttft_ms: 13320}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-xhigh', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (xhigh)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1284,15 +1284,15 @@ models:
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 44}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 90.9, ttft_ms: 5660}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-high', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (high)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1303,15 +1303,15 @@ models:
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 41}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 90.9, ttft_ms: 1430}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-medium', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (medium)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1322,15 +1322,15 @@ models:
     effort_confidence: exact
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 36}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 91.0, ttft_ms: 1280}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-low', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (low)'}
     content_hash:
     supersession_metadata:
   - model_id: gpt-6.1-terra
     invocation_model_id: gpt-6.1-terra
     invocation_harness: codex
-    invocation_source: 'documented: OpenAI gpt-6.1-terra available in Codex; exact effort-specific local conformance pending'
+    invocation_source: 'documented: listed by codex debug models (codex-cli 0.163.0); isolated codex exec smoke receipts 2026-10-27 in docs/benchmarks/aa-pr-refresh-2026-10-27.md; Office exact conformance probe pending'
     dispatchable: false
     discovery: eligible
     discovery_reason: 'Documented model; exact effort conformance required before trial'
@@ -1341,9 +1341,9 @@ models:
     effort_confidence: mapped
     benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 33}
     price_fields: {input_per_mtok: 1.0, output_per_mtok: 5.0, currency: USD, as_of: '2026-10-26'}
-    speed_fields: {output_tok_per_s: null, ttft_ms: null}
+    speed_fields: {output_tok_per_s: 91.1, ttft_ms: 1270}
     release_date: '2026-10-26'
-    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_context: 'AA v4.3.2 published score; not Codex CLI conformance'}
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gpt-6-1-terra-non-reasoning', release_url: 'https://artificialanalysis.ai/models/releases/gpt-6-1-terra', fetched_at: '2026-10-27T04:29:56Z', metrics_as_of: '2026-10-27', metrics_context: 'AA v4.3.2 score and first-party API speed; not Codex CLI conformance', page_title: 'GPT-6.1 Terra (non-reasoning)'}
     content_hash:
     supersession_metadata:
   - model_id: mimo-v2.6-pro

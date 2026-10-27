@@ -24,6 +24,11 @@ Candidates within the competitive band of the best utility are a close call:
 a reproducible draw from the routing seed picks among them. Exploration, at a
 small bounded rate, may promote an under-tested qualifying route whose utility
 and cost stay near the best.
+
+Lineage supersession (#811) runs last: within one named lineage and effort, a
+newer released generation that qualified takes its predecessor's place in the
+order, and the predecessor follows directly behind it as a fallback. Routes of
+different lineages keep the utility comparison's order.
 """
 from __future__ import annotations
 
@@ -325,9 +330,12 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         rows.remove(chosen)
         rows.insert(0, chosen)
 
+    supersession = _supersede(rows, by_id, request)
+
     for i, r in enumerate(rows):
         r["rank"] = i + 1
-    slate = [_slate_entry(i, r, rows, clincher, exploration) for i, r in enumerate(rows[:SLATE_SIZE])]
+    slate = [_slate_entry(i, r, rows, clincher, exploration, supersession)
+             for i, r in enumerate(rows[:SLATE_SIZE])]
     audit = {
         "policy_version": POLICY_VERSION, "learner_version": route_learning.LEARNER_VERSION,
         "cost_policy": policy, "weights": weights, "competitive_band": band, "budget_ceiling_usd": ceiling,
@@ -340,6 +348,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         **({"budget_ceiling_source": (request.get("budget_ceiling") or {}).get("source")}
            if request.get("budget_ceiling") else {}),
         "numeric_order": numeric_order, "clincher": clincher, "exploration": exploration,
+        **({"supersession": supersession} if supersession else {}),
         "spread": {"wave_load": load, "applied": any(r["contributions"]["spread"] for r in rows)},
         "preferred_seed": request.get("preferred_seed"), "aliases": aliases,
         "candidates": rows, "slate": slate,
@@ -486,8 +495,62 @@ def _weakness(r: dict, rows: list[dict]) -> str:
     return "no notable risk"
 
 
-def _slate_entry(i: int, r: dict, rows: list[dict], clincher: dict, exploration: dict) -> dict:
-    if i == 0 and exploration.get("picked") == r["route"]:
+def _supersede(rows: list[dict], by_id: dict[str, dict], request: dict) -> list[dict]:
+    """Within one named lineage and effort, put each qualifying newer released
+    generation directly ahead of its predecessor, in place (#811).
+
+    Only rows that already qualified move, so every gate (denial, version ceiling,
+    overkill, trust, capability, floor, quota, discovery) still decides whether
+    the newer generation competes at all; when it does not, the predecessor keeps
+    its own rank. Identity comes from the lineage manifest, never from spelling.
+    A predecessor the user declared (--as), or seeded ahead of its successor in
+    preferred_seed, is not moved. Returns the moves made."""
+    from office import model_lineages
+    from office.routing import preferred_rank
+    manifest = model_lineages.load()
+    seed = request.get("preferred_seed")
+    declared = request.get("declared_route")
+
+    def identity(route: str):
+        c = by_id[route]
+        meta = model_lineages.identify(c.get("model_id"), aliases=c, manifest=manifest)
+        if not meta or meta.get("release_status") != "released":
+            return None
+        return meta["lineage_key"], c.get("effort"), model_lineages.version_parts(meta["generation_version"])
+
+    def pinned(older: dict, newer: dict) -> bool:
+        if older["route"] == declared:
+            return True
+        o, n = preferred_rank(by_id[older["route"]], seed), preferred_rank(by_id[newer["route"]], seed)
+        return o is not None and (n is None or n > o)
+
+    ids = {r["route"]: identity(r["route"]) for r in rows}
+    moves: list[dict] = []
+    i = 0
+    while i < len(rows):
+        mine = ids[rows[i]["route"]]
+        newer = [r for r in rows[i + 1:]
+                 if mine and (x := ids[r["route"]]) and x[:2] == mine[:2] and x[2] > mine[2] and not pinned(rows[i], r)]
+        if not newer:
+            i += 1
+            continue
+        succ = max(newer, key=lambda r: ids[r["route"]][2])
+        moves.append({"route": succ["route"], "label": succ["label"], "supersedes": rows[i]["route"],
+                      "supersedes_label": rows[i]["label"], "lineage_key": mine[0], "effort": mine[1]})
+        rows.remove(succ)
+        rows.insert(i, succ)
+    return moves
+
+
+def _slate_entry(i: int, r: dict, rows: list[dict], clincher: dict, exploration: dict,
+                 supersession: list[dict] | None = None) -> dict:
+    promoted = next((m for m in supersession or [] if m["route"] == r["route"]), None)
+    demoted = next((m for m in supersession or [] if m["supersedes"] == r["route"]), None)
+    if promoted:
+        reason = f"newer generation of {promoted['supersedes_label']} (same lineage and effort)"
+    elif demoted:
+        reason = f"superseded by {demoted['label']}; kept as its fallback"
+    elif i == 0 and exploration.get("picked") == r["route"]:
         reason = "exploration: under-tested, close to the best"
     elif i == 0 and clincher.get("used") and clincher.get("picked") == r["route"]:
         reason = "close call, won the seeded draw"

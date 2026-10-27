@@ -59,6 +59,10 @@ class World:
         self.codex.chmod(0o755)
         # Discovery fixtures model one fake codex. Do not enlist real host CLIs.
         monkeypatch.setattr(adapters, "installed", lambda adapter: adapters.executable(adapter) == "codex")
+        # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) stays out of this world.
+        rows = candidates.catalog_rows
+        monkeypatch.setattr(candidates, "catalog_rows",
+                            lambda: [r for r in rows() if r.get("model_id") != "gpt-6.1-terra"])
         if route_probe.write_boundary_reason() is not None:
             # No OS write boundary here: the launch path still runs, only the sandbox wrapper is dropped.
             monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
