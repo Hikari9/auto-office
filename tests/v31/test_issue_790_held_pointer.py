@@ -177,3 +177,49 @@ def test_agent_herdr_no_longer_reports_gets_no_enter(monkeypatch):
     monkeypatch.setattr(dispatch, "_herdr_agent_sample", lambda name: None)
     (landed, mismatch), spec = pane.settle()
     assert (landed, mismatch) == (False, None) and pane.enters == []
+
+
+# A reviewer that ends without a reply file is not recorded as a plain success.
+
+def _ended_summary(env, monkeypatch, *, reply: str | None, kind="reviewer") -> str:
+    from test_herdr_agent_launch import _fake, _live_dispatch
+    from office import paths
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    con = env.con()
+    try:
+        with con:
+            con.execute("UPDATE dispatches SET kind=?, role=? WHERE id=?", (kind, kind, d["id"]))
+    finally:
+        con.close()
+    out = ddir / "reply.txt"
+    if reply is not None:
+        out.write_text(reply)
+    (ddir / "launch.json").write_text(json.dumps({"herdr_agent": "office-D", "kind": kind, "output": str(out)}))
+    monkeypatch.setattr(dispatch, "watch_herdr_agent", lambda *a, **kw: (0, "success"))
+    monkeypatch.setattr(dispatch, "_mark", lambda *a, **kw: None)
+    dispatch.supervise(d["id"])
+    con = env.con()
+    try:
+        return con.execute("SELECT summary FROM events WHERE kind='dispatch.ended' AND dispatch_id=?", (d["id"],)).fetchone()[0]
+    finally:
+        con.close()
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("reply", [None, ""])
+def test_reviewer_ending_without_a_reply_file_says_so(env, monkeypatch, reply):
+    summary = _ended_summary(env, monkeypatch, reply=reply)
+    assert summary.endswith("reviewer ended: success with an empty reply: no reply file was written"), summary
+
+
+@pytest.mark.approved
+def test_reviewer_with_a_reply_file_ends_as_a_plain_success(env, monkeypatch):
+    assert _ended_summary(env, monkeypatch, reply="VERDICT: PASS").endswith("reviewer ended: success")
+
+
+@pytest.mark.approved
+def test_worker_without_a_reply_file_ends_as_a_plain_success(env, monkeypatch):
+    assert _ended_summary(env, monkeypatch, reply=None, kind="worker").endswith("worker ended: success")
