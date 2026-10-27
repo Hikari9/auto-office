@@ -365,3 +365,90 @@ def test_unavailable_plan_review_attempts_spend_no_round(env):
     finally:
         con.close()
 
+
+
+# ------------------------------------------------------------------ re-pinning the plan reviewer (#790)
+
+REPIN = "codex/gpt-6-luna@xhigh"
+
+
+def _route_notices(env):
+    return [json.loads(e["payload_json"]) for e in _events(env, "route.changed")
+            if json.loads(e["payload_json"]).get("notice") == "review"]
+
+
+def test_review_plan_as_re_pins_and_re_runs_only_the_plan_review_without_spending_a_round(env):
+    _start(env)
+    _ingest(env, status="UNAVAILABLE")
+    assert not _queued(env) and _run(env)["plan_review"]["status"] == "unavailable"
+    code, out = _o(env, "review", "plan", "--as", REPIN)
+    assert code == 0 and "no round is spent" in out and REPIN in out, out
+    (gate,) = _queued(env)
+    assert gate["round"] == 1 and gate["cycle"] == 1, "an attempt that had no verdict spent no round"
+    pr = _run(env)["plan_review"]
+    assert pr["review_override"]["as"] == REPIN and pr["review_override"]["by"] == "user" and not pr["ended"]
+    payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='plan_review' ORDER BY created_at DESC")[0]["payload_json"])
+    assert payload["gate_id"] == gate["id"] and payload["review_override"]["as"] == REPIN
+    assert not _q(env, "SELECT 1 FROM authorizations WHERE target='plan:review'"), "re-pinning is not another review"
+    (notice,) = _route_notices(env)
+    assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "user"
+    assert notice["stage"] == "plan_reviewer" and "re-pinned" in notice["reason"]
+    code, status = _o(env, "status")
+    assert REPIN in status and "review route change" in status, status
+    code, route = _o(env, "inspect", "route")
+    assert REPIN in route and "[repin]" in route, route
+    _ingest(env, APPROVED)
+    assert [g["round"] for g in _plan_gates(env) if g["review_status"] == "COMPLETED"] == [1]
+
+
+def test_review_plan_as_after_a_verdict_queues_the_next_round_and_says_so(env):
+    _start(env)
+    _ingest(env, recheck())
+    code, out = _o(env, "review", "plan", "--as", REPIN)
+    assert code == 0 and "round 2/3" in out and "no round is spent" not in out, out
+    assert [g["round"] for g in _queued(env)] == [2]
+
+
+def test_review_plan_as_is_refused_while_a_round_is_still_running(env):
+    _start(env)
+    code, out = _o(env, "review", "plan", "--as", REPIN)
+    assert code == 4 and "plan-review-running" in out, out
+    assert len(_plan_gates(env)) == 1 and "review_override" not in _run(env)["plan_review"]
+
+
+def test_review_plan_as_validates_the_route_before_pinning_anything(env):
+    _start(env)
+    _ingest(env, status="UNAVAILABLE")
+    code, out = _o(env, "review", "plan", "--as", "nonesuch/model@high")
+    assert code != 0 and not _queued(env) and "review_override" not in _run(env)["plan_review"], out
+
+
+def test_review_plan_as_after_the_review_closed_still_needs_the_users_words(env):
+    _approved_run(env)
+    code, out = _o(env, "review", "plan", "--as", REPIN)
+    assert code == 2 and "user-quote-required" in out, out
+    _o(env, "review", "plan", "--as", REPIN, "--quote", "again, with this reviewer", check=0)
+    assert _run(env)["plan_review"]["review_override"]["as"] == REPIN and len(_queued(env)) == 1
+
+
+def test_review_plan_without_as_still_refuses_while_open(env):
+    _start(env)
+    _ingest(env, status="UNAVAILABLE")
+    code, out = _o(env, "review", "plan", "--quote", "again")
+    assert code == 4 and "plan-review-open" in out and not _queued(env), out
+
+
+def test_the_pinned_plan_reviewer_is_the_route_the_review_runs_on(env):
+    env.trust()
+    env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"exit": 1}])
+    env.office("start", "add numbers", "--gear", "full", check=0)
+    assert _run(env)["plan_review"]["status"] == "unavailable"
+    fallbacks = [n for n in _route_notices(env) if n["kind"] == "reviewer-fallback"]
+    assert fallbacks and fallbacks[0]["stage"] == "plan_reviewer" and fallbacks[0]["before"] != fallbacks[0]["after"]
+    assert fallbacks[0]["reason"], "the notice says why the plan review left its route"
+    assert fallbacks[0]["after"] in env.office("status")[1] and fallbacks[0]["after"] in env.office("inspect", "route")[1]
+    env.script(plan_reviewer=[{"reply": APPROVED}])
+    env.office("review", "plan", "--as", REPIN, check=0)
+    assert _run(env)["plan_review"]["status"] == "approved"
+    last = _q(env, "SELECT triple FROM dispatches WHERE role='plan_reviewer' ORDER BY started_at DESC LIMIT 1")[0]["triple"]
+    assert last.split("/", 1)[1] == REPIN.split("/", 1)[1], last

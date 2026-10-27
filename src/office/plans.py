@@ -573,7 +573,8 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
     outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                        plan_review=True, exclude=job["payload"].get("exclude"),
-                                       resume_from=job["payload"].get("resume_from"))
+                                       resume_from=job["payload"].get("resume_from"),
+                                       review_override=job["payload"].get("review_override"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -910,15 +911,20 @@ def review_after_revision(con, run: dict, version: int) -> str:
     return "plan-review queued" if gid else "plan review not queued"
 
 
-def request_review(con, run: dict, quote: str | None, rounds: int | None = None) -> Result:
+def request_review(con, run: dict, quote: str | None, rounds: int | None = None, *, pin: dict | None = None) -> Result:
     """The user's explicit request for another plan review after a cycle closed
     (#418): a new bounded cycle, recorded as user-requested with their words.
-    It is the only way plan review reopens."""
+    It is the only way plan review reopens. While plan review is open, `pin`
+    (`--as`) re-pins the plan reviewer and re-runs only that review."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-request-review", "only the user requests another plan review")
     if not contract.is_convergence(run):
         raise Refused("legacy-contract", f"this run keeps the {contract.of(run)} review contract; it has no "
                       "user-requested plan review", next_step="office status")
+    if pin:  # the route's shape and capability, before any pin is written
+        candidates.declared_decision(pin["as"], flag="--as", role="plan_reviewer", config=state.pinned_config(run))
+    if pin and review_required(run) and not _pr(run).get("ended") and run.get("plan_version"):
+        return _repin_open_review(con, run, pin)
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "another plan review is the user's request; record their words",
                     next_step='office review plan --quote "<user\'s words>" [--rounds N]')
@@ -940,6 +946,8 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None)
         pr.update({"required": True, "ended": False, "ended_reason": None, "status": "pending", "cycle": cycle,
                    "lifecycle": USER_REQUESTED, "max_rounds": rounds, "outstanding": None,
                    "requested": {"quote": quote.strip(), "plan_version": version, "at": now_iso()}})
+        if pin:
+            pr["review_override"] = pin
         state.update_run(con, run["id"], plan_review=pr)
         run = state.get_run(con, run["id"])
         queue_plan_review(con, run, version)
@@ -947,6 +955,42 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None)
                    f"up to {rounds} substantive round(s)", payload={"quote": quote.strip(), "rounds": rounds})
     jobs.kick(con, run["id"])
     return Result(lines=[f"plan review requested by the user: p{version}, cycle {cycle}, up to {rounds} round(s)"],
+                  next="no action; the verdict returns here (office status)")
+
+
+def _repin_open_review(con, run: dict, pin: dict) -> Result:
+    """`office review plan --as <route>` while plan review is open: pin the plan reviewer to `pin` and queue one
+    fresh plan-review attempt. Only a completed review spends a round, so an attempt that returned no verdict
+    (unavailable, unreadable reply) costs none. A running attempt is left to finish."""
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        pr = _pr(run)
+        gates = plan_gates(con, run["id"])
+        live = [g for g in gates if g["status"] in ("queued", "running")]
+        if live:
+            raise Refused("plan-review-running", f"plan review round {live[-1]['id']} is still running"
+                          + (f" on {live[-1]['route']}" if live[-1].get("route") else ""), scope="plan",
+                          next_step="wait for its result (office status); re-pin once it returns no verdict")
+        before = (pr.get("review_override") or {}).get("as") or (gates[-1].get("route") if gates else None)
+        pr["review_override"] = pin
+        state.update_run(con, run["id"], plan_review=pr)
+        run = state.get_run(con, run["id"])
+        spent = substantive_rounds(con, run)
+        gid = queue_plan_review(con, run, run["plan_version"])
+        if gid is None:
+            raise Refused("plan-review-not-queued", f"no plan review can be queued ({spent}/{round_cap(run)} rounds spent)",
+                          scope="plan", next_step="office status")
+        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
+        from office import gates as gate_engine
+        gate_engine.review_route_notice(con, run, gate, "plan_reviewer", before, pin["as"],
+                                        "the user re-pinned the plan reviewer (office review plan --as)",
+                                        kind="repin", actor="user")
+        last = gates[-1] if gates else None
+        voided = last is None or last.get("review_status") != contract.COMPLETED
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"plan review re-run on {pin['as']} (gate {gid}, pinned by the user); "
+                         + ("the previous attempt had no verdict, so no round is spent" if voided
+                            else f"the next completed review is round {spent + 1}/{round_cap(run)}")],
                   next="no action; the verdict returns here (office status)")
 
 
@@ -968,6 +1012,8 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
     if rounds >= round_cap(run):
         return None
     payload = {"exclude": list(exclude or [])}
+    if pr.get("review_override"):
+        payload["review_override"] = pr["review_override"]
     # Same reviewer across a RECHECK sequence when it is still available (#337).
     prev = recheck_reviewer(con, run)
     if prev and not payload["exclude"]:
