@@ -240,7 +240,10 @@ def compatible(a: str | None, b: str | None) -> bool:
 
 def serves(pinned: str | None, runtime: str | None) -> bool:
     """True when `runtime` may operate a run pinned to `pinned`: the same line or a later compatible one.
-    A MAJOR bump, an older runtime and a breaking line never serve; they take an explicit `office upgrade`."""
+    A MAJOR bump, an older runtime line and a breaking line never serve; they take an explicit `office upgrade`.
+    A run is pinned to a release LINE ("3.6"), never to a patch, so patches inside a line are deliberately
+    not compared here: PATCH releases are bugfix-compatible and `frontdoor.ensure_runtime` already hops to
+    the newest registered patch of the run's own line."""
     return compatible(pinned, runtime) and _line_key(runtime) >= _line_key(pinned)
 
 

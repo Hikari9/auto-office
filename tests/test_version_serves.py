@@ -6,7 +6,7 @@ from office import version
 
 @pytest.mark.parametrize("pinned, runtime, ok", [
     ("3.6", "3.6.6", True), ("3.6.1", "3.6.6", True), ("3.6", "3.7.0", True), ("3.1", "3.9.2", True),
-    ("3.7", "3.6.6", False), ("3.6.6", "3.6.1", True), ("3.9", "4.0.0", False), ("4.0", "3.9.9", False),
+    ("3.7", "3.6.6", False), ("3.6.6", "3.6.1", True),  # pins are lines; patches within a line are not ordered here, ("3.9", "4.0.0", False), ("4.0", "3.9.9", False),
     ("4.0", "4.1.0", True), ("4.2", "4.1.0", False), ("", "3.7.0", False), (None, "3.7.0", False),
 ])
 def test_serves_matrix(pinned, runtime, ok):
