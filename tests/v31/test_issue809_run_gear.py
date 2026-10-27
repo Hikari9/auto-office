@@ -117,10 +117,17 @@ def test_unknown_size_is_conservative_m_and_never_guessed_xs(env):
     assert "conservative M" in _run(env)[1]["gates"]["run_gear_rationale"]
 
 
+def test_new_cli_help_promotes_canonical_xs_xl_gear_names(env):
+    code, out = env.office("start", "--help")
+    assert code == 0 and "--gear {XS,S,M,L,XL}" in out, out
+    assert "historical aliases" in out
+
+
 def test_legacy_name_starts_an_explicit_preset_and_names_its_closest_gear(env):
     env.trust()
     code, out = env.office("start", "fixture goal", "--gear", "full", "--planner", "inline")
     assert code == 0 and "closest to XL" in out, out
+    assert "compatibility notice: full is a historical preset" in out, out
     assert config.LEGACY_EQUIVALENT == {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M",
                                         "express": "M", "full": "XL"}
     _, run = _run(env)
