@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.7.1
+
+- perf(test): `office wait` uses a monotonic deadline and a clock/sleeper seam; deterministic wait tests run on a virtual clock (#796, #797).
+
 ## 3.7.0
 
 Rolls up everything landed on `main` since 3.6.6 (the version was not bumped per PR before this release).
