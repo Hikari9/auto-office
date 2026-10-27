@@ -29,7 +29,7 @@ Inline rules (`task_sizing.execution_mode`), applied per task, each recording ow
 | Run gear | Inline when | Otherwise |
 | --- | --- | --- |
 | XS | low risk and the task is XS or S (an M task delegates) | dedicated executor |
-| S | low risk, an XS-M task and a measured `inline=<n> dedicated=<n> <unit>: <evidence>` estimate where inline is strictly cheaper | dedicated executor |
+| S | low risk, an XS-M task and a measured `inline=<n> dedicated=<n> <unit>: <evidence>` estimate with both costs above zero where inline is strictly cheaper | dedicated executor |
 | M | low risk, an XS-M task and the run has exactly one task and a measured, strictly cheaper total cost-to-success estimate | dedicated executor |
 | L, XL, legacy gears | never | dedicated executor |
 
