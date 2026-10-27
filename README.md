@@ -14,6 +14,8 @@ The goal is simple: take a human intent and turn it into a reviewable, resumable
 
 Auto Office is deliberately not a generic multi-agent chat framework. It has a lifecycle, hard invariants, role-specific routing, isolated worktrees, immutable submissions, independent review, integration gates, version-pinned runs, and explicit landing authority.
 
+**New XS–XL run gears:** [Funded behavior, subtask sizing, adaptive profiles, Goldfish and legacy compatibility](docs/xs-xl-run-gear.md).
+
 **Start here:** [Manifesto](MANIFESTO.md) · [Install](#install) · [Opinionated SDLC](#the-opinionated-sdlc) · [Routing](#routing-different-roles-can-use-different-agents) · [Benchmarks](#benchmarks-intelligence-floors-without-online-routing) · [State & resume](#state-durability-and-resume) · [Development](#development)
 
 ## Auto Self Improve (issue-only)

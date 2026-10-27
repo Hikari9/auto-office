@@ -3695,6 +3695,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
     scope = dispatch.get("task_id")
     title = dispatch.get("task_title")
     pr = None
+    size = None
     role = dispatch.get("role") or kind
     try:
         con = db.connect()
@@ -3704,6 +3705,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
                 if task:
                     title = task.get("title") or title
                     pr = ((task.get("pr") or {}).get("number"))
+                    size = (task.get("descriptor") or {}).get("task_size")
 
             else:
                 gate = con.execute("SELECT subject FROM gates WHERE id=?", (dispatch.get("gate_id"),)).fetchone() \
@@ -3718,7 +3720,7 @@ def pane_label(run: dict, dispatch: dict, kind: str = "") -> str:
     except Exception:
         pass  # A label must not prevent or interrupt a launch.
     scope = scope or ("integration" if role == "integration_reviewer" else "plan")
-    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr)
+    return pane_labels.format_label(run, {**dispatch, "role": role}, scope, title, pr, size)
 
 
 
