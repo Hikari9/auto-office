@@ -366,7 +366,7 @@ def test_a_flood_of_signals_prints_the_newest_few_with_a_count(env):
 
 
 @pytest.mark.approved
-def test_signals_an_older_run_already_read_are_not_news(env, virtual_wait_clock):
+def test_signals_an_older_run_already_read_are_not_news(env):
     from office import state
     _go(env)
     wenv, wt, d = _executor(env)
