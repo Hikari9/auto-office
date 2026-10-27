@@ -37,6 +37,17 @@ def test_retired_mimo_evidence_is_nonrouting_archive():
     assert {(r["invocation_harness"], r["model_id"], r["effort"]) for r in rows} == {
         (h, m, "medium") for h in HARNESSES for m in RETIRED}
     assert all(r["dispatchable"] is False for r in rows)
+    # No benchmark/history loss: every archived row keeps its invocation slug and benchmark evidence.
+    slugs = {(r["invocation_harness"], r["model_id"]): r["invocation_model_id"] for r in rows}
+    assert slugs == {
+        ("pi", "mimo-v2.6-pro"): "xiaomi-token-plan-sgp/mimo-v2.6-pro",
+        ("pi", "mimo-v2.6-flash"): "xiaomi-token-plan-sgp/mimo-v2.6-flash",
+        ("kilo", "mimo-v2.6-pro"): "kilo/xiaomi/mimo-v2.6-pro",
+        ("kilo", "mimo-v2.6-flash"): "kilo/xiaomi/mimo-v2.6-flash"}
+    for r in rows:
+        assert r["invocation_source"].startswith("local-evidence:"), r["model_id"]
+        assert r["benchmark_indexes"] and all(isinstance(v, (int, float)) for v in r["benchmark_indexes"].values())
+        assert r["price_fields"] and r["speed_fields"] and r["source_snapshot_metadata"]["url"]
     assert all("owner-requested retirement" in r["supersession_metadata"]["reason"]
                for r in rows)
 
