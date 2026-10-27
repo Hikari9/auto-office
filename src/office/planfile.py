@@ -13,6 +13,8 @@ lines per task so a planner never writes JSON:
     actions:
     - deploy preview | preconditions: tests pass
     checks: pytest -q
+    run_gear: M   (optional recommendation; never lowers the intake gear or risk floor)
+    run_gear_why: coupled auth and API changes across three packages
     end_state: e2e
     deploy_prod: vercel deploy --prod
     deploy_verify: curl -fsS https://example.test/health
@@ -44,7 +46,7 @@ REQ_KEYVAL = re.compile(r"^([A-Za-z_][A-Za-z_ -]*?)\s*:\s*(.*)$")
 # Run-level Requirements fields; an indented `key:` line with one of these ends a wrapped list item.
 REQUIREMENT_KEYS = frozenset({
     "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible",
-    "size_class", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
+    "size_class", "run_gear", "run_gear_why", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify",
 })
 
 
@@ -54,7 +56,7 @@ def requirement_key(raw: str) -> str:
 
 
 BLAST = ("local", "repo", "production", "production-data")
-SIZES = ("S", "M", "L", "XL")
+SIZES = ("XS", "S", "M", "L", "XL")
 # How far a run goes after its PRs (3.2): stop and ask, preview deploy only,
 # merge only, or merge + prod deploy end to end.
 END_STATES = ("ask", "preview", "merge", "e2e")
@@ -260,6 +262,8 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         action, _, pre = entry.partition("|")
         pre = pre.split(":", 1)[1] if ":" in pre else pre
         actions.append({"action": action.strip(), "preconditions": [p.strip() for p in pre.split(";") if p.strip()]})
+    if req.get("run_gear_why") and not req.get("run_gear"):
+        plan.warnings.append("requirements `run_gear_why:` without `run_gear:` is ignored")
     checks = req.get("checks") if isinstance(req.get("checks"), list) else []
     plan.run_checks.extend(c for c in checks if not _is_no_check(c))
     return {
@@ -268,6 +272,8 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         "blast_radius": req.get("blast_radius"),
         "irreversible": req.get("irreversible"),
         "size_class": req.get("size_class"),
+        "run_gear": ({"gear": (str(req["run_gear"]).split() or [""])[0].upper(),
+                      "why": str(req.get("run_gear_why") or "").strip()} if req.get("run_gear") else None),
         "lightweight": ({"rationale": str(req["lightweight"]).strip()} if "lightweight" in req else None),
         "non_goals": (req.get("non_goals") or []),
         "named_actions": actions,
@@ -356,6 +362,12 @@ def _validate(plan: ParsedPlan) -> None:
             plan.errors.append(f"{t['id']}: integration_risk must be high or normal")
         if t["visual"] is not None and not t["visual"].get("none") and not t["visual"].get("url"):
             plan.errors.append(f"{t['id']}: visual block needs `url:`")
+    for t in plan.tasks:
+        d = t["descriptor"]
+        if d.get("task_size") and not d.get("task_size_rationale"):
+            plan.warnings.append(f"{t['id']}: `task_size:` has no `task_size_rationale:`; Office records a generic one")
+        elif d.get("task_size_rationale") and not d.get("task_size"):
+            plan.warnings.append(f"{t['id']}: `task_size_rationale:` without `task_size:` is replaced by the inferred one")
     if _has_cycle({t["id"]: t["depends"] for t in plan.tasks}):
         plan.errors.append("task dependencies contain a cycle")
     r = plan.requirements
@@ -363,6 +375,12 @@ def _validate(plan: ParsedPlan) -> None:
         plan.errors.append(f"requirements blast_radius must be one of {', '.join(BLAST)}")
     if r.get("size_class") and r["size_class"] not in SIZES:
         plan.errors.append(f"requirements size_class must be one of {', '.join(SIZES)}")
+    if r.get("run_gear"):
+        if r["run_gear"]["gear"] not in SIZES:
+            plan.errors.append(f"requirements run_gear must be one of {', '.join(SIZES)}")
+        if not 12 <= len(r["run_gear"]["why"]) <= 500 or task_descriptors.unsafe_text(r["run_gear"]["why"]):
+            plan.errors.append("requirements `run_gear:` needs a `run_gear_why:` line with concrete reasons "
+                               "(12-500 characters, no control characters)")
     if r.get("irreversible") and str(r["irreversible"]).lower() not in ("yes", "no", "true", "false"):
         plan.errors.append("requirements irreversible must be yes or no")
     if r.get("lightweight") is not None and not r["lightweight"]["rationale"]:
