@@ -735,6 +735,9 @@ def _target(con, args, require_run=True):
                                state_dir=args.state_dir, harness=args.harness, session=args.session)
     if target.run is not None:
         frontdoor.ensure_runtime(target.run)
+        from office import state, upgrade
+        if upgrade.auto_adopt(con, target.run):
+            target.run = state.get_run(con, target.run["id"])
     if target.dispatch is not None:
         # An executor that lost its env: act as that dispatch (the lease still fences it).
         for key, value in (("OFFICE_RUN_ID", target.run["id"]), ("OFFICE_TASK_ID", target.dispatch["task_id"] or ""),

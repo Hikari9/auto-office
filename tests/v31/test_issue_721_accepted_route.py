@@ -54,7 +54,7 @@ def test_revoke_of_new_acceptance_work_does_not_restore_stale_acceptance(env):
     assert _dispatch(env, task_row(env, "T1")["current_dispatch_id"])["triple"] == "codex@1/gpt-6-astra@low"
 
 
-@pytest.mark.parametrize("block", ["denied", "quota", "quarantined", "capabilities"])
+@pytest.mark.parametrize("block", ["denied", "quota", "capabilities"])
 def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env, monkeypatch, block):
     accepted = _accepted(env)
     producer = _dispatch(env, accepted["current_dispatch_id"])
@@ -69,9 +69,6 @@ def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env,
     elif block == "quota":
         from test_adaptive_dispatch import _quota
         extra = _quota(env, codex=1)
-    elif block == "quarantined":
-        from test_declared_route_426 import _trust
-        _trust(monkeypatch, "codex@1/gpt-6-astra@low", "quarantined")
     else:
         from office import adapters
         real = adapters.load_sources

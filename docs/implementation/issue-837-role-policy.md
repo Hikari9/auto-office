@@ -29,7 +29,7 @@ Edits use `routing.user_policy.role_rules` in the *user* YAML file, validated be
 
 ## Acceptance and verification — progress ledger
 
-Version: 4.0.0 (MAJOR per `AGENTS.md`: `office approve trust` is retired and routing policy changes).
+Release: MAJOR bump per `AGENTS.md` (see `CHANGELOG.md`): `office approve trust` is retired and routing policy changes).
 
 - [x] #837 controls legacy #627 trust sections; #682's approval ceremony is not implemented.
 - [x] Role-scoped allow/neutral/deny in the router; neutral admission never reads historical trust. Role rules outrank legacy `denied_models`; conflicting equivalent rules resolve to deny; a canonical `@major` deny still matches when the installed harness major cannot be read (never fails open).
@@ -40,6 +40,7 @@ Version: 4.0.0 (MAJOR per `AGENTS.md`: `office approve trust` is retired and rou
 - [x] Trial gate: a role-denied trial route or fallback blocks a trial (`role-deny` / `no-fallback`); the quarantine veto is gone.
 - [x] Migration: `office route migrate` dry run (legacy `denied_models`, what the old gate blocked, user-quarantine acts as optional deny suggestions), `--apply` (adds explicit all-role deny rules, removes nothing, backup), `--rollback`. Historical trust acts, runs and pinned policies are never rewritten. Decision hashes of recorded routing decisions are unchanged (golden test); only the eligibility record shape changed.
 - [x] Legacy trust wording removed from CLI help, harness scaffold/validate/smoke/list output, onboarding, SKILL.md, route/adapter/harness skills and docs. `inspect trust` and the trust report are labelled audit-only.
+- [x] Version bump does not brick in-flight runs: compatible MINOR/PATCH runtimes serve pinned runs and auto-adopt at an idle boundary; MAJOR needs `office upgrade` (`version.serves`, `upgrade.auto_adopt`, tests in `tests/test_version_serves.py` and `tests/v31/test_discovery_pinning.py`).
 - [~] Web: the model registry shows per-role effective state with its source and points to `office route` for edits. Web-side editing of role rules is not implemented.
 - [ ] Reviewer-discovery bounded trials for non-executor roles: not implemented (the discovery design keeps trials builder-only; reviewers run neutral routes directly under the same capability and independence checks).
 - [ ] Provider-credit exhaustion as a timed availability state: left to #831.

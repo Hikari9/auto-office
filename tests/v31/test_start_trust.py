@@ -1,73 +1,47 @@
-"""F3: office start reports derived trust for each trust-gated role's routes."""
+"""F3 (reworked by #837): `office start` reports role policy, and trust history is audit-only evidence."""
 from __future__ import annotations
 
 import re
 
-
-def _trust_lines(out):
-    return [l for l in out.splitlines() if l.startswith("trust ")]
+AUDIT = "legacy trust evidence (audit only) "
 
 
-def _summary(out):
-    return [l for l in _trust_lines(out) if re.match(r"trust \S+: ", l)]
+def _audit_lines(out):
+    return [l for l in out.splitlines() if l.startswith(AUDIT)]
 
 
-def _detail(out):
-    return [l for l in _trust_lines(out) if not re.match(r"trust \S+: ", l)]
-
-
-def test_default_start_prints_one_summary_line_per_role(env):
+def test_start_prints_one_policy_line_and_no_trust_prompt(env):
     code, out = env.office("start", "fixture goal", "--planner", "inline")
     assert code == 0, out
-    lines = _trust_lines(out)
-    assert lines and lines == _summary(out), out
-    roles = [l.split()[1].rstrip(":") for l in lines]
-    assert len(roles) == len(set(roles)), out
-    assert "office approve trust" not in out, out
-    assert "office start" not in "".join(lines), out
-    for l in lines:
-        if "no candidate routes" in l:
-            continue
-        m = re.match(r"trust \S+: (\d+) routes \((.+)\) \| per-route detail: office inspect trust$", l)
-        assert m, l
-        assert sum(int(p.split()[0]) for p in m.group(2).split(", ")) == int(m.group(1)), l
+    lines = [l for l in out.splitlines() if l.startswith("routing policy:")]
+    assert len(lines) == 1 and "office route policy --effective" in lines[0], out
+    assert "approve trust" not in out and not _audit_lines(out), out
+    assert not [l for l in out.splitlines() if l.startswith("trust ")], out
 
 
-def test_fresh_install_lists_routes_with_approve_command(env):
+def test_inspect_trust_lists_audit_evidence_and_never_an_approve_command(env):
     code, out = env.office("start", "fixture goal", "--planner", "inline")
     assert code == 0, out
     code, out = env.office("inspect", "trust")
     assert code == 0, out
-    lines = _detail(out)
-    assert any(l.startswith("trust executor ") for l in lines), out
-    routed = [l for l in lines if "no candidate routes" not in l]
-    assert routed, out
-    for l in routed:
-        m = re.match(r"trust \S+ (\S+): (\S+)", l)
-        assert m, l
-        triple, state = m.groups()
-        # A shipped trust baseline may make some routes proven on a fresh install;
-        # every route that is not proven must name the exact approval command.
-        if state == "proven":
-            assert "office approve trust" not in l, l
-        else:
-            assert f"office approve trust {triple} --quote" in l, l
-    assert any(": proven" not in l for l in routed), out
+    lines = _audit_lines(out)
+    assert any(l.startswith(AUDIT + "executor ") for l in lines), out
+    assert "approve trust" not in out and "quote" not in out.lower(), out
+    for l in lines:
+        assert re.match(re.escape(AUDIT) + r"\S+ \S+: \S+", l), l
 
 
-def test_proven_route_has_no_approve_command(env):
+def test_derived_state_is_reported_for_a_trusted_install_without_gating(env):
     env.trust()
     code, out = env.office("start", "fixture goal", "--planner", "inline")
     assert code == 0, out
     code, out = env.office("inspect", "trust")
-    assert code == 0, out
-    executor = [l for l in _detail(out) if l.startswith("trust executor ")]
+    executor = [l for l in _audit_lines(out) if l.startswith(AUDIT + "executor ")]
     assert executor and all(l.endswith(": proven") for l in executor), out
 
 
 def test_visual_route_without_a_current_vision_proof_says_so(env):
-    """#211: trust `proven` is not vision. A proof on an older harness version
-    no longer counts, and the trust line must say why the route is rejected."""
+    """#211: a vision proof on an older harness version no longer counts, and the audit line says why."""
     from office import candidates
     env.trust()
     con = env.con()
@@ -81,7 +55,7 @@ def test_visual_route_without_a_current_vision_proof_says_so(env):
     assert code == 0, out
     code, out = env.office("inspect", "trust")
     assert code == 0, out
-    visual = [l for l in _detail(out) if l.startswith("trust visual_reviewer ")]
+    visual = [l for l in _audit_lines(out) if l.startswith(AUDIT + "visual_reviewer ")]
     assert visual and all("vision" in l and "office doctor --probe-vision" in l for l in visual), out
     assert any("last pass on 0.0.1, 2026-09-27" in l for l in visual), out
     assert any("never probed" in l for l in visual) == (len(visual) > 1), out

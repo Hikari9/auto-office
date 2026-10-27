@@ -162,7 +162,7 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
         if run is None or state.is_terminal(run):
             return 0
         from office import version
-        if not version.same_line(run["office_version"], version.current()):
+        if not version.serves(run["office_version"], version.current()):
             return 0  # a run is served only by a runtime on its release line
         dispatch_id, session = os.environ.get("OFFICE_DISPATCH_ID"), _payload_session(payload)
         if dispatch_id and session:

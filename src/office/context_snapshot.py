@@ -145,7 +145,7 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
     if _cursor(con, r["id"]) != (raw["seq"], raw["updated"]):
         stale.append("run changed while this snapshot was assembled; rerun office context")
     pinned, current = r.get("office_version"), version.current()
-    if pinned and not version.same_line(pinned, current):
+    if pinned and not version.serves(pinned, current):
         stale.append(f"run pinned to office {pinned}, this runtime is {current} (another release line)")
     draft = _plan_draft(r, plan)
     if draft["status"] == "differs":

@@ -1,9 +1,10 @@
 """Exact Office version identity and the MAJOR.MINOR release line.
 
 Every runtime-owned packet, job, dispatch and event records the exact identity
-of the runtime that wrote it. A run records its release line ("3.2"): PATCH
-releases on that line are bugfix-compatible, so the newest installed patch
-serves the run. Crossing a MINOR or MAJOR takes an explicit `office upgrade`. A released wheel reports its distribution version
+of the runtime that wrote it. A run records its release line ("3.2"). A later
+MINOR or PATCH of the same MAJOR serves it (`serves`) and moves the run onto its
+own line at the next idle boundary (`upgrade.auto_adopt`); only a MAJOR bump, or a
+line listed in BREAKING_LINES, takes an explicit `office upgrade`. A released wheel reports its distribution version
 ("3.1.0"). A source checkout reports a PEP 440 local version that names the
 commit and, when runtime files are modified, a digest of that modification
 ("3.1.0+g1a2b3c4d5e6f.d0badc0de"). The word "dev" is never an identity.
@@ -217,6 +218,30 @@ def release_line(version: str) -> str:
     """'3.1.0+g…' -> '3.1'. Used for compatibility-window checks."""
     parts = re.split(r"[.+]", version)
     return ".".join(parts[:2])
+
+
+# MINOR lines that cannot serve a run pinned before them (a behaviour or schema change that needs
+# `office upgrade`). Empty today: a later MINOR or PATCH serves older pins of the same MAJOR (#843).
+BREAKING_LINES: frozenset[str] = frozenset()
+
+
+def _line_key(version: str | None) -> tuple[int, ...]:
+    return release_key(release_line(version or ""))
+
+
+def compatible(a: str | None, b: str | None) -> bool:
+    """Same MAJOR and no breaking line between the two: either may stamp work for a run pinned to the other."""
+    ka, kb = _line_key(a), _line_key(b)
+    if len(ka) < 2 or len(kb) < 2 or ka[0] != kb[0]:
+        return False
+    lo, hi = sorted((ka, kb))
+    return not any(lo < _line_key(line) <= hi for line in BREAKING_LINES)
+
+
+def serves(pinned: str | None, runtime: str | None) -> bool:
+    """True when `runtime` may operate a run pinned to `pinned`: the same line or a later compatible one.
+    A MAJOR bump, an older runtime and a breaking line never serve; they take an explicit `office upgrade`."""
+    return compatible(pinned, runtime) and _line_key(runtime) >= _line_key(pinned)
 
 
 def same_line(a: str | None, b: str | None) -> bool:
