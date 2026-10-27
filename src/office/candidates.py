@@ -832,8 +832,9 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
         "learned_eligibility": route_learning.current_eligibility(con, role),
         "exploration_history": route_learning.recent_exploration(con, role),
         "run_explorations": explored + pending_explorations, "wave_load": dict(wave_load or {}),
+        # No plan_version: an amendment must not redraw the close call of a task it did not touch (#816).
         "routing_seed": sha256_obj({"run": run.get("id"), "task": task_id, "role": role,
-                                    "plan_version": plan_version, "kind": dispatch_kind}),
+                                    "kind": dispatch_kind}),
     }
 
 
