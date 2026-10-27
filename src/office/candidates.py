@@ -767,7 +767,7 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
 
 
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
-                    task_id: str | None, dispatch_kind: str, plan_version: int | None,
+                    task_id: str | None, dispatch_kind: str,
                     wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
     """Learner evidence and reproducibility inputs for an executor/worker request (#300).
 
@@ -803,8 +803,8 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
         "learned_eligibility": route_learning.current_eligibility(con, role),
         "exploration_history": route_learning.recent_exploration(con, role),
         "run_explorations": explored + pending_explorations, "wave_load": dict(wave_load or {}),
-        "routing_seed": sha256_obj({"run": run.get("id"), "task": task_id, "role": role,
-                                    "plan_version": plan_version, "kind": dispatch_kind}),
+        # No plan_version: an amendment must not redraw the close call of a task it does not touch (#816).
+        "routing_seed": sha256_obj({"run": run.get("id"), "task": task_id, "role": role, "kind": dispatch_kind}),
     }
 
 
@@ -934,7 +934,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         request["exact_route"] = exact
     if role in routing.ADAPTIVE_ROLES:
         request.update(adaptive_inputs(con, config, run, role, candidates, task_id=task_id,
-                                       dispatch_kind=dispatch_kind, plan_version=run.get("plan_version"),
+                                       dispatch_kind=dispatch_kind,
                                        wave_load=wave_load, pending_explorations=pending_explorations))
     if discovering:
         request["discovery"] = discovery_inputs(
