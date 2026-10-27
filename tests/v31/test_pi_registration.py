@@ -19,14 +19,14 @@ from pathlib import Path
 import pytest
 
 import fake_agent
-from conftest import GOOD_ADD, approved_run, enable_decommissioned_mimo, task_row
+from conftest import GOOD_ADD, approved_run, enable_decommissioned_mimo, retired_mimo_rows, task_row
 
 from office import adapters, candidates, configcmd, routing
 from office.state import Refused
 
 PI = "pi"
 MIMO_FLASH = "xiaomi-token-plan-sgp/mimo-v2.6-flash"
-LAUNCH_EFFORT = "low"  # the seed row is decommissioned (#809); launch tests use a user-catalog copy at this effort
+LAUNCH_EFFORT = "low"  # the MiMo rows are retired (#786); launch tests use a user-catalog copy of the archived row at this effort
 MIMO_PRO = "xiaomi-token-plan-sgp/mimo-v2.6-pro"
 EXECUTOR_CAPS = {"roles": {"executor": {"required_capabilities": ["builder"]}}}
 PLANNER_CAPS = {"roles": {"planner": {"required_capabilities": ["planning"]}}}
@@ -102,15 +102,15 @@ def test_pi_preflight_validates_the_pinned_slug_and_credentials():
 
 # ---------------------------------------------------------------- catalog rows
 
-def test_mimo_rows_pin_the_provider_and_claim_no_conformance():
-    rows = {r["model_id"]: r for r in _rows() if str(r["model_id"]).startswith("mimo")}
+def test_archived_mimo_rows_pin_the_provider_and_claim_no_conformance():
+    """The retired (#786) pi MiMo rows live only in the archive; the shipped catalog has none."""
+    assert not [r for r in _rows() if str(r["model_id"]).startswith("mimo")]
+    rows = {r["model_id"]: r for r in retired_mimo_rows("pi")}
     assert set(rows) == {"mimo-v2.6-pro", "mimo-v2.6-flash"}, set(rows)
     for model_id, row in rows.items():
         # pi's documented provider/id syntax: never an ambiguous global default.
         assert row["invocation_model_id"] == f"xiaomi-token-plan-sgp/{model_id}"
-        # Decommissioned (#809): the row stays for historical evidence but is never dispatchable.
-        assert row["dispatchable"] is False and row["discovery"] == "ineligible" and row["effort"] == "medium"
-        assert "decommissioned" in row["discovery_reason"]
+        assert row["dispatchable"] is False and row["effort"] == "medium"
         source = row["invocation_source"]
         assert source.startswith("local-evidence:")
         assert f"xiaomi-token-plan-sgp/{model_id}" in source
@@ -134,15 +134,10 @@ def test_deprecated_pi_gpt5codex_row_is_disabled_and_not_a_candidate(monkeypatch
 
 
 def test_mimo_is_excluded_from_every_routing_pool(monkeypatch):
-    """#809 R16: a decommissioned MiMo row is neither an eligible nor a discovery candidate for any role,
-    while its rows stay in the catalog so historical audit evidence still resolves."""
+    """#786: the retired MiMo rows are not in the shipped catalog, so no role can route to them."""
     monkeypatch.setattr(adapters, "installed", lambda a: True)
     monkeypatch.setattr(adapters, "harness_version", lambda a: "9.9.9")
-    rows = [r for r in candidates.catalog_rows() if str(r["model_id"]).startswith("mimo")]
-    assert {(r["invocation_harness"], r["model_id"]) for r in rows} == {
-        (h, m) for h in ("pi", "kilo") for m in ("mimo-v2.6-pro", "mimo-v2.6-flash")}
-    assert all(r["dispatchable"] is False and r["discovery"] == "ineligible" and "decommissioned" in r["discovery_reason"]
-               for r in rows), "every MiMo row, pi and kilo, is closed to routing and discovery"
+    assert not [r for r in candidates.catalog_rows() if str(r["model_id"]).startswith("mimo")]
     for role in ("executor", "worker", "planner", "code_reviewer"):
         cands, _ = candidates.build_candidates(None, role, probe=False)
         assert not [c for c in cands if str(c["model_id"]).startswith("mimo")], role
@@ -244,7 +239,7 @@ def test_routed_candidates_fail_the_capability_stage_for_planner(monkeypatch):
     monkeypatch.setattr(adapters, "installed", lambda a: True)
     monkeypatch.setattr(adapters, "harness_version", lambda a: "1.1.0")
     cands, _ = candidates.build_candidates(None, "planner", probe=False)
-    # The only pi rows are decommissioned MiMo (#809) and the deprecated gpt-5-codex: none is a candidate.
+    # The only pi row is the deprecated gpt-5-codex: not a candidate.
     assert not [c for c in cands if c["harness"] == "pi"]
     # The capability stage itself is still enforced on a dispatchable user-catalog copy of the MiMo row.
     enable_decommissioned_mimo("pi", "mimo-v2.6-flash")
@@ -259,14 +254,14 @@ def test_routed_candidates_fail_the_capability_stage_for_planner(monkeypatch):
 
 def test_setup_offers_pi_only_for_roles_it_can_serve():
     seeds = [{"model_id": "mimo-v2.6-flash", "harness": "pi", "effort": "medium"}]
-    # MiMo is decommissioned (#809): setup refuses it for every role and never offers it.
+    # MiMo is retired (#786): setup refuses it for every role and never offers it.
     for role, config in (("planner", PLANNER_CAPS), ("code_reviewer", REVIEW_CAPS), ("executor", EXECUTOR_CAPS),
                          (None, None)):
         problems = configcmd.validate_seed(seeds, role=role, config=config)
-        assert problems and "is not dispatchable" in problems[0], (role, problems)
+        assert problems and "unknown model" in problems[0], (role, problems)
         assert not [r for r in configcmd.known_routes(role, config=config) if r.startswith("pi/")], role
-    # With a dispatchable user-catalog copy the role gate applies again: builder-only pi never serves planner or reviewer.
-    enable_decommissioned_mimo("pi", "mimo-v2.6-flash")
+    # With a dispatchable user-catalog copy of the archived row the role gate applies again: builder-only pi never serves planner or reviewer.
+    enable_decommissioned_mimo("pi", "mimo-v2.6-flash", "medium")
     problems = configcmd.validate_seed(seeds, role="planner", config=PLANNER_CAPS)
     assert problems and "cannot serve role planner" in problems[0], problems
     problems = configcmd.validate_seed(seeds, role="code_reviewer", config=REVIEW_CAPS)

@@ -471,18 +471,24 @@ def env(request, tmp_path, monkeypatch):
         shutil.rmtree(e.state, ignore_errors=True)
 
 
-def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low") -> None:
-    """Make a user-catalog copy of a decommissioned MiMo seed row dispatchable at another effort (#809).
+RETIRED_MIMO_ARCHIVE = Path(__file__).resolve().parents[2] / "catalog" / "archive" / "retired-mimo-pi-kilo-2026-10-24.yaml"
 
-    The seed rows can never dispatch, but the pi and kilo launch tests exercise the harness
-    (preflight, timeout, conformance), not the model, and still need one routable row."""
+
+def retired_mimo_rows(harness: str) -> list[dict]:
+    """The archived MiMo rows (#786) for one harness: non-dispatchable evidence, never shipped."""
     import yaml
+    models = yaml.safe_load(RETIRED_MIMO_ARCHIVE.read_text(encoding="utf-8"))["models"]
+    return [r for r in models if r["invocation_harness"] == harness]
 
-    from office import paths, user_catalog
-    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8"))["models"]
-    row = next(r for r in seed if r["invocation_harness"] == harness and r["model_id"] == model_id)
-    kept = {k: v for k, v in row.items() if k not in ("discovery", "discovery_reason")}
-    user_catalog.save({"models": [{**kept, "effort": effort, "dispatchable": True}]})
+
+def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low") -> None:
+    """Make a dispatchable user-catalog copy of an archived MiMo row at another effort (#786).
+
+    The MiMo rows are retired from the shipped seed, but the pi and kilo launch tests exercise the
+    harness (preflight, timeout, conformance), not the model, and still need one routable row."""
+    from office import user_catalog
+    row = next(r for r in retired_mimo_rows(harness) if r["model_id"] == model_id)
+    user_catalog.save({"models": [{**row, "effort": effort, "dispatchable": True}]})
 
 
 def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):
