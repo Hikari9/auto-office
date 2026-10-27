@@ -127,3 +127,51 @@ def partition(rows: list[dict], *, manifest: dict[str, dict] | None = None) -> d
         destination = "active" if version_parts(meta["generation_version"]) in windows[meta["lineage_key"]] else "archived"
         result[destination].append(row)
     return result
+
+
+# A newer model may supersede an older model only AFTER both passed all
+# independent catalog, trust, benchmark, task, and quota qualification checks.
+# The older route returns on retry if the qualified newer route fails/is blocked.
+# This list is deliberate: no inferred generational policies for other families.
+EXECUTOR_SUPERSESSION_LINEAGES = frozenset({"openai/gpt-sol", "openai/gpt-terra"})
+
+
+def prefer_qualified_generation(rows: list[dict], *, preserved: set[str] | None = None
+                                ) -> tuple[list[dict], list[dict]]:
+    """Retain the newest qualified exact harness+effort per requested lineage.
+
+    Operates ONLY on candidates after factual routing stages. No catalog edits,
+    user pins, cross-family comparisons, effort substitution, or global hard
+    denial of the older model. Returns (active, auditable suppressed receipts).
+    """
+    preserved = preserved or set()
+    buckets: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for c in rows:
+        lineage = c.get("lineage_key")
+        if lineage not in EXECUTOR_SUPERSESSION_LINEAGES or lineage in preserved:
+            continue
+        version = c.get("generation_version")
+        if not version:
+            continue
+        try:
+            version_parts(version)
+        except LineageError:
+            continue
+        buckets[(lineage, str(c.get("harness")), str(c.get("effort")))].append(c)
+    suppressed: list[dict] = []
+    to_remove: set[int] = set()
+    for (lineage, harness, effort), cohort in buckets.items():
+        latest = max(version_parts(c["generation_version"]) for c in cohort)
+        latest_rows = [c for c in cohort if version_parts(c["generation_version"]) == latest]
+        newest = latest_rows[0]["model_id"]
+        for older in cohort:
+            if version_parts(older["generation_version"]) < latest:
+                to_remove.add(id(older))
+                suppressed.append({
+                    "model_id": older.get("model_id"), "newer_model_id": newest,
+                    "lineage_key": lineage, "harness": harness, "effort": effort,
+                    "reason": ("newer generation qualified for this exact harness+effort; "
+                               "older generation remains eligible if the newer route fails "
+                               "and routing recomputes without it"),
+                })
+    return [r for r in rows if id(r) not in to_remove], suppressed
