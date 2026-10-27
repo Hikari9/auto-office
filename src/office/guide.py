@@ -323,6 +323,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
+    if not state.is_terminal(run):
+        from office import gates as review_gates
+        for line in review_gates.review_route_lines(con, run["id"], limit=3):
+            res.add(line)
     from office import risk as risk_mod
     rline = risk_mod.line(run)
     if rline and (risk_mod.classification(run.get("risk")) == risk_mod.UNKNOWN or (run.get("gates") or {}).get("lightweight")):

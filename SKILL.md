@@ -139,6 +139,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   dispatch unaffected work meanwhile. At the plan round cap (3, or `office start --plan-review-rounds N`) plan review closes unapproved and
   you own the findings: fix each in the plan or accept it, then `office disposition plan:<code> fixed|dismissed|follow-up -- "<rationale>"`.
   Do not ask the user just because the rounds ran out. Another plan review only on the user's ask: `office review plan --quote "<words>" [--rounds N]`.
+  While plan review is open and a reviewer returned no verdict, `office review plan --as <harness>/<model>[@effort]` re-pins the plan reviewer and re-runs only that review (no round spent).
 - A task is accepted on its own checks. A check that also fails the same way on the revision's base (never when its output names a changed file, or on
   timeout) is pre-existing: a nonblocking note, and lane review still runs. Re-accepting a task reopens its stale accepted dependents (`restack:`):
   `office rerun <dependent> --resume|--fresh`; integration reports `stale` and names the task to restack. Amending or redispatching an existing task restacks its accepted dependencies before the worker launches; on a dirty-worktree refusal, revoke the relaunch and rerun `office rerun <task> --fresh --stash-wip` (WIP is preserved and reapplied, the stash survives a restoration conflict; the orchestrator never runs Git in a task worktree). When a lane's tasks (joined by `depends` or `lane:`) are all accepted, Office composes them and runs

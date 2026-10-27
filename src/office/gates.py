@@ -654,8 +654,21 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
                                          config=state.pinned_config(run))["candidate"]) != same_route:
         resume, same_route = None, None  # the pin names another reviewer than the one that would be resumed
+    # (route, why) of the attempt the next route replaces: first the route this review was asked to start away from
+    started_away = [r for r in [*(exclude or []), *(prefer_not or [])] if not r.startswith("harness:")]
+    last_failed: tuple[str, str] | None = ((started_away[-1], "an earlier attempt on that route did not settle this review")
+                                           if started_away and not pinned else None)
+    retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
+    retried: set[str] = set()
     for attempt in range(limit + 1):
-        if attempt == 0 and same_route:
+        retry, retry_route = retry_route, None
+        if retry and not pinned:
+            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"), exact=retry)
+            if decision.get("status") != "selected":
+                excluded.add(retry)
+                decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                                 exclude=excluded | soft)
+        elif attempt == 0 and same_route:
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exact=same_route)
             if decision.get("status") != "selected":
@@ -688,6 +701,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         triple = routing.candidate_id(cand)
         with db.transaction(con):
             dispatch_id = _reviewer_dispatch(con, run, gate, role, decision)
+            if last_failed and last_failed[0] != triple:
+                review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
+            elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
+                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id)
             con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
                         "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
         ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
@@ -728,6 +745,27 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                             plan_review=plan_review, visual=visual)
             never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
+            if never_replied:
+                with db.transaction(con):
+                    state.emit(con, run, "review.empty_reply", f"{gate.get('task_id') or gate.get('scope') or 'plan'} {role} "
+                               f"{dispatch_id} on {triple} ended: {d.get('terminal_classification')} with an empty reply: "
+                               "no reply file was written", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                               payload={"route": triple, "gate": gate["id"], "classification": d.get("terminal_classification")})
+            if attention and never_replied and triple not in retried and _launch_spec(ddir).get("retry_same_route"):
+                # T1 recorded that this reviewer's brief pointer never reached its agent (#790): the route is not at
+                # fault, so it runs once more, in a fresh session, before any fallback route is taken.
+                retried.add(triple)
+                retry_route = triple
+                last_failed = (triple, f"{triple}: launch pointer never landed")
+                with db.transaction(con):
+                    state.emit(con, run, "review.retry_same_route", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
+                               f"{role} {dispatch_id}: its brief pointer never landed; re-running once on the same route "
+                               f"{triple} before any fallback", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                               payload={"route": triple, "gate": gate["id"]})
+                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
+                                (dispatch_id,))
+                dispatch_mod.reclaim_pane(run, dispatch_id)
+                continue
             if attention and never_replied and convergence and not pinned:
                 # Every re-prompt came back empty: the reviewer never worked (a
                 # quota wall the harness did not report, a brief that never
@@ -737,6 +775,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir, pane=True)
                 wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
                 failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
+                last_failed = (triple, failures[-1])
                 # A harness that silently answers nothing is walled for every
                 # model on it, so the chain moves to another harness.
                 excluded.update({triple, f"harness:{cand['harness']}"})
@@ -789,6 +828,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         if wall:
             reason += f" [{wall}]"
         failures.append(reason)
+        last_failed = (triple, reason)
         if pinned:
             break  # the user named this reviewer; never substitute another
         excluded.add(triple)
@@ -802,6 +842,54 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
                 "env_failures": len(failures), "exhausted": True}
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+def _launch_spec(ddir: Path) -> dict:
+    """The dispatch's recorded launch evidence (launch.json); empty when it was never written."""
+    try:
+        spec = json.loads((ddir / "launch.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return spec if isinstance(spec, dict) else {}
+
+
+def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
+    """(route, why) when routing passed over the review's preferred primary route for `chosen`: the first
+    preferred_seed entry matched a candidate that selection rejected (quota cooldown, trust, capability) and
+    `chosen` is not that entry's route."""
+    seed = ((decision.get("request") or {}).get("preferred_seed") or [])[:1]
+    if not seed or routing.preferred_rank(chosen, seed) is not None:
+        return None
+    wanted = {routing.candidate_id(c) for c in (decision.get("request") or {}).get("candidates") or []
+              if routing.preferred_rank(c, seed) is not None}
+    for r in decision.get("rejected") or []:
+        if r.get("candidate") in wanted:
+            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}"
+    return None
+
+
+def review_route_notice(con, run: dict, gate: dict, role: str, before: str | None, after: str, reason: str, *,
+                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office") -> None:
+    """A user-visible notice that a plan or lane review left its primary or pinned route: old route, new route and
+    why, in `office status` and `office inspect route`. Caller holds the tx."""
+    scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
+                              stage=role, extra={"notice": "review", "gate": gate["id"]})
+
+
+def review_route_lines(con, run_id: str, *, skip_task: str | None = None, limit: int | None = None) -> list[str]:
+    """The recorded review route notices, oldest first. `skip_task`: a task whose own route changes the caller
+    already lists."""
+    rows = con.execute("SELECT task_id, payload_json, created_at FROM events WHERE run_id=? AND kind='route.changed' "
+                       "AND json_extract(payload_json,'$.notice')='review' ORDER BY seq", (run_id,)).fetchall()
+    lines = []
+    for r in rows:
+        if skip_task and r["task_id"] == skip_task:
+            continue
+        c = json.loads(r["payload_json"])
+        lines.append(f"review route change {r['created_at'][:16]} {c.get('stage')} {r['task_id']}: "
+                     f"{c.get('before') or 'unrecorded'} -> {c['after']} [{c.get('kind')}] by {c.get('actor')}: {c.get('reason')}")
+    return lines[-limit:] if limit else lines
 
 
 REPLY_FILE_RULE = ("Office reads your review only from that file; text you print in the terminal is not read.")

@@ -81,6 +81,8 @@ Auto Office {ver}
                                     waiver; refused for the session that produced the work
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
+  office review plan --as <harness>/<model>[@effort]
+                                    while plan review is open: re-pin the plan reviewer and re-run only that review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office config --run <id> --apply-routing --quote "<user's words>"
                                     re-pin one run's roles and routing from the current config files
@@ -487,7 +489,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="<task|lane>: re-run only its review on this reviewer route (re-pins the reviewer)")
+                   help="<task|lane|plan>: re-run only its review on this reviewer route (re-pins the reviewer)")
     s.add_argument("--cli", dest="review_cli", metavar="ARGV", help="with --as: start exactly this reviewer argv in herdr")
     s.add_argument("--external", dest="review_external", action="store_true",
                    help="with --as: you start the reviewer; Office reads its review file")
@@ -1031,8 +1033,14 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
                                 session=args.usage_session, role=args.usage_role)
     if cmd == "inspect":
-        from office import inspect_cmd
-        return inspect_cmd.inspect(con, run, args.what, args.ident)
+        from office import gates, inspect_cmd
+        res = inspect_cmd.inspect(con, run, args.what, args.ident)
+        if (args.what or "").lower() == "route":  # plan and lane reviews that left their route (a task's own changes are listed already)
+            notices = gates.review_route_lines(con, run["id"], skip_task=(args.ident or "").upper() or None)
+            res.lines += notices
+            if isinstance(res.data, dict):
+                res.data["review_route_changes"] = notices
+        return res
     if cmd == "approve":
         from office import authority
         return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
@@ -1048,8 +1056,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
         return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
     if cmd == "review" and args.target.lower() == "plan":
-        from office import plans
-        return plans.request_review(con, run, args.quote, args.rounds)
+        from office import gates, plans
+        from office.state import Usage
+        if (args.review_cli or args.review_external) and not args.review_as:
+            raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
+        return plans.request_review(con, run, args.quote, args.rounds,
+                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external))
     if cmd == "review":
         from office import convergence, gates
         from office.state import Usage
