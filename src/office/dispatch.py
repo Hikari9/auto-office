@@ -613,6 +613,9 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     if not planned:
         fresh.setdefault("route_source", "override" if override else "router")
         return fresh
+    if stale := _outdated_slate(planned, fresh):
+        fresh["route_source"], fresh["route_note"] = "reroute", stale
+        return fresh
     qualifying = fresh.get("qualifying_candidates") or {}
     reasons = {r["candidate"]: r["reason"] for r in fresh.get("rejected") or []}
     order = [planned["primary"], *(planned.get("fallbacks") or [])]
@@ -644,6 +647,25 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
             "planned": planned, **origin,
             "decision_hash": sha256_obj({"planned": planned.get("decision_hash"), "fresh": fresh.get("decision_hash"),
                                          "dispatched": rid, "fallbacks_taken": taken})}
+
+
+def _outdated_slate(planned: dict, fresh: dict) -> str | None:
+    """Why an unpinned planned slate gives way to the fresh decision, or None to keep the plan (#846).
+
+    A slate the router drew before the policy changed (an old flat seed, a size slate that was not yet
+    applied) must not outlive it: when the current seed names routes and the planned primary is none of
+    them, the fresh decision stands. A declared, recorded or planner-chosen primary is a deliberate choice."""
+    if planned.get("chooser") != "router" or fresh.get("status") != "selected":
+        return None
+    req = fresh.get("request") or {}
+    seed = req.get("preferred_seed")
+    primary = planned.get("primary")
+    if not seed or not primary:
+        return None
+    cand = next((c for c in req.get("candidates") or [] if routing.candidate_id(c) == primary), None)
+    if cand is not None and routing.preferred_rank(cand, seed) is not None:
+        return None
+    return f"planned primary {primary} is outside the current preferred routes; rerouted from current policy"
 
 
 def _effective_slate(con, run: dict, task: dict) -> dict | None:

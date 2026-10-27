@@ -795,18 +795,24 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
 
 def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
                     role: str = "executor"):
-    """A pinned explicit seed wins; otherwise nominate #809 ideal size routes.
-    Qualification is independently enforced downstream at actual dispatch."""
+    """A per-size seed wins, then the #809 ideal size slate for a sized XS-XL run, then a flat seed.
+    The slate is the default, so a flat seed (an old `roles.executor.preferred_seed`) cannot shadow it;
+    a legacy run without a size still reads the flat seed. Qualification is independently enforced
+    downstream at actual dispatch."""
     size = task_size or (run.get("risk") or {}).get("size_class")
     by_size = policy_cfg.get("preferred_seed_by_size") or {}
     if size in by_size:
         return by_size[size]
-    if policy_cfg.get("preferred_seed"):
-        return policy_cfg["preferred_seed"]
     if (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
             and size in executor_slates.FLOORS):
         return executor_slates.ideal_seed(size)
-    return None
+    return policy_cfg.get("preferred_seed") or None
+
+
+def _size_slate(seed, run: dict, task_size: str | None, role: str) -> bool:
+    """True when `seed` is the #809 ideal slate that `_preferred_seed` nominated for this sized XS-XL run."""
+    return bool(seed) and role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS \
+        and task_size in executor_slates.FLOORS and seed == executor_slates.ideal_seed(task_size)
 
 
 def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> str:
@@ -1030,6 +1036,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
+    if _size_slate(seed, run, effective_task_size, role):
+        # A user's own flat or per-size seed keeps the ordinary advisory scoring.
+        request["slate_anchor"] = True
     if declared:
         request["declared_route"] = declared
     if exact:

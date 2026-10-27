@@ -351,6 +351,16 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         rows.remove(chosen)
         rows.insert(0, chosen)
 
+    # The size slate is the default routing (#846): its qualifying routes rank ahead of every other route,
+    # which stay behind them as fallbacks. Utility still orders the routes within each group.
+    slate_anchor = bool(request.get("slate_anchor")) and not exploration.get("picked")
+    if slate_anchor:
+        from office.routing import preferred_rank
+        on_slate = [r for r in rows if preferred_rank(by_id[r["route"]], request.get("preferred_seed")) is not None]
+        slate_anchor = bool(on_slate) and len(on_slate) < len(rows)
+        if slate_anchor:
+            rows[:] = on_slate + [r for r in rows if r not in on_slate]
+
     supersession = _supersede(rows, by_id, request)
 
     # Claude Code Sonnet -> agy is a harness failover, not an effort change.
@@ -397,6 +407,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
            if request.get("budget_ceiling") else {}),
         "numeric_order": numeric_order, "clincher": clincher, "exploration": exploration,
         **({"lineage_supersession": supersession} if supersession else {}),
+        **({"slate_anchor": "size slate routes ranked ahead of routes outside it"} if slate_anchor else {}),
         "spread": {"wave_load": load, "applied": any(r["contributions"]["spread"] for r in rows)},
         "preferred_seed": request.get("preferred_seed"), "aliases": aliases,
         **({"sonnet_self_fallbacks": self_fallbacks} if self_fallbacks else {}),
