@@ -19,7 +19,8 @@ COUNTERFACTUAL_NOTE = ("unexecuted counterfactual routes are not measured: this 
 GATE_SIGNALS = (
     ("review", "events review.degraded_fallback: a non-independent reviewer stood in for the funded independent review"),
     ("permission", "events submit.refused with code outside-scope: a worker changed files outside its leased scope"),
-    ("landing", "events pr.merged with no merge authorization recorded at or before the merge"),
+    ("landing", "events pr.merged by Office with no merge authorization recorded at or before the merge (a PR adopted "
+     "after a human merged it on GitHub is not counted)"),
 )
 
 
@@ -56,9 +57,10 @@ def collect_run_evidence(con: sqlite3.Connection, run_ids: set[str]) -> dict:
             "SELECT COUNT(*) FROM events WHERE run_id=? AND kind='review.degraded_fallback'", (run_id,)).fetchone()[0]
         violations["permission"] += con.execute(
             "SELECT COUNT(*) FROM events WHERE run_id=? AND kind='submit.refused' "
-            "AND json_extract(payload_json, '$.code')='outside-scope'", (run_id,)).fetchone()[0]
+            "AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.code') END='outside-scope'", (run_id,)).fetchone()[0]
         violations["landing"] += con.execute(
-            "SELECT COUNT(*) FROM events e WHERE e.run_id=? AND e.kind='pr.merged' AND NOT EXISTS("
+            "SELECT COUNT(*) FROM events e WHERE e.run_id=? AND e.kind='pr.merged' AND e.summary LIKE '% merged into %' "
+            "AND NOT EXISTS("
             "SELECT 1 FROM authorizations a WHERE a.run_id=e.run_id AND a.kind='merge' "
             "AND a.revoked_at IS NULL AND a.created_at<=e.created_at)", (run_id,)).fetchone()[0]
     return {"latency": latency, "latency_unmeasured_tasks": unmeasured, "gate_violations": violations}
