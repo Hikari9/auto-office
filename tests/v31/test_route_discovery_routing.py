@@ -713,8 +713,22 @@ def inputs_for(config, tmp_path):
     from office import db
     con = db.connect(tmp_path / "ceiling.db")
     run = {"id": "r1", "playbook": "Change", "risk": {"size_class": "S"}}
-    return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=None, dispatch_kind="fresh",
-                                      plan_version=1)
+    return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=None, dispatch_kind="fresh")
+
+
+def test_the_routing_seed_does_not_change_with_the_plan_version(tmp_path, monkeypatch):
+    # #816: an amendment bumps run.plan_version; a task it does not touch keeps its seeded close-call draw.
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    from office import db
+    config = cfg.resolve(None)[0]
+    con = db.connect(tmp_path / "seed.db")
+
+    def seed(task, plan_version, kind="fresh"):
+        run = {"id": "r1", "playbook": "Change", "risk": {"size_class": "S"}, "plan_version": plan_version}
+        return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=task, dispatch_kind=kind)["routing_seed"]
+
+    assert seed("T1", 1) == seed("T1", 2) == seed("T1", 7)
+    assert seed("T1", 1) != seed("T2", 1) and seed("T1", 1) != seed("T1", 1, kind="rework")
 
 
 def test_the_shipped_economic_scale_is_not_a_ceiling_for_a_new_run(tmp_path, monkeypatch):

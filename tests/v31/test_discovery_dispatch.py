@@ -12,7 +12,7 @@ import pytest
 
 from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 
-from office import candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
+from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
 from office.util import dumps, now_iso
 
 
@@ -255,6 +255,12 @@ def test_a_quota_change_between_the_probe_and_the_dispatch_dispatches_the_fallba
 
 # ------------------------------------------------------------------ the transaction's own rechecks
 
+def _pin_draws(monkeypatch, **draws):
+    """Fix the named seeded draws so a test's route does not depend on the seed's luck (#816)."""
+    real = adaptive._draw
+    monkeypatch.setattr(adaptive, "_draw", lambda seed, label: draws[label] if label in draws else real(seed, label))
+
+
 def _between(cold, monkeypatch, change):
     """Run `change(cold)` after the preflight and before the dispatch transaction opens."""
     real = dispatch.preflight_discovery
@@ -364,6 +370,7 @@ def test_the_rolling_cap_is_rechecked_in_the_transaction(cold, monkeypatch):
     route_learning.ensure_schema(cold.con)
     cold.con.execute("INSERT INTO route_audit(id, run_id, task_id, role, phase, decision_hash, disclosure_json, created_at) "
                      "VALUES('ra-old','run-B','T9','executor','dispatch','h','{}',?)", (now_iso(),))
+    _pin_draws(monkeypatch, discovery=0.0)
 
     def another_runs_trial(cold, _decision):
         with db.transaction(cold.con):
@@ -1184,6 +1191,7 @@ def test_only_the_recomputed_decision_is_dispatched(cold, monkeypatch):
         return out
 
     monkeypatch.setattr(route_probe, "ensure", then_denied)
+    _pin_draws(monkeypatch, clincher=0.0)
     cold.dispatch("T1")
     (d,) = cold.dispatches()
     assert first["primary"] == "codex@0/gpt-6-astra@low" and d["triple"] != first["primary"]
