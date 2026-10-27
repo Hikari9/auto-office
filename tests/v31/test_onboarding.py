@@ -106,13 +106,13 @@ def test_first_run_is_due_and_offers_office_decide_seeded_routes_and_custom(h):
     assert "orchestrator" not in json.dumps([q["roles"] for q in data["questions"]])
 
 
-def test_reviewer_and_executor_routes_follow_derived_trust(h):
+def test_reviewer_and_executor_routes_follow_role_policy_not_historical_trust(h):
     reviewer = h.question("reviewer")
-    # code_reviewer needs proven trust: on a fresh install only the shipped baseline is proven.
+    # #837: an unapproved but technically capable neutral reviewer is eligible.
     assert "codex/gpt-6-luna@high" in reviewer["eligible"]
-    assert "claude/opus@low" not in reviewer["eligible"]
+    assert "claude/opus@low" in reviewer["eligible"]
     why = {u["route"]: u["reason"] for u in reviewer["unavailable"]}
-    assert "not proven" in why["claude/opus@low"] and "office approve trust" in why["claude/opus@low"]
+    assert "claude/opus@low" not in why
     executor = h.question("executor")
     assert "agy/gemini-3.8-flash@medium" in executor["eligible"]
     assert not [o for o in executor["options"] if o.get("seeded")]  # executor ships no seed: adaptive routing decides
@@ -300,13 +300,19 @@ def test_onboarding_state_is_user_level_only(h):
     ("claude/opus@none", "no none effort"),                # unsupported effort
     ("codex/opus@high", "runs on claude, not codex"),      # wrong harness
     ("opus@high", "harness/model@effort"),                 # not a full route
-    ("claude/opus@low", "not proven"),                     # trust floor for code review
     ("agy/gemini-3.8-flash@medium", "no reviewer launch profile"),  # role-ineligible
 ])
 def test_invalid_reviewer_answers_are_rejected_and_nothing_is_written(h, answer, fragment):
     code, out = h.office("onboard", "--planner", "claude/opus@medium", "--reviewer", answer)
     assert code == 2 and fragment in out and "eligible:" in out, out
     assert not h.user.exists() and h.status()["due"] is True
+
+
+def test_user_may_onboard_a_neutral_reviewer_without_a_trust_approval(h):
+    code, out = h.office("onboard", "--planner", "claude/opus@medium", "--reviewer", "claude/opus@low")
+    assert code == 0 and "onboarding complete" in out
+    assert "claude/opus@low" in out
+    assert "approve trust" not in out
 
 
 def test_signed_out_harness_is_not_offered_or_accepted(h, monkeypatch):

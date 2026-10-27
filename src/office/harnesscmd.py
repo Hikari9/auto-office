@@ -923,11 +923,13 @@ def model_policy() -> Result:
     p = route_policy.user_policy(cfg.resolve(None)[0])
     lines = ["global model routing policy (technical qualification is independent):",
              f"  denied routes: {', '.join(p['denied']) or '(none)'}",
-             f"  manual-only/overkill rules: {len(p['overkill'])}"]
+             f"  manual-only/overkill rules: {len(p['overkill'])}",
+             f"  role-scoped user rules: {len(p['role_rules'])}"]
+    lines.extend(f"  {r['role']}: {r['state']} {r['route']} ({p['sources'].get('role_rules') or 'user'})" for r in p['role_rules'])
     lines.extend(f"  deny {lineage} <= {version}" for lineage, version in sorted(p["ceilings"].items()))
     if not p["ceilings"]:
         lines.append("  lineage version ceilings: (none)")
-    return Result(lines=lines, next="office model ceiling openai/gpt-sol --through 5.6, or office model unceil openai/gpt-sol",
+    return Result(lines=lines, next="office route policy --effective --role code_reviewer; office model ceiling openai/gpt-sol --through 5.6",
                   data={"policy": p})
 
 

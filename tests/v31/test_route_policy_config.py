@@ -24,8 +24,8 @@ def layer(value):
 def test_new_defaults_have_no_hard_ceiling_or_user_policy():
     cfg = resolve()
     assert policy.budget_ceiling(cfg) == {"usd": None, "source": "shipped"}
-    assert policy.user_policy(cfg) == {"denied": [], "ceilings": {}, "ceiling_sources": {}, "overkill": [],
-                                       "sources": {"denied_models": "shipped", "version_ceilings": None, "overkill_rules": "shipped"}}
+    assert policy.user_policy(cfg) == {"denied": [], "ceilings": {}, "ceiling_sources": {}, "overkill": [], "role_rules": [],
+                                       "sources": {"denied_models": "shipped", "version_ceilings": None, "overkill_rules": "shipped", "role_rules": "shipped"}}
     settings = policy.discovery_settings(cfg)
     # shipped config turns discovery on (#494 T6); the code constant stays off, the safe default for a pre-#494 pin
     assert settings == {**policy.DISCOVERY_DEFAULTS, "enabled": True, "trial_bounded_production_tasks": True}
@@ -77,7 +77,7 @@ def test_each_policy_leaf_records_the_winning_tier_even_when_value_equals_defaul
     assert provenance["routing.discovery.roles"] == "shipped"
     user = policy.user_policy(cfg)
     assert user["denied"] == ["harness:codex"]
-    assert user["sources"] == {"denied_models": "user", "version_ceilings": None, "overkill_rules": "repo"}
+    assert user["sources"] == {"denied_models": "user", "version_ceilings": None, "overkill_rules": "repo", "role_rules": "shipped"}
     assert user["overkill"][0]["roles"] == ["worker"]
 
 
@@ -105,7 +105,7 @@ def test_policy_digest_covers_settings_policy_and_ceiling_source_only():
     same["irrelevant"] = "changed"
     assert policy.policy_digest(same) == digest
     for edited in (resolve(sets=["routing.discovery.enabled=false"]),
-                   resolve(sets=["routing.user_policy.denied_models=[new-model]"]),
+                   resolve({"routing": {"user_policy": {"denied_models": ["new-model"]}}}),
                    resolve(layer(30)), resolve(sets=["routing.adaptive.budget_ceiling_usd=null"])):
         assert policy.policy_digest(edited) != digest
 
