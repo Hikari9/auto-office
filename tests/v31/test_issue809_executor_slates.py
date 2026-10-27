@@ -1,4 +1,4 @@
-"""#809 final executor slate, versioned task floors and missing catalog qualifications."""
+"""#809 final executor slate, versioned task floors, and missing catalog qualifications."""
 import pytest
 from office import executor_slates as slates
 from office import routing
@@ -30,4 +30,35 @@ def test_terra_effort_thresholds_do_not_claim_qualification(effort, score, large
 
 
 def test_sonnet_self_fallback_order_and_same_effort():
-    for size, eff¶»§q«^
+    for size, effort in (("M", "medium"), ("L", "high")):
+        seed = slates.ideal_seed(size)
+        assert seed[:2] == [
+            {"model_id": "claude-sonnet-5-5", "effort": effort, "harness": "claude"},
+            {"model_id": "claude-sonnet-5-5", "effort": effort, "harness": "agy"}]
+        assert all(x["model_id"] != "claude-sonnet-5-5" for x in seed[2:])
+
+
+def test_l_argon_medium_remains_conditional_and_xl_high_distinct():
+    assert slates.ideal_seed("L")[-1] == {"model_id": "gemini-4-argon", "effort": "medium"}
+    assert slates.ideal_seed("XL")[-1] == {"model_id": "gemini-4-argon", "effort": "high"}
+    assert slates.benchmark_gate({"benchmark_indexes": {slates.INDEX: 53}, "effort": "high"}, "L") is None
+    assert slates.benchmark_gate({"benchmark_indexes": {}, "effort": "medium"}, "L")
+
+
+def test_opus_is_xl_only_and_sonnet_harness_is_limited():
+    for size in ("XS", "S", "M", "L"):
+        assert slates.model_restriction({"model_id": "claude-opus-5-5"}, size)
+        assert slates.model_restriction({"model_id": "opus", "alias_resolved_to": "claude-opus-5-5"}, size)
+    assert slates.model_restriction({"model_id": "claude-opus-5-5"}, "XL") is None
+    assert slates.model_restriction({"model_id": "claude-sonnet-5-5", "harness": "codex"}, "M")
+
+
+def test_conditional_missing_and_unqualified_ideal_routes_are_audited():
+    pref = slates.ideal_seed("M")
+    c = {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium",
+         "harness_version": "1", "route_status": "available"}
+    cid = routing.candidate_id(c)
+    summary = slates.route_summary(pref, [c], [], [{"route": cid, "rank": "PRIMARY"}])
+    assert [entry["status"] for entry in summary] == [
+        "not-in-catalog", "selected", "not-in-catalog", "not-in-catalog"]
+    assert summary[1]["qualified_routes"] == [cid]
