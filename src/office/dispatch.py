@@ -238,7 +238,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             # It is not a simulated executor model launch, and it must still
             # submit through preflight, review and landing like every worker.
             from office import task_sizing
-            desc = (task.get("descriptor") or {})
+            from office import candidates as candidate_policy
+            desc = candidate_policy._effective_task_descriptor(run, task)
             mode = task_sizing.execution_mode(run.get("gear"), desc, run.get("risk"))
             if mode["mode"] == "inline" and not (as_model or route or cli or external):
                 routes[tid]["launch"] = {"external": True, "inline": True}
@@ -348,8 +349,13 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 res.add(f"{tid} {sizing.get('task_size') or 'unclassified'} | profile "
                         f"{sizing.get('profile') or 'legacy'} | why: "
                         f"{sizing.get('task_size_rationale') or 'legacy plan has no task size'}")
-                res.add(f"ACTUAL DISPATCH {tid}: {decision['selected']} | "
-                        f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
+                if mode == "inline":
+                    res.add(f"ACTUAL DISPATCH {tid}: orchestrator-inline (no model launched); "
+                            f"qualified candidate preview: {decision['selected']} | "
+                            f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
+                else:
+                    res.add(f"ACTUAL DISPATCH {tid}: {decision['selected']} | "
+                            f"{(decision.get('selection_disclosure') or {}).get('reason') or 'qualified route'}")
                 res.add(f"{tid} -> {did} executor/{decision['selection_disclosure']['triple']} {verb}"
                         + (" (user override)" if decision.get("override") else "")
                         + (f" ({decision['route_note']})" if decision.get("route_note") else ""))
@@ -655,7 +661,8 @@ def _route_payload(decision: dict) -> dict:
     }
     out = {"candidate": decision.get("candidate"), "execution_mode": mode,
            "selection_disclosure": decision.get("selection_disclosure"),
-           "selected_route": decision.get("selected"),
+           "selected_route": ("orchestrator-inline (not an agent model launch)"
+                              if mode["mode"] == "inline" else decision.get("selected")),
            "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
            "preferred_route": (decision.get("planned") or {}).get("primary"),
            "fallback_routes": (decision.get("planned") or {}).get("fallbacks") or [],

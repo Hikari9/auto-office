@@ -766,6 +766,22 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     return f"fix: {fix}; {pinned}"
 
 
+def _effective_task_descriptor(run: dict, task: dict | None) -> dict:
+    """Route on a task's effective size, even for a partially migrated descriptor.
+
+    Historical pinned-run descriptors remain untouched. Classification is
+    side-effect-free for planning previews, reroutes and retries.
+    """
+    if not task:
+        return {}
+    d = task.get("descriptor") or {}
+    if ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+            and (not d.get("task_size") or not d.get("profile_version"))):
+        from office import task_sizing
+        return {**d, **task_sizing.classify({**task, "descriptor": d}, run_gear=run.get("gear"))}
+    return d
+
+
 def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str, candidates: list[dict], *,
                     task_id: str | None, dispatch_kind: str, plan_version: int | None,
                     wave_load: dict | None = None, as_of: str | None = None, pending_explorations: int = 0) -> dict:
@@ -785,7 +801,7 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
         ceiling = route_policy.budget_ceiling(config)
         adaptive_cfg = {**adaptive_cfg, "budget_ceiling_usd": ceiling["usd"]}
     task = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
-    desc = (task or {}).get("descriptor") or {}
+    desc = _effective_task_descriptor(run, task)
     task_size = desc.get("task_size") or (run.get("risk") or {}).get("size_class")
     context = {"role": role, "playbook": run.get("playbook"), "size_class": task_size,
                "gear": run.get("gear"), "dispatch_kind": dispatch_kind,
@@ -866,7 +882,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[])
     task_for_route = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
-    descriptor_for_route = (task_for_route or {}).get("descriptor") or {}
+    descriptor_for_route = _effective_task_descriptor(run, task_for_route)
     sized_work = role in routing.ADAPTIVE_ROLES
     effective_task_size = (descriptor_for_route.get("task_size") if sized_work else None) or \
         (run.get("risk") or {}).get("size_class")

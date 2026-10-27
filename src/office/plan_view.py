@@ -162,7 +162,15 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
                 + (["ui review"] if visual_gate else [])
         persisted = state.get_task(con, run["id"], t["id"]) or {}
         desc = persisted.get("descriptor") or {}
-        sizing = task_sizing.classify(t, run_gear=run.get("gear")) if not desc else desc
+        if ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+                and (not desc.get("task_size") or not desc.get("profile_version"))):
+            sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
+        else:
+            sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
+        recorded = state.recorded_route(persisted) if persisted else None
+        if (dispatched_route and recorded and
+                (recorded.get("execution_mode") or {}).get("mode") == "inline"):
+            dispatched_route = "orchestrator-inline (no model launched)"
         mode = task_sizing.execution_mode(run.get("gear"), sizing, run.get("risk"))
         fallback_rows = [dict(s) for s in (ex.get("slate") or [])[1:]]
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],

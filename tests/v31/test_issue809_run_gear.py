@@ -178,3 +178,10 @@ def test_single_task_s_runtime_is_still_delegated_by_default(env):
     row = con.execute("SELECT * FROM dispatches WHERE role='executor' ORDER BY started_at DESC LIMIT 1").fetchone()
     assert row is not None
     assert json.loads(row["route_json"]).get("execution_mode", {}).get("mode") == "delegated", json.loads(row["route_json"])
+
+
+def test_sm_inline_is_not_allowed_for_elevated_risk_even_with_advantage():
+    descriptor = {"task_size": "S", "inline_advantage": "reduced overall cost despite delegation overhead"}
+    for gear in ("S", "M"):
+        mode = task_sizing.execution_mode(gear, descriptor, {"classification": "elevated"})
+        assert mode["mode"] == "delegated"

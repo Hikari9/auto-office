@@ -94,7 +94,8 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None)
         return {"mode": "inline", "why": "XS run, low risk and bounded subtask; retain orchestrator context",
                 "decision_version": VERSION}
     benefit = d.get("inline_advantage")
-    if gear in ("S", "M") and benefit and size in ("XS", "S", "M"):
+    if (gear in ("S", "M") and risk.get("classification") == "low" and benefit
+            and size in ("XS", "S", "M")):
         return {"mode": "inline", "why": f"documented cost-to-success advantage: {benefit}",
                 "decision_version": VERSION}
     return {"mode": "delegated", "why": "dedicated executor default; no supported total-cost inline exception",
