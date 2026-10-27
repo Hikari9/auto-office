@@ -290,3 +290,14 @@ def test_migrate_apply_handles_duplicate_legacy_denials(home):
     routecmd.migrate(apply=True)
     rules = yaml.safe_load(cfg.read_text())["routing"]["user_policy"]["role_rules"]
     assert [r["route"] for r in rules] == ["claude/opus@low"]
+
+
+def test_model_list_notes_a_role_allow_over_a_legacy_deny(home):
+    from office import harnesscmd
+    cfg, _ = home
+    cfg.write_text(yaml.safe_dump({"routing": {"user_policy": {"denied_models": ["claude/claude-opus-5-5@high"], "role_rules": [
+        {"role": "executor", "route": "claude/claude-opus-5-5@high", "state": "allow"}]}}}))
+    res = harnesscmd.model_list("claude")
+    row = next(r for r in res.data["rows"] if r["model_id"] == "claude-opus-5-5" and r["effort"] == "high")
+    assert row["user_denied"] is True and row["role_allowed"] == ["executor"]
+    assert any("but allowed for roles: executor" in l for l in res.lines if "claude-opus-5-5" in l and "high" in l)

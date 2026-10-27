@@ -51,10 +51,13 @@ def view() -> dict:
                 eff = route_policy.effective_role_state(probe, role, [policy])
                 if eff["state"] != "neutral":
                     role_states[role] = {"state": eff["state"], "source": eff["source"]}
+            role_allowed = sorted(role for role, st in role_states.items()
+                                  if st["state"] == "allow" and st["source"] != "shipped")
             specs.append({
-                "role_policy": role_states,
+                "role_policy": role_states, "role_allowed_over_deny": role_allowed if permission else [],
                 "user_denied": bool(permission or legacy_effort_denied),
-                "user_denial_reason": permission or ("legacy user-catalog overlay deny" if legacy_effort_denied else None),
+                "user_denial_reason": ((permission + (f" (but allowed for roles: {', '.join(role_allowed)})" if role_allowed else ""))
+                                       if permission else ("legacy user-catalog overlay deny" if legacy_effort_denied else None)),
                 "legacy_overlay_denied": legacy_effort_denied,
                 "effort": r.get("effort"),
                 "invocation_model_id": r.get("invocation_model_id"),
