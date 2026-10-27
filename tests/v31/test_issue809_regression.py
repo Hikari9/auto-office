@@ -131,7 +131,10 @@ def test_terra_effort_boundaries_pass_exactly_the_sizes_whose_floor_they_meet(ef
 @pytest.mark.parametrize("gear,size,kwargs,mode", [
     ("XS", "XS", {}, "inline"), ("XS", "S", {}, "inline"), ("XS", "M", {}, "delegated"),
     ("S", "S", {}, "delegated"), ("S", "S", {"inline_advantage": ESTIMATE}, "inline"),
-    ("M", "M", {"task_count": 1}, "inline"), ("M", "M", {"task_count": 2}, "delegated"),
+    ("M", "M", {"task_count": 1, "inline_advantage": ESTIMATE}, "inline"),
+    ("M", "M", {"task_count": 1}, "delegated"),
+    ("M", "M", {"task_count": 2, "inline_advantage": ESTIMATE}, "delegated"),
+    ("M", "M", {"task_count": 2}, "delegated"),
     ("L", "XS", {"task_count": 1, "inline_advantage": ESTIMATE}, "delegated"),
     ("XL", "XS", {"task_count": 1, "inline_advantage": ESTIMATE}, "delegated"),
 ])
