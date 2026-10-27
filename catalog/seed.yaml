@@ -821,10 +821,7 @@ models:
   - model_id: claude-opus-5-5
     invocation_model_id: claude-opus-5-5
     invocation_harness: claude
-    invocation_source: 'documented: official Claude Code --model claude-opus-5-5; maintainer confirmed model available 2026-10-08; specific effort conformance not logged'
-    dispatchable: false
-    discovery: eligible
-    discovery_reason: 'Documented model invocation; exact effort conformance probe required (claude effort is read back from the session transcript)'
+    invocation_source: 'local-evidence: office doctor --probe-route claude/claude-opus-5-5@low passed on claude 2.1.311 (2026-10-27): the session transcript recorded model claude-opus-5-5 at effort low (#824, #832)'
     source_identifier: claude-opus-5-5-low
     source_name: artificial-analysis
     effort: low
