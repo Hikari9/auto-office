@@ -25,10 +25,10 @@ a reproducible draw from the routing seed picks among them. Exploration, at a
 small bounded rate, may promote an under-tested qualifying route whose utility
 and cost stay near the best.
 
-Lineage supersession (#811) runs last: within one named lineage and effort, a
-newer released generation that qualified takes its predecessor's place in the
-order, and the predecessor follows directly behind it as a fallback. Routes of
-different lineages keep the utility comparison's order.
+Lineage supersession (#811) runs last: within one named lineage and effort, the
+predecessor of a newer released generation that qualified moves to directly
+behind it as its fallback. The newer generation keeps its own place, so routes
+of different lineages are still compared on their own utility.
 """
 from __future__ import annotations
 
@@ -496,22 +496,25 @@ def _weakness(r: dict, rows: list[dict]) -> str:
 
 
 def _supersede(rows: list[dict], by_id: dict[str, dict], request: dict) -> list[dict]:
-    """For the Sol and Terra lineages, put each qualifying newer released generation
-    directly ahead of its predecessor on the same harness and effort, in place (#811).
+    """For the Sol and Terra lineages, move each predecessor of a qualifying newer
+    released generation on the same harness and effort to directly behind it (#811).
 
-    Runs after the budget ceiling, so an unaffordable newer route never displaces an
-    affordable older one, and only rows that already qualified move: every gate
-    (denial, version ceiling, overkill, trust, capability, floor, quota, discovery)
-    still decides whether the newer generation competes. When it does not, the
-    predecessor keeps its own rank. Identity comes from the lineage manifest, never
-    from spelling or the candidate's own fields. A manual, declared or exact route
-    turns supersession off, and a predecessor the user's preferred_seed ranks ahead
-    of its successor is not moved. Returns the moves made."""
+    The newer generation keeps its own place, so it competes with other lineages on
+    its own utility, never on its predecessor's, and the predecessor is always the
+    next route after it (in the slate whenever the newer one leads). Runs after the
+    budget ceiling, so an unaffordable newer route never demotes an affordable older
+    one, and only rows that already qualified count: every gate (denial, version
+    ceiling, overkill, trust, capability, floor, quota, discovery) still decides
+    whether the newer generation competes. When it does not, the predecessor keeps
+    its own rank. Identity comes from the lineage manifest, never from spelling or
+    the candidate's own fields. A manual, declared or exact route turns supersession
+    off, and a predecessor the effective preferred_seed (request or policy) ranks
+    ahead of its successor is not moved. Returns the pairs applied."""
     from office.routing import preferred_rank
     if request.get("manual_route") or request.get("declared_route") or request.get("exact_route"):
         return []
     manifest = model_lineages.load()
-    seed = request.get("preferred_seed")
+    seed = request.get("preferred_seed") or (request.get("policy") or {}).get("preferred_seed")
 
     def identity(route: str):
         c = by_id[route]
@@ -527,20 +530,34 @@ def _supersede(rows: list[dict], by_id: dict[str, dict], request: dict) -> list[
         return o is not None and (n is None or n > o)
 
     ids = {r["route"]: identity(r["route"]) for r in rows}
-    moves: list[dict] = []
-    i = 0
-    while i < len(rows):
-        mine = ids[rows[i]["route"]]
-        newer = [r for r in rows[i + 1:]
-                 if mine and (x := ids[r["route"]]) and x[0] == mine[0] and x[1] > mine[1] and not pinned(rows[i], r)]
-        if not newer:
-            i += 1
-            continue
-        succ = max(newer, key=lambda r: ids[r["route"]][1])
-        moves.append({"route": succ["route"], "label": succ["label"], "supersedes": rows[i]["route"],
-                      "supersedes_label": rows[i]["label"], "lineage_key": mine[0][0], "effort": mine[0][2]})
-        rows.remove(succ)
-        rows.insert(i, succ)
+    successor: dict[str, dict] = {}
+    for r in rows:
+        mine = ids[r["route"]]
+        newer = [n for n in rows
+                 if mine and (x := ids[n["route"]]) and x[0] == mine[0] and x[1] > mine[1] and not pinned(r, n)]
+        if newer:
+            successor[r["route"]] = max(newer, key=lambda n: ids[n["route"]][1])
+    if not successor:
+        return []
+    behind: dict[str, list[dict]] = {}
+    for r in rows:
+        if r["route"] in successor:
+            behind.setdefault(successor[r["route"]]["route"], []).append(r)
+    order: list[dict] = []
+
+    def place(r: dict) -> None:
+        order.append(r)
+        for p in behind.get(r["route"], []):
+            place(p)
+
+    for r in rows:
+        if r["route"] not in successor:
+            place(r)
+    moves = [{"route": successor[r["route"]]["route"], "label": successor[r["route"]]["label"],
+              "supersedes": r["route"], "supersedes_label": r["label"],
+              "lineage_key": ids[r["route"]][0][0], "effort": ids[r["route"]][0][2]}
+             for r in order if r["route"] in successor]
+    rows[:] = order
     return moves
 
 

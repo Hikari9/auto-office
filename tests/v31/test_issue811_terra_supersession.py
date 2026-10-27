@@ -79,9 +79,9 @@ def test_adaptive_prefers_newer_only_within_comparable_qualified_lineage():
     new = row("gpt-6.1-terra", "high", score=44)
     other = row("gpt-6.1-sol", "high", score=50)
     rec = recommend([old, new, other])
-    order = models(rec)
-    assert order.index("gpt-6.1-terra@high") < order.index("gpt-5.6-terra@high")
-    assert set(order) == {"gpt-5.6-terra@high", "gpt-6.1-terra@high", "gpt-6.1-sol@high"}
+    # 5.6 Terra scores best, but 6.1 Terra competes with 6.1 Sol on its own utility:
+    # it never inherits its predecessor's place ahead of a stronger other lineage.
+    assert models(rec) == ["gpt-6.1-sol@high", "gpt-6.1-terra@high", "gpt-5.6-terra@high"]
     assert rec["audit"]["lineage_supersession"][0]["label"] == "codex/gpt-6.1-terra@high"
     retry = recommend([old, other])
     assert "gpt-5.6-terra@high" in models(retry) and "lineage_supersession" not in retry["audit"]

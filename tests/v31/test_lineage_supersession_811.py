@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from office import candidates, model_lineages, paths, route_learning, routing, scoring
+from office import adaptive, candidates, model_lineages, paths, route_learning, routing, scoring
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
 LINEAGES = {"sol": ("gpt-5.6-sol", "gpt-6.1-sol"), "terra": ("gpt-5.6-terra", "gpt-6.1-terra")}
@@ -132,6 +132,19 @@ def test_supersession_is_per_effort_and_never_invents_a_missing_effort():
     assert "lineage_supersession" not in d["routing"] and labels(d)[0] == lab("gpt-5.6-sol", "medium")
 
 
+def test_older_generation_stays_in_the_slate_when_newer_routes_fill_the_top():
+    # 6.1 already outranks 5.6 at every effort: without demotion the slate would be
+    # three 6.1 Terra routes and no 5.6 fallback.
+    efforts = ("high", "medium", "max")
+    news = [cand("gpt-6.1-terra", e) for e in efforts]
+    olds = [cand("gpt-5.6-terra", e) for e in efforts]
+    d = routing.route(req([*olds, *news], evidence=favour(*news)))
+    primary = labels(d)[0]
+    assert primary.startswith("codex/gpt-6.1-terra@")
+    assert labels(d)[1] == primary.replace("gpt-6.1-terra", "gpt-5.6-terra")
+    assert d["slate"][1]["reason"].startswith(f"superseded by {primary}")
+
+
 # ------------------------------------------------------------------ older fallback when 6.1 cannot qualify
 
 def test_absent_newer_generation_leaves_the_older_route_selected():
@@ -234,6 +247,13 @@ def test_user_seeded_older_route_is_not_superseded():
     assert labels(d)[0] == lab("gpt-5.6-sol", "high") and "lineage_supersession" not in d["routing"]
 
 
+def test_policy_seeded_older_route_is_not_superseded():
+    o, n = cand("gpt-5.6-sol", "high"), cand("gpt-6.1-sol", "high")
+    pol = {"cost_policy": "balanced", "preferred_seed": [{"model_id": "gpt-5.6-sol", "effort": "high"}]}
+    d = routing.route(req([o, n], evidence=favour(o), policy=pol))
+    assert labels(d)[0] == lab("gpt-5.6-sol", "high") and "lineage_supersession" not in d["routing"]
+
+
 def test_seed_listing_newer_first_still_supersedes():
     o, n = cand("gpt-5.6-sol", "high"), cand("gpt-6.1-sol", "high")
     seed = [{"model_id": "gpt-6.1-sol", "effort": "high"}, {"model_id": "gpt-5.6-sol", "effort": "high"}]
@@ -291,10 +311,16 @@ def test_other_lineages_keep_the_utility_order():
     assert labels(d)[1:] == [lab("gpt-6.1-sol", "high"), lab("gpt-5.6-sol", "high")]
 
 
-def test_decision_hash_changes_only_when_a_generation_moved():
+def test_decision_hash_covers_the_supersession_record(monkeypatch):
     plain = routing.route(req([cand("gpt-5.6-sol", "high")]))
     assert "lineage_supersession" not in plain["routing"]
     o, n = cand("gpt-5.6-sol", "high"), cand("gpt-6.1-sol", "high")
     a = routing.route(req([o, n], evidence=favour(o)))
-    b = routing.route(req([o, n], evidence=favour(o)))
-    assert a["decision_hash"] == b["decision_hash"] and a["routing"]["lineage_supersession"]
+    assert a["decision_hash"] == routing.route(req([o, n], evidence=favour(o)))["decision_hash"]
+    assert a["routing"]["lineage_supersession"]
+    # Same reorder, record withheld: only the record differs, so the hash must too.
+    real = adaptive._supersede
+    monkeypatch.setattr(adaptive, "_supersede", lambda rows, by_id, request: (real(rows, by_id, request), [])[1])
+    silent = routing.route(req([o, n], evidence=favour(o)))
+    assert labels(silent) == labels(a) and "lineage_supersession" not in silent["routing"]
+    assert silent["decision_hash"] != a["decision_hash"]

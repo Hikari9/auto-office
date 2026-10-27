@@ -906,7 +906,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # In the hash only when discovery is active, so discovery-off decisions hash exactly as before.
         hashed["discovery"] = disc
     if audit.get("lineage_supersession"):
-        # Likewise only when a newer generation moved, so other decisions hash as before.
+        # Likewise only when a predecessor was superseded, so other decisions hash as before.
         hashed["lineage_supersession"] = audit["lineage_supersession"]
     decision_hash = sha256_obj(hashed)
     audit["decision_hash"] = decision_hash
