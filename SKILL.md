@@ -39,7 +39,7 @@ Take every decision to the user through the harness's native question tool when 
 
 Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
 - **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
-- **Release differs from this directory's `src/office/_version.py`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
+- **Release differs from this directory's `VERSION`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
 
@@ -165,7 +165,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 ### Risk floor and the lightweight path
 
 - A run gear (`XS` to `XL`, pinned at intake) funds planning and review ceremony from complexity; `office start`, `office inspect plan` and every dispatch print it with its
-  funded gates. Risk is separate: a gear never lowers the floor below. Legacy names (`direct` to `full`) only resume runs already pinned to them. Task sizes, size floors and planner gear recommendations: `skills/auto-planning`.
+  funded gates. Risk is separate: a gear never lowers the floor below. Legacy names (`direct` to `full`) remain explicit compatibility presets with historic gates. New integrations use XS-XL; existing pinned runs resume unchanged. Task sizes, size floors and planner gear recommendations: `skills/auto-planning`.
 - Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high), `elevated` (irreversible, production
   blast radius, or size L/XL on a legacy-pinned run; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
   `unknown` and `elevated` imply.
