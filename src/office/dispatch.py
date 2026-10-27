@@ -4329,6 +4329,7 @@ def supervise(dispatch_id: str) -> int:
     the supervisor itself cannot start the agent."""
     started = time.time()
     code, sig, classification = None, None, None
+    empty_reply = False
     child = None
     state_box = {"signal": None, "watching": False}
 
@@ -4364,6 +4365,7 @@ def supervise(dispatch_id: str) -> int:
             state_box["watching"] = True
             code, classification = watch_external_output(dispatch_id, spec)
             state_box["watching"] = False
+            empty_reply = _reply_file_missing(spec, classification)
             return 0 if classification == "success" else 1
         if spec.get("herdr_agent"):
             # The agent runs in its herdr pane; this process only watches for the end.
@@ -4371,6 +4373,7 @@ def supervise(dispatch_id: str) -> int:
             state_box["watching"] = True
             code, classification = watch_herdr_agent(dispatch_id, spec)
             state_box["watching"] = False
+            empty_reply = _reply_file_missing(spec, classification)
             return 0 if classification == "success" else 1
         log_path = Path(d.get("log_path") or spec.get("log_path"))
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4471,6 +4474,8 @@ def supervise(dispatch_id: str) -> int:
             # A worker with no reply file ended cleanly but said nothing: the
             # prompt may never have been consumed (adapter failure_signatures).
             _note(log_path, "the harness exited 0 with no output; the prompt may not have been consumed")
+        # A headless reviewer's reply can come from its stdout (#399), so only silence counts.
+        empty_reply = not wrote and _reply_file_missing(spec, classification)
     except _Stopped as stop:
         sig, classification = stop.signum, "signal"
     except FileNotFoundError as exc:
@@ -4482,7 +4487,8 @@ def supervise(dispatch_id: str) -> int:
     finally:
         try:
             if classification != "duplicate_ignored":
-                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started)
+                _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
+                        empty_reply=empty_reply)
         finally:
             if timer:
                 timer.cancel()
@@ -4520,7 +4526,15 @@ def _mark(dispatch_id: str, pid_child: int) -> None:
     _record_identity(run_id, dispatch_id, "supervisor", os.getpid())
 
 
-def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> None:
+def _reply_file_missing(spec: dict, classification: str) -> bool:
+    """A reader (reviewer, vision) that ended cleanly without writing its reply file."""
+    if classification != "success" or spec.get("kind") not in read_scope.READER_KINDS or not spec.get("output"):
+        return False
+    out = Path(spec["output"])
+    return not (out.is_file() and out.stat().st_size > 0)
+
+
+def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False) -> None:
     accepted = False
     con = db.connect()
     try:
@@ -4536,10 +4550,13 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float) -> No
                 d["terminal_classification"] = classification
                 if _quota_wall(run, d):
                     _record_route_cooldown(con, run, d)
+            # A reviewer that ended without a reply is not a plain success: the gate re-prompts or retries it.
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
+                       + (" with an empty reply: no reply file was written" if empty_reply else "")
                        + (f" (exit {code})" if code not in (None, 0) else ""), audience="runtime",
                        task_id=d["task_id"], dispatch_id=dispatch_id,
-                       payload={"exit_code": code, "signal": sig, "classification": classification})
+                       payload={"exit_code": code, "signal": sig, "classification": classification,
+                                **({"empty_reply": True} if empty_reply else {})})
             if d["kind"] in ("planner", "executor"):
                 after_worker_exit(con, run, dispatch_id)
             if d["kind"] == "planner" and _submitted(con, d):
