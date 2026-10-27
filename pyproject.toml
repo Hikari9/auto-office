@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auto-office"
-version = "3.6.6"
+dynamic = ["version"]
 description = "Auto Office: adaptive, independently reviewed agent engineering runtime behind one `office` CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,9 @@ office = "office.cli:main"
 [project.urls]
 Repository = "https://github.com/Hikari9/auto-office"
 
+[tool.hatch.version]
+path = "src/office/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/office"]
 
@@ -41,7 +44,6 @@ packages = ["src/office"]
 "adapters" = "office/_resources/adapters"
 "skills" = "office/_resources/skills"
 "SKILL.md" = "office/_resources/SKILL.md"
-"VERSION" = "office/_resources/VERSION"
 # The hub (SKILL.md) links to these for operating detail, so a wheel-only install needs them.
 "docs/orchestrator-reference.md" = "office/_resources/docs/orchestrator-reference.md"
 "docs/review-convergence.md" = "office/_resources/docs/review-convergence.md"
@@ -51,7 +53,7 @@ packages = ["src/office"]
 "scripts/agy-usage.py" = "office/_resources/scripts/agy-usage.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "config", "schemas", "catalog", "adapters", "skills", "scripts", "docs", "SKILL.md", "VERSION", "README.md", "MANIFESTO.md", "pyproject.toml"]
+include = ["src", "config", "schemas", "catalog", "adapters", "skills", "scripts", "docs", "SKILL.md", "README.md", "MANIFESTO.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -77,7 +79,7 @@ source_paths = [
     "src/office/config.py",
     "src/office/web/service.py",
 ]
-also_copy = ["src", "tests", "config", "schemas", "catalog", "adapters", "skills", "docs", "scripts", "SKILL.md", "VERSION", "plugin.json",
+also_copy = ["src", "tests", "config", "schemas", "catalog", "adapters", "skills", "docs", "scripts", "SKILL.md", "plugin.json",
              "README.md", "MANIFESTO.md", "CONTEXT.md", "CLAUDE.md", "references", "protocol", "patterns", "agents", "evals", "eval", "proposal-templates"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]
 # Default selection: the scoring properties, which run in seconds. Narrow it to a module's own tests for each run (the table in

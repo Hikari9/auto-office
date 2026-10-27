@@ -9,7 +9,7 @@ refuses something this page allows, the runtime is right; fix this page.
 - `office --version` not found: stop, ask the user to approve installing it, never install silently. On approval:
   `uv tool install "<skill directory>"` (`pipx install` if `uv` is missing), then `office install` (managed harness hooks and
   runtime registration, with a backup of each config) and `office doctor`.
-- Release (the part before any `+`) differs from the directory's `VERSION`: tell the user and offer
+- Release (the part before any `+`) differs from the directory's `src/office/_version.py`: tell the user and offer
   `uv tool install --force --reinstall "<skill directory>"`, then `office install`. Runs already started keep their pinned runtime.
 - Same release: a wheel reports only its release, so later fixes are invisible to `--version`. Run `office doctor`; on
   `install: STALE`, tell the user and offer the same reinstall.

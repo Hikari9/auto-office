@@ -306,7 +306,7 @@ Runtime resources (schemas, catalog seeds, protocol documentation) and skills sh
   `office uninstall` removes harness hook entries, deletes skill symlinks, and executes `uv tool uninstall office-skills`. Run directories and `runs.db` are preserved unless `--purge` is supplied.
 
 ### 5.3 Versioning and Drift Policy (D142-3, D142-4)
-- A single unified version string governs the system: `VERSION` = Python package version = `plugin.json` version.
+- A single unified version string governs the system: `src/office/_version.py` is the only place it is written; `pyproject.toml` reads it and `plugin.json` carries none.
 - **Pinned Run Hashes**: Active runs record their creating version and policy hash (`policy_hash`).
 - **Drift Detection**: When `office status` runs, it compares the active runtime version with the run's pinned version.
 - **Policy Enforcement**: If an approved run encounters a mismatch in `policy_hash` following a package upgrade, the run enters a hard-stop state. Execution resumes only after an explicit adoption command:

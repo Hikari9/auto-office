@@ -95,26 +95,33 @@ def check_skill_budgets(root=ROOT):
     return errors
 
 def check_versions(root=ROOT):
-    """One release identity: VERSION, the plugin manifest and the package agree.
-    Claude Code keys plugin updates on the manifest version, and every run pins
-    the package version, so a mismatch ships one identity under two numbers."""
+    """One release identity: src/office/_version.py is the only place a version is written.
+    pyproject.toml reads it through hatch, and the plugin manifests carry no version, so they
+    cannot drift from the package every run pins."""
     import tomllib
-    want = (root / 'VERSION').read_text().strip()
-    found = {'VERSION': want}
-    manifest = root / '.claude-plugin' / 'plugin.json'
-    if manifest.exists():
-        found['.claude-plugin/plugin.json'] = json.loads(manifest.read_text()).get('version')
-    portable = root / 'plugin.json'
-    if portable.exists():
-        found['plugin.json'] = json.loads(portable.read_text()).get('version')
+    errors = []
+    source = root / 'src' / 'office' / '_version.py'
+    if not source.is_file():
+        return ['src/office/_version.py: missing, the single source of the release version']
+    project = root / 'pyproject.toml'
+    if project.exists():
+        data = tomllib.loads(project.read_text())
+        if 'version' in data.get('project', {}):
+            errors.append('pyproject.toml: [project] must not hardcode version; it is dynamic from src/office/_version.py')
+        if 'version' not in data.get('project', {}).get('dynamic', []):
+            errors.append("pyproject.toml: [project] dynamic must include 'version'")
+        if data.get('tool', {}).get('hatch', {}).get('version', {}).get('path') != 'src/office/_version.py':
+            errors.append('pyproject.toml: [tool.hatch.version] path must be src/office/_version.py')
+    for name in ('.claude-plugin/plugin.json', 'plugin.json'):
+        manifest = root / name
+        if manifest.exists() and 'version' in json.loads(manifest.read_text()):
+            errors.append(f'{name}: must not hardcode version')
     catalog = root / '.claude-plugin' / 'marketplace.json'
     if catalog.exists():
         for entry in json.loads(catalog.read_text()).get('plugins', []):
-            found[f".claude-plugin/marketplace.json:{entry.get('name')}"] = entry.get('version')
-    project = root / 'pyproject.toml'
-    if project.exists():
-        found['pyproject.toml'] = tomllib.loads(project.read_text()).get('project', {}).get('version')
-    return [f'{where}: version {got!r} does not match VERSION {want!r}' for where, got in found.items() if got != want]
+            if 'version' in entry:
+                errors.append(f".claude-plugin/marketplace.json:{entry.get('name')}: must not hardcode version")
+    return errors
 
 
 

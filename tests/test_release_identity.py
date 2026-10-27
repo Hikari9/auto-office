@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import check_ecosystem  # noqa: E402
 
 
-def test_version_plugin_manifest_and_package_agree():
+def test_version_has_one_source_and_manifests_carry_none():
     assert check_ecosystem.check_versions() == []
 
 
@@ -19,7 +19,7 @@ def test_skill_checks_for_the_cli_before_anything_else():
     section = text[check:text.index('## Start')]
     assert '`office --version`' in section
     assert 'ask the user to approve installing it; never install' in section
-    assert '`office install`' in section and '`VERSION`' in section
+    assert '`office install`' in section and '`src/office/_version.py`' in section
 
 
 import pytest as _pytest  # noqa: E402
