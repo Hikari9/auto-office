@@ -9,7 +9,7 @@ refuses something this page allows, the runtime is right; fix this page.
 - `office --version` not found: stop, ask the user to approve installing it, never install silently. On approval:
   `uv tool install "<skill directory>"` (`pipx install` if `uv` is missing), then `office install` (managed harness hooks and
   runtime registration, with a backup of each config) and `office doctor`.
-- Release (the part before any `+`) differs from the directory's `VERSION`: tell the user and offer
+- Release (the part before any `+`) differs from the directory's `src/office/_version.py`: tell the user and offer
   `uv tool install --force --reinstall "<skill directory>"`, then `office install`. Runs already started keep their pinned runtime.
 - Same release: a wheel reports only its release, so later fixes are invisible to `--version`. Run `office doctor`; on
   `install: STALE`, tell the user and offer the same reinstall.
@@ -103,6 +103,12 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   reported session must match the recorded one, and no other dispatch may hold the pane's reservation. Each send re-checks the reservation
   under the pane lock, which is held for that one send only. Any mismatch sends nothing, starts no headless copy and prints
   `pane-mismatch: <why>; brief NOT sent`: read the pane, then `office revoke <task>`.
+- opencode workers and reviewers get panes like every other harness with a Herdr kind: `opencode mini --model <slug>#<effort>` (a reviewer adds
+  `--standalone --agent office-reviewer`, its per-dispatch permissions), labelled and identity-checked before the brief is sent. `mini` has no
+  timeout of its own, so the pane watcher stops an opencode pane past `max_minutes` (60, or `OFFICE_WORKER_MAX_MINUTES`) as `timeout` and
+  closes the pane, keeping `pane-final.txt`. A `Free usage limit reached` or `Rate limit exceeded` wall in the pane is classified from the pane
+  tail like any pane agent's. Office reads opencode's session store (read-only) only to confirm the brief landed and to record the session id;
+  a review is read from the reply file only. Without Herdr the headless `opencode run` form runs.
 - `office revoke` restores a task to its accepted revision only when an amendment delivery alone demoted it. A task reopened for work still
   owed (open RECHECK or APPROVED-cleanup findings, a `restack:` pause, a hold for an amended dependency) stays reopened.
 - Office presses Enter for a prompt left typed but unsubmitted. A notice saying it is still unsubmitted means
@@ -137,6 +143,10 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   checks re-queues the reviews checks had cancelled.
 - Re-accepting a task reopens its accepted dependents whose revision does not contain the new one: each is paused `restack: ...` and `office status`
   prints a rerun command supported by its stored session and adapter. If the original route is unavailable, inspect the route before selecting another.
+  An amendment/redispatch reusing a task worktree restacks accepted dependencies before the executor starts (issue #696).
+  If tracked WIP blocks restack, revoke the failed relaunch and run `office rerun <task> --fresh --stash-wip`:
+  Office saves tracked/untracked WIP under its own `refs/office/wip/` ref (never the shared `refs/stash`), merges the dependency, and restores the WIP.
+  A restoration conflict appends the WIP to `git stash list` and reports its immutable commit for recovery; the orchestrator must not run raw Git in the worktree.
   A conflicting restack leaves HEAD unchanged and tells the executor to merge every missing accepted dependency, resolve within its scope, and rerun checks.
   Integration refuses a stale composition with `INTEGRATION stale: <T> accepted on ... does not
   contain <dep> accepted on ...; restack <T> onto <dep>` instead of reporting a merge conflict.

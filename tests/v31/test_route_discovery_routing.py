@@ -43,14 +43,14 @@ def failed(reason_class="unsupported-model-effort"):
 
 
 def discovery(*, known=None, quarantined=(), size="S", blast="repo", irreversible=False, used=(0, 0, 0),
-              max_=(2, 1, 3), percent=100, enabled=True, **settings):
-    s = {**route_policy.DISCOVERY_DEFAULTS, "enabled": enabled, "max_trial_percent_rolling_20": percent, **settings}
+              max_=(2, 1, 3), percent=100, enabled=True, task=None, **settings):
+    s = {**route_policy.DISCOVERY_DEFAULTS, "trial_bounded_production_tasks": True, "enabled": enabled, "max_trial_percent_rolling_20": percent, **settings}
     return {"settings": s,
             "allocation": {"probes": {"used": used[0], "max": max_[0]}, "trials": {"used": used[1], "max": max_[1]},
                            "rolling": {"used": used[2], "max": max_[2], "window": 20, "warmup": max_[2] == 0}},
             "known_working": known if known is not None else ["claude@2/opus@medium"],
             "quarantined": list(quarantined),
-            "risk": {"size_class": size, "blast_radius": blast, "irreversible": irreversible}}
+            "risk": {"size_class": size, "blast_radius": blast, "irreversible": irreversible, "task": task}}
 
 
 def req(cands, *, role="executor", disc=None, seed="seed-1", **extra):
@@ -264,6 +264,56 @@ def test_recompute_re_evaluates_every_gate_and_drops_the_candidate_with_its_reas
     assert d["discovery"]["intent"] == "none" and d["discovery"]["blocked"] == blocked, d["discovery"]
     assert d["selected"] != "codex@2/newmodel@high"
     assert d["selected"] == d["slate"][0]["route"]
+
+
+BOUNDED = {"task_size": "S", "bounds": "bounded", "domain": "backend"}
+
+
+def _production(**task):
+    return dict(blast="production", size="L", task={**BOUNDED, **task})
+
+
+def test_a_production_run_trials_a_bounded_small_task_with_the_fallback_recorded():
+    c = untried(probe=passed())
+    d = go(base() + [c], disc=discovery(**_production()), discovery_input=handle(c))
+    assert d["discovery"]["intent"] == "trial" and d["discovery"]["candidate"] == NEW
+    assert d["discovery"]["fallback"] == "claude@2/opus@medium" and "blocked" not in d["discovery"]
+
+
+@pytest.mark.parametrize("disc", [
+    _production(task_size="L"), _production(task_size=None), _production(bounds="open"), _production(bounds=None),
+    _production(domain="infrastructure"), dict(_production(), blast="production-data"),
+    dict(_production(), irreversible=True), dict(_production(), task=None),
+    dict(_production(), known=[]), dict(_production(), used=(0, 1, 0)),
+])
+def test_a_production_run_still_refuses_any_task_that_is_not_small_and_bounded(disc):
+    c = untried(probe=passed())
+    d = go(base() + [c], disc=discovery(**disc), discovery_input=handle(c))
+    assert d["discovery"]["intent"] == "none" and d["discovery"]["blocked"] in ("risk", "no-fallback", "trial-cap")
+    assert d["selected"] != NEW
+
+
+def test_the_production_task_allowance_can_be_switched_off():
+    c = untried(probe=passed())
+    d = go(base() + [c], disc=discovery(**_production(), trial_bounded_production_tasks=False), discovery_input=handle(c))
+    assert d["discovery"]["blocked"] == "risk"
+
+
+def test_a_declared_route_with_a_passed_probe_is_pinned_not_a_discovery_candidate():
+    """#812: amend route re-routes the declared pin; a production run must not park it in the trial pool."""
+    c = untried(probe=passed(), status="probe-passed")
+    d = go([c], disc=discovery(blast="production", size="M"), declared_route=NEW, exact_route=NEW)
+    assert d["selected"] == NEW and d["status"] == "selected"
+    not_declared = go([c], disc=discovery(blast="production", size="M"), exact_route=NEW)
+    assert not_declared["selected"] is None
+    pending = untried(probe=passed(), status="probe-pending")
+    d = go([pending], disc=discovery(blast="production", size="M"), declared_route=NEW, exact_route=NEW)
+    assert d["selected"] is None
+
+
+def test_the_first_call_probes_for_a_bounded_production_task():
+    d = go(base() + [untried()], disc=discovery(**_production()))
+    assert d["discovery"]["intent"] == "probe"
 
 
 def test_recompute_never_selects_a_different_untried_route():
@@ -663,8 +713,22 @@ def inputs_for(config, tmp_path):
     from office import db
     con = db.connect(tmp_path / "ceiling.db")
     run = {"id": "r1", "playbook": "Change", "risk": {"size_class": "S"}}
-    return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=None, dispatch_kind="fresh",
-                                      plan_version=1)
+    return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=None, dispatch_kind="fresh")
+
+
+def test_the_routing_seed_does_not_change_with_the_plan_version(tmp_path, monkeypatch):
+    # #816: an amendment bumps run.plan_version; a task it does not touch keeps its seeded close-call draw.
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    from office import db
+    config = cfg.resolve(None)[0]
+    con = db.connect(tmp_path / "seed.db")
+
+    def seed(task, plan_version, kind="fresh"):
+        run = {"id": "r1", "playbook": "Change", "risk": {"size_class": "S"}, "plan_version": plan_version}
+        return candidates.adaptive_inputs(con, config, run, "executor", [], task_id=task, dispatch_kind=kind)["routing_seed"]
+
+    assert seed("T1", 1) == seed("T1", 2) == seed("T1", 7)
+    assert seed("T1", 1) != seed("T2", 1) and seed("T1", 1) != seed("T1", 1, kind="rework")
 
 
 def test_the_shipped_economic_scale_is_not_a_ceiling_for_a_new_run(tmp_path, monkeypatch):
@@ -875,3 +939,29 @@ def test_route_role_rejects_a_denied_route_with_its_source_and_a_plan_route_choi
     picked = adaptive.apply_planner_choice(audit, {"routes": [denied[0]["candidate"]], "why": "the user asked for it"})
     assert "rejected at stage 1" in picked["planner_error"] and "denied" in picked["planner_error"]
     assert picked["primary"] == audit["slate"][0]["route"]
+
+
+
+def test_a_strict_seed_never_falls_to_an_unseeded_route():
+    """bcf80833: with luna and deepseek out, a free flash route reviewed instead of opus low."""
+    seeded = cand("codex", "luna", idx=40, caps=("review",))
+    other = cand("opencode", "glm-flash", idx=40, caps=("review",))
+    rq = trusted(req([other], disc=None, role="plan_reviewer"))
+    rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}], strict_seed=True)
+    d = routing.route(rq)
+    assert d["selected"] is None and d["status"] == "no_qualifying_candidate"
+    rq = trusted(req([other, seeded], disc=None, role="plan_reviewer"))
+    rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}], strict_seed=True)
+    assert routing.route(rq)["selected"] == "codex@2/luna@medium"
+    rq = trusted(req([other], disc=None, role="plan_reviewer"))
+    rq["policy"].update(required_capabilities=["review"], preferred_seed=[{"model_id": "luna"}])
+    assert routing.route(rq)["selected"] == "opencode@2/glm-flash@medium"
+
+
+def test_a_run_pinned_before_the_production_task_key_never_gains_it():
+    from office import route_policy as rp
+    old = {"routing": {"discovery": {"enabled": True}}, rp.PROVENANCE_KEY: {}}
+    settings = rp.discovery_settings(old)
+    assert settings["trial_bounded_production_tasks"] is False
+    assert rp.trial_risk_blocked(settings, {"blast_radius": "production", "size_class": "L"},
+                                 {"task_size": "S", "bounds": "bounded"})

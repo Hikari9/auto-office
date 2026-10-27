@@ -12,7 +12,7 @@ import pytest
 
 from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 
-from office import candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
+from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
 from office.util import dumps, now_iso
 
 
@@ -255,6 +255,12 @@ def test_a_quota_change_between_the_probe_and_the_dispatch_dispatches_the_fallba
 
 # ------------------------------------------------------------------ the transaction's own rechecks
 
+def _pin_draws(monkeypatch, **draws):
+    """Fix the named seeded draws so a test's route does not depend on the seed's luck (#816)."""
+    real = adaptive._draw
+    monkeypatch.setattr(adaptive, "_draw", lambda seed, label: draws[label] if label in draws else real(seed, label))
+
+
 def _between(cold, monkeypatch, change):
     """Run `change(cold)` after the preflight and before the dispatch transaction opens."""
     real = dispatch.preflight_discovery
@@ -364,6 +370,7 @@ def test_the_rolling_cap_is_rechecked_in_the_transaction(cold, monkeypatch):
     route_learning.ensure_schema(cold.con)
     cold.con.execute("INSERT INTO route_audit(id, run_id, task_id, role, phase, decision_hash, disclosure_json, created_at) "
                      "VALUES('ra-old','run-B','T9','executor','dispatch','h','{}',?)", (now_iso(),))
+    _pin_draws(monkeypatch, discovery=0.0)
 
     def another_runs_trial(cold, _decision):
         with db.transaction(cold.con):
@@ -1184,6 +1191,7 @@ def test_only_the_recomputed_decision_is_dispatched(cold, monkeypatch):
         return out
 
     monkeypatch.setattr(route_probe, "ensure", then_denied)
+    _pin_draws(monkeypatch, clincher=0.0)
     cold.dispatch("T1")
     (d,) = cold.dispatches()
     assert first["primary"] == "codex@0/gpt-6-astra@low" and d["triple"] != first["primary"]
@@ -1738,3 +1746,41 @@ def test_a_scan_run_beneath_a_tagged_process_does_not_name_its_own_helpers(monke
     monkeypatch.setattr(dispatch, "_process_table", lambda: table)
     monkeypatch.setattr(dispatch.os, "getpid", lambda: 200)
     assert dispatch._WorkerTree("Dtagged", {}).scan() == {400}
+
+
+@pytest.mark.parametrize("descriptor,blocked", [
+    ({"task_size": "S", "bounds": "bounded", "domain": "backend"}, None),
+    ({"task_size": "M", "bounds": "bounded"}, None),
+    ({"task_size": "L", "bounds": "bounded"}, "risk"),
+    ({"task_size": "S", "bounds": "open"}, "risk"),
+    ({"task_size": "S", "bounds": "bounded", "domain": "infrastructure"}, "risk"),
+    # #809: a size Office inferred (conservative M) is not a size the planner declared, so it opens no trial.
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "inferred", "profile_version": "task-dispatch-profile-1"}, "risk"),
+    ({"task_size": "M", "bounds": "bounded", "profile_version": "task-dispatch-profile-1"}, "risk"),
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "planner", "profile_version": "task-dispatch-profile-1"}, None),
+    (None, "risk")])
+def test_a_production_run_rechecks_the_task_before_reserving_a_trial(cold, descriptor, blocked):
+    run = state.get_run(cold.con, "run-A")
+    task = state.get_task(cold.con, "run-A", "T1")
+    decision = dispatch.preflight_discovery(cold.con, run, task, dispatch.planned_route(cold.con, run, task))
+    trial = decision["trial"]
+    run = {**run, "risk": {"size_class": "L", "blast_radius": "production", "irreversible": False},
+           "policy": cold.policy(trial_bounded_production_tasks=True)}
+    with db.transaction(cold.con):
+        got = dispatch._trial_blocked(cold.con, run, decision, trial["fallback"], {"descriptor": descriptor})
+    assert got == blocked
+    with db.transaction(cold.con):  # production-data and irreversible are never bounded away
+        for risk in ({"blast_radius": "production-data"}, {"blast_radius": "production", "irreversible": True}):
+            assert dispatch._trial_blocked(cold.con, {**run, "risk": {"size_class": "S", **risk}}, decision,
+                                           trial["fallback"], {"descriptor": {"task_size": "S", "bounds": "bounded"}}) == "risk"
+
+
+@pytest.mark.parametrize("descriptor,size", [
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "inferred", "profile_version": "task-dispatch-profile-1"}, None),
+    ({"task_size": "M", "bounds": "bounded", "task_size_source": "planner", "profile_version": "task-dispatch-profile-1"}, "M")])
+def test_discovery_inputs_record_only_a_planner_declared_task_size(cold, descriptor, size):
+    from office import candidates, route_policy
+    run = state.get_run(cold.con, "run-A")
+    settings = route_policy.discovery_settings(state.pinned_config(run))
+    got = candidates.discovery_inputs(cold.con, run, "executor", [], settings, {"descriptor": descriptor})
+    assert got["risk"]["task"] == {"task_size": size, "bounds": "bounded", "domain": None}

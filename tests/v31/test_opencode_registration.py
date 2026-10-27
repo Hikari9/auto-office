@@ -219,7 +219,8 @@ def test_preflight_signed_out_unlisted_model_fails_model_check(fake, monkeypatch
 def test_capabilities_are_builder_only(fake):
     adapter = _adapter()
     assert adapter["capabilities"] == ["builder"]
-    assert set(adapter["office_profiles"]) == {"worker"}
+    # A reviewer form exists (pane-hosted, fenced by a per-dispatch agent file); no vision form.
+    assert set(adapter["office_profiles"]) == {"worker", "reviewer"}
 
 
 def test_free_model_discovery_does_not_change_auth_or_enable_candidates(fake, monkeypatch, tmp_path):

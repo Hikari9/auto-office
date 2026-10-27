@@ -40,7 +40,7 @@ Auto Office {ver}
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
   office ack <amendment-id>         worker: record that you applied a delivered amendment
-  office rerun <task> --resume|--fresh [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
+  office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
   office prompt <task|dispatch> -- "<message>"
@@ -81,6 +81,8 @@ Auto Office {ver}
                                     waiver; refused for the session that produced the work
   office review plan --quote "<user's words>" [--rounds N]
                                     the user's explicit request for another plan review (a new bounded cycle)
+  office review plan --as <harness>/<model>[@effort]
+                                    while plan review is open: re-pin the plan reviewer and re-run only that review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office config --run <id> --apply-routing --quote "<user's words>"
                                     re-pin one run's roles and routing from the current config files
@@ -217,10 +219,10 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("start", parents=[common], add_help=True)
     s.add_argument("goal", nargs="?")
-    s.add_argument("--gear", choices=["direct", "direct+review", "light", "quick", "express", "full"])
+    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "direct", "direct+review", "light", "quick", "express", "full"])
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
-    s.add_argument("--size-class", choices=["S", "M", "L", "XL"])
+    s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])
     s.add_argument("--irreversible", action="store_true")
     s.add_argument("--volume", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--interview", action="store_true", help=argparse.SUPPRESS)
@@ -487,7 +489,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="<task|lane>: re-run only its review on this reviewer route (re-pins the reviewer)")
+                   help="<task|lane|plan>: re-run only its review on this reviewer route (re-pins the reviewer)")
     s.add_argument("--cli", dest="review_cli", metavar="ARGV", help="with --as: start exactly this reviewer argv in herdr")
     s.add_argument("--external", dest="review_external", action="store_true",
                    help="with --as: you start the reviewer; Office reads its review file")
@@ -498,6 +500,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--resume", action="store_true", help="continue the ended session (native harness resume)")
     s.add_argument("--fresh", action="store_true", help="start a new session with the open findings in its brief")
+    s.add_argument("--stash-wip", action="store_true", help="with --fresh: let Office stash and restore uncommitted WIP around dependency restack")
     s.add_argument("--reroute", action="store_true",
                    help="with --fresh: route from current evidence instead of keeping the original route")
     s.add_argument("--as", dest="as_model", metavar="HARNESS/MODEL[@EFFORT]",
@@ -639,8 +642,11 @@ def main(argv: list[str] | None = None) -> int:
             err.data.setdefault("final", closeout.done(f"stopped early ({err.category}); nothing closed or cleaned up"))
         return emit_error(err, args, _refusal_hints(err, args, argv))
     except Exception as err:
-        from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
-        print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        try:
+            from office import bughint  # the traceback and exit code stay as they were; the hint precedes them on stderr
+            print(bughint.line(bughint.internal_error_signal(err).text), file=sys.stderr)
+        except ImportError:
+            pass  # the install is being replaced under this process: show the original error, not this one (#830)
         raise
     except KeyboardInterrupt:
         return 130
@@ -1030,8 +1036,14 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return economics.ingest(con, run, file=args.file, harness=args.usage_harness,
                                 session=args.usage_session, role=args.usage_role)
     if cmd == "inspect":
-        from office import inspect_cmd
-        return inspect_cmd.inspect(con, run, args.what, args.ident)
+        from office import gates, inspect_cmd
+        res = inspect_cmd.inspect(con, run, args.what, args.ident)
+        if (args.what or "").lower() == "route":  # plan and lane reviews that left their route (a task's own changes are listed already)
+            notices = gates.review_route_lines(con, run["id"], skip_task=(args.ident or "").upper() or None)
+            res.lines += notices
+            if isinstance(res.data, dict):
+                res.data["review_route_changes"] = notices
+        return res
     if cmd == "approve":
         from office import authority
         return authority.approve(con, run, args.target, args.quote, args.extra, root_cause=args.root_cause,
@@ -1047,8 +1059,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
         return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
     if cmd == "review" and args.target.lower() == "plan":
-        from office import plans
-        return plans.request_review(con, run, args.quote, args.rounds)
+        from office import gates, plans
+        from office.state import Usage
+        if (args.review_cli or args.review_external) and not args.review_as:
+            raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
+        return plans.request_review(con, run, args.quote, args.rounds,
+                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external))
     if cmd == "review":
         from office import convergence, gates
         from office.state import Usage
@@ -1070,7 +1086,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return dispatch.revoke(con, run, args.task, args.reason)
     if cmd == "rerun":
         from office import rerun
-        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, reroute=args.reroute,
+        return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, stash_wip=args.stash_wip, reroute=args.reroute,
                            as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external, review_as=args.review_as,
                            review_cli=args.review_cli, review_external=args.review_external)
     if cmd == "dismiss":

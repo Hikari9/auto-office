@@ -17,10 +17,15 @@ from office.util import sha256_file, sha256_obj
 
 NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
                          route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
-GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
+RUN_GEARS = ("XS", "S", "M", "L", "XL")
+# Existing runs pin the old representation and its gates; never rewrite their stored gear.
+LEGACY_GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
+# The XS-XL gear whose funding each legacy name is closest to, shown when a legacy name starts a run.
+LEGACY_EQUIVALENT = {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M", "express": "M", "full": "XL"}
+GEARS = (*RUN_GEARS, *LEGACY_GEARS)
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
-SIZE_CLASSES = ("S", "M", "L", "XL")
+SIZE_CLASSES = RUN_GEARS
 
 
 def default_config_path() -> Path:
@@ -303,15 +308,34 @@ def resolve_risk(config: dict, blast_radius: str | None, size_class: str | None,
 
 def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview: bool = False,
              adversarial: bool = False) -> str:
-    """The v3 fit test, unchanged: mode-preset selection is #128's scope."""
+    """Pin complexity gear independently of blast-radius and irreversibility risk.
+
+    Old names remain explicit compatibility presets for existing pinned runs; no
+    new auto-fit silently chooses one. Unknown complexity is M, not guessed XS.
+    """
     if requested:
         return requested
-    if risk.get("irreversible"):
-        return "full"
-    base = "express" if sum((volume, interview, adversarial)) >= 2 else "direct"
-    if risk.get("high") and base == "direct":
-        return "express"
-    return base
+    size = risk.get("size_class")
+    if size in RUN_GEARS:
+        return size
+    if sum((volume, interview, adversarial)) >= 2:
+        return "L"
+    return "M"
+
+
+def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bool = False,
+                   adversarial: bool = False) -> str:
+    """Human-readable, immutable at intake. Risk is explained by separate gates."""
+    if gear in LEGACY_GEARS:
+        return (f"explicit legacy preset {gear} (closest to {LEGACY_EQUIVALENT[gear]}): "
+                "its pinned review and release semantics are preserved")
+    if risk.get("size_class") in RUN_GEARS:
+        return (f"intake complexity {risk['size_class']}: scope, coupling and coordination are "
+                "funded at this gear; safety review floors remain independent")
+    signals = [name for name, on in (("multiwave volume", volume), ("discovery/interview", interview),
+                                      ("adversarial uncertainty", adversarial)) if on]
+    return (f"{' and '.join(signals)} warrant coordinated planning" if len(signals) >= 2 else
+            "no reliable task-size evidence at intake: conservative M pending planning")
 
 
 def resolve_gates(gear: str, risk, config: dict) -> dict:
@@ -343,6 +367,8 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         # #337: every RECHECK sequence stops at three substantive rounds.
         plan_rounds = code_rounds = contract.MAX_ROUNDS
     gates = {
+        "run_gear": gear,
+        "gear_model_version": "run-gear-1" if gear in RUN_GEARS else "legacy-pinned",
         # Pinned per run (#337): the review contract this run keeps for its life.
         "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they

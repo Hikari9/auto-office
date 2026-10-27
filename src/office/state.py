@@ -123,8 +123,25 @@ def tasks(con: sqlite3.Connection, run_id: str, *, include_planner: bool = False
     return out
 
 
+EXECUTION_OUTCOMES = ("accepted", "changes_required", "cancelled", "superseded")
+
+
+def _note_execution_outcome(con: sqlite3.Connection, run_id: str, task_id: str, fields: dict) -> None:
+    """#809: a task's recorded execution mode (owner, reason, estimated savings) gains the outcome of that
+    attempt when the task is accepted, sent back, cancelled or superseded. The record is rewritten by the
+    next dispatch, so an outcome always belongs to the attempt that made it."""
+    row = con.execute("SELECT route_json FROM tasks WHERE run_id=? AND id=?", (run_id, task_id)).fetchone()
+    route = loads(row["route_json"], {}) if row and row["route_json"] else {}
+    mode = route.get("execution_mode") if isinstance(route, dict) else None
+    if isinstance(mode, dict) and mode.get("mode"):
+        mode["outcome"] = {"status": fields["status"], "at": fields["updated_at"]}
+        fields["route_json"] = dumps(route)
+
+
 def update_task(con: sqlite3.Connection, run_id: str, task_id: str, **fields) -> None:
     fields["updated_at"] = now_iso()
+    if fields.get("status") in EXECUTION_OUTCOMES and "route_json" not in fields:
+        _note_execution_outcome(con, run_id, task_id, fields)
     for key in ("scope", "depends", "interfaces", "accept", "checks", "visual", "review_override", "pr", "descriptor"):
         if key in fields:
             fields[key + "_json"] = dumps(fields.pop(key))

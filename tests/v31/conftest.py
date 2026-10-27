@@ -234,6 +234,12 @@ class Env:
         monkeypatch.setattr(candidates, "catalog_rows", lambda: [
             {**r, "dispatchable": False} if r.get("invocation_harness") == "agy"
             and str(r.get("model_id", "")).startswith("claude-") else r for r in seed_rows()])
+        # The shipped reviewer seed is strict (luna > deepseek > opus@low, #815) and the fake env has no deepseek
+        # route, so a scripted reviewer chain would end after two routes. The suites that walk a chain need the
+        # fakes' other routes; the strict seed itself is covered by test_route_discovery_routing.
+        seed_role_policy = candidates.role_policy
+        monkeypatch.setattr(candidates, "role_policy", lambda config, role: (
+            {k: v for k, v in seed_role_policy(config, role).items() if k != "strict_seed"}))
         # A disposable state home: reporters working it are reclaimed when this
         # owner process ends, even if the directory survives an interrupted
         # teardown (#501).
@@ -463,6 +469,26 @@ def env(request, tmp_path, monkeypatch):
     finally:
         # Release the disposable home explicitly; its reporter leaves with it (#501).
         shutil.rmtree(e.state, ignore_errors=True)
+
+
+RETIRED_MIMO_ARCHIVE = Path(__file__).resolve().parents[2] / "catalog" / "archive" / "retired-mimo-pi-kilo-2026-10-24.yaml"
+
+
+def retired_mimo_rows(harness: str) -> list[dict]:
+    """The archived MiMo rows (#786) for one harness: non-dispatchable evidence, never shipped."""
+    import yaml
+    models = yaml.safe_load(RETIRED_MIMO_ARCHIVE.read_text(encoding="utf-8"))["models"]
+    return [r for r in models if r["invocation_harness"] == harness]
+
+
+def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low") -> None:
+    """Make a dispatchable user-catalog copy of an archived MiMo row at another effort (#786).
+
+    The MiMo rows are retired from the shipped seed, but the pi and kilo launch tests exercise the
+    harness (preflight, timeout, conformance), not the model, and still need one routable row."""
+    from office import user_catalog
+    row = next(r for r in retired_mimo_rows(harness) if r["model_id"] == model_id)
+    user_catalog.save({"models": [{**row, "effort": effort, "dispatchable": True}]})
 
 
 def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):

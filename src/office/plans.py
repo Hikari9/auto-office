@@ -102,6 +102,12 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                           preserved=f"{plan_path} is unchanged; the run keeps its review policy",
                           next_step=f"classify risk in {plan_path} (`blast_radius: local|repo`), or drop `lightweight:`, "
                                     "then office submit")
+        rec = parsed.requirements.get("run_gear")
+        rec_problem = risk.run_gear_problem(run.get("gear"), proposed_risk or run.get("risk") or {}, rec["gear"]) if rec else None
+        if rec_problem:
+            raise Refused("run-gear-refused", f"run gear recommendation refused: {rec_problem}", scope="plan",
+                          preserved=f"{plan_path} is unchanged; the run keeps gear {run.get('gear')}",
+                          next_step=f"raise or drop `run_gear:` in {plan_path}, then office submit")
         if redirect:
             from office import redirect as redirect_mod
             for line in redirect_mod.record(con, run, redirect):
@@ -114,6 +120,14 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         for line in _apply_risk(con, run, proposed_risk, declaration, new_version):
             res.add(line)
         run = state.get_run(con, run["id"])
+        # Advisory: the pinned gear and its gates never change from a recommendation. A revision that drops it clears it.
+        gates = {k: v for k, v in (run.get("gates") or {}).items() if k != "run_gear_recommendation"}
+        if rec:
+            gates["run_gear_recommendation"] = {**rec, "plan_version": new_version}
+            res.add(f"planner recommends run gear {rec['gear']} (pinned gear stays {run['gear']}): {rec['why']}")
+        if gates != (run.get("gates") or {}):
+            state.update_run(con, run["id"], gates=gates)
+            run = state.get_run(con, run["id"])
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], new_version, kind, text, dumps(parsed.tasks), dumps(parsed.requirements),
@@ -225,7 +239,9 @@ def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None,
     gear = run["gear"]
     raised = bool(new.get("high")) and not cur.get("high")
     if raised and gear == "direct":
-        gear = cfg.fit_gear(None, new)
+        # The pre-809 direct preset had a pinned risk-driven upgrade. Do not
+        # reinterpret that historical rule through XS-XL complexity fitting.
+        gear = "full" if new.get("irreversible") else "express"
     base = cfg.resolve_gates(gear, new, config)
     keys = list(risk.FLOOR_KEYS)
     started = (bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))
@@ -304,6 +320,16 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     state.update_run(con, run["id"], requirements_version=version, envelope=envelope)
 
 
+def _sized_descriptor(run: dict, planned: dict) -> dict:
+    """The planner's descriptor, plus Office's size, rationale and profile for an XS-XL run. A run pinned to a
+    legacy gear keeps exactly the descriptor its plan wrote."""
+    from office import task_sizing
+    declared = planned.get("descriptor") or {}
+    if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1":
+        return declared
+    return {**declared, **task_sizing.classify(planned, run_gear=run.get("gear"))}
+
+
 def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
     """Make the tasks table match a plan version. Caller holds the tx.
 
@@ -326,8 +352,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                 (run["id"], p["id"], p["title"], "executor", dumps(p["scope"]), dumps(p["depends"]),
                  dumps(p["interfaces"]), dumps(p["accept"]), dumps(checks), dumps(p["visual"]) if p["visual"] else None,
                  "planned", plan_version, plan_version, plan_version, now, now))
-            if p.get("descriptor"):
-                state.update_task(con, run["id"], p["id"], descriptor=p["descriptor"])
+            state.update_task(con, run["id"], p["id"], descriptor=_sized_descriptor(run, p))
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
@@ -339,7 +364,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
-                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=p.get("descriptor") or {})
+                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=_sized_descriptor(run, p))
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])
@@ -571,9 +596,16 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
-    outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
-                                       plan_review=True, exclude=job["payload"].get("exclude"),
-                                       resume_from=job["payload"].get("resume_from"))
+    from office import xl_review
+    if xl_review.eligible(con, run, gate):
+        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer.
+        outcome = xl_review.audit_plan(con, run, gate, plan, brief, Path(run["repo_root"]),
+                                       exclude=job["payload"].get("exclude"))
+    else:
+        outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
+                                           plan_review=True, exclude=job["payload"].get("exclude"),
+                                           resume_from=job["payload"].get("resume_from"),
+                                           review_override=job["payload"].get("review_override"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -910,15 +942,23 @@ def review_after_revision(con, run: dict, version: int) -> str:
     return "plan-review queued" if gid else "plan review not queued"
 
 
-def request_review(con, run: dict, quote: str | None, rounds: int | None = None) -> Result:
+def request_review(con, run: dict, quote: str | None, rounds: int | None = None, *, pin: dict | None = None) -> Result:
     """The user's explicit request for another plan review after a cycle closed
     (#418): a new bounded cycle, recorded as user-requested with their words.
-    It is the only way plan review reopens."""
+    It is the only way plan review reopens. While plan review is open, `pin`
+    (`--as`) re-pins the plan reviewer and re-runs only that review."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-request-review", "only the user requests another plan review")
     if not contract.is_convergence(run):
         raise Refused("legacy-contract", f"this run keeps the {contract.of(run)} review contract; it has no "
                       "user-requested plan review", next_step="office status")
+    if pin:  # the route's shape and capability, before any pin is written
+        candidates.declared_decision(pin["as"], flag="--as", role="plan_reviewer", config=state.pinned_config(run))
+    if pin and review_required(run) and not _pr(run).get("ended") and run.get("plan_version"):
+        if rounds is not None:
+            raise Usage("rounds-with-open-review", f"plan review is open with a cap of {round_cap(run)} round(s); a re-pin "
+                        "(--as) keeps it, so --rounds cannot change it", next_step="office review plan --as <route>")
+        return _repin_open_review(con, run, pin)
     if not quote or len(re.sub(r"\s+", "", quote)) < 2:
         raise Usage("user-quote-required", "another plan review is the user's request; record their words",
                     next_step='office review plan --quote "<user\'s words>" [--rounds N]')
@@ -940,6 +980,8 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None)
         pr.update({"required": True, "ended": False, "ended_reason": None, "status": "pending", "cycle": cycle,
                    "lifecycle": USER_REQUESTED, "max_rounds": rounds, "outstanding": None,
                    "requested": {"quote": quote.strip(), "plan_version": version, "at": now_iso()}})
+        if pin:
+            pr["review_override"] = pin
         state.update_run(con, run["id"], plan_review=pr)
         run = state.get_run(con, run["id"])
         queue_plan_review(con, run, version)
@@ -947,6 +989,42 @@ def request_review(con, run: dict, quote: str | None, rounds: int | None = None)
                    f"up to {rounds} substantive round(s)", payload={"quote": quote.strip(), "rounds": rounds})
     jobs.kick(con, run["id"])
     return Result(lines=[f"plan review requested by the user: p{version}, cycle {cycle}, up to {rounds} round(s)"],
+                  next="no action; the verdict returns here (office status)")
+
+
+def _repin_open_review(con, run: dict, pin: dict) -> Result:
+    """`office review plan --as <route>` while plan review is open: pin the plan reviewer to `pin` and queue one
+    fresh plan-review attempt. Only a completed review spends a round, so an attempt that returned no verdict
+    (unavailable, unreadable reply) costs none. A running attempt is left to finish."""
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        pr = _pr(run)
+        gates = plan_gates(con, run["id"])
+        live = [g for g in gates if g["status"] in ("queued", "running")]
+        if live:
+            raise Refused("plan-review-running", f"plan review round {live[-1]['id']} is still running"
+                          + (f" on {live[-1]['route']}" if live[-1].get("route") else ""), scope="plan",
+                          next_step="wait for its result (office status); re-pin once it returns no verdict")
+        before = (pr.get("review_override") or {}).get("as") or (gates[-1].get("route") if gates else None)
+        pr["review_override"] = pin
+        state.update_run(con, run["id"], plan_review=pr)
+        run = state.get_run(con, run["id"])
+        spent = substantive_rounds(con, run)
+        gid = queue_plan_review(con, run, run["plan_version"])
+        if gid is None:
+            raise Refused("plan-review-not-queued", f"no plan review can be queued ({spent}/{round_cap(run)} rounds spent)",
+                          scope="plan", next_step="office status")
+        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
+        from office import gates as gate_engine
+        gate_engine.review_route_notice(con, run, gate, "plan_reviewer", before, pin["as"],
+                                        "the user re-pinned the plan reviewer (office review plan --as)",
+                                        kind="repin", actor="user")
+        last = gates[-1] if gates else None
+        voided = last is None or last.get("review_status") != contract.COMPLETED
+    jobs.kick(con, run["id"])
+    return Result(lines=[f"plan review re-run on {pin['as']} (gate {gid}, pinned by the user); "
+                         + ("the previous attempt had no verdict, so no round is spent" if voided
+                            else f"the next completed review is round {spent + 1}/{round_cap(run)}")],
                   next="no action; the verdict returns here (office status)")
 
 
@@ -968,6 +1046,8 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
     if rounds >= round_cap(run):
         return None
     payload = {"exclude": list(exclude or [])}
+    if pr.get("review_override"):
+        payload["review_override"] = pr["review_override"]
     # Same reviewer across a RECHECK sequence when it is still available (#337).
     prev = recheck_reviewer(con, run)
     if prev and not payload["exclude"]:

@@ -69,4 +69,4 @@ def test_every_accepted_requirement_key_variant_stays_separate_when_indented():
     # every key the parser maps into a requirements field is in the table
     assert planfile.REQUIREMENT_KEYS == {
         "goal", "done", "non_goals", "actions", "checks", "blast_radius", "irreversible", "size_class",
-        "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify"}
+        "run_gear", "run_gear_why", "lightweight", "end_state", "deploy_preview", "deploy_prod", "deploy_verify"}

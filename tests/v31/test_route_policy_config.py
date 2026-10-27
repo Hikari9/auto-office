@@ -28,8 +28,9 @@ def test_new_defaults_have_no_hard_ceiling_or_user_policy():
                                        "sources": {"denied_models": "shipped", "version_ceilings": None, "overkill_rules": "shipped"}}
     settings = policy.discovery_settings(cfg)
     # shipped config turns discovery on (#494 T6); the code constant stays off, the safe default for a pre-#494 pin
-    assert settings == {**policy.DISCOVERY_DEFAULTS, "enabled": True}
+    assert settings == {**policy.DISCOVERY_DEFAULTS, "enabled": True, "trial_bounded_production_tasks": True}
     assert policy.DISCOVERY_DEFAULTS["enabled"] is False
+    assert policy.DISCOVERY_DEFAULTS["trial_bounded_production_tasks"] is False
     assert cfg["routing"]["adaptive"]["cost_scale_usd"] == 25
     assert cfg[policy.DIGEST_KEY] == policy.policy_digest(cfg)
 
@@ -153,7 +154,7 @@ def test_config_command_edits_discovery_and_user_policy_at_existing_tiers(home, 
     ("max_trial_percent_rolling_20", "101"), ("max_trial_percent_rolling_20", ".nan"),
     ("probe_timeout_s", "0"), ("probe_timeout_s", "901"), ("probe_ttl_days", "366"),
     ("trial_size_classes", "[L]"), ("trial_blast_radius", "[production]"),
-    ("enabled", "null"), ("require_known_fallback", "null"),
+    ("enabled", "null"), ("require_known_fallback", "null"), ("trial_bounded_production_tasks", "null"),
 ])
 def test_discovery_invalid_values_rejected_without_writing(home, key, value):
     with pytest.raises(OfficeError) as exc:

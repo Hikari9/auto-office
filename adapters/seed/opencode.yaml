@@ -76,19 +76,43 @@ source_notes: >-
   `auth list` exit status is not sign-in evidence or a launch gate; onboarding
   reads its output to recognize authentication. It reports a listed `-free`
   model as the named credential-free usable path, while
-  signed-in OpenCode is usable through its authenticated path. No reviewer or
-  vision profile is declared: opencode has no verified read-only isolation, so it is not a code
-  or visual reviewer, and its quota is always unknown (no probe; never treated
-  as unlimited). Session identity is not declared; opencode keeps its own
+  signed-in OpenCode is usable through its authenticated path. A reviewer
+  profile is declared (no vision profile). opencode has no permission flag, but
+  agent permissions fence a reviewer to reading plus one reply file: Office
+  writes that agent per dispatch (see the reviewer profile), and the result is
+  read only from the reply file. Its quota is always unknown (no probe; never
+  treated as unlimited). Session identity is not declared; opencode keeps its own
   sessions (opencode.db, --session exists) which Office does not read, so no
   headless resume form exists yet. A pane-hosted interactive form is declared
   for Herdr delegation (herdr_kind opencode, `mini --model` with the same trust
   posture and pinned model/effort; mini is the interactive surface that accepts
-  --model, verified to require a TTY rather than reject the flag). Conformance
+  --model, verified to require a TTY rather than reject the flag; it also takes
+  --standalone and --agent, which the reviewer pane uses so the per-dispatch
+  agent in OPENCODE_CONFIG_DIR applies, since a background service would not
+  see that environment). Under Herdr both workers and reviewers get panes (the
+  same label, pane identity check on cwd, agent kind, agent name and session, and
+  brief-pointer delivery as other pane agents); the pane form is `max_minutes`
+  capped by the pane watcher (`wall_cap`), as `mini` has no timeout of its own, and
+  a quota or rate-limit wall printed in the pane (`Free usage limit reached`,
+  `Rate limit exceeded`) is classified by the same quota check on the pane tail
+  as for any pane agent, since the failure signatures above are its text. Session
+  and transcript: opencode 2.0.29 keeps sessions in opencode.db (session_v2 holds
+  id and directory; session_message holds `user` messages with a JSON `text` field
+  and `assistant` messages whose `content` mixes reasoning, tool and text parts).
+  Office reads only the `user` message, read-only, for the landing probe
+  (`prompt_seen`) and the session id; `mini --session <id>` is the pane resume form
+  (flag per `opencode mini --help`, not yet exercised live). No `final_reply`
+  reader exists on purpose: a review is read only from the reply file the
+  reviewer's agent may edit, never from pane or session text. Conformance
   stays pending and variant names stay model-specific: an unknown variant fails
   fast at launch, never silently.
+# opencode takes no id at launch and keeps its sessions in its own SQLite store
+# (opencode.db), which Office reads read-only: the session whose `user` message
+# carries this dispatch's brief path (`transcript`), or the id herdr reports
+# (`herdr`). It never reads an assistant reply from it (see source_notes).
 session:
-  id: none
+  id: detected
+  sources: [herdr, transcript]
 capabilities: [builder]
 office_profiles:
   worker:
@@ -102,6 +126,30 @@ office_profiles:
     # above stays the dispatch-of-record for smoke and conformance.
     interactive:
       argv: [mini, --model, "{model}#{effort}"]
+      resume_argv: [--session, "{session_id}"]
+      wall_cap: true
     # opencode run has no timeout of its own, so the supervisor's wall cap
-    # stops a stuck dispatch instead of holding the task open forever.
+    # stops a stuck dispatch instead of holding the task open forever. The pane
+    # form (`mini`) has none either: wall_cap makes the pane watcher apply the
+    # same max_minutes (or OFFICE_WORKER_MAX_MINUTES) and close the pane.
+    max_minutes: 60
+  # Pane-hosted reviewer. opencode has no permission flag, so Office writes the
+  # per-dispatch `office-reviewer` agent into <dispatch dir>/opencode/agents/
+  # (agent_file) and sets OPENCODE_CONFIG_DIR to it for both the pane and the
+  # headless launch. The generated permissions, verified against opencode 2.0.29:
+  #   deny `*`; allow read/glob/grep `*`; deny read `*.env`, `*.env.*`;
+  #   external_directory `<dir>/*` for the checkout (cwd), include_dirs, shared
+  #   read roots and the dispatch dir (each also as its realpath);
+  #   edit on the exact reply file only (absolute, realpath, cwd-relative).
+  # No --auto anywhere: a permission nobody granted is denied, never approved.
+  reviewer:
+    argv: [run, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
+    prompt: argv
+    output: stdout
+    herdr_kind: opencode
+    agent_file: {format: opencode, name: office-reviewer, env: OPENCODE_CONFIG_DIR}
+    interactive:
+      argv: [mini, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
+      resume_argv: [--session, "{session_id}"]
+      wall_cap: true
     max_minutes: 60

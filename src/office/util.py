@@ -80,6 +80,19 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def pid_gone(pid: int | None) -> bool:
+    """Whether `pid` has exited: no such process, or a zombie (exited, not yet reaped by its parent, so
+    `os.kill(pid, 0)` still succeeds). A pid that cannot be read is never gone."""
+    if not pid_alive(pid):
+        return True
+    import subprocess
+    try:
+        proc = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.stdout.strip().startswith("Z")
+
+
 def pid_state(pid: int | None) -> str:
     """ALIVE, DEAD (no such process) or UNKNOWN (the probe itself failed)."""
     if not pid or pid <= 0:

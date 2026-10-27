@@ -127,3 +127,9 @@ def partition(rows: list[dict], *, manifest: dict[str, dict] | None = None) -> d
         destination = "active" if version_parts(meta["generation_version"]) in windows[meta["lineage_key"]] else "archived"
         result[destination].append(row)
     return result
+
+
+
+# Lineages whose newer qualified generation moves ahead of its predecessor in executor/worker
+# slates (adaptive._supersede, #811). Deliberate: no inferred policy for other families.
+EXECUTOR_SUPERSESSION_LINEAGES = frozenset({"openai/gpt-sol", "openai/gpt-terra"})

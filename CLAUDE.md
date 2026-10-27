@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Auto Office is an agent engineering lifecycle (intent → plan → routed execution → independent review → verification → landing) behind one `office` CLI. Distribution `auto-office`, Python package `office` in `src/office/`, entry point `office.cli:main`. Version lives in both `VERSION` and `pyproject.toml`.
+Auto Office is an agent engineering lifecycle (intent → plan → routed execution → independent review → verification → landing) behind one `office` CLI. Distribution `auto-office`, Python package `office` in `src/office/`, entry point `office.cli:main`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it dynamically. See `AGENTS.md` for the bump rule.
 
 ## Commands
 
@@ -40,7 +40,7 @@ The module map is in `docs/v31-implementation.md` §1. The big-picture rules:
 - **Review contracts.** New runs default to `convergence-v1` (`convergence.py`, `docs/review-convergence.md`). Runs pinned to `v3.1` keep rolling plan-review semantics (`docs/v31-rolling-review-gates.md`). Changes to review behavior must preserve both.
 - **Flow through modules:** `lifecycle.py` (start/resume/close) → `plans.py`/`planfile.py` (PLAN.md, plan review) → `authority.py` (user approval) → `dispatch.py` (leases, worktrees, agent launch) → `submit.py` (immutable revisions) → `gates.py` (checks, review, acceptance) → `integration.py` → `land.py`/`closeout.py`. `amend.py` handles amendments. `guide.py` produces `status` and its `next:` line.
 - **Routing** (`routing.py`, `scoring.py`, `adaptive.py`, `candidates.py`, `benchmarks.py`) picks harness/model/effort per role under trust and capability floors, using `catalog/`, `config/`, and harness adapters in `adapters/` (validated by `scripts/office_runtime.py validate-adapter`).
-- **Packaged resources.** `config/`, `schemas/`, `catalog/`, `adapters/`, `skills/`, `SKILL.md`, `VERSION`, and the `scripts/*-usage.py` probes ship inside the wheel as `office/_resources/`. Adding a runtime-read file outside these needs a `pyproject.toml` force-include entry.
+- **Packaged resources.** `config/`, `schemas/`, `catalog/`, `adapters/`, `skills/`, `SKILL.md`, and the `scripts/*-usage.py` probes ship inside the wheel as `office/_resources/`. Adding a runtime-read file outside these needs a `pyproject.toml` force-include entry.
 - **Skills.** `SKILL.md` is the orchestrator operating contract. `skills/` holds role skills (`auto-planning`, `auto-review`, harness CLIs, etc.). When runtime behavior changes, update the skills that describe it.
 
 ## Terminology

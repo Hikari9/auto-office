@@ -7,11 +7,13 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
@@ -211,12 +213,15 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     # task HEAD after a successful earlier merge (#580).
     if paths.git(wt, "status", "--porcelain", "--untracked-files=no").strip():
         raise Refused("restack-dirty-worktree", f"{task['id']} has uncommitted changes",
-                      preserved="the task worktree", next_step="commit or stash changes first")
+                      preserved="the task worktree",
+                      next_step=f"office rerun {task['id']} --fresh --stash-wip "
+                                "(Office preserves and reapplies WIP; revoke a failed pending relaunch first)")
     env = {**os.environ, **paths.commit_identity_env(wt)}
     merged = []
     with tempfile.TemporaryDirectory(prefix="office-restack-") as tmp:
         scratch = Path(tmp) / "worktree"
         paths.git(Path(run["repo_root"]), "worktree", "add", "-q", "--detach", str(scratch), head)
+        failure: BaseException | None = None
         try:
             for dep, rev_id, sha in pending:
                 proc = subprocess.run(["git", "-C", str(scratch), "merge", "--no-edit", "-m",
@@ -251,11 +256,121 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                 if proc.returncode != 0:
                     raise Refused("restack-publish-failed", f"cannot advance task branch: {proc.stderr[:180]}",
                                   preserved="task HEAD unchanged", next_step="inspect worktree and retry")
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
-            subprocess.run(["git", "-C", str(run["repo_root"]), "worktree", "remove", "--force", str(scratch)],
-                           capture_output=True)
+            _remove_scratch(run["repo_root"], scratch, failure)
     return {"base": base, "merged": merged, "conflict": None, "reopened": reopened,
             "line": "; ".join(x for x in ("restacked onto " + ", ".join(f"{m['task']} {m['revision']}" for m in merged), note) if x)}
+
+
+def _remove_scratch(repo_root: str, scratch: Path, failure: BaseException | None) -> None:
+    """Drop the scratch worktree. A cleanup error is noted on the restack error already in
+    flight instead of replacing it; with no error in flight it propagates."""
+    try:
+        subprocess.run(["git", "-C", str(repo_root), "worktree", "remove", "--force", str(scratch)],
+                       capture_output=True)
+    except Exception as exc:
+        if failure is None:
+            raise
+        failure.add_note(f"scratch worktree cleanup failed: {exc}")
+
+
+def _save_wip(wt: Path, tid: str, token: str) -> str:
+    """Record dirty tracked and untracked WIP as a stash-shaped commit under refs/office/wip/<token>
+    and clean the worktree. refs/stash is shared by every worktree and is only an index-addressed
+    stack, so Office never pushes to or drops from it: nothing a foreign `git stash` does can
+    shift or remove this entry. `git stash apply --index <sha>` restores it."""
+    env = {**os.environ, **paths.commit_identity_env(wt)}
+    head = paths.git(wt, "rev-parse", "HEAD")
+
+    def commit(tree: str, subject: str, *parents: str) -> str:
+        return paths.git(wt, "commit-tree", tree, *(a for p in parents for a in ("-p", p)), "-m", subject, env=env)
+
+    index_tree = paths.git(wt, "write-tree")
+    index_commit = commit(index_tree, f"index on {tid}", head)
+    with tempfile.TemporaryDirectory(prefix="office-wip-") as tmp:
+        tracked = {**env, "GIT_INDEX_FILE": str(Path(tmp) / "tracked")}
+        paths.git(wt, "read-tree", index_tree, env=tracked)
+        paths.git(wt, "add", "--update", env=tracked)
+        work_tree = paths.git(wt, "write-tree", env=tracked)
+        listed = subprocess.run(["git", "-C", str(wt), "ls-files", "-z", "--others", "--exclude-standard"],
+                                capture_output=True, text=True, check=True)
+        names = [n for n in listed.stdout.split("\0") if n]
+        parents = [head, index_commit]
+        if names:
+            untracked = {**env, "GIT_INDEX_FILE": str(Path(tmp) / "untracked")}
+            paths.git(wt, "add", "--pathspec-from-file=-", "--pathspec-file-nul", env=untracked,
+                      input_text="\0".join(names) + "\0")
+            parents.append(commit(paths.git(wt, "write-tree", env=untracked), f"untracked files on {tid}"))
+    saved = commit(work_tree, f"office: preserve {tid} WIP before restack [{token}]", *parents)
+    paths.git(wt, "update-ref", f"refs/office/wip/{token}", saved)
+    paths.git(wt, "reset", "--hard", "-q", "HEAD")
+    if names:
+        paths.git(wt, "clean", "-fdq")
+    return saved
+
+
+@contextlib.contextmanager
+def _stash_wip(wt: Path, tid: str):
+    """Office-owned, opt-in preservation of dirty tracked/untracked WIP for a restack.
+
+    The WIP is held in an Office ref, not refs/stash (see _save_wip), and dropped by deleting
+    that ref after a clean restore. On any restore failure it is appended to refs/stash with
+    `git stash store`, which only pushes, so WIP is never silently dropped and no foreign stash
+    entry is touched. A restore failure never replaces an error already raised by the restack.
+    """
+    if not (wt / ".git").exists() or not paths.git(wt, "status", "--porcelain").strip():
+        yield
+        return
+    token = uuid.uuid4().hex
+    ref = f"refs/office/wip/{token}"
+    try:
+        saved = _save_wip(wt, tid, token)
+    except (paths.GitError, subprocess.CalledProcessError) as exc:
+        raise Refused("restack-wip-save-failed", f"Office could not save {tid}'s WIP: {str(exc)[:160]}",
+                      preserved="task worktree", next_step=f"inspect {tid}'s worktree before retrying") from exc
+
+    def retain() -> None:
+        """Make the saved WIP visible in `git stash list`; the Office ref also stays until stored."""
+        with contextlib.suppress(Exception):
+            stored = subprocess.run(["git", "-C", str(wt), "stash", "store", "-m",
+                                     f"office: preserve {tid} WIP before restack [{token}]", saved],
+                                    capture_output=True, text=True)
+            if stored.returncode == 0:
+                paths.git(wt, "update-ref", "-d", ref, check=False)
+
+    def restore() -> Refused | None:
+        applied = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", saved],
+                                 capture_output=True, text=True)
+        if applied.returncode:
+            retain()
+            return Refused("restack-wip-restore-conflict",
+                           f"{tid} WIP could not be reapplied cleanly after restack; saved stash {saved[:12]} "
+                           f"remains available; {applied.stderr[:130]}",
+                           preserved=f"stash {saved} and current task worktree",
+                           next_step=f"resolve the worktree conflict using saved stash {saved[:12]} before rerunning")
+        paths.git(wt, "update-ref", "-d", ref, check=False)
+        return None
+
+    try:
+        yield
+    except BaseException as exc:
+        try:
+            conflict = restore()
+        except Exception as restore_exc:
+            conflict = None
+            retain()
+            exc.add_note(f"{tid} WIP restore failed: {restore_exc}; saved stash {saved[:12]} may remain")
+        if conflict is not None:
+            if isinstance(exc, state.OfficeError):
+                exc.preserved = "; ".join(x for x in (exc.preserved, conflict.preserved) if x)
+            exc.add_note(conflict.message)
+        raise
+    conflict = restore()
+    if conflict is not None:
+        raise conflict
 
 
 def _sticky_check(con, run: dict, task: dict, parent: dict) -> str | None:
@@ -338,7 +453,11 @@ def _mode_required(tid: str) -> Usage:
 
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
           as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
-          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False) -> Result:
+          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+          stash_wip: bool = False) -> Result:
+    if stash_wip and not fresh:
+        raise Usage("stash-wip-needs-fresh", "--stash-wip requires --fresh",
+                    next_step=f"{_fresh_cmd(tid)} --stash-wip")
     if resume == fresh and review_as is None:
         raise _mode_required(tid)
     if reroute and resume:
@@ -428,7 +547,11 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
                       scope=tid, next_step=f"{_fresh_cmd(tid)} --as <harness>/<model>[@effort]")
     if launch and launch_prefs:
         launch = {**launch, "launch": launch_prefs}
-    restack = _restack(con, run, task, parent.get("worktree"))
+    if stash_wip and parent.get("worktree"):
+        with _stash_wip(Path(parent["worktree"]), tid):
+            restack = _restack(con, run, task, parent["worktree"])
+    else:
+        restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:

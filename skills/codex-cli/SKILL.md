@@ -46,6 +46,10 @@ in the route notice so the invisibility is a stated cost. A headless one-shot al
 resumed, which `auto-review` asks for explicitly: round 2 is meant to retain round 1's uncertainty,
 and `codex exec` has no session to resume into.
 
+## First launch in a new clone blocks on two screens
+
+A pane started in a freshly cloned repo stops at "Trust this folder?", whose default is "No, exit": send Down then Enter, because plain Enter closes the pane. Once trusted, a repo with `.codex/hooks.json` shows "Hooks need review", and the brief sent to the pane never lands behind it. Fix this before launch, not by keystrokes: add `[projects."<repo path>"] trust_level = "trusted"` and each hook's `trusted_hash` under `[hooks.state."<source>:<event>:<group>:<handler>"]` to `~/.codex/config.toml` (Codex matches project paths exactly, with no parent walk). Pre-trust only repos you own, and print the hook commands being trusted. Confirm with a throwaway `codex exec 'echo ok'` in that repo before sending the real brief.
+
 ## Quota
 
 Probe before dispatch: `python3 ../../scripts/codex-usage.py --json` (bare for human-readable, `--percent` for routing math only). Reads `~/.codex/auth.json`; reports the tighter of the 5-hour/weekly windows. Exit `2` means unknown, not low. Full contract in `../../references/quota-probe.md`.

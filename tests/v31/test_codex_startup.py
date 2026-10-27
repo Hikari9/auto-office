@@ -58,7 +58,7 @@ def test_headless_invalid_diagnostic_never_promises_a_reprompt(tmp_path, monkeyp
     assert "its pane is kept" not in reason and "office prompt" not in reason
 
 
-@pytest.mark.parametrize("screen", ["Hooks need review", "Trust this folder?", "Update available"])
+@pytest.mark.parametrize("screen", ["Hooks need review", "Trust this folder?", "Update available\n› 1. Update now\n  2. Skip"])
 @pytest.mark.parametrize("timeout", [False, True])
 def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, timeout):
     calls, notices = [], []
@@ -91,7 +91,7 @@ def test_failed_codex_start_names_the_screen(tmp_path, monkeypatch, screen, time
     assert dispatch._herdr_agent_start({"id": "R1"}, {"id": "D1"}, {"kind": "reviewer"}, {},
                                        (["--sandbox", "workspace-write"], "codex"), "w1:p1",
                                        tmp_path, tmp_path) is None
-    assert screen.rstrip("?") in notices[0] and "w1:p1" in notices[0]
+    assert screen.splitlines()[0].rstrip("?!") in notices[0] and "w1:p1" in notices[0]
     assert "headless" in notices[0]
     # No keys sent (hook trust and updates remain the user's decision; this cwd is not
     # Office's), and the abandoned pane is closed once its screen is saved.
@@ -161,3 +161,57 @@ def test_doctor_checks_project_and_enabled_plugin_hooks(tmp_path, monkeypatch):
     cfg.write_text('[plugins."example@market"]\nenabled = true\n')
     warning = " ".join(doctor.codex_hook_warnings(tmp_path))
     assert str(project) in warning and str(plugin) in warning
+
+
+CODEX_BANNER = """╭──────────────────────────────────────────────╮
+│ ✨ Update available! 0.163.0 -> 0.164.0      │
+│ Run sh -c 'curl -fsSL https://x/install.sh | sh' to update. │
+╰──────────────────────────────────────────────╯
+
+  >_ OpenAI Codex (v0.163.0)
+
+› Ask Codex to do anything
+"""
+
+
+def test_passive_update_banner_is_not_a_startup_screen():
+    # #790/#761: codex and pi print this above a working composer; only a choice blocks it.
+    assert dispatch._startup_screen(CODEX_BANNER) is None
+    assert dispatch._startup_screen("Update Available\nNew version 1.4.0 is available. Run pi update") is None
+    assert dispatch._startup_screen("Update available! 1 -> 2\n› 1. Update now\n  2. Skip") is not None
+
+
+def test_update_banner_never_skips_the_enter_retry(monkeypatch):
+    held = CODEX_BANNER + "› read the brief\n"
+    views = iter([CODEX_BANNER, CODEX_BANNER, held, held])
+    monkeypatch.setattr(dispatch, "_await_agent_ui", lambda *a, **kw: "ready")
+    monkeypatch.setattr(dispatch, "_agent_up", lambda *a: True)
+    monkeypatch.setattr(dispatch, "_land_timeout", lambda: 0)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda s: None)
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    last = {"v": CODEX_BANNER}
+
+    def view(name):
+        last["v"] = next(views, last["v"])
+        return last["v"]
+
+    monkeypatch.setattr(dispatch, "_pane_view", view)
+    sent = []
+
+    def herdr(*args):
+        sent.append(args)
+        if args[-1] == "Enter":  # the Enter lands once the composer is ready
+            last["v"] = "● Working (2s • esc to interrupt)\n"
+            monkeypatch.setattr(dispatch, "_pane_view", lambda name: last["v"])
+
+    monkeypatch.setattr(dispatch, "_herdr_quiet", herdr)
+    assert dispatch._deliver_prompt("office-d1", "w1:p1", "read the brief") is True
+    assert ("pane", "send-keys", "w1:p1", "Enter") in sent
+
+
+def test_update_words_outside_a_menu_do_not_block():
+    # Only a selected numbered option is a menu; prose that mentions the words is not.
+    for tail in ("› update now please", "Press enter to send", "  1. a plain numbered list line", "skip until later"):
+        assert dispatch._startup_screen(CODEX_BANNER + tail) is None
+    assert dispatch._startup_screen("Update available! 1 -> 2\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n"
+                                    "  Press enter to continue") is not None

@@ -88,6 +88,75 @@ def write_allows(output: Path | None) -> list[str]:
     return [f"Edit(/{out_dir}/**)"] if out_dir else []
 
 
+def _spellings(path: Path) -> list[str]:
+    """`path` as given and, when it differs, with symlinks resolved (/tmp vs
+    /private/tmp): opencode matches the spelling the agent typed."""
+    forms = [str(path)]
+    try:
+        real = str(path.resolve())
+    except OSError:
+        return forms
+    return forms + ([real] if real != forms[0] else [])
+
+
+def opencode_permissions(cwd: Path, output: Path | None, include_dirs: list[Path] | None = None) -> list[dict]:
+    """opencode `permissions` for a reviewer agent; the last matching rule wins.
+
+    Everything is denied except reading (and glob/grep) and ONE write: the exact
+    reply file. opencode gates a path outside its working directory twice: first
+    `external_directory` on `<dir>/*` (`*` crosses `/`, so it covers subdirectories),
+    then the `read` or `edit` action on the absolute path. A path inside the working
+    directory is checked as `edit`/`read` on its cwd-relative path only. So the
+    checkout, `include_dirs` and the shared read roots get an `external_directory`
+    grant (a launch whose PWD is not the checkout would otherwise be denied reading
+    it), and the reply file gets `external_directory` on its dispatch dir plus an
+    exact-path `edit` allow in each spelling it can be checked under."""
+    def rule(action: str, resource: str, effect: str = "allow") -> dict:
+        return {"action": action, "resource": resource, "effect": effect}
+
+    rules = [rule("*", "*", "deny")] + [rule(a, "*") for a in ("read", "glob", "grep")]
+    rules += [rule("read", "*.env", "deny"), rule("read", "*.env.*", "deny")]
+    readable = list(dict.fromkeys(with_read_dirs("reviewer", [Path(cwd), *(include_dirs or [])])))
+    out_dir = dispatch_dir(output)
+    for directory in readable + ([out_dir] if out_dir else []):
+        rules += [rule("external_directory", f"{form}/*") for form in _spellings(directory)]
+    if output:
+        resources = _spellings(Path(output))
+        try:
+            relative = Path(output).relative_to(cwd)
+            resources.append(str(relative))
+        except ValueError:
+            pass
+        rules += [rule("edit", resource) for resource in resources]
+    return rules
+
+
+def opencode_agent_text(cwd: Path, output: Path | None, include_dirs: list[Path] | None = None) -> str:
+    """The opencode agent file (markdown with YAML frontmatter) for a reviewer.
+    Values are JSON strings, which are valid YAML scalars."""
+    lines = ["---", "description: Auto Office reviewer. Reads the checkout and writes its reply file only.",
+             "mode: primary", "permissions:"]
+    for r in opencode_permissions(cwd, output, include_dirs):
+        lines += [f"  - action: {json.dumps(r['action'])}", f"    resource: {json.dumps(r['resource'])}",
+                  f"    effect: {r['effect']}"]
+    lines += ["---", "",
+              "You are an independent reviewer for Auto Office. Follow the review brief you are given exactly. "
+              "You can read, glob and grep. The only file you may write is the reply file the brief names; "
+              "you cannot edit anything else or run commands. Put your complete review in that file."]
+    return "\n".join(lines) + "\n"
+
+
+def write_opencode_agent(name: str, cwd: Path, output: Path, include_dirs: list[Path] | None = None) -> Path:
+    """Write `<dispatch dir>/opencode/agents/<name>.md` and return the config
+    directory to point `OPENCODE_CONFIG_DIR` at. It is per dispatch, so the write
+    allowance names this dispatch's reply file and no other run's."""
+    config_dir = Path(output).parent / "opencode"
+    agent = config_dir / "agents" / f"{name}.md"
+    agent.parent.mkdir(parents=True, exist_ok=True)
+    agent.write_text(opencode_agent_text(cwd, output, include_dirs), encoding="utf-8")
+    return config_dir
+
+
 def readonly_roots() -> list[str]:
     """Absolute paths and globs a reviewer never writes: global guidance and
     harness config. Directories grant `<dir>/**`."""
