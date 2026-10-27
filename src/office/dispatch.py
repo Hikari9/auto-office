@@ -340,6 +340,60 @@ def validate_route_quote(quote: str | None, route: str | None) -> None:
         raise Usage("invalid-quote", "--quote needs the user's nonempty words and an explicit --as/--route")
 
 
+def _effort_rank(effort: str | None) -> int | None:
+    from office import onboarding
+    order = onboarding.EFFORT_ORDER
+    return order.index(effort) if effort in order else None
+
+
+def _prior_override_ceiling(task: dict) -> dict | None:
+    """The user-quoted effort ceiling on the task's recorded route (#817): {model, effort, quote}."""
+    rec = state.recorded_route(task)
+    ceiling = rec.get("override_ceiling")
+    if isinstance(ceiling, dict) and ceiling.get("quote") and ceiling.get("effort"):
+        return ceiling
+    authority = rec.get("route_authority") or {}
+    cand = rec.get("candidate") or {}
+    if authority.get("actor") == "user" and _route_quote(rec) and cand.get("effort"):
+        return {"model": cand.get("model_id"), "effort": cand["effort"], "quote": _route_quote(rec)}
+    return None
+
+
+def _refuse_above_ceiling(task: dict, what: str, prior: dict, effort: str) -> None:
+    new, old = _effort_rank(effort), _effort_rank(prior["effort"])
+    if new is None or old is None or new <= old:
+        return
+    raise Refused("effort-above-user-quote",
+                  f"{task['id']}: {what} raises {prior.get('model')} from the @{prior['effort']} the user's quote "
+                  f"set ({prior['quote'][:80]!r}); re-using that quote is not authorization for @{effort}",
+                  scope=task["id"], preserved="the recorded route",
+                  next_step=f"ask the user for new words and pass them as --quote, or stay at or below "
+                            f"@{prior['effort']}")
+
+
+def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: str = "--as",
+                           effort: str | None = None) -> dict | None:
+    """Refuse a higher effort on the same model than a quoted user override set, unless the
+    quote is new (#817). Returns the ceiling to record on the route, or None."""
+    want = candidates.parse_route_override(text)
+    model = want.get("model_id")
+    prior = _prior_override_ceiling(task)
+    effort = effort or want.get("effort")
+    if not effort and prior and prior.get("model") == model and want.get("harness"):
+        # An omitted effort resolves to the catalog's own, which can sit above the ceiling.
+        try:
+            effort = candidates.declared_candidate(want["harness"], model, None).get("effort")
+        except (Refused, Usage):
+            effort = None
+    same_quote = bool(prior and quote is not None and quote.strip() == prior["quote"].strip())
+    # An unquoted raise on the same model, or a re-used quote on any model, is not new user authority.
+    if prior and effort and (same_quote or (quote is None and prior.get("model") == model)):
+        _refuse_above_ceiling(task, f"{flag} {text}", prior, effort)
+    if quote is None or same_quote:
+        return prior
+    return {"model": model, "effort": effort, "quote": quote} if effort else None
+
+
 def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | None = None,
                          flag: str = "--as") -> dict:
     """An unquoted name is the orchestrator's selection, with ordinary safety gates.
@@ -348,6 +402,7 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
     the decision itself so queued starts and later reruns cannot upgrade authority.
     """
     validate_route_quote(quote, text)
+    ceiling = enforce_effort_ceiling(task, text, quote, flag=flag)
     config = state.pinned_config(run)
     actor = "user" if quote is not None else "orchestrator"
     reason = f'user override ({flag} {text}): "{quote}"' if quote is not None \
@@ -372,6 +427,11 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
             decision["route_note"] = "orchestrator choice"
     decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
                     _qualified=True)
+    resolved = (decision.get("candidate") or {}).get("effort")
+    if resolved:  # a model-only selector or catalog default can resolve above the ceiling
+        ceiling = enforce_effort_ceiling(task, text, quote, flag=flag, effort=resolved)
+    if ceiling:
+        decision["override_ceiling"] = ceiling
     return decision
 
 
@@ -384,18 +444,19 @@ def _route_origin(route: dict) -> dict:
     """Authority for a new decision, without rewriting old producer evidence."""
     quote = _route_quote(route)
     authority = route.get("route_authority") or {}
+    keep = {"override_ceiling": route["override_ceiling"]} if route.get("override_ceiling") else {}
     if not authority and route.get("route_source") == "override" and not route.get("override"):
         authority = {"actor": "orchestrator", "flag": "--route", "reason": "orchestrator choice (recorded --route)"}
     if quote:
         return {"route_authority": {**authority, "actor": "user", "quote": quote,
                                     "reason": authority.get("reason") or f'user route change: "{quote}"'},
-                "override": True, "declared": True,
+                "override": True, "declared": True, **keep,
                 **({"route_change": route["route_change"]} if route.get("route_change") else {})}
     if authority or route.get("override") or route.get("declared"):
         return {"route_authority": {"actor": "orchestrator", "reason": (authority.get("reason")
                                     if authority.get("actor") == "orchestrator" else None) or
                                     "orchestrator choice (legacy route has no recorded user quote)",
-                                    **({"flag": authority["flag"]} if authority.get("flag") else {})}}
+                                    **({"flag": authority["flag"]} if authority.get("flag") else {})}, **keep}
     return {}
 
 
@@ -486,6 +547,10 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
                                   exclude=exclude, discovery_input=discovery_input)
     fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
+        prior = _prior_override_ceiling(task)
+        cand = fresh.get("candidate") or {}
+        if prior and cand.get("model_id") == prior.get("model") and cand.get("effort"):
+            _refuse_above_ceiling(task, f"--reroute (selected {fresh.get('selected')})", prior, cand["effort"])
         fresh["route_source"], fresh["route_note"] = "reroute", "rerouted from current evidence"
     if discovery_input and fresh.get("status") == "selected" and (fresh.get("discovery") or {}).get("intent") == "trial":
         fresh.setdefault("route_source", "router")
@@ -603,7 +668,7 @@ def _route_payload(decision: dict) -> dict:
     reproduces the same route, override, and launch form."""
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure")}
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
-                "route_authority", "route_change"):
+                "route_authority", "route_change", "override_ceiling"):
         if decision.get(key):
             out[key] = decision[key]
     unknown = candidates.quota_unknown_record(decision.get("candidate"))
@@ -659,7 +724,11 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
         state.record_route_change(con, run, tid, before, after, kind=change[1], reason=change[2], actor=change[3],
                                   extra=({"quote": decision["route_authority"]["quote"]}
                                          if (decision.get("route_authority") or {}).get("quote") is not None else None))
-    state.update_task(con, run["id"], tid, route_json=dumps(_route_payload(decision)))
+    payload = _route_payload(decision)
+    ceiling = decision.get("override_ceiling") or _prior_override_ceiling(task)
+    if ceiling:  # a reroute or relaunch never drops the user's quoted effort ceiling (#817)
+        payload["override_ceiling"] = ceiling
+    state.update_task(con, run["id"], tid, route_json=dumps(payload))
 
 
 # ------------------------------------------------------------------ route discovery (#494)
