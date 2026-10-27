@@ -15,27 +15,120 @@ from conftest import GOOD_ADD, approved_run, self_reviewed
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 
+class _VirtualWaitClock:
+    """Poll-only clock; subprocesses, OS clocks and lifecycle remain real."""
+
+    def __init__(self):
+        self.tick = 100.0
+        self.sleeps = []
+        self.on_sleep = None
+
+    def now(self):
+        return self.tick
+
+    def sleep(self, seconds):
+        assert seconds > 0
+        self.sleeps.append(seconds)
+        self.tick += seconds
+        if self.on_sleep:
+            self.on_sleep()
+
+
 @pytest.fixture
 def virtual_wait_clock(monkeypatch):
-    """Advance only Office wait's deadline/poll clock, not subprocess or OS time.
-
-    These tests assert decisions after elapsed time without needing a process
-    to run concurrently. Real-time/process tests intentionally do not use it.
-    """
+    """Virtualize only Office wait's deadline and poll; never globally patch time."""
     from office import guide
-    tick = [100.0]
 
-    def advance(seconds):
-        assert seconds > 0
-        tick[0] += seconds
-
-    monkeypatch.setattr(guide, "_wait_clock", lambda: (lambda: tick[0], advance))
+    clock = _VirtualWaitClock()
+    monkeypatch.setattr(guide, "_wait_clock", lambda: (clock.now, clock.sleep))
+    return clock
 
 
 def _go(env):
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("status", check=0)  # consume the dispatch events
+
+
+def test_wait_uses_monotonic_production_clock_not_wall_time():
+    """Pin the default clock source, independently of the virtual-test seam."""
+    from office import guide
+
+    now, sleep = guide._wait_clock()
+    assert now is time.monotonic
+    assert sleep is time.sleep
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("jump_seconds", [-3600, 3600], ids=["backward", "forward"])
+def test_wait_deadline_ignores_wall_clock_jump(env, virtual_wait_clock, monkeypatch, jump_seconds):
+    """Wall jumps may alter timestamps but must not change the wait deadline."""
+    _go(env)
+    clock = virtual_wait_clock
+    wall = [time.time()]
+
+    def jump_after_poll():
+        wall[0] += jump_seconds
+        # A wall-clock deadline would loop indefinitely after the backward jump.
+        assert len(clock.sleeps) <= 5, "monotonic deadline did not expire"
+
+    clock.on_sleep = jump_after_poll
+    # Scope the wall-time disturbance to this invocation, not to the suite,
+    # subprocess workers, or the OS/process lifecycle tests.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(time, "time", lambda: wall[0])
+        code, out = env.office("wait", "--timeout", "0.7", "--poll", "0.3", env=EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+    assert clock.sleeps == [0.3, 0.3, 0.3]
+
+
+@pytest.mark.approved
+def test_wait_zero_timeout_checks_once_without_sleep(env, virtual_wait_clock):
+    _go(env)
+    code, out = env.office("wait", "--timeout", "0", "--poll", "0.7", env=EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+    assert virtual_wait_clock.sleeps == []
+
+
+@pytest.mark.approved
+def test_wait_nondivisible_poll_expires_at_or_after_deadline(env, virtual_wait_clock):
+    _go(env)
+    code, out = env.office("wait", "--timeout", "0.7", "--poll", "0.3", env=EXTERNAL)
+    assert code == 124 and "nothing new" in out, out
+    assert virtual_wait_clock.sleeps == [0.3, 0.3, 0.3]
+    assert virtual_wait_clock.now() == pytest.approx(100.9)
+
+
+@pytest.mark.approved
+def test_wait_action_arriving_during_poll_wakes_without_waiting_for_timeout(env, virtual_wait_clock):
+    """An urgent orchestrator event emitted between polls still exits 0."""
+    from office import state
+
+    _go(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+
+    def deliver_urgent_event():
+        if len(virtual_wait_clock.sleeps) == 1:
+            with con:
+                state.emit(con, run, "pr.error", "T1 PR refused while watching",
+                           task_id="T1", audience="orchestrator")
+
+    virtual_wait_clock.on_sleep = deliver_urgent_event
+    code, out = env.office("wait", "--timeout", "5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0 and "T1 PR refused while watching" in out, out
+    assert virtual_wait_clock.sleeps == [0.2]
+
+
+@pytest.mark.approved
+def test_wait_real_monotonic_clock_still_observes_elapsed_time(env):
+    """Real-clock contract: do not virtualize all waiting or process tests."""
+    _go(env)
+    before = time.monotonic()
+    code, out = env.office("wait", "--timeout", "0.15", "--poll", "0.05", env=EXTERNAL)
+    elapsed = time.monotonic() - before
+    assert code == 124 and "nothing new" in out, out
+    assert 0.14 <= elapsed < 15, elapsed
 
 
 @pytest.mark.approved
