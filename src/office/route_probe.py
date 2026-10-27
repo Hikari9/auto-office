@@ -606,6 +606,8 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
     base = _probe_base(rec.get("base"))
     ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
     gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours)
+    if base is not None:  # a claude probe keeps its session record in the user's config dir, not under base
+        shutil.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
     if not ours and pid:
         return (f"recorded probe pid {pid} is no longer that process; "
                 + ("attributable descendants stopped" if gone else "attributable descendants did not exit"))
@@ -905,8 +907,69 @@ def _codex_header(text: str) -> dict[str, str] | None:
     return None  # the block never closed
 
 
-# Harness id -> parser of authoritative model and effort metadata. A harness absent here is never probed.
-_IDENTITY_READBACK = {"codex": _codex_header}
+def _claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def claude_transcript_dir(wt: Path) -> Path:
+    """Where Claude Code keeps the session record for a working directory: one
+    directory per path, every non-alphanumeric character written as `-`."""
+    return _claude_config_dir().resolve() / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(wt))
+
+
+def _read_claude_transcript(ws: "_Workspace") -> dict[str, str] | None:
+    """The model and effort Claude Code itself recorded for the probe session.
+
+    `claude -p` prints only the reply, but the session transcript's first
+    assistant record carries the API-returned `message.model` and the effort the
+    request actually ran at, so a settings-inherited effort shows up as what it
+    was. The probe's working directory is unique, so its transcript directory
+    holds exactly one session. Only that session's first assistant record is read,
+    and the reply text is never read."""
+    folder = ws.transcript_dir
+    files = sorted(folder.glob("*.jsonl")) if folder and folder.is_dir() else []
+    if len(files) != 1:
+        return None
+    try:
+        with files[0].open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                model = message.get("model") if isinstance(message, dict) else None
+                effort = record.get("effort")
+                if isinstance(model, str) and isinstance(effort, str):
+                    return {"model": model, "reasoning effort": effort}
+                return None
+    except OSError:
+        return None
+    return None
+
+
+def watch_claude_transcript(ws: "_Workspace") -> None:
+    """Called while the harness runs: remember the identity record the moment it
+    first appears. The probe's own agent can write inside the sandbox, so the file
+    is not tamper-proof; `_claude_transcript` refuses a final record that differs
+    from the one first observed, which leaves only a rewrite inside one poll
+    interval of the record being written."""
+    if ws.seen_identity is None:
+        ws.seen_identity = _read_claude_transcript(ws)
+
+
+def _claude_transcript(ws: "_Workspace") -> dict[str, str] | None:
+    final = _read_claude_transcript(ws)
+    if ws.seen_identity is not None and final != ws.seen_identity:
+        return None
+    return final
+
+
+# Harness id -> reader of authoritative model and effort metadata, given the launch's output and workspace.
+# A harness absent here is never probed.
+_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws)}
 
 
 def classify_text(text: str) -> str | None:
@@ -942,6 +1005,8 @@ class _Workspace:
         self.repo, self.wt, self.outside = self.base / "repo", self.base / "wt", self.base / "outside"
         self.tmp, self.home = self.base / "tmp", self.base / "home"
         self.token = uuid.uuid4().hex[:12]
+        self.transcript_dir: Path | None = None  # a harness's own session record, when it keeps one outside the base
+        self.seen_identity: dict[str, str] | None = None  # the record as first observed while the harness ran
         self.setup_error: str | None = None
         try:
             self._setup()
@@ -975,7 +1040,7 @@ class _Workspace:
 
     @property
     def writable(self) -> list[Path]:
-        return [self.wt, self.repo / ".git", self.tmp, self.home]
+        return [self.wt, self.repo / ".git", self.tmp, self.home, *([self.transcript_dir] if self.transcript_dir else [])]
 
     def snapshot(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -1003,6 +1068,8 @@ class _Workspace:
 
     def remove(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
+        if self.transcript_dir:
+            shutil.rmtree(self.transcript_dir, ignore_errors=True)
 
 
 def _sbpl(path: Path | str) -> str:
@@ -1072,11 +1139,16 @@ def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, no
                 except OSError:
                     pass
         env["CODEX_HOME"] = str(private)
+    elif harness == "claude":
+        # Claude's login lives in the real config directory (its keychain entry is keyed by it), so the
+        # probe keeps it and may write only this one working directory's session record.
+        ws.transcript_dir = claude_transcript_dir(ws.wt)
+        ws.transcript_dir.mkdir(parents=True, exist_ok=True)
     return env
 
 
 def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, timeout_s: float,
-            attempt_id: str, base: Path | None = None) -> dict:
+            attempt_id: str, base: Path | None = None, observe=None) -> dict:
     """Run the harness once under a hard timeout. Always ends with the probe's
     process group and every process attributed to it terminated and
     confirmed gone, or says it could not confirm."""
@@ -1113,6 +1185,8 @@ def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, time
                 except subprocess.TimeoutExpired:
                     feed = None
                     tracker.observe(proc.pid)  # remember descendants while the leader can still name them
+                    if observe is not None:
+                        observe()
                     if time.monotonic() >= deadline:
                         raise
         except subprocess.TimeoutExpired:
@@ -1154,7 +1228,7 @@ def _evaluate(launch: dict, ws: _Workspace, prompt: str, harness: str, expected_
     if launch["returncode"] != 0:
         return "fail", classify_text(text) or "conformance-failed", f"harness exited {launch['returncode']}: {tail}"
     reader = _IDENTITY_READBACK.get(harness)
-    meta = reader(text) if reader else None
+    meta = reader(text, ws) if reader else None
     if meta is None:
         return "fail", "conformance-failed", "no harness-reported invocation metadata, so model and effort are unproven"
     seen_model, seen_effort = meta.get("model"), meta.get("reasoning effort")
@@ -1192,7 +1266,8 @@ def _run_probe(reservation: dict, cand: dict, adapter: dict) -> tuple[str, str |
             return "fail", "isolation-missing", str(exc)
         env = _probe_env(reservation["attempt_id"], reservation["probe_key"], ws, fp["harness"], uuid.uuid4().hex)
         launch = _launch([*_boundary_argv(ws), *argv], prof, prompt, ws.wt, env, float(settings["probe_timeout_s"]),
-                         reservation["attempt_id"], ws.base)
+                         reservation["attempt_id"], ws.base,
+                         observe=(lambda: watch_claude_transcript(ws)) if fp["harness"] == "claude" else None)
         return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"],
                          adapters.effort_value(adapter, fp["effort"]))
     finally:
