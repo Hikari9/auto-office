@@ -1664,12 +1664,30 @@ def reap_orphans(con, run: dict) -> list[str]:
 REPLY_SETTLE_SECONDS = 30
 
 
+def _launch_spec(run: dict, dispatch_id: str) -> dict:
+    try:
+        return json.loads((paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "launch.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _pid_reused(run: dict, dispatch_id: str, pid: int) -> bool:
+    """The recorded supervisor's pid is now another process (a reboot). Only a readable record and a
+    readable start time prove it; anything else is not reuse."""
+    try:
+        rec = json.loads(_identity_file(run["id"], dispatch_id, "supervisor").read_text())
+    except (OSError, ValueError):
+        return False
+    now = _c_start(pid)
+    return rec.get("pid") == pid and bool(rec.get("c_start")) and now is not None and now != rec["c_start"]
+
+
 def settle_dead_supervisor(con, run: dict, d: dict) -> str | None:
     """Record the end of a running pane reviewer whose supervisor exited (a zombie counts as exited). A
     settled reply file is the review, so the end is `success` and its reader ingests it; no reply, and an
     agent herdr says is gone, ends it `lost`. Anything else is left: unknown is never gone."""
     from office import rerun
-    if d.get("pid") and not pid_gone(d["pid"]):
+    if d.get("pid") and not pid_gone(d["pid"]) and not _pid_reused(run, d["id"], d["pid"]):
         return None
     started = parse_iso(d.get("launched_at") or d["started_at"])
     if (datetime.now(timezone.utc) - started).total_seconds() < REAP_GRACE_SECONDS:
@@ -1678,9 +1696,10 @@ def settle_dead_supervisor(con, run: dict, d: dict) -> str | None:
     if reply.is_file() and reply.stat().st_size > 0:
         if time.time() - reply.stat().st_mtime < REPLY_SETTLE_SECONDS:
             return None  # the agent may still be writing it
-        if state.get_dispatch(con, d["id"]).get("ended_at"):
-            return None
-        _finish(d["id"], 0, None, "success", (datetime.now(timezone.utc) - started).total_seconds())
+        sample = _herdr_agent_sample(_launch_spec(run, d["id"]).get("herdr_agent") or d.get("herdr_agent") or "")
+        if sample is not None and sample.get("text_busy", sample.get("busy")) is True:
+            return None  # still mid-turn: it may rewrite the reply
+        _finish(d["id"], 0, None, "success", (datetime.now(timezone.utc) - started).total_seconds(), only_if_open=True)
         return f"{d['id']} reviewer finished; its supervisor was gone, so its reply was ingested"
     if rerun.agent_alive(d) is not False:
         return None  # alive, or herdr could not say
@@ -4666,12 +4685,15 @@ def _reply_file_missing(spec: dict, classification: str) -> bool:
     return not (out.is_file() and out.stat().st_size > 0)
 
 
-def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False) -> None:
+def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, empty_reply: bool = False,
+            only_if_open: bool = False) -> None:
     accepted = False
     con = db.connect()
     try:
         with db.transaction(con):
             d = state.get_dispatch(con, dispatch_id)
+            if only_if_open and d.get("ended_at"):
+                return  # another process recorded the end first; a recovery never overwrites it
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
             status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")

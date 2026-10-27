@@ -115,6 +115,35 @@ def test_a_settled_reply_with_a_dead_supervisor_is_ingested(env, monkeypatch):
 
 
 @pytest.mark.approved
+def test_a_busy_agent_or_an_already_ended_dispatch_is_not_ingested(env, monkeypatch):
+    con, run = _orphan(env, monkeypatch)
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "alive")
+    ddir = dispatch_mod.paths.run_dir(run["id"]) / "dispatches" / "Dorph"
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "reply.txt").write_text("VERDICT: APPROVED\n")
+    os.utime(ddir / "reply.txt", (1, 1))
+    monkeypatch.setattr(dispatch_mod, "_herdr_agent_sample", lambda name: {"busy": True, "text_busy": True})
+    assert dispatch_mod.reap_orphans(con, run) == []  # mid-turn: the draft is not the review
+    assert _dispatch(con)["ended_at"] is None
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='failed', terminal_classification='lost'")
+    con.commit()
+    monkeypatch.setattr(dispatch_mod, "_herdr_agent_sample", lambda name: None)
+    dispatch_mod._finish("Dorph", 0, None, "success", 1.0, only_if_open=True)
+    assert _dispatch(con)["terminal_classification"] == "lost"  # a recovery never overwrites a recorded end
+
+
+@pytest.mark.approved
+def test_a_supervisor_pid_reused_by_another_process_is_gone(env, monkeypatch):
+    con, run = _orphan(env, monkeypatch, pid=os.getpid())
+    monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
+    ident = dispatch_mod._identity_file(run["id"], "Dorph", "supervisor")
+    ident.parent.mkdir(parents=True, exist_ok=True)
+    ident.write_text(json.dumps({"pid": os.getpid(), "start": "x", "c_start": "Thu Jan  1 00:00:00 1970"}))
+    assert dispatch_mod.reap_orphans(con, run)
+    assert _dispatch(con)["terminal_classification"] == "lost"
+
+
+@pytest.mark.approved
 def test_a_zombie_supervisor_is_a_dead_supervisor(env, monkeypatch):
     """#830: the job that started the supervisor outlives it, so the pid stays a zombie and still answers a signal."""
     import subprocess
