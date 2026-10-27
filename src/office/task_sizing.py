@@ -108,7 +108,8 @@ _ESTIMATE = re.compile(r"inline=(\d+(?:\.\d+)?)\s+dedicated=(\d+(?:\.\d+)?)\s+([
 
 def inline_estimate(text: str | None) -> dict | None:
     """The planner's measured total cost-to-success estimate, `inline=<n> dedicated=<n> <unit>: <evidence>`,
-    or None when absent, malformed or not strictly positive. The cost is the whole path to an accepted result
+    or None when absent, malformed, not strictly positive or backed by no real evidence (under 12 characters or
+    3 words). The cost is the whole path to an accepted result
     (executor time, retries and review rounds), so a cheap first run that needs more repair does not beat
     dedicated dispatch, and a zero cost is a missing measurement, not a free path."""
     m = _ESTIMATE.fullmatch((text or "").strip())
@@ -121,9 +122,12 @@ def inline_estimate(text: str | None) -> dict | None:
     # advantage to zero.
     # Ordering is decided on the decimals: two distinct texts can collapse to one float. The original texts are
     # kept for the receipt.
+    evidence = m[4].strip()
+    if len(evidence) < 12 or len(evidence.split()) < 3:  # a placeholder is not a measurement (as task_size_rationale)
+        return None
     saving = Decimal(m[2]) - Decimal(m[1])
     return {"inline": inline, "dedicated": dedicated, "inline_text": m[1], "dedicated_text": m[2],
-            "beneficial": saving > 0, "unit": m[3], "evidence": m[4].strip(), "savings": float(saving)}
+            "beneficial": saving > 0, "unit": m[3], "evidence": evidence, "savings": float(saving)}
 
 
 def number(x: float) -> str:

@@ -44,7 +44,8 @@ def test_s_is_inline_only_on_a_measured_estimate_that_beats_dedicated_dispatch()
 
 @pytest.mark.parametrize("gear", ["S", "M"])
 def test_equal_or_dearer_inline_cost_never_runs_inline(gear):
-    for est in ("inline=22 dedicated=22 minutes: tie", "inline=22.00001 dedicated=22 minutes: dearer"):
+    for est in ("inline=22 dedicated=22 minutes: equal on the measured sessions",
+                "inline=22.00001 dedicated=22 minutes: dearer on the measured sessions"):
         mode = task_sizing.execution_mode(gear, _desc("S", inline_advantage=est), LOW, task_count=1)
         assert mode["mode"] == "delegated", est
 
@@ -71,12 +72,12 @@ def test_the_stored_saving_and_the_receipt_keep_the_estimates_exact_precision(in
 
 
 def test_distinct_decimals_that_collapse_to_one_float_are_still_ordered_exactly():
-    est = "inline=1.00000000000000001 dedicated=1.00000000000000002 minutes: measured sessions"
+    est = "inline=1.00000000000000001 dedicated=1.00000000000000002 minutes: measured on sessions"
     got = task_sizing.inline_estimate(est)
     assert got["beneficial"] and got["savings"] > 0
     mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=est), LOW, task_count=1)
     assert mode["mode"] == "inline" and "inline 1.00000000000000001 vs dedicated 1.00000000000000002" in mode["why"]
-    flipped = "inline=1.00000000000000002 dedicated=1.00000000000000001 minutes: measured sessions"
+    flipped = "inline=1.00000000000000002 dedicated=1.00000000000000001 minutes: measured on sessions"
     assert task_sizing.execution_mode("S", _desc("S", inline_advantage=flipped), LOW, task_count=1)["mode"] == "delegated"
 
 
@@ -85,6 +86,16 @@ def test_an_s_run_is_not_limited_to_a_single_task():
         mode = task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=n)
         assert mode["mode"] == "inline", n
     assert task_sizing.execution_mode("S", _desc("S", inline_advantage=EST), LOW, task_count=2)["estimated_savings"]["savings"] == 8
+
+
+@pytest.mark.parametrize("evidence", ["x", "n/a", "measured", "two words", "a b c", "short ev"])
+def test_a_placeholder_is_not_evidence_for_an_estimate(evidence):
+    assert task_sizing.inline_estimate(f"inline=1 dedicated=2 minutes: {evidence}") is None
+    assert task_sizing.execution_mode("M", _desc("M", inline_advantage=f"inline=1 dedicated=2 minutes: {evidence}"),
+                                      LOW, task_count=1)["mode"] == "delegated"
+    with pytest.raises(ValueError):
+        task_descriptors.parse_field("inline_advantage", f"inline=1 dedicated=2 minutes: {evidence}")
+    assert task_sizing.inline_estimate("inline=1 dedicated=2 minutes: timed on three runs")["beneficial"]
 
 
 def test_the_missing_estimate_reason_names_the_gear():
@@ -247,7 +258,7 @@ def test_m_with_a_non_beneficial_estimate_delegates_at_dispatch(env):
 
 
 @pytest.mark.parametrize("bad", ["inline=0 dedicated=22 minutes: free", "inline=-3 dedicated=22 minutes: negative",
-                                 "cheaper than dedicated", "inline=14 dedicated=22"])
+                                 "cheaper than dedicated", "inline=14 dedicated=22", "inline=14 dedicated=22 minutes: x"])
 def test_a_plan_whose_m_estimate_is_unmeasured_is_refused_and_never_runs_inline(env, bad):
     env.trust()
     code, out = env.office("start", "fixture goal", "--gear", "M", "--planner", "inline")

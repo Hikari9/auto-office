@@ -153,7 +153,7 @@ def test_elevated_risk_never_runs_inline(gear):
 
 
 def test_an_inline_estimate_that_does_not_beat_dedicated_dispatch_delegates():
-    worse = {"task_size": "S", "inline_advantage": "inline=30 dedicated=20 minutes: retries dominate"}
+    worse = {"task_size": "S", "inline_advantage": "inline=30 dedicated=20 minutes: retries dominate the total"}
     assert task_sizing.execution_mode("S", worse, LOW)["mode"] == "delegated"
 
 
