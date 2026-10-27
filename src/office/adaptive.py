@@ -398,7 +398,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         **({"lineage_supersession": supersession} if supersession else {}),
         "spread": {"wave_load": load, "applied": any(r["contributions"]["spread"] for r in rows)},
         "preferred_seed": request.get("preferred_seed"), "aliases": aliases,
-        "sonnet_self_fallbacks": self_fallbacks,
+        **({"sonnet_self_fallbacks": self_fallbacks} if self_fallbacks else {}),
         "candidates": rows, "slate": slate,
     }
     return {"rows": rows, "rejected": rejected, "slate": slate, "audit": audit, "by_id": by_id}
