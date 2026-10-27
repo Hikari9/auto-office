@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from office import adaptive, candidates, contract, convergence, planfile, route_learning, state, visual
+from office import adaptive, candidates, contract, convergence, planfile, route_learning, state, task_sizing, visual
 from office.util import dumps, loads
 
 # ------------------------------------------------------------------ layout
@@ -160,7 +160,22 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
         else:
             task_gates = (["checks"] if t.get("checks") else []) + (["code review"] if code_review else []) \
                 + (["ui review"] if visual_gate else [])
+        desc = t.get("descriptor") or {}
+        if ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+                and (not desc.get("task_size") or not desc.get("profile_version"))):
+            sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
+        else:
+            sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
+                        "task_size": sizing.get("task_size"),
+                        "task_size_rationale": sizing.get("task_size_rationale"),
+                        "task_size_version": sizing.get("task_size_version"),
+                        "profile": sizing.get("profile"), "profile_version": sizing.get("profile_version"),
+                        "decomposition_recommended": sizing.get("decomposition_recommended", False),
+                        "preferred_route": ex.get("triple"),
+                        "preferred_route_reason": ex.get("why"),
+                        "fallback_routes": [dict(s) for s in (ex.get("slate") or [])[1:]],
+                        "selected_route": dispatched_route,
                         "route": dispatched_route or ex.get("route"), "dispatched_route": dispatched_route,
                         **({"trial": dispatched_trials[t["id"]]} if t["id"] in dispatched_trials else {}),
                         **({"discovery": ex["discovery"]} if "discovery" in ex else {}),
@@ -172,7 +187,16 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     from office import prs
     frozen = state.current_requirements(con, run["id"])["frozen"]
     s = prs.settings(con, run)
-    return {"tasks": out, "end_state": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {},
+    gear_gates = run.get("gates") or {}
+    return {"tasks": out, "run_gear": run.get("gear"),
+            "run_gear_rationale": gear_gates.get("run_gear_rationale"),
+            "effective_gates": {k: gear_gates.get(k) for k in
+                                ("plan_review", "code_review", "visual", "dedicated_planner", "review_floor",
+                                 "review_contract", "convergence_max_rounds")},
+            "gear_model_version": gear_gates.get("gear_model_version", "legacy-pinned"),
+            "run_gear_recommendation": gear_gates.get("run_gear_recommendation"),
+            "tasks_version": run.get("plan_version"),
+            "end_state": frozen.get("end_state") or "ask", "deploy": frozen.get("deploy") or {},
             "prs": {k: s.get(k) for k in ("enabled", "reason", "base_branch", "merge_method")}, "_audits": audits}
 
 
@@ -294,6 +318,9 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
     width = min(max(width, 20), 44)
     route_w = max((len(_display_route(e)) for e in tasks.values()), default=8)
     lines = [f"plan p{version} diagram (routes are previews until dispatched; actual route shown after dispatch)", ""]
+    if pv.get("run_gear"):
+        lines += [*run_dispatch_lines(pv["run_gear"], pv.get("run_gear_rationale"), pv.get("effective_gates"),
+                                      pv.get("run_gear_recommendation")), ""]
     for w in waves:
         ids = [t for t, e in tasks.items() if e["wave"] == w]
         lines.append(f"wave {w}" + (f"  ({' | '.join(ids)} in parallel)" if len(ids) > 1 else ""))
@@ -310,11 +337,41 @@ def render(run: dict, version: int, pv: dict) -> list[str]:
                 lines.append(f"  {head:<{width}}  {_display_route(e):<{route_w}}  {_where(e)}")
                 if e.get("why"):
                     lines.append(f"  {'':<{width}}  why: {e['why']}")
+            if e.get("task_size"):
+                lines.append(f"  {'':<{width}}  size: {e['task_size']} | {e.get('task_size_rationale') or 'unclassified'}")
+                lines.append(f"  {'':<{width}}  profile: {e.get('profile') or 'balanced'} "
+                             f"({e.get('profile_version') or 'legacy'})")
+                if e.get("decomposition_recommended"):
+                    lines.append(f"  {'':<{width}}  XL subtask: evaluate decomposition before execution")
+                if e.get("selected_route"):
+                    lines.append(f"  {'':<{width}}  ACTUAL DISPATCH: {e['selected_route']}")
+                elif e.get("preferred_route"):
+                    lines.append(f"  {'':<{width}}  preferred (preview only): {e['preferred_route']}")
             if e.get("review"):
                 lines.append(f"  {'':<{width}}  review: {e['review']}" + (f" ({e['review_why']})" if e.get("review_why") else ""))
         lines.append("")
     lines.append(f"checkpoints: {checkpoints(run, pv)}")
     lines.append(f"end state: {pv.get('end_state') or 'ask'}")
+    return lines
+
+
+def task_wave(con, run: dict, tid: str | None) -> int | None:
+    """The wave the current plan places a task in (None when no preview is stored)."""
+    pv = load(con, run["id"], run["plan_version"]) if tid and run.get("plan_version") else None
+    return ((pv or {}).get("tasks") or {}).get(tid, {}).get("wave")
+
+
+def run_dispatch_lines(gear: str, rationale: str | None, gates: dict | None, recommendation: dict | None = None) -> list[str]:
+    """The run gear, why it was pinned, and the gates it funds: shown with every plan diagram and wave dispatch."""
+    gates = gates or {}
+    lines = [f"RUN DISPATCH gear {gear}", f"  why: {rationale or 'legacy pinned run; no new gear fit applied'}"]
+    if recommendation:
+        lines.append(f"  planner recommends gear {recommendation['gear']} (advisory; pinned gear stays {gear}): "
+                     f"{recommendation['why']}")
+    lines.append("  funded gates: " + ", ".join(
+        f"{name}={'yes' if gates.get(field) else 'no'}" for name, field in
+        (("plan review", "plan_review"), ("convergence", "code_review"),
+         ("browser", "visual"), ("dedicated planner", "dedicated_planner"))))
     return lines
 
 
@@ -360,6 +417,11 @@ def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:
         if not y.get("dispatched_route") and x.get("route") != y["route"]:
             out.append(f"{tid} route: {x.get('route') or 'no route'} -> {y['route'] or 'no route'}"
                        + (f" ({y['why']})" if y.get("why") else ""))
+        if x.get("task_size") != y.get("task_size"):
+            out.append(f"{tid} size: {x.get('task_size') or 'unknown'} -> {y.get('task_size') or 'unknown'} "
+                       f"({y.get('task_size_rationale') or 'new evidence'})")
+        if x.get("profile") != y.get("profile"):
+            out.append(f"{tid} profile: {x.get('profile') or 'unknown'} -> {y.get('profile') or 'unknown'}")
         if x.get("review") != y.get("review"):
             out.append(f"{tid} review: {x.get('review') or 'none'} -> {y.get('review') or 'none'}")
     out += [f"{tid} removed" for tid in a if tid not in b]
@@ -385,5 +447,5 @@ def drift(con, run: dict, tid: str, decision: dict) -> str | None:
     now = route_label(decision.get("selection_disclosure"))
     if not planned or planned == now:
         return None
-    why = short_why(decision.get("selection_disclosure"))
+    why = decision.get("route_note") or short_why(decision.get("selection_disclosure"))
     return f"{tid} route differs from the plan preview: {planned} -> {now}" + (f" ({why})" if why else "")

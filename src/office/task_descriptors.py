@@ -4,6 +4,15 @@ No model-brand-specific routing rules. Unknown fields remain neutral.
 """
 from __future__ import annotations
 import math
+import unicodedata
+
+# ZWNJ and ZWJ are needed for Persian, Indic scripts and emoji sequences.
+_ALLOWED_FORMAT = "\u200c\u200d"
+
+
+def unsafe_text(text: str) -> bool:
+    """Planner prose is echoed to terminals: no control (ESC, CSI, CR), bidi, tag or invisible format characters."""
+    return any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") and c not in _ALLOWED_FORMAT for c in text)
 
 OPTIONS = {
  "domain": ("ui", "backend", "data", "infrastructure", "mixed"),
@@ -11,7 +20,7 @@ OPTIONS = {
  "modality": ("code", "visual", "browser", "multimodal"),
  "quality": ("objective", "taste", "mixed"),
  "bounds": ("bounded", "open"),
- "task_size": ("S", "M", "L", "XL"),
+ "task_size": ("XS", "S", "M", "L", "XL"),
 }
 # Evidence-only planner tags: persisted and snapshotted with the descriptor, but never read by
 # dimensions(), benchmark_fit() or price_tier(). Omitted stays absent (unknown), never defaulted.
@@ -22,7 +31,7 @@ EVIDENCE_OPTIONS = {
  "brief_shape": ("deliverables-enumerated", "checks-only", "unknown"),
 }
 TOKENS = ("estimated_input_tokens", "estimated_output_tokens")
-PLAN_KEYS = frozenset((*OPTIONS, *EVIDENCE_OPTIONS, *TOKENS))
+PLAN_KEYS = frozenset((*OPTIONS, *EVIDENCE_OPTIONS, *TOKENS, "task_size_rationale"))
 VERSION = "task-descriptor-1"
 
 
@@ -33,6 +42,11 @@ def parse_field(key: str, value: str):
         if value not in options:
             raise ValueError(f"{key} must be one of {', '.join(options)}")
         return value
+    if key == "task_size_rationale":
+        text = value.strip()
+        if not 12 <= len(text) <= 500 or unsafe_text(text):
+            raise ValueError(f"{key} must contain concrete evidence (12-500 characters, no control characters)")
+        return text
     if key in TOKENS:
         if not value.isdecimal() or int(value) > 100000000:
             raise ValueError(f"{key} must be a nonnegative token count <= 100000000")

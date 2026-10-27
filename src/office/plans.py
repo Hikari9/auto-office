@@ -102,6 +102,12 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
                           preserved=f"{plan_path} is unchanged; the run keeps its review policy",
                           next_step=f"classify risk in {plan_path} (`blast_radius: local|repo`), or drop `lightweight:`, "
                                     "then office submit")
+        rec = parsed.requirements.get("run_gear")
+        rec_problem = risk.run_gear_problem(run.get("gear"), proposed_risk or run.get("risk") or {}, rec["gear"]) if rec else None
+        if rec_problem:
+            raise Refused("run-gear-refused", f"run gear recommendation refused: {rec_problem}", scope="plan",
+                          preserved=f"{plan_path} is unchanged; the run keeps gear {run.get('gear')}",
+                          next_step=f"raise or drop `run_gear:` in {plan_path}, then office submit")
         if redirect:
             from office import redirect as redirect_mod
             for line in redirect_mod.record(con, run, redirect):
@@ -114,6 +120,14 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
         for line in _apply_risk(con, run, proposed_risk, declaration, new_version):
             res.add(line)
         run = state.get_run(con, run["id"])
+        # Advisory: the pinned gear and its gates never change from a recommendation. A revision that drops it clears it.
+        gates = {k: v for k, v in (run.get("gates") or {}).items() if k != "run_gear_recommendation"}
+        if rec:
+            gates["run_gear_recommendation"] = {**rec, "plan_version": new_version}
+            res.add(f"planner recommends run gear {rec['gear']} (pinned gear stays {run['gear']}): {rec['why']}")
+        if gates != (run.get("gates") or {}):
+            state.update_run(con, run["id"], gates=gates)
+            run = state.get_run(con, run["id"])
         con.execute("INSERT INTO plans(run_id, version, kind, body, tasks_json, requirements_json, created_by, created_at, "
                     "content_hash, parent_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (run["id"], new_version, kind, text, dumps(parsed.tasks), dumps(parsed.requirements),
@@ -225,7 +239,9 @@ def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None,
     gear = run["gear"]
     raised = bool(new.get("high")) and not cur.get("high")
     if raised and gear == "direct":
-        gear = cfg.fit_gear(None, new)
+        # The pre-809 direct preset had a pinned risk-driven upgrade. Do not
+        # reinterpret that historical rule through XS-XL complexity fitting.
+        gear = "full" if new.get("irreversible") else "express"
     base = cfg.resolve_gates(gear, new, config)
     keys = list(risk.FLOOR_KEYS)
     started = (bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))
@@ -304,6 +320,16 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
     state.update_run(con, run["id"], requirements_version=version, envelope=envelope)
 
 
+def _sized_descriptor(run: dict, planned: dict) -> dict:
+    """The planner's descriptor, plus Office's size, rationale and profile for an XS-XL run. A run pinned to a
+    legacy gear keeps exactly the descriptor its plan wrote."""
+    from office import task_sizing
+    declared = planned.get("descriptor") or {}
+    if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1":
+        return declared
+    return {**declared, **task_sizing.classify(planned, run_gear=run.get("gear"))}
+
+
 def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
     """Make the tasks table match a plan version. Caller holds the tx.
 
@@ -326,8 +352,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                 (run["id"], p["id"], p["title"], "executor", dumps(p["scope"]), dumps(p["depends"]),
                  dumps(p["interfaces"]), dumps(p["accept"]), dumps(checks), dumps(p["visual"]) if p["visual"] else None,
                  "planned", plan_version, plan_version, plan_version, now, now))
-            if p.get("descriptor"):
-                state.update_task(con, run["id"], p["id"], descriptor=p["descriptor"])
+            state.update_task(con, run["id"], p["id"], descriptor=_sized_descriptor(run, p))
             changes["added"].append(p["id"])
             continue
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
@@ -339,7 +364,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
-                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=p.get("descriptor") or {})
+                      accept=p["accept"], checks=checks, visual=p["visual"], descriptor=_sized_descriptor(run, p))
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])

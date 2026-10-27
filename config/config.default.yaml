@@ -219,6 +219,49 @@ review:
 # plan-review cap, at intake (`office start --plan-review-rounds N`); config
 # never stands in for that choice.
 gear_presets:
+  # XS-XL complexity funding is independent of the tri-state safety floor.
+  # New runs always keep genuine review and acceptance gates; old presets stay
+  # below for byte-compatible resume of pre-809 runs.
+  XS:
+    dedicated_planner: false
+    plan_review: risk_forced
+    independent_code_review: risk_forced
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
+  S:
+    dedicated_planner: false
+    plan_review: false
+    independent_code_review: true
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
+  M:
+    dedicated_planner: false
+    plan_review: false
+    independent_code_review: true
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
+  L:
+    dedicated_planner: true
+    plan_review: true
+    independent_code_review: true
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+    plan_review_max_rounds: 3
+    code_review_max_rounds: 3
+  XL:
+    dedicated_planner: true
+    plan_review: true
+    independent_code_review: true
+    funded_browser_verification: true
+    allow_advisory_undercut: true
+    plan_review_max_rounds: 3
+    code_review_max_rounds: 3
   direct:
     dedicated_planner: false
     plan_review: risk_forced

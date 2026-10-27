@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import math
 
-from office import model_lineages, route_learning, task_descriptors
+from office import executor_slates, model_lineages, route_learning, task_descriptors
 from office.util import sha256_obj
 
 POLICY_VERSION = "adaptive-2-task"
@@ -68,8 +68,28 @@ DEFAULTS = {
     },
 }
 
+# Profile weights supplement—not override—the qualified catalog, benchmark
+# calibration, quota reserve, trust floor, or an explicit cost policy. They
+# change expected-cost-to-success tradeoffs, never hard-code a model by size.
+PROFILE_WEIGHTS_VERSION = "task-dispatch-profile-1"
+PROFILE_WEIGHTS = {
+    "lean": {"effectiveness": .34, "cost": .34, "speed": .20, "quota": .06, "preference": .06},
+    "balanced": DEFAULTS["weights"]["balanced"],
+    "deep": {"effectiveness": .56, "cost": .13, "speed": .12, "quota": .10, "preference": .09},
+    "discovery": {"effectiveness": .52, "cost": .14, "speed": .14, "quota": .12, "preference": .08},
+}
+
+
+def _effective_weights(request: dict, policy: str, weights: dict) -> dict:
+    d = (request.get("context") or {}).get("task_descriptor") or {}
+    profile = (request.get("context") or {}).get("dispatch_profile") or d.get("profile")
+    if (policy == "balanced" and profile in PROFILE_WEIGHTS
+            and (request.get("context") or {}).get("dispatch_profile_version") == PROFILE_WEIGHTS_VERSION):
+        return PROFILE_WEIGHTS[profile]
+    return weights
+
 SLATE_SIZE = 3
-RANK_LABELS = ("PRIMARY", "FALLBACK 1", "FALLBACK 2")
+RANK_LABELS = ("PRIMARY", "FALLBACK 1", "FALLBACK 2", "FALLBACK 3")
 
 
 def settings(config: dict | None) -> dict:
@@ -264,6 +284,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
     s = settings(config or {"routing": {"adaptive": request.get("adaptive_config") or {}}})
     policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
     weights = s["weights"].get(policy) or s["weights"]["balanced"]
+    weights = _effective_weights(request, policy, weights)
     candidates, aliases = _dedupe(candidates)
     rows = score(candidates, request, s)
     by_id = {r["route"]: c for r, c in zip(rows, candidates)}
@@ -332,10 +353,37 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
 
     supersession = _supersede(rows, by_id, request)
 
+    # Claude Code Sonnet -> agy is a harness failover, not an effort change.
+    # Adaptive selection remains free to choose another model for task-fit.
+    self_fallbacks = []
+    task_size = (request.get("context") or {}).get("size_class")
+    new_gear = executor_slates.new_gear_size(request) is not None  # legacy-pinned runs keep their order
+    limit = 4 if new_gear and task_size in ("M", "L") and len(request.get("preferred_seed") or []) >= 4 else SLATE_SIZE
+    for item in list(rows) if new_gear else []:
+        candidate = by_id[item["route"]]
+        if (candidate.get("alias_resolved_to") or candidate.get("model_id")) != "claude-sonnet-5-5" or candidate.get("harness") != "claude":
+            continue
+        pos = rows.index(item)
+        alt = next((r for r in rows if r["route"] != item["route"]
+                    and (by_id[r["route"]].get("alias_resolved_to") or by_id[r["route"]].get("model_id")) == "claude-sonnet-5-5"
+                    and by_id[r["route"]].get("harness") == "agy"
+                    and by_id[r["route"]].get("effort") == candidate.get("effort")), None)
+        if alt is None or pos >= limit or rows.index(alt) == pos + 1:
+            continue
+        if rows.index(alt) < pos:
+            continue
+        rows.remove(alt)
+        rows.insert(pos + 1, alt)
+        self_fallbacks.append({"from": item["route"], "to": alt["route"],
+                               "why": "same Sonnet model and effort; agy harness failover"})
     for i, r in enumerate(rows):
         r["rank"] = i + 1
     slate = [_slate_entry(i, r, rows, clincher, exploration, supersession)
-             for i, r in enumerate(rows[:SLATE_SIZE])]
+             for i, r in enumerate(rows[:limit])]
+    if self_fallbacks:
+        for entry in slate:
+            if any(entry["route"] == pair["to"] for pair in self_fallbacks):
+                entry["reason"] = "same-model, same-effort Sonnet harness self-fallback before other models"
     audit = {
         "policy_version": POLICY_VERSION, "learner_version": route_learning.LEARNER_VERSION,
         "cost_policy": policy, "weights": weights, "competitive_band": band, "budget_ceiling_usd": ceiling,
@@ -351,6 +399,7 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
         **({"lineage_supersession": supersession} if supersession else {}),
         "spread": {"wave_load": load, "applied": any(r["contributions"]["spread"] for r in rows)},
         "preferred_seed": request.get("preferred_seed"), "aliases": aliases,
+        **({"sonnet_self_fallbacks": self_fallbacks} if self_fallbacks else {}),
         "candidates": rows, "slate": slate,
     }
     return {"rows": rows, "rejected": rejected, "slate": slate, "audit": audit, "by_id": by_id}
@@ -370,6 +419,7 @@ def trial_rows(pool: list[dict], rec: dict, request: dict, config: dict | None =
     s = settings(config or {"routing": {"adaptive": request.get("adaptive_config") or {}}})
     policy = request.get("cost_policy") or (request.get("policy") or {}).get("cost_policy") or "balanced"
     weights = s["weights"].get(policy) or s["weights"]["balanced"]
+    weights = _effective_weights(request, policy, weights)
     kept, _ = _dedupe(pool)
     scored = score(kept, request, s)
     main = rec.get("rows") or []
@@ -639,11 +689,15 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
     name are filled from the router's order."""
     rows = audit.get("candidates") or []
     router = [e["route"] for e in audit.get("slate") or []]
-    out = {"chooser": "router", "primary": router[0] if router else None, "fallbacks": router[1:SLATE_SIZE]}
+    # M/L run-gear slates fund four routes (Claude Code Sonnet, same-effort
+    # agy, then two different-model fallbacks). Preserve the entire effective
+    # slate, not just the old three-route planner-choice limit.
+    capacity = max(SLATE_SIZE, len(router))
+    out = {"chooser": "router", "primary": router[0] if router else None, "fallbacks": router[1:capacity]}
     if not choice or not choice.get("routes"):
         return out
     picked, rejected, unknown = [], [], []
-    for ref in choice["routes"][:SLATE_SIZE]:
+    for ref in choice["routes"][:capacity]:
         r = resolve_route_ref(ref, rows)
         if r is None:
             reason = _rejected_route_ref(ref, audit.get("rejected") or [])
@@ -670,7 +724,7 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
         return {**out, "planner_error": (f"{primary_row['label']} is {gap:.3f} utility behind the best route; "
                                          "a primary outside the close-call band needs route_why")}
     fallbacks = picked[1:] + [x for x in router if x not in picked]
-    return {"chooser": "planner", "primary": picked[0], "fallbacks": fallbacks[:SLATE_SIZE - 1],
+    return {"chooser": "planner", "primary": picked[0], "fallbacks": fallbacks[:capacity - 1],
             "override": picked != router[:len(picked)],
             "departs_from_ranking": departs, "gap_to_best": gap, "why": why or None}
 

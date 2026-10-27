@@ -39,7 +39,9 @@ done:
 - <observable criterion>
 blast_radius: local | repo | production | production-data   (classify it; undeclared risk keeps independent code review on)
 irreversible: yes | no   (optional; yes is high risk)
-size_class: S | M | L | XL   (optional; L and XL are high risk)
+size_class: XS | S | M | L | XL   (optional complexity; risk is classified independently for new runs)
+run_gear: XS | S | M | L | XL   (optional recommendation; refused below the run's intake gear or its risk floor)
+run_gear_why: <concrete reasons: scope, coupling, uncertainty or coordination>   (required with run_gear)
 lightweight: <why this work is trivial and low risk>   (optional; needs blast_radius local or repo; refused for unknown or high risk)
 non_goals:
 - <explicitly out of scope>
@@ -79,6 +81,8 @@ visual:
   selectors: header, nav                   (elements to measure)
 route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
+task_size: XS | S | M | L | XL   (each task independently; the plan may omit for runtime inference)
+task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
 """
 
 REVIEW_FORMAT = """\
@@ -424,7 +428,7 @@ def self_review_tier(gear, risk_json) -> str:
     """How much self-review an executor does, from the run's stored gear and risk record only.
     Nothing in a packet or executor input reaches this. Every doubt resolves to more review:
     an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
-    if gear == "full":
+    if gear in ("L", "XL", "full"):
         return "deep"
     try:
         risk = json.loads(risk_json) if isinstance(risk_json, (str, bytes)) else risk_json
@@ -434,8 +438,10 @@ def self_review_tier(gear, risk_json) -> str:
         return "single"
     blast = risk.get("blast_radius")
     if (risk.get("high") or risk.get("irreversible") or blast in ("production", "production-data")
-            or risk.get("size_class") in _HIGH_SIZES):
+            or (not risk.get("complexity_only") and risk.get("size_class") in _HIGH_SIZES)):
         return "deep"
+    if gear == "XS" and not risk.get("high") and blast in _INLINE_BLAST:
+        return "inline"
     if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
         return "inline"
     return "single"
