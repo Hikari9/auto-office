@@ -46,5 +46,5 @@ def require_new_run_runtime() -> None:
         raise OfficeError("new-runs-on-3.0",
                           f"new runs are configured to use Auto Office 3.0 (rollback); {version.current()} does not create them",
                           next_step=f"start with {where}, or remove runtime.new_runs", exit_code=4)
-    if not re.fullmatch(r"3\.[1-9]\d*(\..*)?", setting):
-        raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not 3.0 or 3.1+", exit_code=2)
+    if not re.fullmatch(r"(?:3\.[1-9]\d*|(?:[4-9]|[1-9]\d)\.\d+)(\..*)?", setting):
+        raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not 3.0 or 3.1+ (a later MAJOR.MINOR line is accepted)", exit_code=2)

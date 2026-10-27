@@ -1,6 +1,6 @@
 # #837 controls #627 — role-scoped routing-policy migration
 
-Status: **partial implementation; do not release this branch yet**. Supersession date: 2026-10-27.  The authoritative requirement is [#837](https://github.com/Hikari9/auto-office/issues/837), not older trust sections in [#627](https://github.com/Hikari9/auto-office/issues/627). This document is an inspectable engineering checklist and is not approval to merge or deploy.
+Status: **substantial implementation; release gates pending**. Supersession date: 2026-10-27.  The authoritative requirement is [#837](https://github.com/Hikari9/auto-office/issues/837), not older trust sections in [#627](https://github.com/Hikari9/auto-office/issues/627). This document is an inspectable engineering checklist and is not approval to merge or deploy.
 
 ## Policy contract
 
@@ -29,22 +29,41 @@ Edits use `routing.user_policy.role_rules` in the *user* YAML file, validated be
 
 ## Acceptance and verification — progress ledger
 
-- [x] `#837` controlling contract distinguished from legacy #627 trust sections; no attempt to complete #682's obsolete approval implementation.
-- [x] Role-specific allow/neutral/deny evaluated in the normal router; neutral admission no longer depends on historical `scoring.evaluate_trust_state`.
-- [x] Role-scoped deny is enforced before capability/ranking; user role allow can supersede older global deny; role/effort isolation covered by regression tests.
-- [x] Shipped `strict_seed` defaults no longer suppress neutral reviewer fallback; remaining technical capability, quota, task-shape, and floor checks retained.
-- [x] Global user-policy config writes and read-only CLI inspection; repo-defined role rules and untrusted run `--set` role-policy mutation refused rather than silently taking user authority.
-- [x] Historic `office approve trust` now refuses; historical trust evidence remains present for auditing.
-- [x] Initial dispatch and discovery paths avoid rechecking the obsolete quarantine permission gate; quota and exact probe checks remain.
-- [x] No destructive runs.db changes; existing audit rows are preserved.
-- [ ] Authenticated **one-off user** override receipt that bypasses policy deny for its scope, with actor provenance, expiry, replay resistance, and no orchestrator spoofing. Changing user config is supported; a safe one-off bypass is not yet implemented.
-- [ ] Complete UI/CLI parity: web control for role policy editing, origin/denial explanations, and refreshed all legacy trust text/help in onboarding, setup, and inspect views.
-- [ ] Migrate legacy policy settings and older pinned runs through a documented migration/backfill/dry-run path with rollback and exact replay parity checks.
-- [ ] New catalog route conformance for reviewer roles: bounded neutral trials and exact probes without legacy approval, including robust offline, rate-limit, and temporary-credit state.
-- [ ] Reconcile dependency PR #810 (XS–XL), #682 (obsolete trust), other overlapping routing/registry/economics work before merging. Reuse independent already-merged registry/harness work.
-- [ ] Comprehensive full-suite pass, on an environment with proven process-group isolation; baseline compare and fix any changed-code regressions.
-- [ ] Independent final-HEAD/SHA review of the complete diff, all required CI and security gates, installation smoke, and actual release/prod verification.
-- [ ] Independently prove every non-superseded #627 criterion (registry lifecycle, catalog lineage, economics, fallback behavior, configuration, harness compatibility, UI and migration). Do **not** close #627 or #837 on this slice alone.
+Version: 4.0.0 (MAJOR per `AGENTS.md`: `office approve trust` is retired and routing policy changes).
+
+- [x] #837 controls legacy #627 trust sections; #682's approval ceremony is not implemented.
+- [x] Role-scoped allow/neutral/deny in the router; neutral admission never reads historical trust. Role rules outrank legacy `denied_models`; conflicting equivalent rules resolve to deny; a canonical `@major` deny still matches when the installed harness major cannot be read (never fails open).
+- [x] Candidate building is role-aware: a role allow outranks a legacy global deny, a role deny stays role-scoped.
+- [x] Strict allow-only routing is an explicit user opt-in (`routing.user_policy.strict_allow_roles`, user tier only). Shipped reviewer `strict_seed` is `false`.
+- [x] User config writes, effective inspection, repo/`--set` refusal, `office approve trust` retired, historical trust acts preserved as audit rows.
+- [x] Authenticated one-off override: `office route override <route> --role R --run RUN --reason "..."`. Issued only from an interactive terminal (refused for workers, pipes, scripts, and orchestrator quotes), HMAC-signed with a per-user key, bound to run + role + exact route, 1m–24h lifetime, revocable, every use appended to `route_override_uses`. A quote or orchestrator `--as` never lifts a deny. Capability, sandbox, reviewer-independence and landing checks still run afterwards. Limits: a receipt is time-boxed, not use-counted; a process running as the same OS user can read the key file (OS boundary, documented in `route_override.py`).
+- [x] Trial gate: a role-denied trial route or fallback blocks a trial (`role-deny` / `no-fallback`); the quarantine veto is gone.
+- [x] Migration: `office route migrate` dry run (legacy `denied_models`, what the old gate blocked, user-quarantine acts as optional deny suggestions), `--apply` (adds explicit all-role deny rules, removes nothing, backup), `--rollback`. Historical trust acts, runs and pinned policies are never rewritten. Decision hashes of recorded routing decisions are unchanged (golden test); only the eligibility record shape changed.
+- [x] Legacy trust wording removed from CLI help, harness scaffold/validate/smoke/list output, onboarding, SKILL.md, route/adapter/harness skills and docs. `inspect trust` and the trust report are labelled audit-only.
+- [~] Web: the model registry shows per-role effective state with its source and points to `office route` for edits. Web-side editing of role rules is not implemented.
+- [ ] Reviewer-discovery bounded trials for non-executor roles: not implemented (the discovery design keeps trials builder-only; reviewers run neutral routes directly under the same capability and independence checks).
+- [ ] Provider-credit exhaustion as a timed availability state: left to #831.
+- [ ] #810 (XS–XL) compatibility: not re-verified after rebase; #810 is still a draft.
+- [ ] Independent final-SHA review, release and post-deploy verification: see the PR body.
+
+### #627 acceptance walk
+
+| # | Item | Disposition |
+| --- | --- | --- |
+| 1 | Two named-lineage generations retained | Merged earlier work (#811, `model_lineages`); not re-verified here |
+| 2 | Alias binding and no displacement by ambiguous previews | Merged earlier work; not re-verified here |
+| 3 | Global deny Sol ≤5.6 vs 6.1, undo, manual-only separate from availability | Existing ceilings/denied_models tests still pass; role rules added |
+| 4 | Policy vs technical states have independent reason codes | Role policy and technical gates are separate categories (`role-deny` vs quota/capability/probe) |
+| 5 | Atomic validated registry update | Not touched; not verified here |
+| 6 | Migration dry-run, reversible, reports conflicts | `office route migrate` (this PR); conflicting hand-edited rules are validated, never overwritten |
+| 7 | First Run: continue with defaults / review policy | Onboarding text updated; no trust prompt remains |
+| 8 | Planner envelope and whole-wave economics | Not touched; not verified here |
+| 9 | Manual route wins; user-denied needs explicit policy change | Superseded by #837: a deny yields only to user config or a user-issued receipt |
+| 10 | Soft reservations, queued-task replan | Not touched; budget work is #831 |
+| 11 | Telemetry opt-in | Not touched |
+| 12 | Web grid/inspector, cards, CLI/web parity | Partial (read-only role policy); web editing open |
+| 13 | Pin/replay/rollback identities | Decision hashes stable (golden test); pinned runs keep their pinned runtime and config |
+| 14 | #607 remains a linked follow-up | Unchanged |
 
 ## Testing and rollback
 

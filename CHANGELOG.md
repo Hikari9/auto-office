@@ -2,6 +2,15 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 4.0.0
+
+MAJOR: routing policy and CLI change (#837, advances #627).
+
+- Policy: role-scoped `allow` / `neutral` / `deny` replaces the `proven` / `valid-unverified` / `quarantined` trust gate. New routes are neutral and eligible; a deny excludes a route for that role only. User config outranks shipped defaults; repo config and `--set` cannot write role rules.
+- CLI: `office approve trust` is retired and refuses (historical trust acts stay as audit evidence). New `office route policy|allow|neutral|deny|clear|override|migrate`. `office route override` is a user-issued, signed, time-boxed one-off deny override bound to a run, role and route; a quote or orchestrator pin cannot lift a deny.
+- Config: new `routing.user_policy.role_rules` and `strict_allow_roles` (user tier only); shipped reviewer `strict_seed` is now `false`. Existing `denied_models` and ceilings keep working unchanged. Pinned older runs keep their pinned runtime.
+- Migration: `office route migrate` (dry run), `--apply`, `--rollback`.
+
 ## 3.7.0
 
 Rolls up everything landed on `main` since 3.6.6 (the version was not bumped per PR before this release).
