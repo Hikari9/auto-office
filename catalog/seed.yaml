@@ -731,6 +731,45 @@ models:
     source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-3-8-flash-low', release_url: 'https://artificialanalysis.ai/models/releases/gemini-3-8-flash', fetched_at: '2026-09-27T14:55:21Z', page_title: Gemini 3.8 Flash (low)}
     content_hash: d6bb96f9b31490cb8287ca2b8eb21a1d041b754d3e30a343c0249b4ddd34b65d
     supersession_metadata:
+  - model_id: gemini-4-argon
+    invocation_model_id: gemini-4-argon-medium
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: '#809 L-only intelligence-floor exception; slug listed by agy models (2026-10-28); launch banner and builder conformance not yet qualified'
+    source_identifier: null
+    source_name: user-approved-issue-809
+    effort: medium
+    source_effort: medium
+    effort_confidence: unknown
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: null}
+    price_fields:
+    speed_fields:
+    release_date:
+    source_snapshot_metadata: {kind: user-approved-routing-exception, url: 'https://github.com/Hikari9/auto-office/issues/809#issuecomment-6433994337', fetched_at: '2026-10-28T01:19:00Z', page_title: '#809 Argon Medium L-only floor exception'}
+    content_hash:
+    supersession_metadata:
+  - model_id: gemini-4-argon
+    invocation_model_id: gemini-4-argon-high
+    invocation_harness: agy
+    invocation_source: 'local-evidence:agy models'
+    dispatchable: false
+    discovery: eligible
+    discovery_reason: '#809 conditional XL final fallback; slug listed by agy models (2026-10-28); launch banner and builder conformance not yet qualified'
+    source_identifier: gemini-4-argon
+    source_name: artificial-analysis
+    effort: high
+    source_effort: high
+    effort_confidence: exact
+    benchmark_indexes: {Artificial Analysis Intelligence Index v4.3.2: 53}
+    price_fields:
+    speed_fields:
+    release_date:
+    source_snapshot_metadata: {kind: vendor-independent-benchmark-page, url: 'https://artificialanalysis.ai/models/gemini-4-argon', fetched_at: '2026-10-28T01:19:00Z', page_title: 'Gemini 4 Argon (high)'}
+    content_hash:
+    supersession_metadata:
+
   # pi/gpt-5-codex@high: disabled on 2026-10-09. Registering the pi harness would
   # otherwise activate this pre-existing row, but the model is deprecated by its
   # vendor (superseded_by gpt-5-1-codex) and has no independent re-verification
