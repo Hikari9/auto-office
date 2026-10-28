@@ -228,8 +228,8 @@ def test_no_eligible_fallback_blocks_the_task_with_the_reasons(plain, monkeypatc
 
 
 def test_a_declared_route_is_logged_and_demoted_but_never_swapped_silently(plain):
-    quote = f"Use codex/{SOL}@high for this task."
-    dispatch.dispatch(plain.con, state.get_run(plain.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@high", quote=quote)
+    quote = f"Use codex/{SOL}@medium for this task."
+    dispatch.dispatch(plain.con, state.get_run(plain.con, "run-A"), ["T1"], as_model=f"codex/{SOL}@medium", quote=quote)
     (d,) = plain.dispatches()
     fail(plain, d, "error: unknown model")
     [failed] = events(plain, "route.failed")

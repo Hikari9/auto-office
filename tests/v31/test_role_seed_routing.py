@@ -272,3 +272,13 @@ def test_user_allows_reports_which_sizes_a_scoped_allow_covers():
     unsized = user({"role": "executor", "route": "codex@0/gpt-6-luna@low", "state": "allow"})
     assert route_policy.user_allows(cand, "executor", [unsized])["sizes"] is None
     assert route_policy.user_allows(cand, "executor", [user()]) is None
+
+
+def test_a_shipped_deny_still_denies_when_the_harness_major_is_unknown():
+    cand = {"harness": "codex", "harness_version": None, "model_id": "gpt-6-astra",
+            "invocation_model_id": "gpt-6-astra", "effort": "medium"}
+    assert route_policy.effective_role_state(cand, "executor", [], "M")["state"] == "deny"
+    # An allow still needs the exact major, so an unknown one never grants.
+    luna = {"harness": "codex", "harness_version": None, "model_id": "gpt-6-luna",
+            "invocation_model_id": "gpt-6-luna", "effort": "high"}
+    assert route_policy.effective_role_state(luna, "code_reviewer", [])["state"] == "neutral"

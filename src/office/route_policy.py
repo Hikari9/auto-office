@@ -330,7 +330,8 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
         if reason := is_denied(cand, policy):
             return {"state": "deny", "source": "legacy-user-deny", "reason": reason}
     shipped = [r for r in SEED_ROLE_RULES
-               if r["role"] == role and _in_scope(r, size) and _rule_matches(cand, r["route"])]
+               if r["role"] == role and _in_scope(r, size)
+               and _rule_matches(cand, r["route"], state=r["state"])]
     if shipped:
         # A deny outranks an allow if the shipped data ever overlaps; a size-scoped rule outranks an unsized one.
         rule = sorted(shipped, key=lambda r: ("sizes" not in r, r["state"] != "deny"))[0]
