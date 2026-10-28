@@ -240,8 +240,8 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "with `route:` and say why with `route_why:`.",
             "Run-level `checks:` in ## Requirements are what integration and landing actually verify, not an "
             "implicit full-suite guarantee. Inspect how this repo selects test tiers and declare its complete "
-            "gate for runtime changes. Auto-Office itself needs `scripts/validate.sh` (pytest `--all` covers "
-            "integration, legacy and slow); bare `pytest` defaults to a partial tier and will not authorize landing.",
+            "gate for runtime changes. Auto-Office PRs use `scripts/validate.sh --pr` (targeted modules with pytest `--all` including "
+            "integration, legacy and slow markers); `scripts/validate.sh` still runs the entire suite on demand; bare `pytest` defaults to a partial tier and will not authorize landing.",
             "Write each check for the tool versions the repo pins. Vitest 1.x rejects `--maxWorkers=N` on its "
             "own (\"minThreads and maxThreads must not conflict\"): cap workers with `--maxWorkers=N --minWorkers=1`.",
             "WHEN DONE run: office submit", "Then stop. Review findings, if any, come back through the orchestrator."]

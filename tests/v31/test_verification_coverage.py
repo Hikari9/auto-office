@@ -90,6 +90,45 @@ def test_unfixed_validation_script_is_partial_even_when_named(tiered_repo):
     assert vc.audit(root, sha, ["scripts/validate.sh"])[0] == vc.PARTIAL
 
 
+def test_pr_script_scope_is_not_full_suite_and_does_not_enqueue_full_duplicate(tiered_repo):
+    root, _ = tiered_repo
+    script = root / "scripts" / "validate.sh"
+    script.write_text(
+        '#!/usr/bin/env bash\n'
+        'python3 scripts/select_pr_tests.py --output "$selection_file"\n'
+        'python3 -m pytest "${selected_tests[@]}" -q -n 2 --all\n'
+    )
+    (root / "scripts" / "select_pr_tests.py").write_text("print('select tests')\n")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "scoped gate"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    command = "scripts/validate.sh --pr"
+    assert vc.audit(root, sha, [command])[0] == vc.SCOPED
+    assert vc.supplemental_checks(root, sha, [command]) == []
+    assert vc._complete_pytest_command(command) is False
+    land._require_run_coverage({"repo_root": str(root),
+                                "landing": {"run_checks": [command]}}, sha)
+
+    # A similarly named but non-functional shell command cannot claim a scope.
+    script.write_text("#!/bin/sh\nexit 0\n")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "disable gate"], check=True)
+    unsafe = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    assert vc.audit(root, unsafe, [command])[0] == vc.PARTIAL
+
+
+def test_unverified_scoped_command_cannot_attest_full_repo():
+    root = Path(__file__).resolve().parents[2]
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    # A command declaration without a valid check-output receipt cannot be
+    # upgraded to a completed integration check.
+    run = {"id": "r", "repo_root": str(root), "landing": {"integration": {
+        "full_suite": {"commit": sha, "gate": "unproven", "command": "scripts/validate.sh --pr"}}}}
+    assert vc.attested_checks(None, run, sha) == []
+
+
 def test_non_tiered_repo_preserves_declared_check_policy(tmp_path):
     root = tmp_path / "untiered"
     root.mkdir()

@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 FULL = "full"
+SCOPED = "scoped"  # verified change-relevant tests; NEVER a full-suite claim
 PARTIAL = "partial"
 
 
@@ -105,12 +106,31 @@ def _is_validate_script(command: str) -> bool:
     return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 
+def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
+    """Recognize the maintained PR selector from the exact committed tree.
+
+    The selector must actually exist in that tree. A similarly named command
+    in an unrelated repo cannot waive #563's full-suite requirement.
+    """
+    words = _tokens(command)
+    if words[:1] in (["bash"], ["sh"]):
+        words = words[1:]
+    if words not in (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"]):
+        return False
+    script = _show(repo, commit, "scripts/validate.sh") or ""
+    selector = _show(repo, commit, "scripts/select_pr_tests.py") or ""
+    return (bool(selector) and "python3 scripts/select_pr_tests.py --output" in script
+            and 'python3 -m pytest "${selected_tests[@]}"' in script
+            and "--all" in script)
+
+
 _ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"
 
 
 def supplemental_checks(repo: Path, commit: str, commands: list[str]) -> list[str]:
     if (_tiered_repo(repo, commit) and any(_is_validate_script(c) for c in commands)
-            and not any(_complete_pytest_command(c) for c in commands)):
+            and not any(_complete_pytest_command(c) or _scoped_validate(repo, commit, c)
+                        for c in commands)):
         return [_ATTEST_PYTEST]
     return []
 
@@ -123,6 +143,9 @@ def audit(repo: Path, commit: str, commands: list[str], *,
     selected = commands if verified_commands is None else verified_commands
     if any(_complete_pytest_command(c) for c in selected):
         return FULL, "full pytest --all selection executed by integration checks"
+    if any(_scoped_validate(repo, commit, c) for c in selected):
+        return SCOPED, ("change-targeted test modules executed with --all markers; "
+                        "not the complete pytest suite")
     return PARTIAL, ("run-level checks do not demonstrate the complete pytest suite; "
                      f"{', '.join(tiers)} tests can be deselected by default; "
                      "shell script text is not execution evidence")
@@ -149,7 +172,8 @@ def attested_checks(con, run: dict, commit: str) -> list[str]:
             or row["revision_id"] != "I" + commit[:7]):
         return []
     expected = proof.get("command")
-    if not expected or not _complete_pytest_command(expected):
+    if not expected or not (_complete_pytest_command(expected)
+                            or _scoped_validate(Path(run["repo_root"]), commit, expected)):
         return []
     run_root = paths.run_dir(run["id"])
     evidence_root = run_root / "evidence"

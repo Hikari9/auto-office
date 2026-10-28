@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pre-push hook. Enable once per clone: git config core.hooksPath .githooks
 # 1. PR guard: direct pushes to main are rejected (owner bypass: BYPASS_PR=1).
-# 2. Validation gate: scripts/validate.sh (CI stays empty, #120). Skipped for delete-only
+# 2. Validation gate: scripts/validate.sh --pr (CI stays empty, #120). Skipped for delete-only
 #    pushes; skip explicitly with SKIP_VALIDATE=1.
 protected_branch="main"
 zero="0000000000000000000000000000000000000000"
@@ -10,7 +10,10 @@ updates=0
 while read local_ref local_sha remote_ref remote_sha
 do
   # A branch deletion ships no code, so it needs no validation.
-  [ "$local_sha" = "$zero" ] || updates=$((updates + 1))
+  if [ "$local_sha" != "$zero" ]; then
+    updates=$((updates + 1))
+    pushed_sha="$local_sha"
+  fi
   if [ "$remote_ref" = "refs/heads/$protected_branch" ]; then
     if [ "$BYPASS_PR" = "1" ]; then
       echo "⚠️ [PR GUARD] Direct push to main BYPASSED by repo owner."
@@ -33,4 +36,10 @@ if [ "$SKIP_VALIDATE" = "1" ]; then
   exit 0
 fi
 
-exec "$(git rev-parse --show-toplevel)/scripts/validate.sh"
+# A push can update an explicit commit other than checkout HEAD. Only attest
+# exactly HEAD; refuse unrelated pushed refs instead of validating wrong bytes.
+if [ "$updates" -ne 1 ] || [ "$pushed_sha" != "$(git rev-parse HEAD)" ]; then
+  echo "[PR GATE] Push must contain exactly the current HEAD; push branches individually." >&2
+  exit 2
+fi
+exec "$(git rev-parse --show-toplevel)/scripts/validate.sh" --pr

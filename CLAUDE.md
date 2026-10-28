@@ -8,7 +8,8 @@ Auto Office is an agent engineering lifecycle (intent → plan → routed execut
 
 ```bash
 uv tool install --force --editable '.[visual]'     # puts `office` on PATH from this checkout
-scripts/validate.sh                                # first run also creates .venv with test deps
+scripts/validate.sh --pr                           # PR-scoped gate, selects changed-file tests; creates .venv
+scripts/validate.sh                                # explicit full regression suite, takes 40+ minutes
 
 .venv/bin/python -m pytest -n 2                    # default: in-process unit smoke tier
 .venv/bin/python -m pytest -n 2 --all              # unit + integration + legacy + slow
@@ -16,14 +17,15 @@ scripts/validate.sh                                # first run also creates .ven
 .venv/bin/python -m pytest tests/test_amendments.py -k some_name   # single test
 
 python3 scripts/check_ecosystem.py                 # static ecosystem/contract check
-scripts/validate.sh                                # full local gate (the pre-push hook runs this too)
+scripts/validate.sh --pr                           # local pre-push gate for each PR
+scripts/validate.sh --full                         # optional full regression/release suite
 VALIDATE_BUILD=1 scripts/validate.sh               # also builds the wheel and checks bundled resources
 git config core.hooksPath .githooks                # enable the pre-push gate
 ```
 
 - Cap pytest workers at 2 (`-n 2`); the gate does the same.
-- There is no remote CI. `scripts/validate.sh` is the only gate and stamps the validated tree under `$(git rev-parse --git-common-dir)/office-validated` so pre-push can skip a rerun.
-- For runtime changes, set the plan's **run-level** `## Requirements` `checks: scripts/validate.sh`. The default `pytest` tier omits `integration`, `legacy`, and `slow`; `scripts/validate.sh` now runs `--all`, and `office land` refuses incomplete tier coverage on a repository declaring this custom selection.
+- There is no remote CI. Pre-push invokes `scripts/validate.sh --pr` and records scoped trees in `office-pr-validated`; explicit full validation records `office-validated`. A scoped receipt **never** attests the full suite.
+- For PR changes, set the plan's **run-level** `## Requirements` `checks: scripts/validate.sh --pr`. The selector compares with the merge base of `origin/main`, discloses its scope and runs selected modules with `--all` (including their `integration`, `legacy`, and `slow` cases). `office land` accepts recorded, integrity-checked scoped results, explicitly labeled **scoped** instead of **full**. Bare `pytest` still omits extra tiers and is not sufficient for landing; use `scripts/validate.sh` for explicit full-suite coverage. Reviewers must evaluate omitted cross-module risk; these targeted checks are not proof of every regression being absent. A missing base or no changed files fails closed.
 - Markers (`pyproject.toml`): `integration`, `legacy`, `slow` are deselected by default. `approved` starts from an approved-plan snapshot. `review_contract(name)` pins the run's review contract (v3.1 suites test pinned pre-#337 runs).
 - Tests use isolated homes and scripted fake harness binaries. Never call a real model from a test.
 - Property tests use Hypothesis (`from hypothesis import given`). Use one where an invariant over generated inputs says more than a table of examples, not to convert ordinary example tests. `tests/conftest.py` loads a deterministic profile (`derandomize`, no example database); `HYPOTHESIS_PROFILE=explore` randomises and widens a one-off hunt. Keep a shrunk counterexample as an `@example(...)`. Keep a named example where the example itself is the contract or the historical regression.
