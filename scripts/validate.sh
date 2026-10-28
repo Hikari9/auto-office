@@ -78,7 +78,10 @@ if [ "$mode" = "pr" ]; then
   selection_file="$(mktemp)"
   trap 'rm -f "$selection_file"' EXIT
   python3 scripts/select_pr_tests.py --output "$selection_file"
-  mapfile -t selected_tests < "$selection_file"
+  selected_tests=()
+  while IFS= read -r selected_test; do
+    selected_tests+=("$selected_test")
+  done < "$selection_file"
   if [ "${#selected_tests[@]}" -eq 0 ]; then
     echo "[PR GATE] No tests selected; refusing empty scoped validation" >&2
     exit 2
