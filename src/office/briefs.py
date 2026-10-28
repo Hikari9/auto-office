@@ -215,6 +215,10 @@ def planner_brief(con, run: dict, packet: dict) -> str:
             "You own architecture, task boundaries, ownership envelopes, dependencies, shared interfaces and the "
             "acceptance/test seams. Executors own exact files, helpers, internal APIs, refactors, technique and extra "
             "tests inside their envelope.",
+            "Earn parallel lanes: document independent scopes, dependencies, interface and review seams before "
+            "fan-out. Prefer cohesive delivery when integration/rework dominates; compare complete root, planner, "
+            "executor, review and rework costs only when measured. Unknown cache policy is neutral; do not "
+            "sacrifice authorization, route eligibility or independent review for a speculative saving.",
             "`scope:` is an ownership envelope: the module or domain directories a task owns, with their tests "
             "(e.g. src/billing/**, tests/billing/**), not a prediction of every file. Name an exact file only where "
             "another task depends on it or two writers would collide; list append-only registries several tasks must "

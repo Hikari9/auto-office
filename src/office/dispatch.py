@@ -238,6 +238,13 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
     with db.transaction(con):
         run = state.get_run(con, run["id"])
         graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
+        if len(task_ids) > 1:
+            from office import delegation_shadow
+            shadow = delegation_shadow.propose(
+                [state.get_task(con, run["id"], tid) for tid in task_ids], parallel_requested=parallel)
+            state.emit(con, run, "delegation.shadow",
+                       f"shadow proposal {shadow['proposal']} vs actual {shadow['actual']}; no policy effect",
+                       audience="runtime", payload=shadow)
         previous = None
         if run.get("gear"):
             gates = run.get("gates") or {}

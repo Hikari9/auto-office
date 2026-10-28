@@ -66,7 +66,7 @@ Auto Office {ver}
                                     catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
-  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics] [id]
+  office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics|efficiency] [id]
   office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
   office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
                                     opt-in (economics.collect): record measured token/cache usage

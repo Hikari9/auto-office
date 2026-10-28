@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.11.0
+
+- feat(economics): add a shadow-only pre-fan-out delegation rationale, read-only `office inspect efficiency` with observed-versus-unknown cost coverage, and conservative matched-run evaluator (#502). This does not change actual dispatch, model selection, safety gates or cost telemetry's default-off setting; real matched runs and scheduling-policy activation remain outstanding.
+
 ## 3.10.2
 
 - fix(routing): honor harness-major user rules for declared routes and register Argon lineage; align release tests with current routing and catalog policy.
