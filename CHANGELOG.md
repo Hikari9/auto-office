@@ -2,9 +2,13 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.9.1
+## 3.10.1
 
-- test(gate): run changed-file-targeted `--all` tests for each PR and pre-push; attest integrity-checked scoped Office landing checks separately from the explicit full suite (#854).
+- test(gate): run changed-file-targeted `--all` tests for each PR and pre-push; attest scoped Office landing checks separately from the explicit full suite (#854).
+
+## 3.10.0
+
+- feat(catalog): move the shipped model seed to strict, normalized TSV routing and benchmark tables plus YAML provenance; keep legacy in-memory objects, run hashes, lineages, user overlays and policy unchanged (#852).
 
 ## 3.9.0
 
