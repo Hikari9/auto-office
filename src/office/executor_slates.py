@@ -7,38 +7,122 @@ from __future__ import annotations
 
 import math
 
-INDEX = "Artificial Analysis Intelligence Index v4.3.2"
-FLOORS = {"XS": 31, "S": 38, "M": 40, "L": 44, "XL": 47}
-VERSION = "xs-xl-executor-slates-2026-10-28-861"
-# Each tuple: concrete model ID, exact effort, harness (None = any qualified).
-IDEAL = {
-    "XS": (("claude-haiku-5-5", "medium", "claude"),
-           ("gemini-3.8-flash", "low", None),
-           ("gpt-6.1-terra", "low", "codex")),
-    "S": (("gemini-3.8-flash", "medium", None),
-          ("claude-haiku-5-5", "high", "claude"),
-          ("gpt-6.1-terra", "medium", "codex")),
-    "M": (("claude-haiku-5-5", "high", "claude"),
-          ("glm-5.3-flash", "max", "opencode"),
-          ("gpt-6.1-terra", "medium", "codex")),
-    "L": (("claude-sonnet-5-5", "high", "claude"),
-          ("claude-sonnet-5-5", "high", "agy"),
-          ("gpt-6.1-terra", "high", "codex"),
-          ("gemini-4-argon", "medium", None)),
-    "XL": (("claude-opus-5-5", "medium", "claude"),
-           ("gpt-6.1-sol", "medium", "codex"),
-           ("gemini-4-argon", "high", None)),
-}
+from pathlib import Path
+import hashlib
+import yaml
 
-# Planner routes, by RUN gear (#850 §4), used only when the user asks for a standalone planner: the root
-# orchestrator plans every run by default. XS and S have no automatic planner and no invented slate.
-PLANNER_BY_GEAR = {
-    "M": (("claude-opus-5-5", "low", "claude"), ("gpt-6-astra", "low", "codex"), ("gemini-4-argon", "low", None)),
-    "L": (("claude-opus-5-5", "medium", "claude"), ("gpt-6-astra", "medium", "codex"),
-          ("gemini-4-argon", "medium", None)),
-    "XL": (("claude-opus-5-5", "high", "claude"), ("gpt-6-astra", "high", "codex"),
-           ("gemini-4-argon", "high", None)),
-}
+from office import paths
+
+SIZES = ("XS", "S", "M", "L", "XL")
+EFFORTS = frozenset(("none", "low", "medium", "high", "xhigh", "max"))
+
+
+class ExecutorPolicyError(ValueError):
+    """Invalid shipped size/slate policy: fail closed instead of dispatching."""
+
+
+def load_policy(root: Path | None = None) -> dict:
+    """Load exactly the deployed policy, or an isolated root for policy-contract tests.
+
+    Never use the test suite as a fallback routing-policy registry.
+    """
+    source = (Path(root) if root is not None else paths.resources_root()) / "catalog/executor-policy.yaml"
+    try:
+        raw = source.read_bytes()
+        policy = yaml.safe_load(raw)
+    except (OSError, yaml.YAMLError) as exc:
+        raise ExecutorPolicyError(f"{source}: cannot load executor policy: {exc}") from exc
+    if not isinstance(policy, dict) or policy.get("schema_version") != 1:
+        raise ExecutorPolicyError(f"{source}: unsupported executor-policy schema")
+    for field in ("policy_version", "benchmark_index"):
+        if not isinstance(policy.get(field), str) or not policy[field].strip():
+            raise ExecutorPolicyError(f"{source}: {field} must be a nonempty string")
+    floors = policy.get("floors")
+    if not isinstance(floors, dict) or set(floors) != set(SIZES) or any(
+        type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in floors.values()
+    ):
+        raise ExecutorPolicyError(f"{source}: floors must specify finite nonnegative values for XS-XL")
+    for field, sizes in (("executor_preferred", SIZES), ("planner_preferred", ("M", "L", "XL"))):
+        slates = policy.get(field)
+        if not isinstance(slates, dict) or set(slates) != set(sizes):
+            raise ExecutorPolicyError(f"{source}: {field} must provide exactly {', '.join(sizes)}")
+        for size, entries in slates.items():
+            if not isinstance(entries, list) or not entries:
+                raise ExecutorPolicyError(f"{source}: {field}.{size} must be nonempty")
+            observed = set()
+            for item in entries:
+                if not isinstance(item, dict) or not {"model_id", "effort"} <= set(item) or (
+                    set(item) - {"model_id", "effort", "harness"}
+                ) or not isinstance(item["model_id"], str) or not item["model_id"].strip() or (
+                    item["effort"] not in EFFORTS
+                ) or (item.get("harness") is not None and (
+                    not isinstance(item["harness"], str) or not item["harness"].strip()
+                )):
+                    raise ExecutorPolicyError(f"{source}: invalid {field}.{size} route")
+                key = (item["model_id"], item["effort"], item.get("harness"))
+                if key in observed:
+                    raise ExecutorPolicyError(f"{source}: duplicate {field}.{size} route {key}")
+                observed.add(key)
+    restrictions = policy.get("model_restrictions")
+    if not isinstance(restrictions, list):
+        raise ExecutorPolicyError(f"{source}: model_restrictions must be a list")
+    for r in restrictions:
+        if not isinstance(r, dict) or not isinstance(r.get("model_id"), str) or not isinstance(
+            r.get("reason"), str
+        ) or not (("allowed_sizes" in r) != ("allowed_harnesses" in r)):
+            raise ExecutorPolicyError(f"{source}: invalid model restriction")
+        if "allowed_sizes" in r and (not isinstance(r["allowed_sizes"], list) or any(
+            size not in SIZES for size in r["allowed_sizes"]
+        )):
+            raise ExecutorPolicyError(f"{source}: invalid allowed_sizes")
+        if "allowed_harnesses" in r and (not isinstance(r["allowed_harnesses"], list) or any(
+            not isinstance(h, str) or not h for h in r["allowed_harnesses"]
+        )):
+            raise ExecutorPolicyError(f"{source}: invalid allowed_harnesses")
+    exceptions = policy.get("floor_exceptions")
+    if not isinstance(exceptions, list):
+        raise ExecutorPolicyError(f"{source}: floor_exceptions must be a list")
+    seen = set()
+    for x in exceptions:
+        if not isinstance(x, dict) or not all(isinstance(x.get(k), str) and x[k] for k in (
+            "name", "model_id", "effort", "size", "role", "score_evidence", "authorization"
+        )) or x["size"] not in SIZES or x["effort"] not in EFFORTS or x["role"] != "executor" or (
+            x["score_evidence"] not in ("missing", "numeric-below-floor")
+        ) or not isinstance(x.get("not_waived"), list) or not x["not_waived"]:
+            raise ExecutorPolicyError(f"{source}: invalid floor exception")
+        if x.get("harness") is not None and not isinstance(x["harness"], str):
+            raise ExecutorPolicyError(f"{source}: invalid exception harness")
+        if x["score_evidence"] == "numeric-below-floor" and (
+            type(x.get("minimum_score")) not in (int, float) or
+            not math.isfinite(x["minimum_score"]) or x["minimum_score"] >= floors[x["size"]]
+        ):
+            raise ExecutorPolicyError(f"{source}: numeric exception must have a finite below-floor minimum")
+        key = (x["model_id"], x["effort"], x["size"], x["role"], x.get("harness"))
+        if key in seen:
+            raise ExecutorPolicyError(f"{source}: duplicate exception {key}")
+        seen.add(key)
+    # This digest identifies the deployed policy bytes; it is not a dispatch receipt.
+    policy["_provenance"] = {"source": str(source), "sha256": hashlib.sha256(raw).hexdigest(),
+                              "precedence": "shipped default; authenticated user policy is resolved later"}
+    return policy
+
+
+POLICY = load_policy()
+INDEX = POLICY["benchmark_index"]
+FLOORS = POLICY["floors"]
+VERSION = POLICY["policy_version"]
+IDEAL = {size: tuple((r["model_id"], r["effort"], r.get("harness")) for r in entries)
+         for size, entries in POLICY["executor_preferred"].items()}
+PLANNER_BY_GEAR = {size: tuple((r["model_id"], r["effort"], r.get("harness")) for r in entries)
+                   for size, entries in POLICY["planner_preferred"].items()}
+FLOOR_EXCEPTION = next((dict(x) for x in POLICY["floor_exceptions"]
+                        if x["score_evidence"] == "missing"), {})
+
+
+def policy_provenance() -> dict:
+    """Expose the canonical shipped policy fingerprint for audit and future snapshots."""
+    return {**POLICY["_provenance"], "policy_version": VERSION, "benchmark_index": INDEX}
+
 
 
 def planner_seed(gear: str | None) -> list[dict]:
@@ -69,10 +153,14 @@ def model_restriction(candidate: dict, size: str | None) -> str | None:
     if size not in FLOORS:
         return None
     model = candidate.get("alias_resolved_to") or candidate.get("model_id") or ""
-    if model == "claude-opus-5-5" and size != "XL":
-        return f"Opus 5.5 is reserved for XL subtasks (got {size})"
-    if model == "claude-sonnet-5-5" and candidate.get("harness") not in ("claude", "agy"):
-        return "Sonnet 5.5 harness must be Claude Code or agy"
+    for restriction in POLICY["model_restrictions"]:
+        if restriction["model_id"] != model:
+            continue
+        if "allowed_sizes" in restriction and size not in restriction["allowed_sizes"]:
+            return restriction["reason"].format(size=size)
+        if "allowed_harnesses" in restriction and candidate.get("harness") not in restriction["allowed_harnesses"]:
+            return restriction["reason"].format(size=size)
+
     return None
 
 
@@ -89,44 +177,30 @@ def benchmark_gate(candidate: dict, size: str | None) -> str | None:
     return None
 
 
-# User-approved (#809, 2026-10-27) and deliberately narrow: only this exact model,
-# effort, role and subtask size may pass the AA floor while its score is unpublished.
-FLOOR_EXCEPTION = {"model_id": "gemini-4-argon", "effort": "medium", "role": "executor", "size": "L"}
-
-
 def floor_exception(candidate: dict, size: str | None, role: str | None = None) -> dict | None:
-    """Audited exact-route exceptions: Argon Medium L (#809), Haiku High M (#861).
-
-    Haiku requires its real AA v4.3.2 numeric score 38. Neither exception
-    invents a score or waives conformance, quota, permissions or safety.
-    """
-    # #861: exact owner-authorized M floor exception; never amend the pinned score.
+    """Exact audited exceptions are data-driven; no unknown score or scope is invented."""
     model = candidate.get("alias_resolved_to") or candidate.get("model_id")
-    if (size == "M" and role in ("executor", "worker") and model == "claude-haiku-5-5"
-            and candidate.get("effort") == "high" and candidate.get("harness") == "claude"):
-        scores = candidate.get("benchmark_indexes") or {}
-        raw = scores.get(INDEX) if isinstance(scores, dict) else None
-        # The owner authorized the documented numeric score 38, not missing
-        # or arbitrarily weaker benchmark evidence. Scores >=40 need no waiver.
-        if type(raw) not in (int, float) or not math.isfinite(raw) or raw < 38 or raw >= FLOORS[size]:
-            return None
-        return {"exception": "haiku-high-m-owner-authorized-floor", "model_id": model,
-                "effort": "high", "harness": "claude", "size": size,
-                "index": INDEX, "observed_score": raw,
-                "waived": f"{INDEX} >= {FLOORS[size]} (owner authorization #861)",
-                "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
-    if size != FLOOR_EXCEPTION["size"] or role not in (FLOOR_EXCEPTION["role"], "worker"):
-        return None
-    model = candidate.get("alias_resolved_to") or candidate.get("model_id")
-    if model != FLOOR_EXCEPTION["model_id"] or candidate.get("effort") != FLOOR_EXCEPTION["effort"]:
-        return None
-    scores = candidate.get("benchmark_indexes")
-    if isinstance(scores, dict) and scores.get(INDEX) is not None:
-        return None
-    return {"exception": "argon-medium-l-intelligence-floor", "model_id": model,
-            "effort": candidate["effort"], "size": size, "index": INDEX,
-            "waived": f"{INDEX} >= {FLOORS[size]} (score unpublished; no score fabricated)",
-            "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
+    scores = candidate.get("benchmark_indexes") or {}
+    raw = scores.get(INDEX) if isinstance(scores, dict) else None
+    for exception in POLICY["floor_exceptions"]:
+        if (size != exception["size"] or role not in (exception["role"], "worker") or
+                model != exception["model_id"] or candidate.get("effort") != exception["effort"] or
+                ("harness" in exception and candidate.get("harness") != exception["harness"])):
+            continue
+        evidence = exception["score_evidence"]
+        if evidence == "numeric-below-floor":
+            if type(raw) not in (int, float) or not math.isfinite(raw) or (
+                    raw < exception["minimum_score"] or raw >= FLOORS[size]):
+                continue
+        elif isinstance(scores, dict) and scores.get(INDEX) is not None:
+            continue
+        return {"exception": exception["name"], "model_id": model,
+                "effort": exception["effort"], "size": size, "index": INDEX,
+                **({"harness": exception["harness"]} if "harness" in exception else {}),
+                **({"observed_score": raw} if evidence == "numeric-below-floor" else {}),
+                "waived": f"{INDEX} >= {FLOORS[size]} ({exception['authorization']})",
+                "not_waived": list(exception["not_waived"])}
+    return None
 
 
 def route_summary(preferences: list[dict], candidates: list[dict],
