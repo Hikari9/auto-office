@@ -369,6 +369,25 @@ def _integrate(con, run: dict, job: dict) -> dict:
         extra_checks = verification_coverage.supplemental_checks(repo, commit, run_checks)
         outcome = gates.run_commands(con, run, [*run_checks, *extra_checks], wt, integ_rev,
                                      {"id": gid, "task_id": None}, check_tree=False)
+        if outcome["verdict"] == "CHANGES_REQUIRED":
+            try:
+                base_failures = gates.preexisting_failures(
+                    con, run, integ_rev, {"id": gid, "task_id": None}, outcome, allow_unchanged=True)
+            except Exception:
+                base_failures = []  # no proof -> block, never guess that it is pre-existing
+            proven = {entry["code"] for entry in base_failures}
+            failures = {f"C{i}" for i, result in enumerate(outcome.get("results") or [], 1)
+                        if result["exit"] != 0}
+            if base_failures:
+                summary = (f"{len(base_failures)} integration check(s) fail identically on pinned base "
+                           f"{base[:12]}: pre-existing, NONBLOCKING (not green)")
+                with db.transaction(con):
+                    state.emit(con, run, "integration.preexisting", summary,
+                               payload={"commit": commit, "base_commit": base, "checks": base_failures})
+                if failures and failures <= proven:
+                    outcome = {**outcome, "verdict": "PASS", "summary": summary}
+                else:
+                    outcome = {**outcome, "summary": f"{outcome['summary']}; {summary}; introduced failures BLOCK"}
         check_outcome = outcome
         with db.transaction(con):
             con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",

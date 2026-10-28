@@ -1040,6 +1040,18 @@ def test_a_wal_database_in_a_read_only_directory_gets_an_actionable_message(tmp_
     path = _make(sub / "wal.db", wal=True)
     os.chmod(sub, 0o555)
     try:
+        # Some sandbox/FUSE mounts permit creating files even after chmod 0555.
+        # Verify the actual write boundary rather than assuming POSIX permissions
+        # are enforced. The injected sqlite error/hint test below runs everywhere.
+        probe = sub / ".writable-probe"
+        try:
+            with probe.open("xb") as out:
+                out.write(b"x")
+        except PermissionError:
+            pass
+        else:
+            probe.unlink()
+            pytest.skip("filesystem allows writes despite chmod 0555")
         assert rer.main(["--db", str(path)]) == 2
     finally:
         os.chmod(sub, 0o755)

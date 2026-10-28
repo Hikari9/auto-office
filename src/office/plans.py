@@ -408,7 +408,11 @@ def rerun_accepted_checks(con, run: dict, task_id: str, amendment_id: str) -> bo
         state.emit(con, run, "gate.rerun", f"{task_id} stays accepted on {rev_id}: {amendment_id} left it no checks to run",
                    task_id=task_id)
         return False
-    gid = gates._new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
+    # Revoke *live* acceptance before the job starts; a queued/failed check
+    # cannot coexist with a landing-ready accepted set (#819). The revision
+    # and its historical acceptance remain auditable and are reused on PASS.
+    state.update_task(con, run["id"], task_id, status="submitted", pause_reason=None)
+    gid = gates._new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}:amend:{amendment_id}", "queued")
     state.enqueue(con, run, "run_checks", {"gate_id": gid, "task_id": task_id, "revision_id": rev_id},
                   dedup_key=f"checks:{gid}", max_attempts=2)
     state.emit(con, run, "gate.rerun", f"{task_id} checks re-run on {rev_id} ({amendment_id} changed them; no relaunch)",
@@ -469,7 +473,9 @@ def _round_base(run: dict) -> int:
 def budget_rounds(con, run: dict) -> int:
     """Non-escalated plan-review rounds counted against plan_review_max_rounds."""
     run = state.get_run(con, run["id"])
-    return len([g for g in plan_gates(con, run["id"]) if not g["escalated"]]) - _round_base(run)
+    return len([g for g in plan_gates(con, run["id"]) if not g["escalated"]
+                and g["status"] in ("done", "queued", "running")
+                and (g["status"] == "done" or g["plan_version"] == run["plan_version"])]) - _round_base(run)
 
 
 def queue_plan_review(con, run: dict, plan_version: int, *, escalated: bool = False, exclude: list[str] | None = None) -> str | None:
@@ -617,6 +623,21 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gate_id,)).fetchone())
     if gate_engine._already_decided(con, run, gate, outcome):
         return  # one round, one result (#403)
+    current = state.get_run(con, run["id"])
+    if (gate["plan_version"] != current["plan_version"]
+            or (contract.is_convergence(current) and int(gate.get("cycle") or 1) != _cycle(current))):
+        # A late old verdict remains in audit history, never overwrites the
+        # current plan's blockers/reviewer/round budget (#624).
+        detail = f"superseded p{gate['plan_version']} by current p{current['plan_version']}"
+        con.execute("UPDATE gates SET status='stale', verdict=?, review_status=?, route=?, "
+                    "reviewer_dispatch_id=?, summary=?, stale_reason=?, finished_at=? WHERE id=?",
+                    (outcome.get("verdict"), outcome.get("status"), outcome.get("route"),
+                     outcome.get("dispatch_id"), outcome.get("summary"), detail, now_iso(), gate_id))
+        state.emit(con, current, "plan.late_result", f"{detail}: verdict archived, not applied",
+                   audience="runtime", payload={"gate": gate_id, "old_version": gate["plan_version"],
+                                                 "current_version": current["plan_version"],
+                                                 "verdict": outcome.get("verdict"), "status": outcome.get("status")})
+        return
     if contract.is_convergence(run) and gate["status"] == "cancelled":
         # The cycle closed (or was waived) while this round ran: its result is
         # kept as audit evidence and reopens nothing (#418).
@@ -1031,7 +1052,8 @@ def _repin_open_review(con, run: dict, pin: dict) -> Result:
 
 def recheck_reviewer(con, run: dict) -> str | None:
     """The reviewer dispatch a plan RECHECK sequence continues with (#337)."""
-    prev = [g for g in _cycle_gates(con, run) if g.get("reviewer_dispatch_id") and g.get("review_status") == contract.COMPLETED]
+    prev = [g for g in _cycle_gates(con, run) if g["status"] == "done" and
+            g.get("reviewer_dispatch_id") and g.get("review_status") == contract.COMPLETED]
     return prev[-1]["reviewer_dispatch_id"] if prev else None
 
 
