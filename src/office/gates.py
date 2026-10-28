@@ -380,7 +380,14 @@ def job_run_checks(con, run: dict, job: dict) -> dict:
     outcome = run_commands(con, run, task["checks"], Path(d["worktree"]), rev, gate)
     if outcome["verdict"] == "CHANGES_REQUIRED":
         try:
-            outcome["preexisting"] = preexisting_failures(con, run, rev, gate, outcome)
+            newer = frozenset()
+            if ":amend:" in (gate.get("input_key") or ""):
+                prior = state.get_plan(con, run["id"], int(gate["plan_version"]) - 1)
+                old = next((t for t in (prior or {}).get("tasks", []) if t["id"] == task["id"]), None)
+                # If the old version is unavailable, fail closed: no baseline waiver.
+                newer = frozenset(task["checks"]) - frozenset(old["checks"] if old else [])
+            outcome["preexisting"] = preexisting_failures(
+                con, run, rev, gate, outcome, exclude_commands=newer)
         except Exception:  # a failure to classify must not lose the checks result: it counts against the task
             outcome["preexisting"] = []
     with db.transaction(con):
@@ -411,7 +418,8 @@ def _roots(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((str(path.resolve()), str(path))))
 
 
-def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -> list[dict]:
+def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *,
+                         allow_unchanged: bool = False, exclude_commands: frozenset[str] = frozenset()) -> list[dict]:
     """Which failing checks of this revision fail the same way on its base
     commit. A check is pre-existing only when the base run has the same nonzero
     exit status and the same failures, neither run timed out, and the task's
@@ -426,7 +434,7 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -
     repo = Path(run["repo_root"])
     changed = [p for p in paths.git(repo, "diff", "--name-only", "--no-renames", "-z", base, rev["commit_sha"],
                                     check=False).split("\0") if p]
-    if not changed:
+    if not changed and not allow_unchanged:
         return []
     cfgv = state.pinned_config(run).get("verification") or {}
     timeout = int(cfgv.get("check_timeout_seconds", 1800))
@@ -439,6 +447,10 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict) -
             return []
         try:
             for code_id, r in failing:
+                # An amendment's newly declared check is a NEW requirement:
+                # failing on base does not excuse it (#802).
+                if r["command"] in exclude_commands:
+                    continue
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
@@ -498,6 +510,24 @@ def check_slot(limit: int, *, poll: float = 2.0):
         time.sleep(poll)
 
 
+def _tracked_diff_snapshot(cwd: Path) -> dict[str, str]:
+    """Tracked per-file worktree patches, including files already dirty at submit.
+
+    A revision may legitimately have tracked edits relative to HEAD; comparing
+    only with HEAD after a check falsely blames a read-only check (#623).
+    """
+    diff = paths.git(cwd, "diff", "--no-ext-diff", "--no-renames", "--binary", "HEAD", "--",
+                     check=False)
+    names = [p for p in paths.git(cwd, "diff", "--no-ext-diff", "--no-renames", "--name-only",
+                                 "-z", "HEAD", "--", check=False).split("\0") if p]
+    chunks = re.split(r"(?m)^diff --git ", diff)[1:] if diff else []
+    if len(names) != len(chunks):
+        # Never silently miss an unexplained tracked change. The generic
+        # revision-integrity check remains the fallback on malformed output.
+        return {"<unparsed tracked diff>": diff}
+    return dict(zip(names, chunks))
+
+
 def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
                   check_tree: bool = True) -> dict:
     from office.submit import matches_revision
@@ -523,6 +553,7 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
                         "code": f"C{i}", "severity": "material", "location": command,
                         "summary": detail, "action": "remove the unsafe manual remote write"}]),
                     "route": "deterministic", "summary": detail, "results": results}
+        before_tracked = _tracked_diff_snapshot(cwd) if check_tree else {}
         code, out = _run_check(command, cwd, timeout, environment)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
@@ -540,6 +571,21 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             con.execute("INSERT INTO validations(id, dispatch_id, kind, command, passed, known_bad_proven, evidence_hash, created_at) "
                         "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, rev["dispatch_id"], "check", command, int(passed), 0,
                                                     sha256_bytes(out.encode()), now_iso()))
+        if check_tree:
+            # A check can rewrite a tracked artifact after submit. Capture the
+            # actual culprit instead of returning a bare STALE verdict (#623).
+            after_tracked = _tracked_diff_snapshot(cwd)
+            changed_paths = sorted(path for path in before_tracked.keys() | after_tracked.keys()
+                                   if before_tracked.get(path) != after_tracked.get(path))
+            if changed_paths:
+                detail = (f"check {command!r} mutated tracked files: {', '.join(changed_paths)}; "
+                          "gate is stale. Make the check read-only or commit intentional generated outputs")
+                with db.transaction(con):
+                    state.emit(con, run, "gate.check_mutated_tree", detail, task_id=gate.get("task_id"),
+                               payload={"gate": gate["id"], "revision": rev["id"],
+                                        "command": command, "paths": changed_paths})
+                return {"verdict": "STALE", "summary": detail, "results": results,
+                        "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
             what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
