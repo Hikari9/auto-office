@@ -65,7 +65,7 @@ def compare(rows: list[dict]) -> dict:
         metrics[k] = {"matched": len(values), "before": before_sum if values else None,
                       "after": after_sum if values else None,
                       "change_pct": ((after_sum - before_sum) / before_sum * 100 if supported else None),
-                      "claim_ready": supported and all(b["integrated_defects"] <= a["integrated_defects"]
+                      "claim_ready": supported and after_sum < before_sum and all(b["integrated_defects"] <= a["integrated_defects"]
                                                        for _, a, b in accepted),
                       "pairs": [t[0] for t in values]}
     return {"paired": len(accepted), "excluded": excluded,
