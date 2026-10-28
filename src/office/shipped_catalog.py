@@ -136,12 +136,20 @@ def _score(value: str, location: str) -> int | float | None:
 
 
 def load(root: Path | None = None) -> dict[str, Any]:
-    """Build an in-memory seed-shaped object without changing legacy hashes.
+    """Build the legacy-shaped catalog from the canonical shipped directory."""
+    base = Path(root) if root is not None else paths.resources_root()
+    return _load_directory(base / "catalog")
+
+
+def _load_directory(directory: Path) -> dict[str, Any]:
+    """Read one explicit catalog directory, preserving normalized seed hashes.
 
     Fail closed on malformed tables, broken joins, invalid scalar types, or
     extra/missing provenance. The row order is defined by routes.tsv.
     """
-    manifest_path, route_path, bench_path, provenance_path = files(root)
+    manifest_path, route_path, bench_path, provenance_path = (
+        directory / name for name in FILES
+    )
     manifest = _yaml(manifest_path)
     if "models" in manifest:
         raise CatalogError(f"{manifest_path}: models belong only in routes.tsv")
@@ -220,8 +228,10 @@ def load(root: Path | None = None) -> dict[str, Any]:
 def export_legacy(seed: dict, directory: Path) -> None:
     """One-time *explicit* converter; never invoked by runtime/CLI writers."""
     directory = Path(directory)
+    if not isinstance(seed, dict):
+        raise CatalogError("legacy seed must be a mapping")
     models = seed.get("models")
-    if not isinstance(models, list) or not isinstance(seed, dict):
+    if not isinstance(models, list):
         raise CatalogError("legacy seed must have a models list")
     seen: set[str] = set()
     routes = []
@@ -265,6 +275,6 @@ def export_legacy(seed: dict, directory: Path) -> None:
         yaml.safe_dump({"rows": provenance}, sort_keys=False,
                        allow_unicode=True, width=120), encoding="utf-8")
     # Enforce a complete, typed field-by-field round trip before claiming parity.
-    actual = load(directory.parent)
+    actual = _load_directory(directory)
     if actual != seed:
         raise CatalogError("legacy conversion changed normalized model catalog data")

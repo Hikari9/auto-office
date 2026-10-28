@@ -146,6 +146,19 @@ def test_legacy_converter_does_not_drop_unrecognized_metadata(table_dir):
     assert shipped_catalog.load(table_dir.parent) == seed
 
 
+def test_legacy_converter_accepts_output_directory_not_named_catalog(tmp_path):
+    unusual = tmp_path / "custom-output"
+    seed = _fixture()
+    shipped_catalog.export_legacy(seed, unusual)
+    assert all((unusual / name).is_file() for name in shipped_catalog.FILES)
+    assert shipped_catalog._load_directory(unusual) == seed
+
+
+def test_legacy_converter_rejects_non_mapping_seed(tmp_path):
+    with pytest.raises(shipped_catalog.CatalogError, match="mapping"):
+        shipped_catalog.export_legacy([], tmp_path / "custom-output")
+
+
 def test_shipped_files_are_the_only_registry():
     assert not (shipped_catalog.files()[0].parent / "seed.yaml").exists()
     assert all(p.is_file() for p in shipped_catalog.files())
