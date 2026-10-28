@@ -57,7 +57,7 @@ def test_opus_xl_only_even_within_xl_parent_run_and_alias():
     assert decide("XL", [opus])["status"] == "selected"
 
 
-@pytest.mark.parametrize("size,effort", [("M", "medium"), ("L", "high")])
+@pytest.mark.parametrize("size,effort", [("L", "high")])
 def test_real_sonnet_harness_self_fallback_and_unavailable_first_route(size, effort):
     score = 41 if size == "M" else 47
     claude = candidate("claude-sonnet-5-5", effort, score, harness="claude")
@@ -144,3 +144,45 @@ def test_m_l_planner_preserves_all_three_fallbacks_when_slate_has_four():
     explicit = adaptive.apply_planner_choice(audit, {"routes": routes, "why": "qualified exact routes"})
     assert explicit["fallbacks"] == routes[1:]
     assert len(explicit["fallbacks"]) == 3
+
+
+def test_issue861_m_haiku_high_selected_with_audited_waiver():
+    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude")
+    terra = candidate("gpt-6.1-terra", "medium", 41)
+    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
+    decision = decide("M", [haiku, terra, sonnet])
+    assert decision["status"] == "selected", decision
+    assert decision["candidate"]["model_id"] == "claude-haiku-5-5", decision
+    assert decision["candidate"]["harness"] == "claude" and decision["candidate"]["effort"] == "high"
+    waiver = decision["routing"]["floor_exceptions"][0]
+    assert waiver["exception"] == "haiku-high-m-owner-authorized-floor"
+    assert waiver["observed_score"] == 38 and waiver["size"] == "M"
+    assert "conformance" in waiver["not_waived"]
+
+
+def test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback():
+    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
+    terra = candidate("gpt-6.1-terra", "medium", 41)
+    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
+    first = decide("M", [haiku, terra, sonnet])
+    assert first["candidate"]["model_id"] == "gpt-6.1-terra", first
+    assert any("haiku" in x["candidate"] and x.get("category") == "untried"
+               for x in first["rejected"]), first
+    second = decide("M", [haiku, sonnet])
+    assert second["candidate"]["model_id"] == "claude-sonnet-5-5", second
+    assert "Temporary Sonnet Medium M fallback" in second["selection_disclosure"]["operational_fallback"]
+
+
+def test_issue861_m_haiku_probe_gate_uses_exact_authorized_waiver_only():
+    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
+    check = lambda c, size, role: routing._pool_gate(
+        c, {"builder"}, None, "Change", set(), policy_size=size, role=role)
+    assert check(haiku, "M", "executor") is None
+    assert check(haiku, "M", "worker") is None
+    for c, size, role in ((haiku, "L", "executor"), (haiku, "M", "code_reviewer"),
+                           ({**haiku, "harness": "agy"}, "M", "executor"),
+                           ({**haiku, "benchmark_indexes": {}}, "M", "executor"),
+                           ({**haiku, "benchmark_indexes": {executor_slates.INDEX: 37}}, "M", "executor")):
+        assert executor_slates.floor_exception(c, size, role) is None
+        if (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX) is not None:
+            assert check(c, size, role) is not None

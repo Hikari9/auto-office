@@ -156,3 +156,20 @@ Every Office-launched Herdr pane for a task, executor or reviewer, shows the tas
 ## Legacy migration and pin safety
 
 The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) continue to parse and retain their prior gating. Their `gear_model_version` is `legacy-pinned`; they are never silently mapped to XS–XL, and `direct` risk-raising amendments retain their old `express`/`full` upgrade contract. The new `run-gear-1` is only for a newly selected XS–XL run. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
+
+
+## M executor Haiku High transition (#861, October 28, 2026)
+
+For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, Codex
+GPT-6.1 Terra Medium, then OpenCode GLM-5.3 Flash Max. Sonnet Medium is no
+longer a preferred M route, but stays an explicitly disclosed operational
+fallback until Haiku qualifies. Other sizes, planner/reviewer funding and
+historical pinned runs are unchanged.
+
+The exact `claude/claude-haiku-5-5@high` M executor/worker route has a
+narrow owner-authorized AA v4.3.2 38-vs-40 size-floor exception. The real
+numeric score must be present, not invented or inferred from AA v5. The
+exception does not bypass registration, exact CLI/model/effort conformance,
+quota, discovery trial limits, permissions or safety. Keep the catalog
+`dispatchable: false`, `discovery: eligible` until proven; fall back to
+known-working routes in the meantime.

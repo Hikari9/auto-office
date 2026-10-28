@@ -95,11 +95,10 @@ FLOOR_EXCEPTION = {"model_id": "gemini-4-argon", "effort": "medium", "role": "ex
 
 
 def floor_exception(candidate: dict, size: str | None, role: str | None = None) -> dict | None:
-    """The audit record when the Argon Medium L exception waives the missing-score floor.
+    """Audited exact-route exceptions: Argon Medium L (#809), Haiku High M (#861).
 
-    Never fabricates a score, lowers the L floor for another model, effort or size,
-    or waives registration, conformance, trust, quota or risk gates; a published
-    score is judged on merit like any other candidate.
+    Haiku requires its real AA v4.3.2 numeric score 38. Neither exception
+    invents a score or waives conformance, quota, permissions or safety.
     """
     # #861: exact owner-authorized M floor exception; never amend the pinned score.
     model = candidate.get("alias_resolved_to") or candidate.get("model_id")
@@ -107,7 +106,9 @@ def floor_exception(candidate: dict, size: str | None, role: str | None = None) 
             and candidate.get("effort") == "high" and candidate.get("harness") == "claude"):
         scores = candidate.get("benchmark_indexes") or {}
         raw = scores.get(INDEX) if isinstance(scores, dict) else None
-        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw) and raw >= FLOORS[size]:
+        # The owner authorized the documented numeric score 38, not missing
+        # or arbitrarily weaker benchmark evidence. Scores >=40 need no waiver.
+        if type(raw) not in (int, float) or not math.isfinite(raw) or raw < 38 or raw >= FLOORS[size]:
             return None
         return {"exception": "haiku-high-m-owner-authorized-floor", "model_id": model,
                 "effort": "high", "harness": "claude", "size": size,
