@@ -267,3 +267,16 @@ def test_the_effective_view_does_not_claim_an_uninstalled_harness_dispatches(wor
     row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
                if r["route"] == "codex/gpt-6-astra@low")
     assert row["dispatches"] is False and "not installed" in row["dispatch_reason"]
+
+
+def test_the_effective_view_counts_a_preferred_seed_allow_and_checks_the_role_launch_profile(world, monkeypatch):
+    disabled_astra(monkeypatch)
+    world.user_config.write_text(yaml.safe_dump({"roles": {"executor": {"preferred_seed": [
+        {"harness": "codex", "model_id": "gpt-6-astra", "effort": "low"}]}}}))
+    row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
+               if r["route"] == "codex/gpt-6-astra@low")
+    assert row["dispatches"] is True and row["state"] == "allow"
+    monkeypatch.setattr(routecmd.adapters, "profile", lambda adapter, kind: None)
+    row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
+               if r["route"] == "codex/gpt-6-astra@low")
+    assert row["dispatches"] is False and "launch profile" in row["dispatch_reason"]

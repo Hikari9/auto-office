@@ -49,13 +49,15 @@ def _canonicalize(spec: str) -> str:
     return f"{harness}@{major}/{target}@{effort}" if major.isdigit() else f"{harness}/{target}@{effort}"
 
 
-def _dispatch_view(row: dict, state: dict, installed: bool = True) -> tuple[bool, str]:
+def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True) -> tuple[bool, str]:
     """(dispatches, why) for one catalog route under one role (#845). An allow dispatches with no proof;
     a catalog or overlay `dispatchable: false` only stops a route the user has not allowed."""
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
     if not installed:
         return False, f"{row.get('invocation_harness')} is not installed here"
+    if not has_profile:
+        return False, f"{row.get('invocation_harness')} has no launch profile for this role"
     if row.get("dispatchable") is False:
         if state["state"] == "allow":
             was = "your catalog overlay disabled it" if row.get("user_disabled") else "its catalog row is not dispatchable"
@@ -79,6 +81,9 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
     unknown_versions = set()
     for r in roles:
         count = {"allow": 0, "neutral": 0, "deny": 0}
+        kind = candidates.KIND_FOR_ROLE.get(r, "worker")
+        # An exact entry of the role's preferred_seed is an allow too (#845), exactly as candidate building reads it.
+        seed = route_policy.preferred_seed_policy(r, candidates.role_policy(cfg_effective, r).get("preferred_seed"))
         dispatching = 0
         role_lines = []
         for row in candidates.catalog_rows():
@@ -92,8 +97,8 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
             c = {"harness": harness, "harness_version": version,
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
-            state = route_policy.effective_role_state(c, r, [p])
-            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter))
+            state = route_policy.effective_role_state(c, r, [seed, p])
+            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)))
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
