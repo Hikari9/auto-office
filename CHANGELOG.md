@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.10.4
+
+- fix(routing): usage-limit stalls temporarily demote the exhausted exact route and known shared OpenCode free quota pool; reroutes skip unavailable pools and live dispatch --reroute refuses instead of falsely succeeding (#860, #628).
+
 ## 3.10.3
 
 - fix(restack): a stale accepted dependent can follow status's `office rerun` recovery, preserving accepted evidence and normal task-done protections (#856, #628).

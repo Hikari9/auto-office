@@ -176,6 +176,15 @@ def create_planner_task(con, run: dict, *, contract_request: str | None = None, 
 
 # ------------------------------------------------------------------ dispatch command
 
+def _reroute_live_guard(con, run: dict, tid: str) -> None:
+    """A live dispatch cannot silently acknowledge a reroute it did not perform (#860)."""
+    from office import gates
+    if live := gates.live_task_session(con, run["id"], tid):
+        raise Refused("worker-live", f"{tid} still has live worker {live}; --reroute did not dispatch anything",
+                      scope=tid, preserved="the live session, its lease and worktree",
+                      next_step=f"office revoke {tid}, then office rerun {tid} --fresh --reroute --stash-wip")
+
+
 def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, route: str | None = None,
              as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
              review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
@@ -214,6 +223,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
         if task is None or task["role"] == "planner":
             raise Usage("unknown-task", f"{tid} is not a task in plan p{run['plan_version']}",
                         next_step="office status lists the ready tasks")
+        if reroute:
+            _reroute_live_guard(con, run, tid)
         from office import gates
         block = gates.unavailable_review_block(con, run, task)
         if block and (as_model or route or cli or external):
@@ -246,6 +257,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 res.add(line)
         for tid in task_ids:
             task = state.get_task(con, run["id"], tid)
+            if reroute:
+                _reroute_live_guard(con, run, tid)  # recheck inside transaction, not just preflight
             if tid not in routes:
                 # A submitted revision blocked only by an UNAVAILABLE code
                 # review needs its review re-run, not a fresh executor.
