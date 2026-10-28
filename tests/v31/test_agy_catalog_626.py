@@ -22,7 +22,8 @@ UNVERIFIED_LAUNCH = {("claude-opus-5-5", "low")}
 
 
 def _seed():
-    return yaml.safe_load((paths.resources_root() / "catalog/seed.yaml").read_text())
+    from office import shipped_catalog
+    return shipped_catalog.load()
 
 
 def test_agy_claude_rows_use_local_display_names_and_match_benchmarks():

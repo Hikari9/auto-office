@@ -17,7 +17,8 @@ def clean_catalog(tmp_path, monkeypatch):
 
 
 def test_retired_mimo_not_shipped_or_offered(monkeypatch):
-    seed = yaml.safe_load((ROOT / "catalog" / "seed.yaml").read_text(encoding="utf-8"))
+    from office import shipped_catalog
+    seed = shipped_catalog.load(ROOT)
     retired = lambda row: (row.get("model_id") in RETIRED
                            and row.get("invocation_harness") in HARNESSES)
     assert not [r for r in seed["models"] if retired(r)]

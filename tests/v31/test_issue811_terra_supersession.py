@@ -1,5 +1,5 @@
 """#811 complete published Terra roster and exact-lineage supersession behavior."""
-from office import adaptive, config, paths
+from office import shipped_catalog, adaptive, config, paths
 
 INDEX = "Artificial Analysis Intelligence Index v4.3.2"
 
@@ -16,7 +16,7 @@ def row(model, effort, *, lineage=None, version=None, score=48):
 
 
 def test_six_terra_rows_are_present_but_do_not_fake_conformance():
-    catalog = config.load_yaml(paths.resources_root() / "catalog" / "seed.yaml")["models"]
+    catalog = shipped_catalog.load()["models"]
     expected = {"none": 33, "low": 36, "medium": 41, "high": 44, "xhigh": 45, "max": 48}
     found = {r["effort"]: r for r in catalog if r["model_id"] == "gpt-6.1-terra"}
     assert set(found) == set(expected)

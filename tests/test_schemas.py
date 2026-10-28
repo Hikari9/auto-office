@@ -68,7 +68,8 @@ class TestSchemas(unittest.TestCase):
         # (not `min_effort`), and `min_effort` does not appear there at all (it is a
         # config-only threshold under roles.<role>.floor.min_effort). Asserted
         # against the row count so adding a row does not need a test edit.
-        catalog = yaml.safe_load((ROOT / 'catalog/seed.yaml').read_text())['models']
+        from office import shipped_catalog
+        catalog = shipped_catalog.load(ROOT)['models']
         self.assertGreaterEqual(len(catalog), 44)
         self.assertEqual(sum(1 for m in catalog if m.get('effort')), len(catalog))
         self.assertEqual(sum(1 for m in catalog if 'min_effort' in m), 0)

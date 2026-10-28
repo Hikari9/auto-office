@@ -641,7 +641,14 @@ def _start_effective_config(repo: Path) -> tuple[dict, str]:
 
 
 def _start_catalog_hash() -> str:
-    return sha256_obj(load_data(ROOT / "catalog" / "seed.yaml"))
+    # The normalized object is exactly the old seed's hash input. Formatting
+    # TSV cells/comments never changes an in-flight run's catalog pin.
+    try:
+        from office import shipped_catalog
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(ROOT / "src"))  # standalone source checkout
+        from office import shipped_catalog
+    return sha256_obj(shipped_catalog.load(ROOT))
 
 
 def _start_adapter_hash() -> str:

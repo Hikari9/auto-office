@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from office import candidates, db, paths, state
+from office import candidates, db, paths, shipped_catalog, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, now_iso, parse_iso, sha256_obj, short
@@ -33,7 +33,7 @@ SUBMIT_FORM = "office benchmarks submit <delta.yaml>"
 
 
 def index_version() -> str:
-    data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
+    data = shipped_catalog.load()
     return str(data.get("benchmark_index_version") or "")
 
 

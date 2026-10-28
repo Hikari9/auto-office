@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, cli_runtimes, paths, user_catalog
+from office import adapters, cli_runtimes, paths, shipped_catalog, user_catalog
 from office.result import Result
 from office.state import OfficeError
 from office.util import now_iso
@@ -836,7 +836,7 @@ def model_list(harness: str | None = None) -> Result:
                      "lineage_key": r.get("lineage_key"), "generation_version": r.get("generation_version"),
                      "user_denied": bool(denied or legacy_denied), "role_denied": sorted(role_states), "role_allowed": role_allowed, "denial_reason": denied or
                      ("legacy user-catalog overlay" if legacy_denied else None)})
-    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
+    seed = shipped_catalog.load()
     lines += [f"warning: {w}" for w in user_catalog.merge(list(seed.get("models") or []))[1]]
     return Result(lines=lines or [f"no catalog rows{' for ' + harness if harness else ''}"],
                   next="office model add <harness>/<slug> --effort <e>, or office model disable <harness>/<model>[@effort]",

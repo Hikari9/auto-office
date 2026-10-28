@@ -1,7 +1,7 @@
 """The user-level catalog overlay: rows `office model add` appends and rows
 `office model disable` turns off, kept beside the user config file.
 
-The packaged seed (`catalog/seed.yaml`) is never written. The overlay holds
+The packaged hybrid TSV+YAML catalog is never written. The overlay holds
 two lists, `models` (catalog rows in the seed's shape) and `disabled`
 (`{harness, model_id, effort?, reason?}` entries that set `dispatchable:
 false` on matching rows). A row added here carries no trust: routing still
