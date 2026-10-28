@@ -1,6 +1,9 @@
 # Changelog
-
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
+
+## 3.11.2
+
+- refactor(policy): externalize executor/planner size slates, benchmark floors, restrictions and authorized exceptions into one validated catalog policy (#871 PR A). Shipped defaults remain unchanged.
 
 ## 3.11.1
 
