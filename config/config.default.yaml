@@ -134,9 +134,10 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   plan_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: high}
-      - {model_id: deepseek-v4.1-flash-free, harness: opencode}
+      - {model_id: luna, harness: codex, effort: high}
+      - {model_id: deepseek-v4.1-flash-free, harness: opencode, effort: max}
       - {model_id: opus, harness: claude, effort: low}
+      - {model_id: claude-opus-5-5, harness: agy, effort: low}
     # The review order is the whole order: no unseeded route is substituted when these are unavailable.
     strict_seed: false # legacy seed is advisory; only explicit user allow/deny is authoritative
     required_capabilities: [review]
@@ -147,9 +148,10 @@ roles:
       min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   executor:
-    # No seed. adaptive.py moves 5.6 Sol/Terra to directly behind a qualifying 6.1 route
-    # of the same harness and effort, as its fallback (#811).
-    # Size-specific ideal slates are funded by issue #809 independently.
+    # No flat seed: the size-specific ideal slates (XS-XL, #809) live in executor_slates.py, and the
+    # shipped allow/deny rules for them in route_policy.SEED_ROLE_RULES. adaptive.py moves 5.6 Sol/Terra
+    # to directly behind a qualifying 6.1 route of the same harness and effort, as its fallback (#811).
+    # TODO(Gemini 4 Argon registration PR): add Argon @high (XL) and @medium (L) allow rules.
     required_capabilities: [builder]
     floor:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
@@ -164,9 +166,10 @@ roles:
       allowed_sources: ["local-evidence:", "documented:"]
   code_reviewer:
     preferred_seed:
-      - {model_id: luna, effort: high}
-      - {model_id: deepseek-v4.1-flash-free, harness: opencode}
+      - {model_id: luna, harness: codex, effort: high}
+      - {model_id: deepseek-v4.1-flash-free, harness: opencode, effort: max}
       - {model_id: opus, harness: claude, effort: low}
+      - {model_id: claude-opus-5-5, harness: agy, effort: low}
     # The review order is the whole order: no unseeded route is substituted when these are unavailable.
     strict_seed: false # legacy seed is advisory; only explicit user allow/deny is authoritative
     required_capabilities: [review]
@@ -182,16 +185,16 @@ roles:
       min_effort: low
       allowed_sources: ["local-evidence:"]
   # Visual judgment is a separate specialist from code review (charter 8B).
-  # Preference order Gemini -> Sonnet -> Luna; a route qualifies only after an
+  # Preference order Gemini Flash -> Terra; a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
   # Reviewer independence is per agent, not per model family: a reviewer is
   # always a fresh dispatch, so it may share the producer's model.
   visual_reviewer:
     preferred_seed:
-      # Latest Gemini Flash through agy (Gemini slugs embed effort); medium is the default.
+      # Latest Gemini Flash through agy (Gemini slugs embed effort), then Terra.
+      - {model_id: gemini-3.8-flash, harness: agy, effort: low}
       - {model_id: gemini-3.8-flash, harness: agy, effort: medium}
-      - {model_id: sonnet, harness: claude, effort: high}
-      - {model_id: luna}
+      - {model_id: gpt-6.1-terra, harness: codex, effort: low}
     required_capabilities: [review, vision]
     floor:
       min_effort: low

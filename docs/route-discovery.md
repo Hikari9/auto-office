@@ -64,6 +64,25 @@ Denial entries accept `harness/model[@effort]`, `model` or `harness:<name>`. Ove
 
 **Ceiling provenance.** Without a genuine user ceiling, expected cost to success ranks routes and removes none. The shipped `cost_scale_usd` ranks only and is never a ceiling. A hard ceiling discloses its tier (`run`, `repo` or `user`) in the decision and in inspect. A run pinned before #494 keeps the ceiling its own config carried (25 unless it set another). Unsupported invocation, unsafe or invalid adapters, quarantine, missing capability or isolation, protected quota exhaustion and documented safety or permission violations still block execution.
 
+### Shipped role policy and size scope (#850)
+
+The shipped allow and deny rules live in one file, `catalog/role-policy.yaml`, grouped by role, then
+`harness[@major]/model`, then state, then effort, with the task sizes each applies to (`all` or a list of
+XS to XL). A route not listed is neutral and stays eligible. The order in which routes are preferred is not
+in that file: executors use `executor_slates.IDEAL`, reviewers and the visual reviewer use
+`roles.<role>.preferred_seed` in `config.default.yaml`.
+
+A rule with sizes only applies when the task size is known, so a role check with no size (a reviewer, a
+legacy run) ignores it. Your own `routing.user_policy.role_rules` outrank the shipped file and accept the same
+`sizes: [XS, S]` list; a size-scoped rule of yours outranks an unsized one, and a deny outranks an allow only
+within the same scope.
+
+```
+office route allow claude/claude-sonnet-5-5@high --role executor --size L,XL
+office route clear claude/claude-sonnet-5-5@high --role executor --size L,XL
+office route policy --effective --role executor --size XL
+```
+
 ## Probe before a trial
 
 The exact probe fingerprint is **harness, full harness version, adapter hash, launch profile (`worker`), invocation model ID and effort**. This is stricter than the major-version trust and history identity. A change to any field is a new key, so a pass for one effort, model, harness version, adapter or profile never qualifies another.

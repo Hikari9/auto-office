@@ -14,6 +14,14 @@ from office.state import Refused
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
 NEW = "codex@2/newmodel@high"
 
+@pytest.fixture(autouse=True)
+def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
+    """#850 denies Astra, GPT-5.6 and GPT-6.1 Sol above medium for executors. These tests exercise probe and
+    discovery mechanics on those routes, not the shipped policy, which test_role_seed_routing.py covers."""
+    from office import route_policy
+    monkeypatch.setattr(route_policy, "SEED_ROLE_RULES", tuple(
+        r for r in route_policy.SEED_ROLE_RULES if not (r["role"] == "executor" and r["state"] == "deny")))
+
 
 def cand(harness, model, effort="medium", *, idx=45, out=2.0, quota=60, caps=("builder",), **extra):
     return {

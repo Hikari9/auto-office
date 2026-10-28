@@ -40,7 +40,8 @@ def test_user_deny_is_effort_exact_and_role_specific():
     assert route("executor", [candidate()], pol)["status"] == "no_qualifying_candidate"
     assert route("code_reviewer", [candidate()], pol)["status"] == "selected"
     assert route("code_reviewer", [candidate(effort="high")], pol)["status"] == "no_qualifying_candidate"
-    assert route("code_reviewer", [candidate(effort="medium")], pol)["status"] == "selected"
+    # #850: the shipped policy denies Opus above low as a reviewer, and the user's allow at low does not widen it.
+    assert route("code_reviewer", [candidate(effort="medium")], pol)["status"] == "no_qualifying_candidate"
 
 
 def test_neutral_role_can_run_without_legacy_proven_approval(monkeypatch):

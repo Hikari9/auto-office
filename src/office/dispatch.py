@@ -960,13 +960,14 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
         return "probe-stale"
     from office import candidates as candidate_builder
     policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
-    if route_policy.effective_role_state(cand, "executor", policies)["state"] == "deny":
+    size = ((task or {}).get("descriptor") or {}).get("task_size")
+    if route_policy.effective_role_state(cand, "executor", policies, size)["state"] == "deny":
         return "role-deny"
     # No trial without a known-working fallback on record, whoever launched this dispatch.
     if (fallback.get("status") != "selected" or not fallback.get("candidate")
             or routing.candidate_id(fallback["candidate"]) == link["candidate"]
             or not _known_working(con, fallback["candidate"])
-            or route_policy.effective_role_state(fallback["candidate"], "executor", policies)["state"] == "deny"):
+            or route_policy.effective_role_state(fallback["candidate"], "executor", policies, size)["state"] == "deny"):
         return "no-fallback"
     return None
 

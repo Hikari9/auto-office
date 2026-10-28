@@ -391,10 +391,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
             allow_free = onboarding.free_models_enabled()
         for c in request.get("candidates", []):
             cid = candidate_id(c)
-            role_rule = route_policy.effective_role_state(c, role, policies)
+            role_rule = route_policy.effective_role_state(c, role, policies, new_policy_size)
             if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
                 role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
+            if (scope := c.get("user_allow_sizes")) is not None and new_policy_size not in scope:
+                # A size-scoped allow lifted the catalog disable for these sizes only (#850).
+                rejected.append({"candidate": cid, "stage": 1, "reason": f"not dispatchable: the user's allow covers "
+                                 f"task sizes {', '.join(scope)}, not {new_policy_size or 'an unknown size'}"})
+                continue
             denied = role_rule.get("reason") or f"{role} policy deny by {role_rule['source']}: {role_rule.get('rule', cid)}" if role_rule["state"] == "deny" else None
             overkill = None if request.get("manual_route") else next(
                 (why for pol in policies if (why := route_policy.is_overkill(c, role, size_class, pol))), None)
