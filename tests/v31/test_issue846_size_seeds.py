@@ -186,3 +186,20 @@ def test_no_new_gear_queues_a_dedicated_planner_by_default():
         risk = config.resolve_risk(cfg, "repo", None, False)
         risk["size_class"] = gear
         assert config.resolve_gates(gear, risk, cfg)["dedicated_planner"] is False, gear
+
+
+@pytest.mark.parametrize("size", ["S", "M"])
+def test_exploration_never_lifts_a_route_outside_the_slate_over_it(size):
+    outsider = priced("gpt-6.1-terra", "xhigh", 45, "codex")
+    pool = _slate_pool(size)[:1] + [outsider]
+    request = {"role": "worker", "playbook": "Change", "preferred_seed": executor_slates.ideal_seed(size),
+               "slate_anchor": True, "routing_seed": "issue-846-explore",
+               "policy": {"required_capabilities": ["builder"], "quota_reserve_percent": 5,
+                          "floor": {"min_effort": "none", "allowed_sources": ["local-evidence:"]}},
+               "context": {"gear": size, "size_class": size}, "cost_policy": "balanced", "allow_free_models": True,
+               "adaptive_config": {"exploration": {"rate": 1.0, "margin": 1.0, "max_cost_vs_primary_percent": 1000}},
+               "candidates": pool}
+    for seed in range(40):
+        out = routing.route({**request, "routing_seed": f"issue-846-explore-{seed}"})
+        assert out["candidate"]["model_id"] == pool[0]["model_id"], (seed, out["routing"]["exploration"])
+        assert out["routing"]["exploration"]["picked"] is None

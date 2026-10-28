@@ -353,13 +353,16 @@ def recommend(candidates: list[dict], request: dict, *, config: dict | None = No
 
     # The size slate is the default routing (#846): its qualifying routes rank ahead of every other route,
     # which stay behind them as fallbacks. Utility still orders the routes within each group.
-    slate_anchor = bool(request.get("slate_anchor")) and not exploration.get("picked")
+    slate_anchor = bool(request.get("slate_anchor"))
     if slate_anchor:
         from office.routing import preferred_rank
         on_slate = [r for r in rows if preferred_rank(by_id[r["route"]], request.get("preferred_seed")) is not None]
         slate_anchor = bool(on_slate) and len(on_slate) < len(rows)
         if slate_anchor:
             rows[:] = on_slate + [r for r in rows if r not in on_slate]
+            if exploration.get("picked") and exploration["picked"] != rows[0]["route"]:
+                # Exploration never lifts a route from outside the size slate over it.
+                exploration = {**exploration, "picked": None, "suppressed": "route outside the size slate"}
 
     supersession = _supersede(rows, by_id, request)
 
