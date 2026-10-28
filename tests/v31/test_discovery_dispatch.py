@@ -15,6 +15,14 @@ from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
 from office.util import dumps, now_iso
 
+@pytest.fixture(autouse=True)
+def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
+    """#850 denies Astra, GPT-5.6 and GPT-6.1 Sol above medium for executors. These tests exercise probe and
+    discovery mechanics on those routes, not the shipped policy, which test_role_seed_routing.py covers."""
+    from office import route_policy
+    monkeypatch.setattr(route_policy, "SEED_ROLE_RULES", tuple(
+        r for r in route_policy.SEED_ROLE_RULES if not (r["role"] == "executor" and r["state"] == "deny")))
+
 
 class Cold(World):
     """World plus a persisted run (`run-A`) with tasks T1 and T2, and a repository with a base commit."""
@@ -304,10 +312,10 @@ def _deny_for_executor(triple):
     from office import route_policy
     real = route_policy.effective_role_state
 
-    def effective(cand, role, policies):
+    def effective(cand, role, policies, size=None):
         if role == "executor" and routing.candidate_id(cand) == triple:
             return {"state": "deny", "source": "user", "rule": triple}
-        return real(cand, role, policies)
+        return real(cand, role, policies, size)
 
     return effective
 
