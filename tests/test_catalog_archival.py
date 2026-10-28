@@ -19,7 +19,8 @@ def _read(path):
 def test_legacy_benchmarks_are_preserved_only_in_the_nonrouting_archive():
     root = paths.resources_root()
     archive = _read(root / "catalog" / "archive" / ARCHIVE)
-    seed = _read(root / "catalog" / "seed.yaml")
+    from office import shipped_catalog
+    seed = shipped_catalog.load(root)
     archived = archive["models"]
     active = seed["models"]
     assert archive["benchmark_index_version"] == seed["benchmark_index_version"] == INDEX
@@ -44,7 +45,8 @@ def test_trust_for_archived_models_is_kept_only_as_nonrouting_history():
 
 
 def test_sol_uses_official_invocation_id_without_enabling_unproved_efforts():
-    seed = _read(paths.resources_root() / "catalog" / "seed.yaml")
+    from office import shipped_catalog
+    seed = shipped_catalog.load()
     sol = [r for r in seed["models"] if r["model_id"] == "gpt-6.1-sol"]
     assert len(sol) == 5
     assert {r["effort"] for r in sol} == {"low", "medium", "high", "xhigh", "max"}

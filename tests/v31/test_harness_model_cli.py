@@ -140,11 +140,11 @@ def test_registering_a_harness_needs_no_python_edit(env):
     assert "fakecli" in discovery.harness_names()
     assert "fakecli" not in configcmd._installed()  # no catalog row routes to it yet
 
-    seed = paths.resources_root() / "catalog" / "seed.yaml"
-    before = seed.read_bytes()
+    from office import shipped_catalog
+    before = [p.read_bytes() for p in shipped_catalog.files()]
     code, out = env.office("model", "add", "fakecli/acme/fast-1", "--effort", "medium,high")
     assert code == 0, out
-    assert seed.read_bytes() == before  # the packaged seed is never written
+    assert [p.read_bytes() for p in shipped_catalog.files()] == before  # the packaged seed is never written
     overlay = yaml.safe_load(user_catalog.path().read_text())
     assert [(r["model_id"], r["effort"]) for r in overlay["models"]] == [("fast-1", "medium"), ("fast-1", "high")]
     rows = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "fakecli"]
@@ -170,11 +170,11 @@ def test_registering_a_harness_needs_no_python_edit(env):
 
 
 def test_model_disable_turns_off_a_seed_row_through_the_overlay(env):
-    seed = paths.resources_root() / "catalog" / "seed.yaml"
-    before = seed.read_bytes()
+    from office import shipped_catalog
+    before = [p.read_bytes() for p in shipped_catalog.files()]
     code, out = env.office("model", "disable", "codex/luna")
     assert code == 0, out
-    assert seed.read_bytes() == before
+    assert [p.read_bytes() for p in shipped_catalog.files()] == before
     assert all(r.get("dispatchable") is False for r in candidates.catalog_rows()
                if r.get("invocation_harness") == "codex" and r.get("model_id") == "luna")
     assert env.office("model", "disable", "codex/no-such-model")[0] == 2

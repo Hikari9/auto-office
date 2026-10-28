@@ -34,7 +34,8 @@ def test_packaged_index_is_exact_three_column_tsv():
 
 
 def test_sync_saves_manifest_and_canonical_models_without_modifying_seed(isolated):
-    before = (paths.resources_root() / "catalog" / "seed.yaml").read_bytes()
+    from office import shipped_catalog
+    before = [p.read_bytes() for p in shipped_catalog.files()]
     result = harnesscmd.manifest_list()
     assert result.exit_code == 0 and result.data["saved"] is False
     assert not cli_runtimes.location().exists()  # a list or doctor must not write anything
@@ -54,7 +55,7 @@ def test_sync_saves_manifest_and_canonical_models_without_modifying_seed(isolate
         assert actual == cli_runtimes.projection(candidates.catalog_rows(), entry.key)
         assert actual["kind"] == "office-derived-harness-model-list"
         assert all("user_denied" not in row and "trust" not in row for row in actual["models"])
-    assert (paths.resources_root() / "catalog" / "seed.yaml").read_bytes() == before
+    assert [p.read_bytes() for p in shipped_catalog.files()] == before
     first = {e.key: cli_runtimes.resolve(e, "models").stat().st_mtime_ns for e in entries}
     manifest_bytes = cli_runtimes.location().read_bytes()
     assert harnesscmd.manifest_sync().exit_code == 0

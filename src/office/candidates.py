@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, state, task_sizing
+from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -37,7 +37,7 @@ _QUOTA_TTL = 60.0
 
 
 def catalog_rows() -> list[dict]:
-    data = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8")) or {}
+    data = shipped_catalog.load()
     from office import user_catalog
     return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 

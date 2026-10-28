@@ -1,11 +1,11 @@
 """Role floors gate on intelligence, aliases carry scores, and seeds can vary by size (#183)."""
-from office import candidates, config, model_lineages, paths, scoring
+from office import shipped_catalog, candidates, config, model_lineages, paths, scoring
 
 INDEX = "Artificial Analysis Intelligence Index v4.3.2"
 
 
 def _seed_rows():
-    return {m["model_id"]: m for m in config.load_yaml(paths.resources_root() / "catalog" / "seed.yaml")["models"]
+    return {m["model_id"]: m for m in shipped_catalog.load()["models"]
             if m["model_id"] in {"sonnet", "opus", "astra", "luna"}}
 
 
