@@ -21,18 +21,18 @@ ALWAYS = (
 )
 SPECIAL = {
     "catalog/": ("tests/test_schemas.py", "tests/test_alias_resolution.py",
-                 "tests/v31/test_intelligence_floor.py"),
-    "config/": ("tests/test_config.py", "tests/v31/test_config.py",
+                 "tests/v31/test_intelligence_floor.py", "tests/test_shipped_catalog_tables.py"),
+    "config/": ("tests/v31/test_config_command.py", "tests/v31/test_config_sandbox.py",
                 "tests/v31/test_intelligence_floor.py"),
     "adapters/": ("tests/test_adapters.py", "tests/v31/test_harness_model_cli.py"),
     "schemas/": ("tests/test_schemas.py",),
     "skills/": ("tests/test_skills.py",),
-    "src/office/web/": ("tests/web/test_service.py",),
+    "src/office/web/": ("tests/web/test_server.py",),
     "src/office/_resources/": ("tests/test_resource_bundle.py",),
     ".githooks/": ("tests/v31/test_verification_coverage.py",),
     "scripts/": ("tests/test_pr_test_selection.py",),
     "pyproject.toml": ("tests/v31/test_verification_coverage.py",),
-    "src/office/integration.py": ("tests/test_integration.py", "tests/v31/test_run_checks.py"),
+    "src/office/integration.py": ("tests/v31/test_run_checks.py", "tests/v31/test_verification_coverage.py"),
     "src/office/land.py": ("tests/v31/test_land.py", "tests/v31/test_land_recovery.py"),
     "src/office/briefs.py": ("tests/v31/test_preflight.py",),
 }
@@ -49,7 +49,8 @@ def git(root: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def selection(root: Path, base_ref: str = "refs/remotes/origin/main") -> tuple[str, list[str], list[str]]:
+def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
+              reasons: dict[str, set[str]] | None = None) -> tuple[str, list[str], list[str]]:
     """Return (merge base, changed files, relevant existing test modules)."""
     root = root.resolve()
     # Require a real local base; never turn a missing origin into an empty diff.
@@ -63,20 +64,32 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main") -> tuple[s
         raise SelectionError("A test file was deleted/renamed: review coverage and run full validation explicitly")
 
     tests = sorted(p.relative_to(root).as_posix() for p in (root / "tests").rglob("test_*.py"))
-    selected = {p for p in ALWAYS if p in tests}
+    selected: set[str] = set()
+
+    def include(test: str, reason: str) -> None:
+        # A selector can name an exact pytest node as well as a module.
+        if test in tests or ("::" in test and test.split("::", 1)[0] in tests):
+            selected.add(test)
+            if reasons is not None:
+                reasons.setdefault(test, set()).add(reason)
+
+    for name in ALWAYS:
+        include(name, "cross-cutting smoke")
     # Direct module references in tests, including both import forms. This
     # deliberately adds affected test modules but cannot discover every indirect
     # dependency. See the printed scope disclosure and PR review requirements.
     relevant = [p for p in sorted(changed) if p.startswith(("src/", "scripts/")) and p.endswith(".py")]
     for path in sorted(changed):
         if path.startswith("tests/") and path in tests:
-            selected.add(path)
+            include(path, "modified test")
         for prefix, targets in SPECIAL.items():
             if path == prefix or path.startswith(prefix):
-                selected.update(t for t in targets if t in tests)
+                for test in targets:
+                    include(test, f"explicit mapping: {prefix}")
         if path.endswith((".js", ".css", ".html")) and "web/" in path:
-            selected.update(t for t in tests if t.startswith("tests/web/") and
-                            ("browser" not in t or "test_workbench" in t))
+            for test in tests:
+                if test.startswith("tests/web/") and ("browser" not in test or "test_workbench" in test):
+                    include(test, f"web asset: {path}")
     for source in relevant:
         stem = Path(source).stem
         if stem in ("__init__", "_version"):
@@ -84,14 +97,29 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main") -> tuple[s
         pattern = re.compile(r"\b(?:from\s+office\s+import\s+|office\.|import\s+office\.|from\s+office\.)" + re.escape(stem) + r"\b")
         direct = [test for test in tests if Path(test).stem == f"test_{stem}"
                   or Path(test).stem.startswith(f"test_{stem}_")]
-        selected.update(direct)
-        # Broad lifecycle imports can appear in a hundred integration tests.
-        # Their entire import closure is not a useful PR gate. Bound indirect
-        # fan-out, give name-relevant tests priority, and disclose this scope.
+        for test in direct:
+            if source == "src/office/integration.py" and test == "tests/test_integration.py":
+                # This is a legacy 3.0 integration module with many unrelated
+                # end-to-end tests; its single v3.1 source import is in #577.
+                include("tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log",
+                        "direct legacy regression: office.integration")
+            else:
+                include(test, f"direct test: {source}")
+        # Unrelated imports must not turn a PR gate back into a nearly full
+        # suite. Keep one cross-module test if there is direct/mapped coverage,
+        # or two fallback importers if this module has no explicit tests.
+        mapped = any((source == prefix or source.startswith(prefix))
+                     and any(t in tests for t in targets)
+                     for prefix, targets in SPECIAL.items())
         indirect = [test for test in tests if test not in direct
                     and pattern.search((root / test).read_text(encoding="utf-8", errors="replace"))]
         indirect.sort(key=lambda test: (stem not in Path(test).stem, test))
-        selected.update(indirect[:4])
+        for test in indirect[:1 if (direct or mapped) else 2]:
+            include(test, f"bounded import dependency: {source}")
+        if not direct and not indirect and not mapped:
+            raise SelectionError(
+                f"No tests mapped to changed runtime module {source}; "
+                "add an explicit test or a selector mapping before landing")
     if not selected:
         raise SelectionError("No test modules selected; fail closed")
     return base, sorted(changed), sorted(selected)
@@ -103,8 +131,9 @@ def main() -> int:
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
     root = Path(__file__).resolve().parents[1]
+    reasons: dict[str, set[str]] = {}
     try:
-        base, changed, tests = selection(root, args.base)
+        base, changed, tests = selection(root, args.base, reasons=reasons)
     except SelectionError as exc:
         print(f"[PR GATE] BLOCKED: {exc}", file=sys.stderr)
         return 2
@@ -113,7 +142,7 @@ def main() -> int:
     print(f"[PR GATE] {len(changed)} changed files: {', '.join(changed)}")
     print(f"[PR GATE] {len(tests)} selected test modules (scoped, not full-suite):")
     for name in tests:
-        print(f"  {name}")
+        print(f"  {name} — {'; '.join(sorted(reasons.get(name) or {'unclassified'}))}")
     return 0
 
 

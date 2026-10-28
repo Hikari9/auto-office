@@ -25,6 +25,16 @@ cd "$(git rev-parse --show-toplevel)"
 # own temp fixture repos would inherit them and commit onto the branch being pushed.
 unset $(git rev-parse --local-env-vars)
 
+# Scope test evidence to exactly the pushed commit. Dirty tracked code or
+# untracked runnable sources could shadow the committed tree and falsely pass.
+if [ "$mode" = "pr" ]; then
+  if ! git diff --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard -- src tests scripts adapters catalog config .githooks)" ]; then
+    echo "[PR GATE] Refusing a dirty source/test tree; commit changes before validation" >&2
+    exit 2
+  fi
+fi
+
+
 # The tree under test, taken before any check runs: a commit that lands during
 # the run must not be stamped as validated.
 start_tree=""

@@ -91,7 +91,7 @@ def test_many_indirect_importers_are_bounded(pr_repo):
         p.write_text("from office import routing\n")
     _, _, chosen = selection(pr_repo)
     extras = [p for p in chosen if p.startswith("tests/test_extra_")]
-    assert len(extras) <= 4
+    assert len(extras) <= 1
     assert "tests/test_routing.py" in chosen
     assert "tests/v31/test_routing_fallback.py" in chosen
 
@@ -111,3 +111,47 @@ def test_uses_merge_base_so_updated_main_does_not_add_unrelated_tests(pr_repo):
     git(pr_repo, "checkout", "feature")
     _, changed, _ = selection(pr_repo)
     assert changed == ["src/office/routing.py"]
+
+
+def test_unmapped_runtime_file_fails_closed(pr_repo):
+    path = pr_repo / "src/office/new_runtime_subsystem.py"
+    path.write_text("def subtle_bug(): return False\n")
+    git(pr_repo, "add", "src/office/new_runtime_subsystem.py")
+    with pytest.raises(SelectionError, match="No tests mapped to changed runtime module"):
+        selection(pr_repo)
+
+
+@pytest.mark.parametrize("kind", ["tracked", "untracked_source"])
+def test_pr_shell_gate_rejects_uncommitted_inputs_before_install(pr_repo, kind):
+    import os
+    script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
+    dest = pr_repo / "scripts" / "validate.sh"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(script.read_text())
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "commit script"], check=True)
+    if kind == "tracked":
+        (pr_repo / "README.md").write_text("dirty\n")
+    else:
+        (pr_repo / "src/office/untracked.py").write_text("SECRET = True\n")
+    proc = subprocess.run(["bash", str(dest), "--pr"], cwd=pr_repo,
+                          capture_output=True, text=True, env={**os.environ, "VALIDATE_WORKERS": "2"})
+    assert proc.returncode == 2
+    assert "Refusing a dirty source/test tree" in proc.stderr
+    assert not (pr_repo / ".venv").exists()
+
+
+def test_legacy_integration_mapping_runs_only_relevant_node(pr_repo):
+    target = pr_repo / "src/office/integration.py"
+    target.write_text("def compose(): return True\n")
+    node = pr_repo / "tests/test_integration.py"
+    node.write_text("def test_issue_577_failed_integration_check_evidence_includes_log(): pass\n")
+    git(pr_repo, "add", "tests/test_integration.py")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "baseline test"], check=True)
+    git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(pr_repo, "add", "src/office/integration.py")
+    _, _, chosen = selection(pr_repo)
+    assert "tests/test_integration.py" not in chosen
+    assert "tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log" in chosen

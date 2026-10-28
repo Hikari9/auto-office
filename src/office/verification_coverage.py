@@ -119,6 +119,10 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
         return False
     script = _show(repo, commit, "scripts/validate.sh") or ""
     selector = _show(repo, commit, "scripts/select_pr_tests.py") or ""
+    # A line of unreachable documentation after `exit 0` cannot authorize
+    # landing: #563's no-op script guard applies equally to the scoped tier.
+    if re.search(r"(?m)^\s*(?:exit|return)\s+0\s*(?:#.*)?$", script):
+        return False
     return (bool(selector) and "python3 scripts/select_pr_tests.py --output" in script
             and 'python3 -m pytest "${selected_tests[@]}"' in script
             and "--all" in script)

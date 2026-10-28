@@ -129,6 +129,20 @@ def test_unverified_scoped_command_cannot_attest_full_repo():
     assert vc.attested_checks(None, run, sha) == []
 
 
+def test_scoped_noop_script_does_not_claim_coverage(tiered_repo):
+    root, _ = tiered_repo
+    (root / "scripts" / "select_pr_tests.py").write_text("print('selector')\n")
+    (root / "scripts" / "validate.sh").write_text(
+        "#!/usr/bin/env bash\nexit 0\n"
+        'python3 scripts/select_pr_tests.py --output "$selection_file"\n'
+        'python3 -m pytest "${selected_tests[@]}" -q -n 2 --all\n')
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "no-op gate"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    assert vc.audit(root, sha, ["scripts/validate.sh --pr"])[0] == vc.PARTIAL
+
+
 def test_non_tiered_repo_preserves_declared_check_policy(tmp_path):
     root = tmp_path / "untiered"
     root.mkdir()
@@ -257,3 +271,64 @@ def test_issue_563_full_suite_proof_survives_independent_integration_review(env)
     receipt = json.loads((Path(state_dir) / "archive-receipt.json").read_text())
     assert receipt["verification"]["status"] == vc.FULL
     assert "FULL SUITE NOT VERIFIED" not in output
+
+@pytest.mark.review_contract("v3.1")
+def test_scoped_gate_real_execution_attests_composed_commit_without_full_suite(env):
+    """A passing selected test must yield a scoped, hash-checked closeout receipt."""
+    import json
+    from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run
+    from office import integration, lifecycle, state
+
+    tests = env.repo / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text('''
+def pytest_addoption(parser):
+    parser.addoption("--all", action="store_true")
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--all"):
+        return
+    # integration, legacy and slow are normally deselected
+''')
+    (tests / "test_smoke.py").write_text('def test_scoped_smoke(): assert 2 + 2 == 4\n')
+    scripts = env.repo / "scripts"
+    scripts.mkdir()
+    (scripts / "select_pr_tests.py").write_text('''import argparse
+p=argparse.ArgumentParser()
+p.add_argument("--output")
+a=p.parse_args()
+open(a.output,"w").write("tests/test_smoke.py\\n")
+''')
+    (scripts / "validate.sh").write_text('''#!/usr/bin/env bash
+set -e
+selection_file="$(mktemp)"
+python3 scripts/select_pr_tests.py --output "$selection_file"
+mapfile -t selected_tests < "$selection_file"
+python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
+''')
+    (scripts / "validate.sh").chmod(0o755)
+    env.git("add", "-A")
+    env.git("commit", "-qm", "fixture: actual scoped validation")
+    plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
+    plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    approved_run(env, plan=plan,
+                 executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
+                                              "T2": {"mul.py": GOOD_MUL}}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}],
+                 integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2", check=0)
+    assert code == 0, out
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0]
+    run = state.get_run(con, run_id)
+    artifact = (run["landing"] or {}).get("integration") or {}
+    assert artifact["status"] == "accepted", artifact
+    assert artifact["full_suite"]["scope"] == vc.SCOPED
+    assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
+    assert lifecycle._verified_test_tiers(con, run)["status"] == vc.SCOPED
+    assert "SCOPED PR TESTS VERIFIED" in "\n".join(land._ask(con, run).lines)
+    code, output = env.office("close", "--handoff", "https://github.com/example/repo/pull/1")
+    assert code == 0, output
+    state_dir = con.execute("SELECT state_dir FROM runs LIMIT 1").fetchone()[0]
+    receipt = json.loads((Path(state_dir) / "archive-receipt.json").read_text())
+    assert receipt["verification"]["status"] == vc.SCOPED
+    assert "SCOPED PR TESTS VERIFIED" in output
