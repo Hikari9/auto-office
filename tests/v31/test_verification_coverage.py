@@ -360,6 +360,7 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
     assert artifact["status"] == "accepted", artifact
     assert artifact["full_suite"]["scope"] == vc.SCOPED
     assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
+    land._require_run_coverage(run, artifact["commit"], con=con)
     assert lifecycle._verified_test_tiers(con, run)["status"] == vc.SCOPED
     assert "SCOPED PR TESTS VERIFIED" in "\n".join(land._ask(con, run).lines)
     code, output = env.office("close", "--handoff", "https://github.com/example/repo/pull/1")
@@ -368,3 +369,69 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
     receipt = json.loads((Path(state_dir) / "archive-receipt.json").read_text())
     assert receipt["verification"]["status"] == vc.SCOPED
     assert "SCOPED PR TESTS VERIFIED" in output
+
+
+@pytest.mark.review_contract("v3.1")
+def test_pinned_gate_executes_for_composed_commit(env):
+    """Run the actual pinned gate and selector through Office integration."""
+    import hashlib
+    import shutil
+    from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run
+    from office import state
+
+    source = Path(__file__).resolve().parents[2]
+    tests = env.repo / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text('''
+def pytest_addoption(parser):
+    parser.addoption("--all", action="store_true")
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--all"):
+        return
+    # integration, legacy and slow are normally deselected
+''')
+    for name in ("test_version_single_source.py", "test_pr_test_selection.py",
+                 "v31/test_verification_coverage.py"):
+        path = tests / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_fixture_smoke(): assert True\n")
+    scripts = env.repo / "scripts"
+    scripts.mkdir()
+    for name in ("validate.sh", "select_pr_tests.py"):
+        shutil.copy2(source / "scripts" / name, scripts / name)
+    # Keep the gate's surrounding ecosystem checks lightweight in this fixture.
+    (scripts / "check_ecosystem.py").write_text("print('fixture ecosystem')\n")
+    (scripts / "office_runtime.py").write_text("print('fixture adapter')\n")
+    (env.repo / "adapters/seed").mkdir(parents=True)
+    (env.repo / "adapters/seed/fixture.yaml").write_text("id: fixture\n")
+    shutil.copy2(source / "pyproject.toml", env.repo / "pyproject.toml")
+    fixture_venv = env.tmp / "gate-venv"
+    fixture_venv.mkdir()
+    (fixture_venv / "bin").symlink_to(source / ".venv/bin", target_is_directory=True)
+    (fixture_venv / "lib").symlink_to(source / ".venv/lib", target_is_directory=True)
+    shutil.copy2(source / ".venv/pyvenv.cfg", fixture_venv / "pyvenv.cfg")
+    (fixture_venv / ".validate-stamp").write_text(
+        hashlib.sha1((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
+    (env.repo / ".venv").symlink_to(fixture_venv, target_is_directory=True)
+    env.git("add", "-A")
+    env.git("commit", "-qm", "fixture: pinned gate")
+    env.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
+    plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    approved_run(env, plan=plan,
+                 executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
+                                              "T2": {"mul.py": GOOD_MUL}}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}],
+                 integration_reviewer=[{"reply": "VERDICT: PASS"}])
+    code, out = env.office("dispatch", "T1", "T2", check=0)
+    assert code == 0, out
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0]
+    run = state.get_run(con, run_id)
+    artifact = (run["landing"] or {}).get("integration") or {}
+    logs = list(env.state.rglob("check-*.log"))
+    assert artifact["status"] == "accepted", (artifact, [p.read_text() for p in logs])
+    assert any("3 passed" in p.read_text() and "== Validation passed" in p.read_text() for p in logs)
+    assert artifact["full_suite"]["scope"] == vc.SCOPED
+    assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
+    land._require_run_coverage(run, artifact["commit"], con=con)
