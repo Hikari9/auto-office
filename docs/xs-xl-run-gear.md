@@ -173,3 +173,12 @@ exception does not bypass registration, exact CLI/model/effort conformance,
 quota, discovery trial limits, permissions or safety. Keep the catalog
 `dispatchable: false`, `discovery: eligible` until proven; fall back to
 known-working routes in the meantime.
+
+**Separate explicit user-authority path (#837/#845/#850):** An authenticated
+user-owned exact role allow, user-configured preferred route, or validated
+override receipt may intentionally authorize a catalog-disabled route. This
+does **not** prove that the CLI can launch the requested model and effort, does
+not change the shipped catalog status, and is never inferred from the default
+size slate. The user's rules take precedence over shipped preferences. Such
+explicit authority follows its own scope, receipt and remaining runtime
+safeguards; it must not be portrayed as automatic Haiku qualification.
