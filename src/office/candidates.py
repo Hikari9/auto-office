@@ -584,6 +584,17 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
     skipped.extend(not_routable)
+    # An allow naming a route the catalog does not have cannot dispatch: say so, never drop it silently (#845).
+    rows_all = catalog_rows()
+    for spec in route_policy.allow_specs(role, allow_pols):
+        harness_, model_, effort_ = route_policy.spec_parts(spec)
+        if not model_ or not harness_:
+            continue
+        if not any(r.get("invocation_harness") == harness_ and model_ in (r.get("model_id"), r.get("invocation_model_id"))
+                   and (not effort_ or r.get("effort") == effort_) for r in rows_all):
+            skipped.append({"candidate": spec, "category": "not-in-catalog",
+                            "reason": f"allowed for {role}, but the catalog has no such route; add it: "
+                                      f"office model add {harness_}/{model_} --effort {effort_ or '<effort>'}"})
     if quota_snapshot is not None:
         for c in candidates:
             c["quota"] = quota_for_candidate(c, quota_snapshot.get(c["adapter_id"], c["quota"]))

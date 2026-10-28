@@ -280,3 +280,21 @@ def test_the_effective_view_counts_a_preferred_seed_allow_and_checks_the_role_la
     row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
                if r["route"] == "codex/gpt-6-astra@low")
     assert row["dispatches"] is False and "launch profile" in row["dispatch_reason"]
+
+
+def test_an_allowed_route_still_needs_the_adapter_to_have_a_launch_profile_for_the_role(world, monkeypatch):
+    allow(world, "visual_reviewer", "codex/gpt-6.1-sol@high")
+    real = candidates.adapters.profile
+    monkeypatch.setattr(candidates.adapters, "profile", lambda adapter, kind: None if kind == "vision" else real(adapter, kind))
+    cands, skipped = build(world, "visual_reviewer")
+    assert world.sol["high"] not in cands  # no vision profile: the allow cannot invent one
+    assert any(s["candidate"] == "codex/gpt-6.1-sol@high" and s["category"] == "no-profile" for s in skipped)
+
+
+def test_an_allow_for_a_route_the_catalog_lacks_is_reported_not_dropped(world):
+    allow(world, "executor", "codex/gpt-9-nope@high")
+    _, skipped = build(world)
+    [entry] = [x for x in skipped if x["candidate"] == "codex/gpt-9-nope@high"]
+    assert entry["category"] == "not-in-catalog" and "office model add" in entry["reason"]
+    assert any("gpt-9-nope" in line and "no such route" in line
+               for line in routecmd.policy(role="executor", effective=True).lines)

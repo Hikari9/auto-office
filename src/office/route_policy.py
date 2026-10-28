@@ -320,6 +320,25 @@ def preferred_seed_policy(role: str, entries) -> dict:
             "overkill": [], "sources": {"role_rules": "preferred_seed"}}
 
 
+def allow_specs(role: str, policies: list[dict]) -> list[str]:
+    """Every route a policy allows for this role by name (harness/model@effort), for catalog cross-checks (#845)."""
+    out = []
+    for policy in policies:
+        for rule in policy.get("role_rules", ()):
+            if rule.get("state") == "allow" and rule.get("role") in (role, "*") and rule["route"] not in out:
+                out.append(rule["route"])
+    return out
+
+
+def spec_parts(spec: str) -> tuple[str | None, str | None, str | None]:
+    """(harness, model, effort) of a route spec in either spelling; model is None for a `harness:<name>` spec."""
+    if match := _CANONICAL.fullmatch(spec):
+        return match["harness"], match["model"], match["effort"]
+    if match := _ROUTE.fullmatch(spec):
+        return match["harness"], match["model"], match["effort"]
+    return None, None, None
+
+
 def _matches(cand: dict, spec: str) -> bool:
     harness = cand.get("harness") or cand.get("invocation_harness")
     if match := _HARNESSES.fullmatch(spec):

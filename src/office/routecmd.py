@@ -111,6 +111,15 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
         if show_rows:
             lines += role_lines
+    rows = candidates.catalog_rows()
+    for r in roles:
+        seed = route_policy.preferred_seed_policy(r, candidates.role_policy(cfg_effective, r).get("preferred_seed"))
+        for spec in route_policy.allow_specs(r, [seed, p]):
+            harness, model, effort = route_policy.spec_parts(spec)
+            if model and not any(row.get("invocation_harness") == harness
+                                 and model in (row.get("model_id"), row.get("invocation_model_id"))
+                                 and (not effort or row.get("effort") == effort) for row in rows):
+                lines.append(f"  {r}: {spec}: allow -> does not dispatch (the catalog has no such route; office model add)")
     if not show_rows:
         lines.append("use --role <role> or --effective to list every route and what it does")
     if unknown_versions:
