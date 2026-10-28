@@ -84,6 +84,30 @@ def test_deleted_test_refuses_to_silently_lose_coverage(pr_repo):
         selection(pr_repo)
 
 
+@pytest.mark.parametrize("destination", ["docs/test_unrelated.py", "tests/helper.py"])
+def test_renamed_test_refuses_to_silently_lose_coverage(pr_repo, destination):
+    (pr_repo / destination).parent.mkdir(parents=True, exist_ok=True)
+    git(pr_repo, "mv", "tests/test_unrelated.py", destination)
+    with pytest.raises(SelectionError, match="test file was deleted"):
+        selection(pr_repo)
+
+
+def test_test_infrastructure_requires_full_validation(pr_repo):
+    (pr_repo / "tests/conftest.py").write_text("# changed fixtures\n")
+    git(pr_repo, "add", "tests/conftest.py")
+    with pytest.raises(SelectionError, match="Test infrastructure changed"):
+        selection(pr_repo)
+
+
+def test_unmapped_script_fails_closed(pr_repo):
+    path = pr_repo / "scripts/new_runtime.py"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("pass\n")
+    git(pr_repo, "add", "scripts/new_runtime.py")
+    with pytest.raises(SelectionError, match="No tests mapped"):
+        selection(pr_repo)
+
+
 def test_many_indirect_importers_are_bounded(pr_repo):
     (pr_repo / "src/office/routing.py").write_text("def dispatch(): return 2\n")
     for idx in range(30):

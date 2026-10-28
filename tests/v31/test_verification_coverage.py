@@ -90,7 +90,7 @@ def test_unfixed_validation_script_is_partial_even_when_named(tiered_repo):
     assert vc.audit(root, sha, ["scripts/validate.sh"])[0] == vc.PARTIAL
 
 
-def test_pr_script_scope_is_not_full_suite_and_does_not_enqueue_full_duplicate(tiered_repo):
+def test_pr_script_scope_is_not_full_suite_and_does_not_enqueue_full_duplicate(tiered_repo, monkeypatch):
     root, _ = tiered_repo
     script = root / "scripts" / "validate.sh"
     script.write_text(
@@ -99,6 +99,11 @@ def test_pr_script_scope_is_not_full_suite_and_does_not_enqueue_full_duplicate(t
         'python3 -m pytest "${selected_tests[@]}" -q -n 2 --all\n'
     )
     (root / "scripts" / "select_pr_tests.py").write_text("print('select tests')\n")
+    import hashlib
+    monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
+        p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+        for p in vc._SCOPED_GATE_SHA256
+    })
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c",
                     "user.email=t@t", "commit", "-qm", "scoped gate"], check=True)
@@ -133,13 +138,37 @@ def test_scoped_noop_script_does_not_claim_coverage(tiered_repo):
     root, _ = tiered_repo
     (root / "scripts" / "select_pr_tests.py").write_text("print('selector')\n")
     (root / "scripts" / "validate.sh").write_text(
-        "#!/usr/bin/env bash\nexit 0\n"
-        'python3 scripts/select_pr_tests.py --output "$selection_file"\n'
-        'python3 -m pytest "${selected_tests[@]}" -q -n 2 --all\n')
+        "#!/usr/bin/env bash\ntrue\n"
+        '# python3 scripts/select_pr_tests.py --output "$selection_file"\n'
+        '# python3 -m pytest "${selected_tests[@]}" -q -n 2 --all\n')
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c",
                     "user.email=t@t", "commit", "-qm", "no-op gate"], check=True)
     sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    assert vc.audit(root, sha, ["scripts/validate.sh --pr"])[0] == vc.PARTIAL
+
+
+def test_scoped_gate_pins_match_reviewed_source():
+    import hashlib
+    root = Path(__file__).resolve().parents[2]
+    assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+            for p in vc._SCOPED_GATE_SHA256} == vc._SCOPED_GATE_SHA256
+
+
+@pytest.mark.parametrize("changed", ["scripts/validate.sh", "scripts/select_pr_tests.py"])
+def test_scoped_gate_rejects_changed_blob(tiered_repo, changed, monkeypatch):
+    import hashlib
+    root, _ = tiered_repo
+    (root / "scripts/select_pr_tests.py").write_text("selector\n")
+    monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
+        p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+        for p in vc._SCOPED_GATE_SHA256
+    })
+    (root / changed).write_bytes((root / changed).read_bytes() + b"# drift\n")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "gate drift"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD",], text=True).strip()
     assert vc.audit(root, sha, ["scripts/validate.sh --pr"])[0] == vc.PARTIAL
 
 
@@ -273,7 +302,7 @@ def test_issue_563_full_suite_proof_survives_independent_integration_review(env)
     assert "FULL SUITE NOT VERIFIED" not in output
 
 @pytest.mark.review_contract("v3.1")
-def test_scoped_gate_real_execution_attests_composed_commit_without_full_suite(env):
+def test_scoped_gate_real_execution_attests_composed_commit_without_full_suite(env, monkeypatch):
     """A passing selected test must yield a scoped, hash-checked closeout receipt."""
     import json
     from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run
@@ -302,10 +331,17 @@ open(a.output,"w").write("tests/test_smoke.py\\n")
 set -e
 selection_file="$(mktemp)"
 python3 scripts/select_pr_tests.py --output "$selection_file"
-mapfile -t selected_tests < "$selection_file"
+selected_tests=()
+while IFS= read -r selected_test; do selected_tests+=("$selected_test"); done < "$selection_file"
 python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
 ''')
     (scripts / "validate.sh").chmod(0o755)
+    # Exercise the lifecycle with a deliberately small test-only trusted gate.
+    import hashlib
+    monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
+        p: hashlib.sha256((env.repo / p).read_bytes()).hexdigest()
+        for p in vc._SCOPED_GATE_SHA256
+    })
     env.git("add", "-A")
     env.git("commit", "-qm", "fixture: actual scoped validation")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")

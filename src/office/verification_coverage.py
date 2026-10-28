@@ -106,6 +106,12 @@ def _is_validate_script(command: str) -> bool:
     return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 
+_SCOPED_GATE_SHA256 = {
+    "scripts/validate.sh": "d5e07794201f587f32a3d599ca97d8bab347080c469533486e39447f4a184d9d",
+    "scripts/select_pr_tests.py": "1ef3de0ebd64080a64bbb52bb78cff2b1ae3a10b28cb9587da3b68705b56ef0a",
+}
+
+
 def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
     """Recognize the maintained PR selector from the exact committed tree.
 
@@ -117,15 +123,16 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
         words = words[1:]
     if words not in (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"]):
         return False
-    script = _show(repo, commit, "scripts/validate.sh") or ""
-    selector = _show(repo, commit, "scripts/select_pr_tests.py") or ""
-    # A line of unreachable documentation after `exit 0` cannot authorize
-    # landing: #563's no-op script guard applies equally to the scoped tier.
-    if re.search(r"(?m)^\s*(?:exit|return)\s+0\s*(?:#.*)?$", script):
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         return False
-    return (bool(selector) and "python3 scripts/select_pr_tests.py --output" in script
-            and 'python3 -m pytest "${selected_tests[@]}"' in script
-            and "--all" in script)
+    # Trust only the reviewed gate and selector, byte for byte. Updating either
+    # requires reviewing both and updating these digests in the same change.
+    for path, expected in _SCOPED_GATE_SHA256.items():
+        proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
+                              capture_output=True)
+        if proc.returncode or hashlib.sha256(proc.stdout).hexdigest() != expected:
+            return False
+    return True
 
 
 _ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"

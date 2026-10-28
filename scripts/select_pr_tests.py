@@ -29,8 +29,8 @@ SPECIAL = {
     "skills/": ("tests/test_skills.py",),
     "src/office/web/": ("tests/web/test_server.py",),
     "src/office/_resources/": ("tests/test_resource_bundle.py",),
-    ".githooks/": ("tests/v31/test_verification_coverage.py",),
-    "scripts/": ("tests/test_pr_test_selection.py",),
+    ".githooks/": ("tests/test_pre_push_hook.py",),
+    "scripts/select_pr_tests.py": ("tests/test_pr_test_selection.py",),
     "pyproject.toml": ("tests/v31/test_verification_coverage.py",),
     "src/office/integration.py": ("tests/v31/test_run_checks.py", "tests/v31/test_verification_coverage.py"),
     "src/office/land.py": ("tests/v31/test_land.py", "tests/v31/test_land_recovery.py"),
@@ -56,14 +56,16 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     # Require a real local base; never turn a missing origin into an empty diff.
     git(root, "rev-parse", "--verify", base_ref + "^{commit}")
     base = git(root, "merge-base", "HEAD", base_ref)
-    changed = set(git(root, "diff", "--name-only", "--diff-filter=ACDMRT", base, "HEAD").splitlines())
-    changed.update(git(root, "diff", "--name-only", "--diff-filter=ACDMRT", "HEAD").splitlines())
+    changed = set(git(root, "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRT", base, "HEAD").splitlines())
+    changed.update(git(root, "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRT", "HEAD").splitlines())
     if not changed:
         raise SelectionError("No changed files versus PR base; refusing an empty PR-test attestation")
     if any(p.startswith("tests/") and not (root / p).is_file() for p in changed):
         raise SelectionError("A test file was deleted/renamed: review coverage and run full validation explicitly")
 
     tests = sorted(p.relative_to(root).as_posix() for p in (root / "tests").rglob("test_*.py"))
+    if any(p.startswith("tests/") and p not in tests for p in changed):
+        raise SelectionError("Test infrastructure changed: run full validation explicitly")
     selected: set[str] = set()
 
     def include(test: str, reason: str) -> None:
