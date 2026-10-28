@@ -438,7 +438,11 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
             continue
         rec = state.recorded_route(t)
         if rec:
-            out[t["id"]] = routing.candidate_id(rec["candidate"]) + (" (declared)" if rec.get("declared") else "")
+            chosen = routing.candidate_id(rec["candidate"])
+            preferred = rec.get("preferred_route")
+            out[t["id"]] = chosen + (" (declared)" if rec.get("declared") else "") + \
+                (f" (preferred {preferred}: {rec.get('selection_reason') or 'fell back'})"
+                 if preferred and preferred != chosen else "")
             continue
         plan = (((pv or {}).get("tasks") or {}).get(t["id"]) or {}).get("route_plan") or {}
         if plan.get("primary"):

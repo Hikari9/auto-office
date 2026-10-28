@@ -255,7 +255,7 @@ gear_presets:
     plan_review_max_rounds: null
     code_review_max_rounds: 3
   L:
-    dedicated_planner: true
+    dedicated_planner: false # the orchestrator plans; `office start --planner dedicated` asks for one (#850)
     plan_review: true
     independent_code_review: true
     funded_browser_verification: acceptance_forced
@@ -263,7 +263,7 @@ gear_presets:
     plan_review_max_rounds: 3
     code_review_max_rounds: 3
   XL:
-    dedicated_planner: true
+    dedicated_planner: false # the orchestrator plans; `office start --planner dedicated` asks for one (#850)
     plan_review: true
     independent_code_review: true
     funded_browser_verification: true
