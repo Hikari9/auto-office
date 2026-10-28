@@ -615,13 +615,23 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
 
 
 def candidate_from_spec(spec: str) -> dict:
-    """The candidate `harness/model@effort` names, built from its active catalog
+    """The candidate `harness/model@effort` or printed `harness@major/model@effort`,
+    built from its active catalog
     row. Unlike `candidates.build_candidates` this keeps rows that are not
     dispatchable, because probing them is what discovery is for. The catalog gates
     in `reserve` still decide whether the route may be probed."""
     from office import candidates
     from office.state import Usage
-    want = candidates.parse_route_override(spec)
+    # The UI/status print canonical harness-major routes (e.g. claude@2/model@medium).
+    # Resolve that display spelling to the exact catalog route, but never silently
+    # ignore a stale or fabricated harness major.
+    printed = re.fullmatch(
+        r"(?P<harness>[A-Za-z0-9_.-]+)@(?P<major>[0-9]+)/"
+        r"(?P<model>[A-Za-z0-9_.-]+)@(?P<effort>[a-z]+)", spec
+    )
+    lookup = (f"{printed['harness']}/{printed['model']}@{printed['effort']}"
+              if printed else spec)
+    want = candidates.parse_route_override(lookup)
     if not (want["harness"] and want["model_id"] and want["effort"]):
         raise Usage("invalid-route", f"--probe-route {spec!r}: expected <harness>/<model>@<effort>",
                     next_step="office doctor --probe-route codex/gpt-6.1-sol@high")
@@ -629,6 +639,18 @@ def candidate_from_spec(spec: str) -> dict:
     if adapter is None:
         raise Usage("unknown-harness", f"--probe-route names harness {want['harness']!r}, which has no adapter",
                     next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
+    harness_version = adapters.harness_version(adapter)
+    if printed:
+        from office import scoring
+        actual_major = scoring.harness_major(harness_version)
+        if actual_major != printed["major"]:
+            raise Usage(
+                "harness-major-mismatch",
+                f"--probe-route {spec!r} names {want['harness']} major {printed['major']}, "
+                f"but the installed harness major is {actual_major}",
+                next_step=f"verify the installed {want['harness']} version and use "
+                          f"{want['harness']}/{want['model_id']}@{want['effort']} to probe its current route",
+            )
     cand = {"harness": want["harness"], "model_id": want["model_id"], "effort": want["effort"]}
     row = catalog_row(cand)
     if row is None:
@@ -638,7 +660,7 @@ def candidate_from_spec(spec: str) -> dict:
                     next_step="office inspect route <task|role> lists the routes Office knows")
     state = row_state(row)
     return {
-        "harness": want["harness"], "harness_version": adapters.harness_version(adapter) or "unknown",
+        "harness": want["harness"], "harness_version": harness_version or "unknown",
         "model_id": row.get("model_id"), "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
         "invocation_source": row.get("invocation_source"), "effort": row.get("effort"),
         "alias_resolved_to": row.get("alias_resolved_to"),

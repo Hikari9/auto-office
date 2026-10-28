@@ -70,6 +70,36 @@ def test_a_manual_probe_prints_the_record_and_audits_an_unbound_attempt(probe_en
     assert len({e["attempt_id"] for e in rows}) == 1
 
 
+def test_printed_harness_major_route_probes_the_same_fingerprint(probe_env):
+    """#858: CLI accepts the exact harness-major route shown by Office status."""
+    from office import adapters, route_probe, scoring
+
+    major = scoring.harness_major(adapters.harness_version(adapters.load_all()["codex"]))
+    assert major.isdigit(), major
+    printed = f"codex@{major}/gpt-6.1-sol@high"
+    assert route_probe.candidate_from_spec(printed)["adapter_id"] == "codex"
+
+    code, out = probe_env.office("doctor", "--probe-route", printed)
+    assert code == 0 and "probe codex/gpt-6.1-sol@high: pass" in out, out
+    code, out = probe_env.office("doctor", "--probe-route", ROUTE)
+    assert code == 0 and "cached record, no new launch" in out, out
+    assert probe_env.launches() == 1
+
+
+def test_stale_printed_harness_major_cannot_probe_another_version(probe_env):
+    """A displayed route from an older major must not silently rebind."""
+    from office import adapters, scoring
+
+    major = scoring.harness_major(adapters.harness_version(adapters.load_all()["codex"]))
+    assert major.isdigit(), major
+    wrong = int(major) + 1
+    code, out = probe_env.office(
+        "doctor", "--probe-route", f"codex@{wrong}/gpt-6.1-sol@high"
+    )
+    assert code == 2 and "harness-major-mismatch" in out, out
+    assert probe_env.launches() == 0
+
+
 def test_a_repeat_is_a_cached_record_and_a_cache_hit_event(probe_env):
     assert probe_env.office("doctor", "--probe-route", ROUTE)[0] == 0
     code, data = probe_env.ojson("doctor", "--probe-route", ROUTE)
