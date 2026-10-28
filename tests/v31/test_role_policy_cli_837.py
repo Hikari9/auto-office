@@ -54,8 +54,9 @@ def test_bad_edit_not_written_and_wildcard_requires_flag(isolated):
 def test_effective_view_shows_provenance_and_technical_status(isolated):
     result = routecmd.policy(role="code_reviewer")
     assert result.data["effective"]
-    assert all(set(r) == {"role", "route", "state", "source", "technical_dispatchable"} for r in result.data["effective"])
-    assert any("technical" in l for l in result.lines)
+    assert all(set(r) == {"role", "route", "state", "source", "technical_dispatchable", "dispatches", "dispatch_reason"}
+               for r in result.data["effective"])
+    assert any("does not dispatch" in l for l in result.lines)  # #845: said plainly, with the way to make it dispatch
 
 
 def test_raw_config_supports_role_rules_at_user_tier(isolated):

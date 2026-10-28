@@ -94,14 +94,14 @@ def merge(rows: list[dict], overlay: dict | None = None) -> tuple[list[dict], li
         if key in index:
             label = f"{key[0]}/{key[1]}@{key[2]}"
             if raw_row.get("dispatchable") is False:
-                out[index[key]] = {**out[index[key]], "dispatchable": False}
+                out[index[key]] = {**out[index[key]], "dispatchable": False, "user_disabled": True}
             else:
                 warnings.append(f"user catalog row {label} duplicates an existing row; skipped "
                                 "(only dispatchable: false may override one)")
             continue
         index[key] = len(out)
         out.append(dict(raw_row))
-    out = [{**r, "dispatchable": False} if any(matches(d, r) for d in overlay["disabled"]) else r for r in out]
+    out = [{**r, "dispatchable": False, "user_disabled": True} if any(matches(d, r) for d in overlay["disabled"]) else r for r in out]
     return out, warnings
 
 

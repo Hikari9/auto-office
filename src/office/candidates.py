@@ -469,7 +469,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      family_floors: dict | None = None,
                      quota_snapshot: dict[str, dict] | None = None,
                      discovery: dict | None = None,
-                     user_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+                     user_policies: list[dict] | None = None,
+                     allow_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -481,12 +482,18 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     routing keeps them out of the eligible slate. `user_policies` (default: the
     user's current policy) removes denied routes; routing passes [] and rejects
     denied routes itself, with the policy source, at stage 1.
+
+    `allow_policies` (default: `user_policies`) are the policies whose role allow makes a route
+    dispatchable (#845): an allowed route is a candidate even when its catalog row, a user catalog
+    overlay or the family floor says otherwise, and it needs no probe. Routing still applies deny,
+    capability, quota and independence rules to it.
     """
     from office import onboarding, route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
     sources = adapters.load_sources()
     all_adapters = {aid: entry[0] for aid, entry in sources.items()}
     policies = current_user_policies() if user_policies is None else user_policies
+    allow_pols = policies if allow_policies is None else allow_policies
     candidates, skipped, not_routable = [], [], []
     free_models_allowed = onboarding.free_models_enabled()
     for row in catalog_rows():
@@ -501,7 +508,20 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             continue
         if row.get("status_reason"):
             state = {**state, "reason": row["status_reason"]}
-        if row.get("dispatchable") is False and not (discovery and state["discovery_eligible"]):
+        floor = below_family_floor(row.get("model_id"), family_floors)
+        allowed = None
+        if (row.get("dispatchable") is False or floor) and allow_pols and adapter and adapters.installed(adapter):
+            allowed = route_policy.user_allows(
+                {"harness": harness, "harness_version": adapters.route_version(harness, adapter, sources),
+                 "model_id": row.get("model_id"), "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
+                 "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}, role, allow_pols)
+        if allowed and row.get("dispatchable") is False:
+            # The user's allow outranks the catalog or an overlay: no proof, qualification or trust gate (#845).
+            why = "a user catalog overlay disabled it" if row.get("user_disabled") else (
+                row.get("invocation_source") or "the catalog row is not dispatchable")
+            state = {"status": "available", "discovery_eligible": False,
+                     "reason": f"dispatchable by role {role} allow ({allowed['source']}: {allowed.get('rule')}); {why}"}
+        elif row.get("dispatchable") is False and not (discovery and state["discovery_eligible"]):
             if state["discovery_eligible"]:
                 not_routable.append({"candidate": label, "category": "untried",
                                      "reason": "discovery-eligible but discovery is off for this role or run: "
@@ -510,8 +530,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                 not_routable.append({"candidate": label, "category": "not-eligible",
                                      "reason": f"not a candidate: {state['reason']}"})
             continue
-        floor = below_family_floor(row.get("model_id"), family_floors)
-        if floor:
+        if floor and not allowed:
             skipped.append({"candidate": label, "category": "floor", "reason": f"below model family floor {floor}"})
             continue
         if not adapter or not adapters.profile(adapter, kind):
@@ -543,6 +562,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             "max_concurrent": _max_concurrent(row, adapter, is_free_model),
             "discovery": state["discovery_eligible"], "probe_key": None,
         }
+        if allowed:
+            cand["user_allowed"] = True
         if row.get("alias_resolved_to"):
             cand["alias_resolved_to"] = row["alias_resolved_to"]
         # Role-aware (#837): a role allow outranks a legacy global deny, a role deny stays role-scoped.
@@ -563,6 +584,17 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         cand["quota"] = {"status": "unknown", "tightest_remaining_percent": None}
         candidates.append(cand)
     skipped.extend(not_routable)
+    # An allow naming a route the catalog does not have cannot dispatch: say so, never drop it silently (#845).
+    rows_all = catalog_rows()
+    for spec in route_policy.allow_specs(role, allow_pols):
+        harness_, model_, effort_ = route_policy.spec_parts(spec)
+        if not model_ or not harness_:
+            continue
+        if not any(r.get("invocation_harness") == harness_ and model_ in (r.get("model_id"), r.get("invocation_model_id"))
+                   and (not effort_ or r.get("effort") == effort_) for r in rows_all):
+            skipped.append({"candidate": spec, "category": "not-in-catalog",
+                            "reason": f"allowed for {role}, but the catalog has no such route; add it: "
+                                      f"office model add {harness_}/{model_} --effort {effort_ or '<effort>'}"})
     if quota_snapshot is not None:
         for c in candidates:
             c["quota"] = quota_for_candidate(c, quota_snapshot.get(c["adapter_id"], c["quota"]))
@@ -917,15 +949,19 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     settings = route_policy.discovery_settings(config)
     discovering = bool(settings["enabled"] and role in settings["roles"] and role in routing.ADAPTIVE_ROLES
                        and not override)
-    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
-                                           quota_snapshot=quota_snapshot,
-                                           discovery=settings if discovering else None, user_policies=[])
     task_for_route = state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None
     descriptor_for_route = _effective_task_descriptor(run, task_for_route)
     sized_work = role in routing.ADAPTIVE_ROLES
     effective_task_size = (descriptor_for_route.get("task_size") if sized_work else None) or \
         (run.get("risk") or {}).get("size_class")
     seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role)
+    # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
+    allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
+                      route_policy.user_policy(config), *live]
+    candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
+                                           quota_snapshot=quota_snapshot,
+                                           discovery=settings if discovering else None, user_policies=[],
+                                           allow_policies=allow_policies)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \

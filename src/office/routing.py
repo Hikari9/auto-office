@@ -47,6 +47,26 @@ def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
     return f"{harness or ''}/{invocation_model_id or ''}"
 
 
+def _explicit_allow(rule: dict) -> bool:
+    """Whether a user's own role rule allows this route (#845); the shipped seed and neutral default do not count."""
+    return rule.get("state") == "allow" and rule.get("source") not in ("shipped", "default")
+
+
+def demotion_key(harness: str | None, model: str | None, effort: str | None) -> str:
+    """The cooldown identity of one route (effort included) demoted after a runtime failure (#845)."""
+    return f"{cooldown_key(harness, model)}@{effort}"
+
+
+def harness_demotion_key(harness: str | None) -> str:
+    """The cooldown identity of a whole harness demoted after an auth failure (#845)."""
+    return f"{harness or ''}/*"
+
+
+def _demotion_keys(c: dict) -> tuple[str, str]:
+    return (demotion_key(c.get("harness"), c.get("invocation_model_id") or c.get("model_id"), c.get("effort")),
+            harness_demotion_key(c.get("harness")))
+
+
 def preferred_rank(c, preferred_seed):
     """Index of the first roles.<role>.preferred_seed entry c matches, or None.
 
@@ -429,6 +449,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
         for c in stage:
             cid = candidate_id(c)
             caps = set(c.get("capabilities", []))
+            if _explicit_allow(role_states[cid]) and "vision" in required:
+                caps.add("vision")  # the user's allow stands in for the vision proof (#845)
             if not required.issubset(caps):
                 reason = f"missing capabilities {sorted(required - caps)}"
                 if "vision" in required - caps:
@@ -447,6 +469,9 @@ def route(request: dict, discovery_input: dict | None = None, *,
             waiver = (executor_slates.floor_exception(c, new_policy_size, role)
                       if role in ADAPTIVE_ROLES else None)
             passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))
+            if _explicit_allow(role_states[cid]):
+                nxt.append(c)  # a user allow is not held to a benchmark floor (#845)
+                continue
             if not passed and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": reason})
                 continue
@@ -475,19 +500,22 @@ def route(request: dict, discovery_input: dict | None = None, *,
         now = datetime.now(timezone.utc).isoformat()
         routes = [(cooldown_key(c.get("harness"), c.get("invocation_model_id") or c.get("model_id")), c)
                   for c in stage]
+        demoted_keys = {id(c): _demotion_keys(c) for _, c in routes}
         rate_limited = {}
         if con and routes:
             has_cooldowns = con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='route_cooldowns'"
             ).fetchone()
             if has_cooldowns:
-                ids = list(dict.fromkeys(key for key, _ in routes))
+                ids = list(dict.fromkeys([key for key, _ in routes] + [k for keys in demoted_keys.values() for k in keys]))
                 placeholders = ",".join("?" for _ in ids)
                 rate_limited = {row[0]: row[1] for row in con.execute(
                     f"SELECT route, expires_at FROM route_cooldowns WHERE expires_at>? AND route IN ({placeholders})",
                     (now, *ids))}
         for key, c in routes:
-            if key in rate_limited:
+            if demoted := next((k for k in demoted_keys[id(c)] if k in rate_limited), None):
+                c["quota"] = {**(c.get("quota") or {}), "cause": "route-demoted", "expires_at": rate_limited[demoted]}
+            elif key in rate_limited:
                 c["quota"] = {
                     **(c.get("quota") or {}),
                     "status": "ok",
@@ -502,7 +530,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         safe = []; unknown = []; unsafe = []
         for c in stage:
             gate = _quota_gate(c, reserve)
-            if gate and gate[2] in {"concurrency-cap", "rate-limited"}:
+            if gate and gate[2] in {"concurrency-cap", "rate-limited", "route-demoted"}:
                 category = "concurrency" if gate[2] == "concurrency-cap" else gate[2]
                 rejected.append({"candidate": candidate_id(c), "stage": gate[0], "category": category,
                                  "reason": gate[1]})
@@ -679,6 +707,8 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
     q = c.get("quota", {})
     if q.get("cause") == "rate-limited":
         return 6, "rate-limited", "rate-limited"
+    if q.get("cause") == "route-demoted":
+        return 6, f"demoted after a runtime failure until {q.get('expires_at')}", "route-demoted"
     if q.get("cause") == "concurrency-cap":
         concurrency = q.get("concurrency") or {}
         return (6, f"concurrency cap reached ({concurrency.get('count')}/{concurrency.get('cap')})",

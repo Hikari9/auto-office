@@ -21,6 +21,8 @@ Discovery (#494) lets one explicitly discovery-eligible, unverified executor or 
 
 Role policy (#837) replaces trust promotion: a new route is `neutral` (eligible) for every role, and the user sets `allow` or `deny` per role with `office route allow|deny|neutral|clear <harness/model@effort> --role <role>`. Aliases resolve to one exact identity. Remaining technical gates (conformance probe required, discovery off or blocked, not dispatchable) are reported per route with their remedy and are separate from policy.
 
+**An allow skips all of this (#845).** A route the user has allowed for a role (or listed exactly in that role's `preferred_seed`) is `available` at once: it needs no probe and no discovery trial, and `dispatchable: false` in the catalog or the user catalog overlay no longer hides it. If it then fails at runtime, Office logs `route.failed`, demotes it for a TTL and falls back to the next eligible route. Discovery below is for routes the user has not allowed.
+
 A catalog route becomes probe-able only when the catalog marks it `discovery: eligible` with a concrete invocation model ID and a documented or local-evidence reason. `dispatchable: false` alone does not establish that it can run. Benchmark-only, confirmed-unsupported and archived retired rows stay excluded. Aliases carry the target's availability and reason. Unknown support is distinct from a confirmed unsupported invocation.
 
 Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, `probe-passed`, `temporarily-unavailable` and `confirmed-unsupported`. Availability still leaves role, permission, capability, trust, task and quota gates to check.

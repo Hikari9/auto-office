@@ -4699,6 +4699,8 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
                 return  # another process recorded the end first; a recovery never overwrites it
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
+                con.execute("DELETE FROM route_cooldowns WHERE route=?",
+                            (routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort")),))
             status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
@@ -4823,6 +4825,8 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                        f"submitting: office rerun {task['id']} --resume (resubmits on the amended contract) | --fresh",
                        task_id=task["id"])
             return
+        if d["kind"] == "executor" and not open_trial(con, dispatch_id) and _queue_route_fallback(con, run, task, d):
+            return  # the route itself failed: logged, demoted for a TTL, and the next eligible route takes over (#845)
         if _queue_trial_recovery(con, run, d, f"worker ended ({d['terminal_classification']}) without submitting"):
             return
         # A dispatch that raised stopped on purpose (an answer, not a retry, resolves it): it is no failed attempt.
@@ -4840,6 +4844,117 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
                           pause_reason=f"worker ended ({d['terminal_classification']}) without submitting")
         state.emit(con, run, "task.blocked", f"{task['id']} worker ended without submitting "
                    f"({d['terminal_classification']}); work is preserved in its worktree", task_id=task["id"])
+
+
+# ------------------------------------------------------------------ runtime route failure and fallback (#845)
+
+# What a harness prints when the route itself cannot run. Quota walls are handled before this (cooldown).
+_ROUTE_FAILURE_SIGNATURES = (
+    ("unsupported-model-effort", r"unknown model|model\b.{0,80}(not (found|supported|available|exist)|does not exist|invalid)"
+                                 r"|invalid (model|effort|reasoning)|unsupported .{0,30}(effort|reasoning|model)"
+                                 r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
+                                 r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
+    ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
+    ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
+                  r"|service unavailable|\b50[234]\b|overloaded"),
+)
+
+
+def route_failure(classification: str | None, text: str) -> tuple[str, str] | None:
+    """(reason class, detail) when a worker's end is a failure of its route (unsupported model or effort, auth,
+    timeout, transport death, launch failure), else None. The detail is the tail of the harness log (stdout and stderr merged)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("[office]")]
+    tail = "\n".join(lines[-8:])[-600:]
+    if classification == "launch_failed":
+        return "launch-failed", tail or "the harness executable could not be launched"
+    if classification == "timeout":
+        return "timeout", tail or "the worker timed out"
+    if classification == "nonzero":
+        for reason, pattern in _ROUTE_FAILURE_SIGNATURES:
+            if re.search(pattern, tail, re.I):
+                return reason, tail
+    return None
+
+
+def _queue_route_fallback(con, run: dict, task: dict, d: dict) -> bool:
+    """Log a structured route failure, demote the route for a TTL (never permanently) and queue the fallback
+    to the next eligible route. A route the user declared by hand is logged and demoted but blocks the task
+    instead: a deliberate choice is never swapped silently. False when the end was not a route failure."""
+    from office import gates
+    failure = route_failure(d.get("terminal_classification"),
+                            gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"]))
+    if failure is None:
+        return False
+    reason, detail = failure
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES)).isoformat()
+    keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
+    if reason == "auth":
+        keys.append(routing.harness_demotion_key(d.get("harness")))  # every route on a signed-out harness fails alike
+    for key in keys:
+        con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                    (key, expires, now.isoformat()))
+    declared = bool(d.get("override_json"))
+    tid = task["id"]
+    state.emit(con, run, "route.failed",
+               f"{tid} route {d.get('triple')} failed at runtime ({reason}): {detail.splitlines()[-1][:160] if detail else 'no output'}; "
+               f"demoted until {expires[:16]}Z" + ("; declared route, not swapped" if declared else "; falling back to the next eligible route"),
+               task_id=tid, dispatch_id=d["id"],
+               payload={"route": d.get("triple"), "harness": d.get("harness"), "model": d.get("invocation_model_id"),
+                        "effort": d.get("effort"), "reason": reason, "classification": d.get("terminal_classification"),
+                        "exit_code": d.get("exit_code"), "stderr_tail": detail, "demoted_until": expires,
+                        "declared": declared})
+    if declared:
+        state.update_task(con, run["id"], tid, status="blocked",
+                          pause_reason=f"declared route {d.get('triple')} failed ({reason}); choose another: office dispatch {tid} --reroute")
+        state.emit(con, run, "task.blocked", f"{tid} declared route {d.get('triple')} failed ({reason}) and is not swapped "
+                   f"silently; office dispatch {tid} --reroute, or --as <route>", task_id=tid)
+        return True
+    state.enqueue(con, run, "route_fallback", {"dispatch_id": d["id"], "task_id": tid, "reason": reason},
+                  dedup_key=f"route-fallback:{d['id']}", max_attempts=2)
+    return True
+
+
+def job_route_fallback(con, run: dict, job: dict) -> dict:
+    """Dispatch the next eligible route after a runtime route failure. The failed route is demoted, so a fresh
+    reroute cannot pick it again; with no eligible route left the task blocks with the reasons."""
+    d = state.get_dispatch(con, job["payload"]["dispatch_id"])
+    task = state.get_task(con, run["id"], d["task_id"]) if d else None
+    if task is None or task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching"):
+        return {"skipped": "superseded"}
+    tid = task["id"]
+    try:
+        fresh = planned_route(con, run, task, reroute=True)
+        why = None if fresh.get("status") == "selected" else _route_failure(tid, fresh)
+    except Refused as refused:
+        fresh, why = None, refused.message
+    with db.transaction(con):
+        run = state.get_run(con, run["id"])
+        task = state.get_task(con, run["id"], tid)
+        if task["current_dispatch_id"] != d["id"] or task["status"] not in ("running", "launching") or state.is_terminal(run):
+            return {"skipped": "state-changed"}
+        if why is None:
+            try:
+                _record_routing(con, run, fresh)
+                note_route(con, run, task, fresh)
+                new = request_launch(con, run, tid, role="executor", decision=fresh, base=d.get("base_commit"))
+            except Refused as refused:
+                why = f"the fallback was refused ({refused.message})"
+            else:
+                state.record_route_change(con, run, tid, d.get("triple"), fresh["selected"], kind="runtime-fallback",
+                                          actor="office", dispatch_id=new,
+                                          reason=f"{d.get('triple')} failed at runtime ({job['payload'].get('reason')})")
+                state.emit(con, run, "route.fallback", f"{tid} fell back from {d.get('triple')} to {fresh['selected']} "
+                           f"as {new} after a runtime failure ({job['payload'].get('reason')})",
+                           task_id=tid, dispatch_id=new)
+                return {"fallback": fresh["selected"], "dispatch": new}
+        state.update_task(con, run["id"], tid, status="blocked",
+                          pause_reason=f"route {d.get('triple')} failed and no fallback is eligible: {why}"[:300])
+        state.emit(con, run, "task.blocked", f"{tid} route {d.get('triple')} failed at runtime and no other route is "
+                   f"eligible now ({why}); work is preserved in its worktree. Allow another route "
+                   f"(office route allow <route> --role executor), then office dispatch {tid} --reroute", task_id=tid)
+    return {"blocked": why}
 
 
 # ------------------------------------------------------------------ trial launch-failure recovery (#494)
