@@ -210,8 +210,8 @@ def validate_user_policy(config: dict) -> list[str]:
         return problems + ["routing.user_policy.role_rules must be a list"]
     seen = set()
     for rule in rules:
-        if not isinstance(rule, dict) or set(rule) - {"role", "route", "state", "wildcard"}:
-            problems.append("routing.user_policy.role_rules entries must contain only role, route, state, wildcard")
+        if not isinstance(rule, dict) or set(rule) - {"role", "route", "state", "wildcard", "sizes"}:
+            problems.append("routing.user_policy.role_rules entries must contain only role, route, state, wildcard, sizes")
             continue
         role, spec, state = rule.get("role"), rule.get("route"), rule.get("state")
         if role not in POLICY_ROLES and not (role == "*" and rule.get("wildcard") is True):
@@ -224,7 +224,11 @@ def validate_user_policy(config: dict) -> list[str]:
             problems.append(f"routing.user_policy.role_rules broad route {spec!r} requires wildcard: true")
         if "wildcard" in rule and type(rule["wildcard"]) is not bool:
             problems.append("routing.user_policy.role_rules wildcard must be a boolean")
-        key = (role, spec)
+        sizes = rule.get("sizes")
+        if sizes is not None and (not isinstance(sizes, list) or not sizes or any(v not in SIZES for v in sizes)):
+            problems.append(f"routing.user_policy.role_rules sizes must be a nonempty list of {', '.join(SIZES)}")
+            sizes = None
+        key = (role, spec, tuple(sorted(sizes)) if sizes else None)
         if key in seen:
             problems.append(f"routing.user_policy.role_rules duplicate rule: {role}/{spec}")
         seen.add(key)
@@ -235,16 +239,39 @@ ROLE_STATES = ("allow", "neutral", "deny")
 POLICY_ROLES = frozenset(("executor", "worker", "planner", "plan_reviewer", "code_reviewer",
                           "browser_verifier", "visual_reviewer", "closeout_verifier", "integration_reviewer"))
 _CANONICAL = re.compile(r"(?P<harness>[A-Za-z0-9_.-]+)@(?P<major>[0-9]+)/(?P<model>[A-Za-z0-9_.-]+)@(?P<effort>[a-z]+)\Z")
+ROLE_POLICY_FILE = ("catalog", "role-policy.yaml")
+SIZES = ("XS", "S", "M", "L", "XL")
+EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def _expand_role_policy(data: dict) -> tuple[dict, ...]:
+    """Flatten the compact catalog/role-policy.yaml into one rule per role, route, state and size scope."""
+    rules = []
+    for role, routes in data.items():
+        if role == "version":
+            continue
+        for key, states in routes.items():
+            harnesses, model = key.rsplit("/", 1)[0].split("|"), key.rsplit("/", 1)[1]
+            for harness in harnesses:
+                for state in ("allow", "deny"):
+                    for effort, sizes in (states.get(state) or {}).items():
+                        for e in (EFFORTS if effort == "*" else (effort,)):
+                            rule = {"role": role, "route": f"{harness}/{model}@{e}", "state": state}
+                            if sizes != "all":
+                                rule["sizes"] = list(sizes)
+                            rules.append(rule)
+    return tuple(rules)
+
+
+def _load_seed_role_rules() -> tuple[dict, ...]:
+    import yaml
+    from office import paths
+    path = paths.resources_root().joinpath(*ROLE_POLICY_FILE)
+    return _expand_role_policy(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
 # Only these reviewed default *preferences* ship. Legacy trust history does not grant admission.
-SEED_ROLE_RULES = (
-    {"role": "executor", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
-    {"role": "code_reviewer", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
-    {"role": "plan_reviewer", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow"},
-    {"role": "code_reviewer", "route": "claude@2/claude-opus-5-5@low", "state": "allow"},
-    {"role": "code_reviewer", "route": "codex@0/gpt-6-luna@high", "state": "allow"},
-    {"role": "plan_reviewer", "route": "codex@0/gpt-6-luna@high", "state": "allow"},
-    {"role": "visual_reviewer", "route": "agy@1/gemini-3.8-flash@low", "state": "allow"},
-)
+SEED_ROLE_RULES = _load_seed_role_rules()
 
 
 def _canonical_spec(spec) -> bool:
@@ -273,19 +300,27 @@ def _rule_matches(cand: dict, spec: str, *, state: str | None = None) -> bool:
     return _matches(cand, spec)
 
 
-def effective_role_state(cand: dict, role: str, policies: list[dict]) -> dict:
-    """Effective role policy; newest user rules > legacy denies > shipped allow > neutral.
+def _in_scope(rule: dict, size: str | None) -> bool:
+    """A rule with `sizes` applies only to a known task size in that list; an unsized rule always applies."""
+    return "sizes" not in rule or size in rule["sizes"]
 
+
+def effective_role_state(cand: dict, role: str, policies: list[dict], size: str | None = None) -> dict:
+    """Effective role policy; newest user rules > legacy denies > shipped rules > neutral.
+
+    `size` is the task's XS-XL size (#850). Rules scoped to sizes do not apply when it is unknown.
     Policy evaluation is independent of technical availability, quotas and review safety.
     A list entry is exact unless its author deliberately set `wildcard: true`.
     """
     for policy in reversed(policies):
         matching = [rule for rule in policy.get("role_rules", ())
-                    if rule.get("role") in (role, "*") and _rule_matches(cand, rule["route"], state=rule.get("state"))]
+                    if rule.get("role") in (role, "*") and _in_scope(rule, size)
+                    and _rule_matches(cand, rule["route"], state=rule.get("state"))]
         if matching:
-            # Specific role always beats a deliberate all-role wildcard.
-            matching.sort(key=lambda r: (r["role"] != role, not _is_exact_spec(r["route"])))
+            # Specific role always beats a deliberate all-role wildcard, and a size-scoped rule beats an unsized one.
+            matching.sort(key=lambda r: (r["role"] != role, "sizes" not in r, not _is_exact_spec(r["route"])))
             best = [r for r in matching if r["role"] == matching[0]["role"]
+                    and ("sizes" in r) == ("sizes" in matching[0])
                     and _is_exact_spec(r["route"]) == _is_exact_spec(matching[0]["route"])]
             # Equivalent spellings of one route can disagree; fail closed, deterministically.
             rule = next((r for r in best if r["state"] == "deny"), None) or sorted(best, key=lambda r: r["state"])[0]
@@ -294,9 +329,12 @@ def effective_role_state(cand: dict, role: str, policies: list[dict]) -> dict:
     for policy in reversed(policies):
         if reason := is_denied(cand, policy):
             return {"state": "deny", "source": "legacy-user-deny", "reason": reason}
-    for rule in SEED_ROLE_RULES:
-        if rule["role"] == role and _rule_matches(cand, rule["route"]):
-            return {"state": rule["state"], "source": "shipped", "rule": rule["route"]}
+    shipped = [r for r in SEED_ROLE_RULES
+               if r["role"] == role and _in_scope(r, size) and _rule_matches(cand, r["route"])]
+    if shipped:
+        # A deny outranks an allow if the shipped data ever overlaps; a size-scoped rule outranks an unsized one.
+        rule = sorted(shipped, key=lambda r: ("sizes" not in r, r["state"] != "deny"))[0]
+        return {"state": rule["state"], "source": "shipped", "rule": rule["route"]}
     return {"state": "neutral", "source": "default", "reason": "no role-specific deny"}
 
 

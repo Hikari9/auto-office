@@ -67,7 +67,9 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     return True, "ready"
 
 
-def policy(*, role: str | None = None, effective: bool = False) -> Result:
+def policy(*, role: str | None = None, effective: bool = False, size: str | None = None) -> Result:
+    if size and size not in route_policy.SIZES:
+        raise configcmd._usage(f"unknown task size {size!r} (known: {', '.join(route_policy.SIZES)})")
     if role and role not in route_policy.POLICY_ROLES:
         raise configcmd._usage(f"unknown routing role {role!r}")
     cfg_effective, _ = cfg.resolve(configcmd._repo_root(Path.cwd()))
@@ -78,6 +80,8 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
     output = []
     lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate; "
              "a runtime failure is logged and falls back to the next eligible route:"]
+    lines.append(f"  for task size {size}" if size else
+                 "  task size unknown: size-scoped rules do not apply (use --size XS|S|M|L|XL)")
     unknown_versions = set()
     for r in roles:
         count = {"allow": 0, "neutral": 0, "deny": 0}
@@ -97,7 +101,7 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
             c = {"harness": harness, "harness_version": version,
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
-            state = route_policy.effective_role_state(c, r, [seed, p])
+            state = route_policy.effective_role_state(c, r, [seed, p], size)
             dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)))
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
                       "state": state["state"], "source": state["source"],
@@ -141,10 +145,15 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
                                      "catalog_overlay_disabled": overlay})
 
 
-def change(action: str, *, role: str | None, route: str | None, wildcard: bool = False) -> Result:
+def change(action: str, *, role: str | None, route: str | None, wildcard: bool = False,
+           sizes: list[str] | None = None) -> Result:
     """Transactional-in-effect YAML edit: validate all layers BEFORE atomic file write.
 
-    `route` may be several comma-separated routes: one command reshuffles a role's list (#845)."""
+    `route` may be several comma-separated routes: one command reshuffles a role's list (#845).
+    `sizes` scopes the rule to those XS-XL task sizes (#850); a rule is replaced only by one of the same scope."""
+    sizes = sorted(set(sizes), key=route_policy.SIZES.index) if sizes else None
+    if sizes and any(v not in route_policy.SIZES for v in sizes):
+        raise configcmd._usage(f"--size takes {', '.join(route_policy.SIZES)} (comma-separated)")
     if role not in route_policy.POLICY_ROLES and not (role == "*" and wildcard):
         raise configcmd._usage(f"a specific --role is required (known: {', '.join(sorted(route_policy.POLICY_ROLES))})")
     specs = [r.strip() for r in (route or "").split(",") if r.strip()]
@@ -168,10 +177,12 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     for original_spec in specs:
         canonical = _canonicalize(original_spec)
         routes.append(canonical)
-        new = [r for r in new if not (isinstance(r, dict) and r.get("role") == role and r.get("route") in (canonical, original_spec))]
+        new = [r for r in new if not (isinstance(r, dict) and r.get("role") == role and r.get("route") in (canonical, original_spec)
+                                      and (sorted(r.get("sizes") or []) == sorted(sizes or [])))]
         if action != "clear":
-            new.append({"role": role, "route": canonical, "state": action, **({"wildcard": True} if wildcard else {})})
-    label = ", ".join(routes)
+            new.append({"role": role, "route": canonical, "state": action, **({"sizes": sizes} if sizes else {}),
+                        **({"wildcard": True} if wildcard else {})})
+    label = ", ".join(routes) + (f" [{','.join(sizes)}]" if sizes else "")
     if new == old:
         return Result(lines=[f"{role}/{label}: no policy change"], data={"changed": False})
     user_policy["role_rules"] = new

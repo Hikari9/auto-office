@@ -67,7 +67,8 @@ def test_shipped_catalog_offers_luna_at_high():
 def test_default_reviewer_seeds_resolve_to_catalog_candidates():
     from office import routing
     roles = config.load_yaml(config.default_config_path())["roles"]
-    rows = candidates.catalog_rows()
+    # Catalog rows carry the harness as invocation_harness; routing candidates carry it as harness.
+    rows = [{**r, "harness": r.get("harness") or r.get("invocation_harness")} for r in candidates.catalog_rows()]
     for role in ("plan_reviewer", "code_reviewer"):
         lead = roles[role]["preferred_seed"][0]
         assert any(routing.preferred_rank(r, [lead]) == 0 for r in rows), role

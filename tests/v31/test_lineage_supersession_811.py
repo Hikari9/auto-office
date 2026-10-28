@@ -228,14 +228,14 @@ def _trust_db(tmp_path, *proven):
 def test_newer_executor_route_without_trust_history_is_neutral_and_eligible(tmp_path):
     """#837: missing historical trust never vetoes a route; it is neutral and stays in the slate."""
     o, n = cand("gpt-5.6-terra", "high"), cand("gpt-6.1-terra", "high")
-    d = routing.route(req([o, n], role="executor", runs_db=_trust_db(tmp_path, o)))
+    d = routing.route(req([o, n], role="worker", runs_db=_trust_db(tmp_path, o)))
     assert lab("gpt-6.1-terra", "high") in labels(d) and lab("gpt-5.6-terra", "high") in labels(d)
     assert not any(r["stage"] == 2 for r in d["rejected"])
 
 
 def test_proven_newer_executor_route_supersedes(tmp_path):
     o, n = cand("gpt-5.6-terra", "high"), cand("gpt-6.1-terra", "high")
-    d = routing.route(req([o, n], role="executor", runs_db=_trust_db(tmp_path, o, n), evidence=favour(o)))
+    d = routing.route(req([o, n], role="worker", runs_db=_trust_db(tmp_path, o, n), evidence=favour(o)))
     assert labels(d) == [lab("gpt-6.1-terra", "high"), lab("gpt-5.6-terra", "high")]
 
 
@@ -264,7 +264,7 @@ def test_seed_listing_newer_first_still_supersedes():
 
 def test_declared_older_route_is_not_superseded(tmp_path):
     o, n = cand("gpt-5.6-terra", "medium"), cand("gpt-6.1-terra", "medium")
-    d = routing.route(req([o, n], role="executor", runs_db=_trust_db(tmp_path, n), evidence=favour(o),
+    d = routing.route(req([o, n], role="worker", runs_db=_trust_db(tmp_path, n), evidence=favour(o),
                           declared_route=routing.candidate_id(o)))
     assert labels(d)[0] == lab("gpt-5.6-terra", "medium")
     assert d["routing"]["candidates"][0]["eligibility"]["source"] == "declared"

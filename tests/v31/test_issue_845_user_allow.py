@@ -71,47 +71,47 @@ def test_a_preferred_list_entry_makes_the_route_dispatchable_too(world):
 
 # ------------------------------------------------------------------ a legacy overlay no longer overrides an allow
 
-def disabled_astra(monkeypatch):
+def disabled_luna(monkeypatch):
     rows = candidates.catalog_rows()
-    overlay = {"models": [], "disabled": [{"harness": "codex", "model_id": "gpt-6-astra", "effort": "low"}]}
+    overlay = {"models": [], "disabled": [{"harness": "codex", "model_id": "gpt-6-luna", "effort": "low"}]}
     merged = user_catalog.apply(rows, overlay)
-    [row] = [r for r in merged if r.get("model_id") == "gpt-6-astra" and r.get("effort") == "low"
+    [row] = [r for r in merged if r.get("model_id") == "gpt-6-luna" and r.get("effort") == "low"
              and r.get("invocation_harness") == "codex"]
     assert row["dispatchable"] is False and row["user_disabled"] is True
     monkeypatch.setattr(candidates, "catalog_rows", lambda: merged)
 
 
 def test_a_user_disabled_overlay_no_longer_silently_overrides_a_user_allow(world, monkeypatch):
-    disabled_astra(monkeypatch)
-    label = "codex/gpt-6-astra@low"
+    disabled_luna(monkeypatch)
+    label = "codex/gpt-6-luna@low"
     cands, skipped = build(world)
-    assert not [c for c in cands.values() if c["model_id"] == "gpt-6-astra" and c["effort"] == "low"]
+    assert not [c for c in cands.values() if c["model_id"] == "gpt-6-luna" and c["effort"] == "low"]
     assert any(s["candidate"] == label for s in skipped)
 
     allow(world, "executor", label)
     cands, _ = build(world)
-    [cand] = [c for c in cands.values() if c["model_id"] == "gpt-6-astra" and c["effort"] == "low"]
+    [cand] = [c for c in cands.values() if c["model_id"] == "gpt-6-luna" and c["effort"] == "low"]
     assert cand["user_allowed"] is True and "overlay" in cand["status_reason"]
 
 
 def test_the_effective_view_says_plainly_what_dispatches_and_why(world, monkeypatch):
-    disabled_astra(monkeypatch)
+    disabled_luna(monkeypatch)
     before = routecmd.policy(role="executor", effective=True)
-    row = next(r for r in before.data["effective"] if r["route"] == "codex/gpt-6-astra@low")
+    row = next(r for r in before.data["effective"] if r["route"] == "codex/gpt-6-luna@low")
     assert row["dispatches"] is False and "overlay" in row["dispatch_reason"]
 
-    routecmd.change("allow", role="executor", route="codex/gpt-6-astra@low")
+    routecmd.change("allow", role="executor", route="codex/gpt-6-luna@low")
     after = routecmd.policy(role="executor", effective=True)
-    row = next(r for r in after.data["effective"] if r["route"] == "codex/gpt-6-astra@low")
+    row = next(r for r in after.data["effective"] if r["route"] == "codex/gpt-6-luna@low")
     assert row["state"] == "allow" and row["dispatches"] is True and "your allow overrides" in row["dispatch_reason"]
-    assert any("codex/gpt-6-astra@low: allow" in line and "-> dispatches" in line for line in after.lines)
+    assert any("codex/gpt-6-luna@low: allow" in line and "-> dispatches" in line for line in after.lines)
 
 
 def test_one_command_reshuffles_several_routes(world):
-    result = routecmd.change("allow", role="executor", route="codex/gpt-6.1-sol@high,codex/gpt-6-astra@low")
+    result = routecmd.change("allow", role="executor", route="codex/gpt-6.1-sol@high,codex/gpt-6-luna@low")
     assert len(result.data["routes"]) == 2
     rules = yaml.safe_load(world.user_config.read_text())["routing"]["user_policy"]["role_rules"]
-    assert {r["route"].split("/")[-1] for r in rules} == {"gpt-6.1-sol@high", "gpt-6-astra@low"}
+    assert {r["route"].split("/")[-1] for r in rules} == {"gpt-6.1-sol@high", "gpt-6-luna@low"}
 
 
 # ------------------------------------------------------------------ a user allow is not held to a benchmark floor
@@ -262,23 +262,23 @@ def test_a_stale_fallback_job_failing_does_not_block_a_task_that_moved_on(plain)
 
 
 def test_the_effective_view_does_not_claim_an_uninstalled_harness_dispatches(world, monkeypatch):
-    routecmd.change("allow", role="executor", route="codex/gpt-6-astra@low")
+    routecmd.change("allow", role="executor", route="codex/gpt-6-luna@low")
     monkeypatch.setattr(routecmd.adapters, "installed", lambda adapter: False)
     row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
-               if r["route"] == "codex/gpt-6-astra@low")
+               if r["route"] == "codex/gpt-6-luna@low")
     assert row["dispatches"] is False and "not installed" in row["dispatch_reason"]
 
 
 def test_the_effective_view_counts_a_preferred_seed_allow_and_checks_the_role_launch_profile(world, monkeypatch):
-    disabled_astra(monkeypatch)
+    disabled_luna(monkeypatch)
     world.user_config.write_text(yaml.safe_dump({"roles": {"executor": {"preferred_seed": [
-        {"harness": "codex", "model_id": "gpt-6-astra", "effort": "low"}]}}}))
+        {"harness": "codex", "model_id": "gpt-6-luna", "effort": "low"}]}}}))
     row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
-               if r["route"] == "codex/gpt-6-astra@low")
+               if r["route"] == "codex/gpt-6-luna@low")
     assert row["dispatches"] is True and row["state"] == "allow"
     monkeypatch.setattr(routecmd.adapters, "profile", lambda adapter, kind: None)
     row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
-               if r["route"] == "codex/gpt-6-astra@low")
+               if r["route"] == "codex/gpt-6-luna@low")
     assert row["dispatches"] is False and "launch profile" in row["dispatch_reason"]
 
 

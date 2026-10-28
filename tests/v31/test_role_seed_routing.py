@@ -1,0 +1,190 @@
+"""#850 sections 1-3: the committed role policy is size-scoped allow / neutral / deny, from one data file."""
+import pytest
+import yaml
+from office import route_policy
+
+MAJOR = {"claude": "2.1.311", "agy": "1.0.0", "codex": "0.157.1", "opencode": None}
+
+
+def state(role, harness, model, effort, size=None, policies=()):
+    cand = {"harness": harness, "harness_version": MAJOR[harness], "model_id": model,
+            "invocation_model_id": model, "effort": effort}
+    return route_policy.effective_role_state(cand, role, list(policies), size)["state"]
+
+
+def user(*rules):
+    return {"role_rules": list(rules), "denied": [], "overkill": [], "ceilings": {}, "sources": {"role_rules": "user"}}
+
+
+# (harness, model, effort, size, expected): the section 1 table.
+EXECUTOR = [
+    ("claude", "claude-haiku-5-5", "medium", "XS", "allow"), ("claude", "claude-haiku-5-5", "high", "S", "allow"),
+    ("claude", "claude-haiku-5-5", "high", "XS", "deny"), ("claude", "claude-haiku-5-5", "xhigh", "M", "deny"),
+    ("claude", "claude-haiku-5-5", "max", "XL", "deny"), ("claude", "claude-haiku-5-5", "low", "XS", "neutral"),
+    ("claude", "claude-haiku-5-5", "medium", "M", "neutral"),
+    ("agy", "gemini-3.8-flash", "low", "XS", "allow"), ("agy", "gemini-3.8-flash", "medium", "S", "allow"),
+    ("agy", "gemini-3.8-flash", "high", "XS", "deny"), ("agy", "gemini-3.8-flash", "high", "S", "deny"),
+    ("agy", "gemini-3.8-flash", "high", "M", "neutral"), ("agy", "gemini-3.8-flash", "max", "L", "deny"),
+    ("codex", "gpt-6.1-terra", "low", "XS", "allow"), ("codex", "gpt-6.1-terra", "medium", "S", "allow"),
+    ("codex", "gpt-6.1-terra", "medium", "M", "allow"), ("codex", "gpt-6.1-terra", "high", "L", "allow"),
+    ("codex", "gpt-6.1-terra", "high", "M", "deny"), ("codex", "gpt-6.1-terra", "xhigh", "L", "deny"),
+    ("codex", "gpt-6.1-terra", "medium", "L", "neutral"),
+    ("claude", "claude-sonnet-5-5", "medium", "M", "allow"), ("agy", "claude-sonnet-5-5", "medium", "M", "allow"),
+    ("claude", "claude-sonnet-5-5", "high", "L", "allow"), ("agy", "claude-sonnet-5-5", "high", "L", "allow"),
+    ("claude", "claude-sonnet-5-5", "high", "S", "deny"), ("agy", "claude-sonnet-5-5", "high", "XS", "deny"),
+    ("claude", "claude-sonnet-5-5", "xhigh", "XL", "deny"), ("claude", "claude-sonnet-5-5", "low", "S", "neutral"),
+    ("claude", "claude-sonnet-5-5", "high", "XL", "neutral"),
+    ("opencode", "glm-5.3-flash", "max", "M", "allow"), ("opencode", "glm-5.3-flash", "max", "L", "neutral"),
+    ("claude", "claude-opus-5-5", "medium", "XL", "allow"), ("claude", "claude-opus-5-5", "medium", "L", "deny"),
+    ("claude", "claude-opus-5-5", "medium", "XS", "deny"), ("claude", "claude-opus-5-5", "high", "XL", "deny"),
+    ("claude", "claude-opus-5-5", "low", "XL", "neutral"), ("agy", "claude-opus-5-5", "medium", "XL", "deny"),
+    ("codex", "gpt-6.1-sol", "medium", "XL", "allow"), ("codex", "gpt-6.1-sol", "high", "XL", "deny"),
+    ("codex", "gpt-6.1-sol", "low", "XL", "neutral"), ("codex", "gpt-6.1-sol", "medium", "L", "neutral"),
+    ("agy", "gemini-4-argon", "medium", "L", "allow"), ("agy", "gemini-4-argon", "high", "XL", "allow"),
+    ("agy", "gemini-4-argon", "high", "L", "deny"), ("agy", "gemini-4-argon", "low", "L", "neutral"),
+]
+
+
+@pytest.mark.parametrize("harness,model,effort,size,expected", EXECUTOR)
+def test_executor_matrix_is_size_scoped(harness, model, effort, size, expected):
+    assert state("executor", harness, model, effort, size) == expected
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"])
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("size", [None, "XS", "M", "XL"])
+def test_astra_and_5_6_are_never_executors_at_any_size(model, effort, size):
+    assert state("executor", "codex", model, effort, size) == "deny"
+
+
+def test_astra_denial_does_not_spill_into_planning():
+    assert state("planner", "codex", "gpt-6-astra", "medium", "L") == "neutral"
+
+
+def test_size_scoped_rules_do_not_apply_to_an_unknown_size():
+    assert state("executor", "claude", "claude-sonnet-5-5", "high", None) == "neutral"
+    assert state("executor", "claude", "claude-opus-5-5", "medium", None) == "neutral"
+    # An unsized rule still applies.
+    assert state("executor", "claude", "claude-sonnet-5-5", "xhigh", None) == "deny"
+
+
+def test_sonnet_high_is_denied_for_s_and_only_a_users_size_scoped_rule_re_allows_it():
+    assert state("executor", "claude", "claude-sonnet-5-5", "high", "S") == "deny"
+    pol = user({"role": "executor", "route": "claude@2/claude-sonnet-5-5@high", "state": "allow", "sizes": ["S"]})
+    assert state("executor", "claude", "claude-sonnet-5-5", "high", "S", [pol]) == "allow"
+    assert state("executor", "claude", "claude-sonnet-5-5", "high", "XS", [pol]) == "deny"
+
+
+@pytest.mark.parametrize("role", ["code_reviewer", "plan_reviewer"])
+def test_reviewers_section_2(role):
+    assert state(role, "codex", "gpt-6-luna", "high") == "allow"
+    assert state(role, "codex", "gpt-6-luna", "low") == "neutral"
+    assert state(role, "codex", "gpt-6-luna", "medium") == "neutral"
+    assert state(role, "codex", "gpt-6-luna", "xhigh") == "deny"
+    assert state(role, "codex", "gpt-6-luna", "max") == "deny"
+    assert state(role, "opencode", "deepseek-v4.1-flash-free", "max") == "allow"
+    for harness in ("claude", "agy"):
+        assert state(role, harness, "claude-opus-5-5", "low") == "allow"
+        for effort in ("medium", "high", "xhigh", "max"):
+            assert state(role, harness, "claude-opus-5-5", effort) == "deny"
+        for effort in ("medium", "high"):
+            assert state(role, harness, "claude-sonnet-5-5", effort) == "deny"
+        # Sonnet reviewer denials are not widened to unapproved efforts.
+        for effort in ("low", "xhigh", "max"):
+            assert state(role, harness, "claude-sonnet-5-5", effort) == "neutral"
+
+
+def test_visual_reviewer_section_3():
+    for effort in ("low", "medium"):
+        assert state("visual_reviewer", "agy", "gemini-3.8-flash", effort) == "allow"
+    assert state("visual_reviewer", "codex", "gpt-6.1-terra", "low") == "allow"
+    assert state("visual_reviewer", "codex", "gpt-5.6-terra", "low") == "deny"
+    assert state("visual_reviewer", "codex", "gpt-5.6-terra", "high") == "neutral"
+    assert state("visual_reviewer", "claude", "claude-sonnet-5-5", "high") == "neutral"
+    assert state("visual_reviewer", "codex", "gpt-6-luna", "high") == "neutral"
+
+
+def test_the_5_6_executor_deny_is_not_a_cross_role_ban():
+    for role in ("code_reviewer", "plan_reviewer", "planner"):
+        assert state(role, "codex", "gpt-5.6-terra", "high") == "neutral"
+
+
+def test_user_rules_outrank_shipped_and_the_scope_precedence_holds():
+    cand = ("claude", "claude-opus-5-5", "medium")
+    pol = user({"role": "executor", "route": "claude@2/claude-opus-5-5@medium", "state": "allow"},
+               {"role": "executor", "route": "claude@2/claude-opus-5-5@medium", "state": "deny", "sizes": ["XL"]})
+    assert state("executor", *cand, "L", [pol]) == "allow"  # a user's pin beats the shipped L deny
+    assert state("executor", *cand, "XL", [pol]) == "deny"  # a size-scoped user rule beats the unsized one
+    neutral = user({"role": "executor", "route": "claude@2/claude-opus-5-5@medium", "state": "neutral", "sizes": ["L"]})
+    assert state("executor", *cand, "L", [neutral]) == "neutral"  # clears one size
+
+
+def _config(*rules):
+    return {"routing": {"user_policy": {"role_rules": list(rules)}}}
+
+
+def test_validate_user_policy_accepts_sizes_and_rejects_bad_ones():
+    base = {"role": "executor", "route": "claude@2/claude-opus-5-5@medium", "state": "allow"}
+    assert route_policy.validate_user_policy(_config({**base, "sizes": ["XL"]})) == []
+    for sizes in ([], ["XXL"], "XL"):
+        assert any("sizes" in p for p in route_policy.validate_user_policy(_config({**base, "sizes": sizes}))), sizes
+    # The same route may carry different rules for different size scopes.
+    assert route_policy.validate_user_policy(_config({**base, "sizes": ["XL"]}, {**base, "state": "deny", "sizes": ["L"]})) == []
+    assert route_policy.validate_user_policy(_config({**base, "sizes": ["XL"]}, {**base, "sizes": ["XL"]}))
+
+
+def test_policy_data_has_no_duplicate_rules_and_only_real_efforts():
+    keys = [(r["role"], r["route"], tuple(r.get("sizes") or ()), r["state"]) for r in route_policy.SEED_ROLE_RULES]
+    assert len(keys) == len(set(keys))
+    for rule in route_policy.SEED_ROLE_RULES:
+        assert rule["route"].rsplit("@", 1)[1] in route_policy.EFFORTS, rule
+
+
+def test_default_config_reviewer_and_visual_seed_order():
+    roles = yaml.safe_load(open("config/config.default.yaml"))["roles"]
+    order = [(e["model_id"], e["harness"], e["effort"]) for e in roles["code_reviewer"]["preferred_seed"]]
+    assert order == [("luna", "codex", "high"), ("deepseek-v4.1-flash-free", "opencode", "max"),
+                     ("opus", "claude", "low"), ("claude-opus-5-5", "agy", "low")]
+    assert roles["plan_reviewer"]["preferred_seed"] == roles["code_reviewer"]["preferred_seed"]
+    visual = [(e["model_id"], e["harness"], e["effort"]) for e in roles["visual_reviewer"]["preferred_seed"]]
+    assert visual == [("gemini-3.8-flash", "agy", "low"), ("gemini-3.8-flash", "agy", "medium"),
+                      ("gpt-6.1-terra", "codex", "low")]
+
+
+# --- CLI: size-scoped user rules (#850) -----------------------------------------------------------------------
+def _isolated(tmp_path, monkeypatch):
+    import subprocess
+    target = tmp_path / "my-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(target))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    return target
+
+
+def test_route_change_writes_and_replaces_size_scoped_rules(tmp_path, monkeypatch):
+    from office import routecmd
+    target = _isolated(tmp_path, monkeypatch)
+    routecmd.change("allow", role="executor", route="claude/claude-sonnet-5-5@high", sizes=["L", "XL"])
+    routecmd.change("deny", role="executor", route="claude/claude-sonnet-5-5@high", sizes=["XS"])
+    rules = yaml.safe_load(target.read_text())["routing"]["user_policy"]["role_rules"]
+    assert [(r["state"], r["sizes"]) for r in rules] == [("allow", ["L", "XL"]), ("deny", ["XS"])]
+    # The same scope replaces its rule; clearing one scope leaves the other.
+    routecmd.change("deny", role="executor", route="claude/claude-sonnet-5-5@high", sizes=["XL", "L"])
+    routecmd.change("clear", role="executor", route="claude/claude-sonnet-5-5@high", sizes=["XS"])
+    rules = yaml.safe_load(target.read_text())["routing"]["user_policy"]["role_rules"]
+    assert [(r["state"], r["sizes"]) for r in rules] == [("deny", ["L", "XL"])]
+    with pytest.raises(Exception):
+        routecmd.change("allow", role="executor", route="claude/claude-sonnet-5-5@high", sizes=["XXL"])
+
+
+def test_route_policy_inspection_by_size(tmp_path, monkeypatch):
+    from office import routecmd
+    _isolated(tmp_path, monkeypatch)
+    rows = {(r["route"], r["state"]) for r in routecmd.policy(role="executor", effective=True, size="XL").data["effective"]}
+    assert ("claude/claude-opus-5-5@medium", "allow") in rows
+    rows = {(r["route"], r["state"]) for r in routecmd.policy(role="executor", effective=True, size="L").data["effective"]}
+    assert ("claude/claude-opus-5-5@medium", "deny") in rows
+    with pytest.raises(Exception):
+        routecmd.policy(role="executor", effective=True, size="XXL")

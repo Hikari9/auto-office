@@ -391,7 +391,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             allow_free = onboarding.free_models_enabled()
         for c in request.get("candidates", []):
             cid = candidate_id(c)
-            role_rule = route_policy.effective_role_state(c, role, policies)
+            role_rule = route_policy.effective_role_state(c, role, policies, new_policy_size)
             if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
                 role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
