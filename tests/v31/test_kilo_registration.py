@@ -133,10 +133,11 @@ def _dispatch_as_kilo(env, **extra):
     return env.office("dispatch", "T1", "--as", LAUNCH_ROUTE, env={**extra}, check=0)
 
 
-def _dispatch_row(env) -> dict:
+def _dispatch_row(env, *, first: bool = False) -> dict:
     con = env.con()
     try:
-        return dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone())
+        order = "ASC" if first else "DESC"
+        return dict(con.execute(f"SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at {order}").fetchone())
     finally:
         con.close()
 
@@ -391,7 +392,7 @@ def test_nonzero_exit_keeps_harness_message(env):
 def test_wall_cap_classifies_timeout(env):
     _approved(env)
     _, out = _dispatch_as_kilo(env, FAKE_KILO_MODE="sleep", OFFICE_WORKER_MAX_MINUTES="0.02")
-    row = _dispatch_row(env)
+    row = _dispatch_row(env, first=True)  # a timeout auto-reroutes; the kilo attempt is the first row
     assert row["terminal_classification"] == "timeout", (row, out)
     assert "wall-clock cap" in _log(env, row)
 
