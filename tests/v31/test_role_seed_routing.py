@@ -198,3 +198,56 @@ def test_route_change_rejects_malformed_sizes_instead_of_widening_the_rule(tmp_p
     with pytest.raises(OfficeError):
         routecmd.change("allow", role="executor", route="claude/claude-sonnet-5-5@high", sizes=sizes)
     assert not target.exists()
+
+
+# --- Integration: routing.route and candidate building honour the shipped policy (#850) -------------------------
+def _cand(harness, model, effort):
+    return {"harness": harness, "harness_version": MAJOR[harness], "model_id": model, "invocation_model_id": model,
+            "effort": effort, "capabilities": ["builder", "review"], "route_status": "available",
+            "quota": {"status": "ok", "tightest_remaining_percent": 80},
+            "cost": {"money_estimate": 1, "quota_burn": 1, "wall_clock_seconds": 1}}
+
+
+def _route(role, rows, size=None):
+    from office import routing
+    request = {"role": role, "candidates": rows, "preferred_seed": None, "user_policies": [], "runs_db": None,
+               "policy": {"floor": None, "strict_seed": False, "required_capabilities": []}}
+    if size:
+        request.update({"run_gear": size, "size_class": size})
+    return routing.route(request)
+
+
+@pytest.mark.parametrize("model,effort", [("gpt-6-astra", "medium"), ("gpt-5.6-sol", "high"), ("gpt-5.6-terra", "low")])
+def test_routing_rejects_a_shipped_executor_deny_at_every_size(model, effort):
+    for size in (None, "XS", "M", "XL"):
+        got = _route("executor", [_cand("codex", model, effort)], size)
+        assert got["status"] == "no_qualifying_candidate", (model, effort, size)
+
+
+def test_routing_applies_the_size_scope_of_a_shipped_deny():
+    sonnet = _cand("claude", "claude-sonnet-5-5", "high")
+    assert _route("executor", [sonnet], "S")["status"] == "no_qualifying_candidate"
+    # Neutral at XL: whatever else rejects it (the XL benchmark floor on this bare candidate), it is not a role deny.
+    got = _route("executor", [sonnet], "XL")
+    assert not any("policy deny" in r.get("reason", "") for r in got.get("rejected", [])), got
+    opus = _cand("claude", "claude-opus-5-5", "medium")
+    assert _route("executor", [opus], "L")["status"] == "no_qualifying_candidate"
+
+
+def test_routing_rejects_a_shipped_reviewer_deny():
+    for model, effort in (("claude-sonnet-5-5", "high"), ("gpt-6-luna", "xhigh")):
+        harness = "codex" if "luna" in model else "claude"
+        got = _route("code_reviewer", [_cand(harness, model, effort)])
+        assert got["status"] == "no_qualifying_candidate", (model, effort)
+
+
+def test_candidate_building_excludes_shipped_denied_executor_routes(tmp_path, monkeypatch):
+    from office import candidates, db, routing
+    _isolated(tmp_path, monkeypatch)
+    con = db.connect()
+    try:
+        built, skipped = candidates.build_candidates(con, "executor", probe=False, user_policies=[user()])
+    finally:
+        con.close()
+    ids = {routing.candidate_id(c) for c in built}
+    assert not [i for i in ids if "gpt-6-astra" in i or "gpt-5.6-sol" in i or "gpt-5.6-terra" in i], ids
