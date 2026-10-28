@@ -9,6 +9,7 @@ One line or short list per version, newest first. The version itself lives only 
 ## 3.9.0
 
 - feat(routing): a user role allow (or exact `preferred_seed` entry) makes a route dispatchable with no proof, qualification or trust gate and overrides a catalog or user-overlay `dispatchable: false`; a runtime route failure is logged (`route.failed`), demoted for a TTL and falls back to the next eligible route; `office route policy --effective` shows what dispatches and why, and `office route allow a,b` reshuffles several routes at once (#845).
+- catalog: register Gemini 4 Argon Medium (unscored, #809 L-only exception) and High (AA v4.3.2 score 53) on agy as non-dispatchable rows pending launch-banner conformance; slugs verified via `agy models` (#809, #850).
 
 ## 3.8.2
 
