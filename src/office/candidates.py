@@ -793,6 +793,13 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
+def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: str) -> bool:
+    """True when the #809 ideal slate, not a user seed, nominates this sized XS-XL run's routes (#846)."""
+    return (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
+            and task_size in executor_slates.FLOORS
+            and task_size not in (policy_cfg.get("preferred_seed_by_size") or {}))
+
+
 def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
                     role: str = "executor"):
     """A per-size seed wins, then the #809 ideal size slate for a sized XS-XL run, then a flat seed.
@@ -803,16 +810,9 @@ def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
     by_size = policy_cfg.get("preferred_seed_by_size") or {}
     if size in by_size:
         return by_size[size]
-    if (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
-            and size in executor_slates.FLOORS):
+    if _uses_size_slate(policy_cfg, run, size, role):
         return executor_slates.ideal_seed(size)
     return policy_cfg.get("preferred_seed") or None
-
-
-def _size_slate(seed, run: dict, task_size: str | None, role: str) -> bool:
-    """True when `seed` is the #809 ideal slate that `_preferred_seed` nominated for this sized XS-XL run."""
-    return bool(seed) and role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS \
-        and task_size in executor_slates.FLOORS and seed == executor_slates.ideal_seed(task_size)
 
 
 def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> str:
@@ -1036,7 +1036,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
-    if _size_slate(seed, run, effective_task_size, role):
+    if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
         request["slate_anchor"] = True
     if declared:

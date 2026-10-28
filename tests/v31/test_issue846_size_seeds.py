@@ -91,12 +91,15 @@ def test_a_per_size_seed_still_wins_and_a_legacy_run_keeps_the_flat_seed():
 
 def test_the_size_slate_anchors_routing_but_a_users_own_seed_does_not():
     run = {"gear": "S"}
-    slate = executor_slates.ideal_seed("S")
-    assert candidates._size_slate(slate, run, "S", "executor")
-    assert not candidates._size_slate(FLAT_SEED, run, "S", "executor")
-    assert not candidates._size_slate(slate, {"gear": "express"}, "S", "executor")
-    assert not candidates._size_slate(slate, run, "S", "code_reviewer")
-    assert not candidates._size_slate(None, run, "S", "executor")
+    assert candidates._uses_size_slate({}, run, "S", "executor")
+    assert candidates._uses_size_slate({"preferred_seed": FLAT_SEED}, run, "S", "executor")
+    # A per-size seed is the user's, even when it copies the ideal slate.
+    copied = {"preferred_seed_by_size": {"S": executor_slates.ideal_seed("S")}}
+    assert not candidates._uses_size_slate(copied, run, "S", "executor")
+    assert candidates._uses_size_slate(copied, run, "M", "executor")
+    assert not candidates._uses_size_slate({}, {"gear": "express"}, "S", "executor")
+    assert not candidates._uses_size_slate({}, run, "S", "code_reviewer")
+    assert not candidates._uses_size_slate({}, run, None, "executor")
 
 
 @pytest.mark.parametrize("size", list(executor_slates.FLOORS))
@@ -118,7 +121,8 @@ def test_with_no_slate_route_available_an_off_slate_route_still_runs():
 
 def _fresh(size, *, status="selected"):
     pool = _slate_pool(size)
-    return {"status": status, "request": {"preferred_seed": executor_slates.ideal_seed(size), "candidates": pool}}
+    return {"status": status, "request": {"preferred_seed": executor_slates.ideal_seed(size), "candidates": pool,
+                                          "slate_anchor": True}}
 
 
 def test_an_s_plan_that_drew_sonnet_high_reroutes_at_dispatch():
@@ -139,6 +143,14 @@ def test_a_planned_primary_inside_the_current_slate_is_kept():
 def test_a_deliberate_planned_choice_is_never_rerouted(chooser):
     old = {"chooser": chooser, "primary": "claude@1.0/claude-sonnet-5-5@high"}
     assert dispatch._outdated_slate(old, _fresh("S")) is None
+
+
+def test_no_reroute_for_a_legacy_run_or_a_user_seed():
+    """Without `slate_anchor` (legacy-pinned run, or a seed the user set) the plan stands."""
+    old = {"chooser": "router", "primary": "claude@1.0/claude-sonnet-5-5@high"}
+    fresh = _fresh("S")
+    del fresh["request"]["slate_anchor"]
+    assert dispatch._outdated_slate(old, fresh) is None
 
 
 def test_no_reroute_without_a_seed_or_a_selected_fresh_decision():

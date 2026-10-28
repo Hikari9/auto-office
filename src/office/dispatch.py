@@ -660,7 +660,8 @@ def _outdated_slate(planned: dict, fresh: dict) -> str | None:
     req = fresh.get("request") or {}
     seed = req.get("preferred_seed")
     primary = planned.get("primary")
-    if not seed or not primary:
+    # Only the automatic size slate of a sized XS-XL run: a legacy-pinned run or a user seed keeps its plan.
+    if not req.get("slate_anchor") or not seed or not primary:
         return None
     cand = next((c for c in req.get("candidates") or [] if routing.candidate_id(c) == primary), None)
     if cand is not None and routing.preferred_rank(cand, seed) is not None:
