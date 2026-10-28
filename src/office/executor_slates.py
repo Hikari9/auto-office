@@ -9,7 +9,7 @@ import math
 
 INDEX = "Artificial Analysis Intelligence Index v4.3.2"
 FLOORS = {"XS": 31, "S": 38, "M": 40, "L": 44, "XL": 47}
-VERSION = "xs-xl-executor-slates-2026-10-27"
+VERSION = "xs-xl-executor-slates-2026-10-28-861"
 # Each tuple: concrete model ID, exact effort, harness (None = any qualified).
 IDEAL = {
     "XS": (("claude-haiku-5-5", "medium", "claude"),
@@ -18,8 +18,7 @@ IDEAL = {
     "S": (("gemini-3.8-flash", "medium", None),
           ("claude-haiku-5-5", "high", "claude"),
           ("gpt-6.1-terra", "medium", "codex")),
-    "M": (("claude-sonnet-5-5", "medium", "claude"),
-          ("claude-sonnet-5-5", "medium", "agy"),
+    "M": (("claude-haiku-5-5", "high", "claude"),
           ("gpt-6.1-terra", "medium", "codex"),
           ("glm-5.3-flash", "max", "opencode")),
     "L": (("claude-sonnet-5-5", "high", "claude"),
@@ -102,6 +101,19 @@ def floor_exception(candidate: dict, size: str | None, role: str | None = None) 
     or waives registration, conformance, trust, quota or risk gates; a published
     score is judged on merit like any other candidate.
     """
+    # #861: exact owner-authorized M floor exception; never amend the pinned score.
+    model = candidate.get("alias_resolved_to") or candidate.get("model_id")
+    if (size == "M" and role in ("executor", "worker") and model == "claude-haiku-5-5"
+            and candidate.get("effort") == "high" and candidate.get("harness") == "claude"):
+        scores = candidate.get("benchmark_indexes") or {}
+        raw = scores.get(INDEX) if isinstance(scores, dict) else None
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw) and raw >= FLOORS[size]:
+            return None
+        return {"exception": "haiku-high-m-owner-authorized-floor", "model_id": model,
+                "effort": "high", "harness": "claude", "size": size,
+                "index": INDEX, "observed_score": raw,
+                "waived": f"{INDEX} >= {FLOORS[size]} (owner authorization #861)",
+                "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
     if size != FLOOR_EXCEPTION["size"] or role not in (FLOOR_EXCEPTION["role"], "worker"):
         return None
     model = candidate.get("alias_resolved_to") or candidate.get("model_id")
