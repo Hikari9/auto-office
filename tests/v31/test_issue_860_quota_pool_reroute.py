@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -79,3 +80,44 @@ def test_expired_shared_quota_pool_key_releases_the_entire_provider(env):
     now = datetime.now(timezone.utc).isoformat()
     assert not con.execute("SELECT 1 FROM route_cooldowns WHERE route=? AND expires_at>?",
                            (key, now)).fetchone()
+
+
+def test_actual_router_skips_same_pool_fallback_then_recovers_after_ttl():
+    """Exercise the real router, not only the pool-key helper."""
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE route_cooldowns(route TEXT PRIMARY KEY, expires_at TEXT, updated_at TEXT)")
+    con.execute("CREATE TABLE dispatches(id TEXT, money_estimate REAL, money_actual REAL, triple TEXT)")
+    key = routing.shared_quota_pool_key("opencode", "glm-5.3-flash-free")
+
+    def candidate(harness, model, effort):
+        return {"harness": harness, "harness_version": "1.0.0", "model_id": model,
+                "invocation_model_id": model, "effort": effort, "capabilities": [],
+                "route_status": "available", "quota": {"status": "ok", "tightest_remaining_percent": 90},
+                "benchmark_indexes": {}, "cost_per_million_input_tokens": 0,
+                "cost_per_million_output_tokens": 0}
+
+    def choose(*, independent=True):
+        rows = [candidate("opencode", "glm-5.3-flash-free", "max"),
+                candidate("opencode", "deepseek-v4.1-flash-free", "max")]
+        if independent:
+            rows.append(candidate("agy", "gemini-3.8-flash", "medium"))
+        return routing.route({
+            "role": "code_reviewer", "candidates": rows, "allow_free_models": True,
+            "preferred_seed": [{"model_id": "glm-5.3-flash-free"},
+                               {"model_id": "deepseek-v4.1-flash-free"},
+                               {"model_id": "gemini-3.8-flash"}],
+            "policy": {"required_capabilities": [], "cost_policy": "balanced"}
+        }, connection=con)
+
+    assert choose()["selected"] == "opencode@1/glm-5.3-flash-free@max"
+    con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
+                (key, "2999-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
+    during = choose()
+    assert during["selected"] == "agy@1/gemini-3.8-flash@medium", during
+    same_pool = [r for r in during["rejected"] if r.get("category") == "route-demoted"]
+    assert len(same_pool) == 2 and all(r["candidate"].startswith("opencode@") for r in same_pool)
+    exhausted = choose(independent=False)
+    assert exhausted["status"] == "no_qualifying_candidate" and exhausted["selected"] is None
+    con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (key,))
+    after = choose()
+    assert after["selected"] == "opencode@1/glm-5.3-flash-free@max", after
