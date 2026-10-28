@@ -348,12 +348,17 @@ def user_allows(cand: dict, role: str, policies: list[dict]) -> dict | None:
     is admitted here; the size-aware role check at routing time still denies it for the other sizes."""
     if not policies:
         return None
+    covered = []
+    first = None
     for size in (None, *SIZES):
         rule = effective_role_state(cand, role, policies, size)
         # Only the user's own allow lifts a catalog or overlay disable; a shipped allow is a preference.
         if rule["state"] == "allow" and rule["source"] not in ("shipped", "default"):
-            return rule
-    return None
+            if size is None:
+                return {**rule, "sizes": None}  # an unsized allow covers every size
+            first = first or rule
+            covered.append(size)
+    return {**first, "sizes": covered} if first else None
 
 
 def preferred_seed_policy(role: str, entries) -> dict:

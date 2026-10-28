@@ -251,3 +251,24 @@ def test_candidate_building_excludes_shipped_denied_executor_routes(tmp_path, mo
         con.close()
     ids = {routing.candidate_id(c) for c in built}
     assert not [i for i in ids if "gpt-6-astra" in i or "gpt-5.6-sol" in i or "gpt-5.6-terra" in i], ids
+
+
+def test_a_size_scoped_allow_that_lifted_a_catalog_disable_does_not_cover_other_sizes():
+    cand = {**_cand("claude", "claude-sonnet-5-5", "medium"), "user_allowed": True, "user_allow_sizes": ["M"]}
+    for size in ("S", "L", None):
+        got = _route("executor", [cand], size)
+        assert got["status"] == "no_qualifying_candidate", size
+        assert "covers task sizes M" in str(got.get("rejected")), size
+    got = _route("executor", [cand], "M")
+    assert not any("covers task sizes" in r.get("reason", "") for r in got.get("rejected", [])), got
+
+
+def test_user_allows_reports_which_sizes_a_scoped_allow_covers():
+    cand = {"harness": "codex", "harness_version": MAJOR["codex"], "model_id": "gpt-6-luna",
+            "invocation_model_id": "gpt-6-luna", "effort": "low"}
+    scoped = user({"role": "executor", "route": "codex@0/gpt-6-luna@low", "state": "allow", "sizes": ["XL", "L"]})
+    assert route_policy.user_allows(cand, "executor", [scoped])["sizes"] == ["L", "XL"] or \
+        sorted(route_policy.user_allows(cand, "executor", [scoped])["sizes"]) == ["L", "XL"]
+    unsized = user({"role": "executor", "route": "codex@0/gpt-6-luna@low", "state": "allow"})
+    assert route_policy.user_allows(cand, "executor", [unsized])["sizes"] is None
+    assert route_policy.user_allows(cand, "executor", [user()]) is None
