@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from concurrent.futures import ThreadPoolExecutor
 
 from conftest import GOOD_ADD, GOOD_MUL, approved_run, task_row
 from test_upstream_reaccept import (EXTERNAL, PASS, PLAN_STACK, _accepted_commit, _commit_on,
@@ -46,3 +47,39 @@ def test_stale_accepted_dependent_can_follow_status_restack_recommendation(env, 
     assert task["status"] != "accepted"
     _, wt = _worker(env, "T2")
     assert _is_ancestor(env, newer, "HEAD", cwd=wt), "restack merges current upstream"
+
+
+def test_parallel_stale_reruns_cannot_restack_twice_or_launch_two_workers(env):
+    approved_run(env, plan=PLAN_STACK, integration_reviewer=[PASS], code_reviewer=[PASS],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
+                 executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
+                            "submit": True}])
+    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T2", check=0)
+    assert task_row(env, "T2")["status"] == "accepted"
+    newer = _commit_on(env, _accepted_commit(env, "T1"),
+                       {"calc.py": GOOD_ADD + "# revised upstream\n"}, "T1 revised concurrently")
+    accept_fab(env, "T1", newer)
+    con = env.con()
+    try:
+        before = con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T2'").fetchone()[0]
+    finally:
+        con.close()
+
+    def attempt():
+        # Independent CLI processes, not threads entering Env.office's global
+        # chdir/env/stdout mocks. This exercises actual cross-process flock.
+        return env._office_subprocess(("rerun", "T2", "--fresh"), None, EXTERNAL, None)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: attempt(), range(2)))
+    statuses = [code for code, _ in outcomes]
+    assert statuses.count(0) == 1, outcomes
+    assert statuses.count(4) == 1, outcomes
+    assert any("worker-live" in msg or "task-done" in msg for code, msg in outcomes if code == 4), outcomes
+    con = env.con()
+    try:
+        after = con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T2'").fetchone()[0]
+        assert after == before + 1, (before, after, outcomes)
+    finally:
+        con.close()
