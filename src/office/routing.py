@@ -676,7 +676,7 @@ def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> No
 
 
 def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
-               *, policy_size: str | None = None) -> tuple[int, str, str] | None:
+               *, policy_size: str | None = None, role: str | None = None) -> tuple[int, str, str] | None:
     """The non-probe gates for a discovery candidate: (stage, reason, blocked token) or None.
     An unknown benchmark score is not a failure here (the scorer prices that uncertainty);
     a known low score, low effort, disallowed source, quarantine, missing capability and a
@@ -699,7 +699,10 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
             return 1, model_reason, "floor"
         known = (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX)
         if known is not None:
-            task_reason = executor_slates.benchmark_gate(c, policy_size)
+            # #861: a discovery probe may use the same exact M owner waiver,
+            # but still cannot be dispatched without verified conformance.
+            waiver = executor_slates.floor_exception(c, policy_size, role)
+            task_reason = executor_slates.benchmark_gate(c, policy_size) if not waiver else None
             if task_reason:
                 return 4, task_reason, "floor"
     supported = c.get("supported_playbooks")
@@ -789,7 +792,7 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     for c in scoped:
         probe = c.get("probe")
         gate = (_pool_gate(c, required, floor, playbook, quarantined,
-                           policy_size=executor_slates.new_gear_size(request))
+                           policy_size=executor_slates.new_gear_size(request), role=role)
                 or _quota_gate(c, reserve))
         if gate:
             stage, why, token = gate
@@ -933,6 +936,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         audit["slate"] = slate
         eligibility[tid] = {"policy": "neutral", "source": "trial", "probe_key": disc["probe_key"],
                             "attempt_id": disc.get("attempt_id")}
+        # A discovery trial was not in the ordinary eligible stage. Persist its
+        # exact benchmark waiver too; otherwise a selected trial would lack the
+        # owner-authorized floor exception in its durable routing receipt.
+        if waiver := executor_slates.floor_exception(c, size, role):
+            audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
     if disc:
         audit["discovery"] = disc
     for row in audit["candidates"]:
@@ -940,6 +948,14 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     chosen = by_id[slate[0]["route"]]
     cid = candidate_id(chosen)
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
+    if (executor_slates.new_gear_size(request) == "M" and not request.get("manual_route")
+            and (chosen.get("alias_resolved_to") or chosen.get("model_id")) == "claude-sonnet-5-5"
+            and chosen.get("effort") == "medium"):
+        disclosure["operational_fallback"] = (
+            "Temporary Sonnet Medium M fallback (#861); Haiku High is preferred only "
+            "after exact harness/model/effort conformance and availability qualify")
+        # Persist the explanation in route_audit as well as the dispatch payload.
+        audit["operational_fallback"] = disclosure["operational_fallback"]
     head = slate[0]
     disclosure["reason"] = "; ".join(
         [disclosure["reason"].split("; ")[0], head["reason"], f"+ {head['strength']}", f"- {head['weakness']}"]

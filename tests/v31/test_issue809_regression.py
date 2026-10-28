@@ -78,16 +78,16 @@ def test_size_floors_are_pinned_and_an_equal_score_passes(size, floor):
 
 @pytest.mark.parametrize("size,first", [
     ("XS", ("claude-haiku-5-5", "medium")), ("S", ("gemini-3.8-flash", "medium")),
-    ("M", ("claude-sonnet-5-5", "medium")), ("L", ("claude-sonnet-5-5", "high")),
+    ("M", ("claude-haiku-5-5", "high")), ("L", ("claude-sonnet-5-5", "high")),
     ("XL", ("claude-opus-5-5", "medium")),
 ])
 def test_each_gear_slate_leads_with_its_documented_route(size, first):
     seed = slates.ideal_seed(size)
     assert (seed[0]["model_id"], seed[0]["effort"]) == first
-    assert len(seed) == (4 if size in ("M", "L") else 3)
+    assert len(seed) == (4 if size == "L" else 3)
 
 
-@pytest.mark.parametrize("size,effort", [("M", "medium"), ("L", "high")])
+@pytest.mark.parametrize("size,effort", [("L", "high")])
 def test_sonnet_falls_back_claude_to_agy_at_the_same_effort_before_any_other_model(size, effort):
     seed = slates.ideal_seed(size)
     assert [(s["model_id"], s["harness"], s["effort"]) for s in seed[:2]] == [

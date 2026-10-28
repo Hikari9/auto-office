@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.11.0
+
+- feat(routing): M executors prefer Haiku 5.5 High with exact audited size-scoped floor exception, retaining independent dispatch conformance and Sonnet operational fallback (#861).
+
 ## 3.10.2
 
 - fix(routing): honor harness-major user rules for declared routes and register Argon lineage; align release tests with current routing and catalog policy.
