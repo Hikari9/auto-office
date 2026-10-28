@@ -303,8 +303,9 @@ def test_resume_and_a_late_result_cannot_reopen_a_closed_review(env):
     assert len(second) == 1, "the open cycle reviews the revision"
     _ingest(env, APPROVED, gate_id=first)
     gates = {g["id"]: g for g in _plan_gates(env)}
-    assert gates[second[0]]["status"] == "cancelled"
-    _ingest(env, recheck(where="T2"), gate_id=second[0])
+    assert gates[first]["status"] == "stale"
+    assert gates[second[0]]["status"] == "queued", "current plan review stays active"
+    _ingest(env, APPROVED, gate_id=second[0])
     assert len(_events(env, "plan.late_result")) == 1
     pr = _run(env)["plan_review"]
     assert pr["status"] == "approved" and pr["ended"]
@@ -316,7 +317,7 @@ def test_resume_and_a_late_result_cannot_reopen_a_closed_review(env):
     _o(env, "resume", check=0)
     assert not _queued(env), "resume cannot resurrect a closed review"
     after = {g["id"]: g for g in _plan_gates(env)}
-    assert after[first]["verdict"] == "APPROVED" and after[second[0]]["status"] == "cancelled"
+    assert after[first]["status"] == "stale" and after[second[0]]["verdict"] == "APPROVED"
 
 
 def test_a_33_run_mid_plan_decision_is_not_moved_to_34(env):

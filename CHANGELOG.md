@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.10.3
+
+- fix(validation): compare integration failures against the pinned base, report tracked check mutations, fence stale plan reviews and revalidate accepted-task amendments (#629, #819, #802).
+
 ## 3.10.2
 
 - fix(routing): honor harness-major user rules for declared routes and register Argon lineage; align release tests with current routing and catalog policy.
