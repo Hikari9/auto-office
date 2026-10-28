@@ -83,6 +83,13 @@ def test_matched_evaluation_requires_quality_and_complete_metrics():
     three = module.compare(rows)
     assert three["metrics"]["total_tokens"]["change_pct"] == -20
     assert three["metrics"]["total_tokens"]["claim_ready"]
+    for row in rows:
+        if row["arm"] == "treatment":
+            row["metrics"]["total_tokens"] = 12
+    assert not module.compare(rows)["metrics"]["total_tokens"]["claim_ready"]
+    for row in rows:
+        if row["arm"] == "treatment":
+            row["metrics"]["total_tokens"] = 8
     rows[-1]["integrated_defects"] = 1
     assert not module.compare(rows)["metrics"]["total_tokens"]["claim_ready"]
     rows[-1]["complete_metrics"] = []
