@@ -573,6 +573,24 @@ rows:
       fetched_at: '2026-09-27T14:55:21Z'
       page_title: Gemini 3.8 Flash (low)
     supersession_metadata: null
+  agy/gemini-4-argon@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: user-approved-routing-exception
+      url: https://github.com/Hikari9/auto-office/issues/809#issuecomment-6433994337
+      fetched_at: '2026-10-28T01:19:00Z'
+      page_title: '#809 Argon Medium L-only floor exception'
+    supersession_metadata: null
+  agy/gemini-4-argon@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-argon
+      fetched_at: '2026-10-28T01:19:00Z'
+      page_title: Gemini 4 Argon (high)
+    supersession_metadata: null
   pi/gpt-5-codex@high:
     price_fields:
       input_per_mtok: 1.25
