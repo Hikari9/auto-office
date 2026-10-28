@@ -431,12 +431,18 @@ def _integrate(con, run: dict, job: dict) -> dict:
     coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
     incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
     detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
-              if incomplete else "composed result verified")
+              if incomplete else
+              "composed result verified with SCOPED PR TESTS (not full-suite)"
+              if coverage and coverage[0] == verification_coverage.SCOPED
+              else "composed result verified")
     with db.transaction(con):
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
-        direct = next((c for c in executed if verification_coverage._complete_pytest_command(c)), None)
-        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct} if direct else None)
+        direct = next((c for c in executed
+                       if verification_coverage._complete_pytest_command(c)
+                       or verification_coverage._scoped_validate(repo, commit, c)), None)
+        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct,
+                  "scope": coverage[0] if coverage else None} if direct else None)
         _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
         if incomplete:
             state.emit(con, run, "integration.coverage_partial",

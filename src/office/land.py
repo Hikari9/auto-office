@@ -534,6 +534,8 @@ def _ask(con, run: dict) -> Result:
         Path(run["repo_root"]), commit,
         list((run.get("landing") or {}).get("run_checks") or []),
         verified_commands=verification_coverage.attested_checks(con, run, commit)) if commit else None
+    if coverage and coverage[0] == verification_coverage.SCOPED:
+        lines.append("SCOPED PR TESTS VERIFIED; full suite not run (see #854).")
     if coverage and coverage[0] == verification_coverage.PARTIAL:
         lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):
@@ -605,8 +607,8 @@ def _require_run_coverage(run: dict, commit: str, *, con=None) -> None:
                       f"integration checks are insufficient for landing: {coverage[1]}; "
                       f"declared run-level checks: {checks or ['none']}",
                       preserved="no additional task PRs were merged by this attempt",
-                      next_step="amend the plan's run-level checks: to scripts/validate.sh "
-                                "(or pytest tests/ --all), re-run integration verification "
+                      next_step="amend the plan's run-level checks: to scripts/validate.sh --pr "
+                                "(targeted) or scripts/validate.sh (full), re-run integration verification "
                                 "against the same composed commit, then office land")
 
 

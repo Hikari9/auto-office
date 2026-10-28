@@ -703,6 +703,9 @@ def _append_verification_disclosure(res: Result, receipt: dict) -> None:
     if verified.get("status") == "partial":
         res.notices.append("FULL SUITE NOT VERIFIED: " + verified["detail"])
         res.data["verification"] = verified
+    elif verified.get("status") == "scoped":
+        res.notices.append("SCOPED PR TESTS VERIFIED; full suite not run: " + verified["detail"])
+        res.data["verification"] = verified
 
 
 def _archive_receipt(con, run: dict, landing: dict, handoff: str | None) -> dict:

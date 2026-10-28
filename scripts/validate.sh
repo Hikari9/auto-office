@@ -1,13 +1,43 @@
 #!/usr/bin/env bash
-# Local validation gate (replaces the removed GitHub Actions workflow; CI stays empty by
-# maintainer decision, #120). Run by .githooks/pre-push; also runnable by hand.
+# Full validation remains available; --pr selects changed-file tests for PRs (#854).
+# No GitHub Actions CI by maintainer decision (#120).
+# The pre-push hook invokes --pr; bare invocation keeps the full regression gate.
 # VALIDATE_BUILD=1 also builds the wheel and checks it carries the packaged resources.
 set -euo pipefail
+mode="full"
+case "${1:-}" in
+  --pr) mode="pr"; shift ;;
+  --full) shift ;;
+  "") ;;
+  *) echo "Usage: scripts/validate.sh [--pr|--full]" >&2; exit 2 ;;
+esac
+if [ "$#" -ne 0 ]; then
+  echo "Unexpected validate arguments: $*" >&2
+  exit 2
+fi
+if [ "${VALIDATE_WORKERS:-2}" -gt 2 ] || [ "${VALIDATE_WORKERS:-2}" -lt 1 ]; then
+  echo "[VALIDATE] VALIDATE_WORKERS must be 1 or 2" >&2
+  exit 2
+fi
 cd "$(git rev-parse --show-toplevel)"
 
 # A git hook exports GIT_DIR, GIT_INDEX_FILE and friends. Tests that run git inside their
 # own temp fixture repos would inherit them and commit onto the branch being pushed.
 unset $(git rev-parse --local-env-vars)
+
+# Scope test evidence to exactly the pushed commit. Dirty tracked code or
+# untracked runnable sources could shadow the committed tree and falsely pass.
+if [ "$mode" = "pr" ]; then
+  input_paths=(src tests scripts adapters catalog config .githooks ':(top,glob)*.py' pytest.ini tox.ini setup.cfg pyproject.toml)
+  untracked="$(git ls-files --others --exclude-standard -- "${input_paths[@]}")"
+  ignored="$(git ls-files --others --ignored --exclude-standard -- "${input_paths[@]}" | \
+    grep -Ev '(^|/)(__pycache__|\.pytest_cache)/|\.py[co]$|(^|/)\.DS_Store$' || true)"
+  if ! git diff --quiet HEAD -- || [ -n "$untracked" ] || [ -n "$ignored" ]; then
+    echo "[PR GATE] Refusing a dirty source/test tree; commit changes before validation" >&2
+    exit 2
+  fi
+fi
+
 
 # The tree under test, taken before any check runs: a commit that lands during
 # the run must not be stamped as validated.
@@ -46,9 +76,26 @@ unset PYTEST_ADDOPTS PYTEST_PLUGINS
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
-echo "== Full test suite (unit, integration, legacy, slow; visual tests skip without Playwright)"
-# Two workers: the local resource budget caps test parallelism at 2 on this class of machine.
-python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
+# Two workers maximum. PR selection still uses --all so selected integration,
+# legacy, and slow tests are never hidden by the default tier filter.
+if [ "$mode" = "pr" ]; then
+  selection_file="$(mktemp)"
+  trap 'rm -f "$selection_file"' EXIT
+  python3 scripts/select_pr_tests.py --output "$selection_file"
+  selected_tests=()
+  while IFS= read -r selected_test; do
+    selected_tests+=("$selected_test")
+  done < "$selection_file"
+  if [ "${#selected_tests[@]}" -eq 0 ]; then
+    echo "[PR GATE] No tests selected; refusing empty scoped validation" >&2
+    exit 2
+  fi
+  echo "== SCOPED PR tests (--all markers enabled; NOT a full-suite pass)"
+  python3 -m pytest "${selected_tests[@]}" -q -n "${VALIDATE_WORKERS:-2}" --all
+else
+  echo "== Full test suite (unit, integration, legacy, slow; visual tests skip without Playwright)"
+  python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
+fi
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do
@@ -71,6 +118,12 @@ echo "== Validation passed"
 # since otherwise the tree that passed is not the one being pushed.
 if [ -n "$start_tree" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] \
     && [ "$(git rev-parse 'HEAD^{tree}')" = "$start_tree" ]; then
-  stamps="$(git rev-parse --git-common-dir)/office-validated"
+  # Keep scoped and full receipts separate; scoped results must never
+  # satisfy a full-suite validation stamp.
+  if [ "$mode" = "pr" ]; then
+    stamps="$(git rev-parse --git-common-dir)/office-pr-validated"
+  else
+    stamps="$(git rev-parse --git-common-dir)/office-validated"
+  fi
   mkdir -p "$stamps" && touch "$stamps/$start_tree"
 fi

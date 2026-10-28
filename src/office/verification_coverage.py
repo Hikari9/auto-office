@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 FULL = "full"
+SCOPED = "scoped"  # verified change-relevant tests; NEVER a full-suite claim
 PARTIAL = "partial"
 
 
@@ -105,12 +106,42 @@ def _is_validate_script(command: str) -> bool:
     return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 
+_SCOPED_GATE_SHA256 = {
+    "scripts/validate.sh": "a79d72ca4e42faab9688903c7c42c6d71c4b254a12e294049890468b8822316c",
+    "scripts/select_pr_tests.py": "42e24afc3fb39696f8abc2d1639537956b518a63b934b3d0a7334e5d403478bd",
+}
+
+
+def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
+    """Recognize the maintained PR selector from the exact committed tree.
+
+    The selector must actually exist in that tree. A similarly named command
+    in an unrelated repo cannot waive #563's full-suite requirement.
+    """
+    words = _tokens(command)
+    if words[:1] in (["bash"], ["sh"]):
+        words = words[1:]
+    if words not in (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"]):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        return False
+    # Trust only the reviewed gate and selector, byte for byte. Updating either
+    # requires reviewing both and updating these digests in the same change.
+    for path, expected in _SCOPED_GATE_SHA256.items():
+        proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
+                              capture_output=True)
+        if proc.returncode or hashlib.sha256(proc.stdout).hexdigest() != expected:
+            return False
+    return True
+
+
 _ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"
 
 
 def supplemental_checks(repo: Path, commit: str, commands: list[str]) -> list[str]:
     if (_tiered_repo(repo, commit) and any(_is_validate_script(c) for c in commands)
-            and not any(_complete_pytest_command(c) for c in commands)):
+            and not any(_complete_pytest_command(c) or _scoped_validate(repo, commit, c)
+                        for c in commands)):
         return [_ATTEST_PYTEST]
     return []
 
@@ -123,6 +154,9 @@ def audit(repo: Path, commit: str, commands: list[str], *,
     selected = commands if verified_commands is None else verified_commands
     if any(_complete_pytest_command(c) for c in selected):
         return FULL, "full pytest --all selection executed by integration checks"
+    if any(_scoped_validate(repo, commit, c) for c in selected):
+        return SCOPED, ("change-targeted test modules executed with --all markers; "
+                        "not the complete pytest suite")
     return PARTIAL, ("run-level checks do not demonstrate the complete pytest suite; "
                      f"{', '.join(tiers)} tests can be deselected by default; "
                      "shell script text is not execution evidence")
@@ -149,7 +183,8 @@ def attested_checks(con, run: dict, commit: str) -> list[str]:
             or row["revision_id"] != "I" + commit[:7]):
         return []
     expected = proof.get("command")
-    if not expected or not _complete_pytest_command(expected):
+    if not expected or not (_complete_pytest_command(expected)
+                            or _scoped_validate(Path(run["repo_root"]), commit, expected)):
         return []
     run_root = paths.run_dir(run["id"])
     evidence_root = run_root / "evidence"
