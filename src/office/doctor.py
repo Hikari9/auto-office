@@ -222,7 +222,7 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
 
 
 def probe_route_record(spec: str, *, run: dict | None = None) -> Result:
-    """`office doctor --probe-route harness/model@effort`: one manual exact-route probe.
+    """`office doctor --probe-route harness[@major]/model@effort`: one manual exact-route probe.
 
     Bound to `run` when one is given (the probe counts against its cap and records its
     plan version); otherwise an unbound manual probe with explicit NULL run fields.
