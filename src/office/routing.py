@@ -936,6 +936,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         audit["slate"] = slate
         eligibility[tid] = {"policy": "neutral", "source": "trial", "probe_key": disc["probe_key"],
                             "attempt_id": disc.get("attempt_id")}
+        # A discovery trial was not in the ordinary eligible stage. Persist its
+        # exact benchmark waiver too; otherwise a selected trial would lack the
+        # owner-authorized floor exception in its durable routing receipt.
+        if waiver := executor_slates.floor_exception(c, size, role):
+            audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
     if disc:
         audit["discovery"] = disc
     for row in audit["candidates"]:
@@ -949,6 +954,8 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         disclosure["operational_fallback"] = (
             "Temporary Sonnet Medium M fallback (#861); Haiku High is preferred only "
             "after exact harness/model/effort conformance and availability qualify")
+        # Persist the explanation in route_audit as well as the dispatch payload.
+        audit["operational_fallback"] = disclosure["operational_fallback"]
     head = slate[0]
     disclosure["reason"] = "; ".join(
         [disclosure["reason"].split("; ")[0], head["reason"], f"+ {head['strength']}", f"- {head['weakness']}"]
