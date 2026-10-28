@@ -27,6 +27,14 @@ from office.route_probe import Refused  # noqa: E402
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
 ROUTE = "codex/gpt-6.1-sol@high"
 
+@pytest.fixture(autouse=True)
+def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
+    """#850 denies Astra, GPT-5.6 and GPT-6.1 Sol above medium for executors. These tests exercise probe and
+    discovery mechanics on those routes, not the shipped policy, which test_role_seed_routing.py covers."""
+    from office import route_policy
+    monkeypatch.setattr(route_policy, "SEED_ROLE_RULES", tuple(
+        r for r in route_policy.SEED_ROLE_RULES if not (r["role"] == "executor" and r["state"] == "deny")))
+
 
 class World:
     """An isolated Office home, a PATH holding one fake `codex`, and one runs.db."""

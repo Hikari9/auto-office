@@ -168,13 +168,13 @@ def _dispatch_row_or_none(env):
 def test_review_as_is_pinned_on_the_task(env):
     approved_run(env)
     code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
-                           "--review-as", "codex/gpt-6-luna@xhigh", "--review-external", env=EXTERNAL)
+                           "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
     assert code == 0, out
     con = env.con()
     pinned = json.loads(con.execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
-    assert pinned == {"as": "codex/gpt-6-luna@xhigh", "cli": None, "external": True, "by": "user"}
+    assert pinned == {"as": "codex/gpt-6-luna@high", "cli": None, "external": True, "by": "user"}
     code, out = env.office("inspect", "task", "T1")
-    assert "review pinned by user: codex/gpt-6-luna@xhigh (external)" in out, out
+    assert "review pinned by user: codex/gpt-6-luna@high (external)" in out, out
 
 
 @pytest.mark.approved
@@ -182,7 +182,7 @@ def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
     """#337: --review-as pins the reviewer of the task's lane; it is still a fresh dispatch."""
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@xhigh", "--review-as", "codex/gpt-6-luna@xhigh", check=0)
+    env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@high", "--review-as", "codex/gpt-6-luna@high", check=0)
     con = env.con()
     reviewed = [c for c in env.calls() if c.get("role") == "convergence_reviewer"]
     assert reviewed and reviewed[0]["harness"] == "codex", env.calls()
@@ -218,14 +218,16 @@ def test_default_reviewer_seeds_and_fallbacks():
     roles = config.load_yaml(config.default_config_path())["roles"]
     for role in ("plan_reviewer", "code_reviewer"):
         seed = roles[role]["preferred_seed"]
-        assert seed == [{"model_id": "luna", "effort": "high"},
-                        {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode"},
-                        {"model_id": "opus", "harness": "claude", "effort": "low"}], role
+        assert seed == [{"model_id": "luna", "harness": "codex", "effort": "high"},
+                        {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode", "effort": "max"},
+                        {"model_id": "opus", "harness": "claude", "effort": "low"},
+                        {"model_id": "claude-opus-5-5", "harness": "agy", "effort": "low"}], role
         # #837: the seeded order is a preference; strict allow-only is an explicit user opt-in (strict_allow_roles)
         assert roles[role]["strict_seed"] is False, role
     visual = roles["visual_reviewer"]["preferred_seed"]
-    assert visual[0] == {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}
-    assert visual[1] == {"model_id": "sonnet", "harness": "claude", "effort": "high"}
+    assert visual == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "low"},
+                      {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"},
+                      {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"}]
 
 
 @pytest.mark.approved

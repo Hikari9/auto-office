@@ -262,7 +262,8 @@ def test_model_list_shows_role_specific_denies(home):
     routecmd.change("deny", role="code_reviewer", route=ROUTE)
     res = harnesscmd.model_list("claude")
     row = next(r for r in res.data["rows"] if r["model_id"] == "claude-opus-5-5" and r["effort"] == "high")
-    assert row["role_denied"] == ["code_reviewer"] and row["user_denied"] is False
+    # #850 also denies Opus high as a plan reviewer and as an executor, so those roles are listed with it.
+    assert sorted(row["role_denied"]) == ["code_reviewer", "executor", "plan_reviewer"] and row["user_denied"] is False
     assert any("denied for roles: code_reviewer" in l for l in res.lines if "claude-opus-5-5" in l and "high" in l)
 
 

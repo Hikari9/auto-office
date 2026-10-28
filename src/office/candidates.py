@@ -564,6 +564,9 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         }
         if allowed:
             cand["user_allowed"] = True
+            if row.get("dispatchable") is False and allowed.get("sizes") is not None:
+                # Admitted over a catalog or overlay disable by an allow scoped to these sizes only (#850).
+                cand["user_allow_sizes"] = allowed["sizes"]
         if row.get("alias_resolved_to"):
             cand["alias_resolved_to"] = row["alias_resolved_to"]
         # Role-aware (#837): a role allow outranks a legacy global deny, a role deny stays role-scoped.

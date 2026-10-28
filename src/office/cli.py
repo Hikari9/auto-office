@@ -56,7 +56,7 @@ Auto Office {ver}
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
   office harness scaffold|validate|smoke|list|sync|manifest
                                     register a harness: draft a user adapter, check it, one throwaway-repo launch
-  office route policy --effective --role <role> | allow|neutral|deny|clear <route> --role <role>
+  office route policy --effective --role <role> [--size XL] | allow|neutral|deny|clear <route> --role <role> [--size XS,S]
                                     role-scoped user allow/neutral/deny (no active run required)
   office route override <route> --role <role> --run <id> --reason "<why>"
                                     user-issued one-off deny override (interactive terminal only)
@@ -388,6 +388,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--role", help="one role, e.g. code_reviewer")
     s.add_argument("--effective", action="store_true", help="inspect effective allow/neutral/deny with origin")
     s.add_argument("--wildcard", action="store_true", help="deliberately apply broad route/role rule")
+    s.add_argument("--size", help="task size scope: XS|S|M|L|XL (policy: show that size; allow/neutral/deny/clear: comma list)")
     s = sp.add_parser("model", parents=[common])
     s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
@@ -833,8 +834,8 @@ def _run(args, unknown) -> int:
         from office import routecmd
         if args.action == "policy":
             if args.ident or args.wildcard:
-                raise OfficeError("usage", "route policy accepts --role and --effective only", exit_code=2)
-            return emit(routecmd.policy(role=args.role, effective=args.effective), args)
+                raise OfficeError("usage", "route policy accepts --role, --effective and --size only", exit_code=2)
+            return emit(routecmd.policy(role=args.role, effective=args.effective, size=args.size), args)
         if args.action == "override":
             return emit(routecmd.override(route=args.ident, role=args.role, run=getattr(args, "run_arg", None),
                                           reason=args.reason, ttl=args.ttl, revoke=args.revoke,
@@ -843,7 +844,8 @@ def _run(args, unknown) -> int:
             return emit(routecmd.migrate(apply=args.apply, rollback=args.rollback), args)
         if args.effective:
             raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
-        return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard), args)
+        return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard,
+                                    sizes=[v.strip().upper() for v in args.size.split(",")] if args.size is not None else None), args)
     if cmd == "config" and args.apply_routing:
         from office import configcmd
         if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
