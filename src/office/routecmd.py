@@ -49,11 +49,13 @@ def _canonicalize(spec: str) -> str:
     return f"{harness}@{major}/{target}@{effort}" if major.isdigit() else f"{harness}/{target}@{effort}"
 
 
-def _dispatch_view(row: dict, state: dict) -> tuple[bool, str]:
+def _dispatch_view(row: dict, state: dict, installed: bool = True) -> tuple[bool, str]:
     """(dispatches, why) for one catalog route under one role (#845). An allow dispatches with no proof;
     a catalog or overlay `dispatchable: false` only stops a route the user has not allowed."""
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
+    if not installed:
+        return False, f"{row.get('invocation_harness')} is not installed here"
     if row.get("dispatchable") is False:
         if state["state"] == "allow":
             was = "your catalog overlay disabled it" if row.get("user_disabled") else "its catalog row is not dispatchable"
@@ -91,7 +93,7 @@ def policy(*, role: str | None = None, effective: bool = False) -> Result:
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
             state = route_policy.effective_role_state(c, r, [p])
-            dispatches, why = _dispatch_view(row, state)
+            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter))
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,

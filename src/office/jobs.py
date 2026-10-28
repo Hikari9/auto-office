@@ -277,6 +277,10 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
         dispatch.trial_recovery_failed(con, run, job, err)
         return
     if job["kind"] == "route_fallback" and task_id:
+        task = state.get_task(con, run["id"], task_id)
+        if (task is None or task["current_dispatch_id"] != job["payload"].get("dispatch_id")
+                or task["status"] not in ("running", "launching")):
+            return  # the task moved on (a reroute, a new dispatch): this stale fallback blocks nothing
         state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"route fallback failed: {err[:200]}")
         state.emit(con, run, "task.blocked", f"{task_id} route fallback could not run: {err[:120]}; "
                    f"office dispatch {task_id} --reroute", task_id=task_id)

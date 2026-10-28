@@ -248,3 +248,22 @@ def test_a_clean_run_clears_the_demotion(plain):
     launched(plain, d)
     dispatch._finish(d["id"], 0, None, "success", 0.1)
     assert plain.con.execute("SELECT 1 FROM route_cooldowns WHERE route=?", (key,)).fetchone() is None
+
+
+def test_a_stale_fallback_job_failing_does_not_block_a_task_that_moved_on(plain):
+    plain.dispatch("T1")
+    (d,) = plain.dispatches()
+    fail(plain, d, "error: unknown model")
+    job = state.get_job(plain.con, plain.con.execute("SELECT id FROM outbox WHERE kind='route_fallback'").fetchone()["id"])
+    with db.transaction(plain.con):
+        state.update_task(plain.con, "run-A", "T1", current_dispatch_id="Dnewer")
+        jobs.on_permanent_failure(plain.con, state.get_run(plain.con, "run-A"), job, "boom")
+    assert state.get_task(plain.con, "run-A", "T1")["status"] != "blocked"
+
+
+def test_the_effective_view_does_not_claim_an_uninstalled_harness_dispatches(world, monkeypatch):
+    routecmd.change("allow", role="executor", route="codex/gpt-6-astra@low")
+    monkeypatch.setattr(routecmd.adapters, "installed", lambda adapter: False)
+    row = next(r for r in routecmd.policy(role="executor", effective=True).data["effective"]
+               if r["route"] == "codex/gpt-6-astra@low")
+    assert row["dispatches"] is False and "not installed" in row["dispatch_reason"]
