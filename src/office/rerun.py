@@ -481,7 +481,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
-    if task["status"] in ("accepted", "cancelled"):
+    if task["status"] == "cancelled" or (task["status"] == "accepted" and not gates.stale_dependency(con, run, task)):
+        # A stale accepted dependent is the exception: status already recommends rerun.
+        # The next launch preserves accepted evidence, with one writer and one lease (#856).
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
