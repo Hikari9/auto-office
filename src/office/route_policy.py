@@ -342,9 +342,18 @@ def user_allows(cand: dict, role: str, policies: list[dict]) -> dict | None:
     """The effective rule when role policy allows this route (#845), else None.
 
     An allow is the whole admission test: it makes a route dispatchable without any proof, qualification or
-    trust gate, and it outranks a catalog or overlay `dispatchable: false`. A runtime failure falls back."""
-    rule = effective_role_state(cand, role, policies) if policies else None
-    return rule if rule and rule["state"] == "allow" else None
+    trust gate, and it outranks a catalog or overlay `dispatchable: false`. A runtime failure falls back.
+
+    Candidates are built before any task size is known, so a route a user allowed for some sizes only (#850)
+    is admitted here; the size-aware role check at routing time still denies it for the other sizes."""
+    if not policies:
+        return None
+    for size in (None, *SIZES):
+        rule = effective_role_state(cand, role, policies, size)
+        # Only the user's own allow lifts a catalog or overlay disable; a shipped allow is a preference.
+        if rule["state"] == "allow" and rule["source"] not in ("shipped", "default"):
+            return rule
+    return None
 
 
 def preferred_seed_policy(role: str, entries) -> dict:

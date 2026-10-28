@@ -298,3 +298,32 @@ def test_an_allow_for_a_route_the_catalog_lacks_is_reported_not_dropped(world):
     assert entry["category"] == "not-in-catalog" and "office model add" in entry["reason"]
     assert any("gpt-9-nope" in line and "no such route" in line
                for line in routecmd.policy(role="executor", effective=True).lines)
+
+
+# ------------------------------------------------------------------ #850: shipped denies and size-scoped allows
+
+def _disable(monkeypatch, model, effort):
+    rows = candidates.catalog_rows()
+    merged = user_catalog.apply(rows, {"models": [], "disabled": [{"harness": "codex", "model_id": model, "effort": effort}]})
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: merged)
+
+
+def test_a_user_allow_overrides_a_shipped_executor_deny_in_candidate_building(world, monkeypatch):
+    """Astra is denied for every executor effort by the shipped policy; a user's own allow still wins (#850)."""
+    _disable(monkeypatch, "gpt-6-astra", "low")
+    label = "codex/gpt-6-astra@low"
+    cands, skipped = build(world)
+    assert not [c for c in cands.values() if c["model_id"] == "gpt-6-astra" and c["effort"] == "low"]
+    allow(world, "executor", label)
+    cands, _ = build(world)
+    [cand] = [c for c in cands.values() if c["model_id"] == "gpt-6-astra" and c["effort"] == "low"]
+    assert cand["user_allowed"] is True
+
+
+def test_a_size_scoped_user_allow_makes_a_disabled_route_a_candidate(world, monkeypatch):
+    """Candidates are built before any task size is known; the allow must still admit the route (#850)."""
+    _disable(monkeypatch, "gpt-6-luna", "low")
+    world.user_config.write_text(yaml.safe_dump({"routing": {"user_policy": {"role_rules": [
+        {"role": "executor", "route": "codex/gpt-6-luna@low", "state": "allow", "sizes": ["XL"]}]}}}))
+    cands, _ = build(world)
+    assert [c for c in cands.values() if c["model_id"] == "gpt-6-luna" and c["effort"] == "low"]
