@@ -53,6 +53,7 @@ def test_efficiency_partial_and_root_missing_not_zero():
     assert s["dispatch_coverage"] == "partial-or-unknown"
     assert s["actual_usd_observed"] is None and s["root_share_of_actual_usd"] is None
     assert s["root_share_of_observed_token_components"] == 150 / 450
+    assert s["cache_coverage"] == {"cache_read_tokens": "1/2", "cache_write_tokens": "1/2"}
 
 
 def test_complete_recorded_actual_cost_is_distinct_from_subscription_quota():

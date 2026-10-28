@@ -21,6 +21,8 @@ def summarize(rows: list[dict], *, total_dispatches: int | None = None) -> dict:
     # Even a completely populated sampled ledger cannot prove root coverage;
     # a root's zero turns can mean missing transcripts, not zero spending.
     root_measured_share = root_parts / total_parts if total_parts else None
+    cache_coverage = {field: f"{len(sample) - unknowns[field]}/{len(sample)}"
+                      for field in ("cache_read_tokens", "cache_write_tokens")}
     actual = [r for r in sample if r.get("cost_kind") == "actual" and isinstance(r.get("cost_usd"), (int, float))]
     actual_complete = bool(sample) and len(actual) == len(sample)
     total_actual = sum(r["cost_usd"] for r in actual)
@@ -36,7 +38,7 @@ def summarize(rows: list[dict], *, total_dispatches: int | None = None) -> dict:
         "actual_usd_observed": total_actual if actual else None,
         "actual_usd_coverage": f"{len(actual)}/{len(sample)}" if sample else "0/0",
         "root_share_of_actual_usd": (root_actual / total_actual if actual_complete and total_actual > 0 else None),
-        "cost_kinds": sorted(kinds),
+        "cost_kinds": sorted(kinds), "cache_coverage": cache_coverage,
     }
 
 
@@ -65,7 +67,14 @@ def inspect(con, run: dict):
         lines.append("reported actual USD: " + (f"${cost:.4f} observed only" if cost is not None else "unknown") +
                      f"; cost coverage {s['actual_usd_coverage']}; "
                      "nominal API estimates and subscription quota are not billed dollars")
+        lines.append("cache read/write field coverage: " + ", ".join(
+            f"{field} {cov}" for field, cov in s["cache_coverage"].items()) +
+                     "; observed cache reads/writes: " +
+                     f"{s['token_components']['cache_read_tokens']}/{s['token_components']['cache_write_tokens']} " +
+                     "(missing fields excluded)")
         lines.append("review/rework/admin time: unknown unless independently observed; attempts are not evidence of rework cost")
+    cold = economics._cold_resumes(con, run, [r for r in rows if r.get("attribution") == "office"]) if rows else []
+    lines.append(f"verified cold resumes in observed records: {len(cold)}; unobserved resume states unknown")
     events = [dict(r) for r in con.execute("SELECT seq,payload_json FROM events WHERE run_id=? "
                                           "AND kind='delegation.shadow' ORDER BY seq DESC LIMIT 5", (run["id"],))]
     advice = []
@@ -82,4 +91,5 @@ def inspect(con, run: dict):
     else:
         lines.append("delegation shadow: no fan-out observation recorded")
     lines.append("matched baseline/treatment comparison: not measured here; use eval/v31/compare_economics.py")
-    return Result(lines=lines, data={"enabled": enabled, "summary": s, "delegation_shadow": advice})
+    return Result(lines=lines, data={"enabled": enabled, "summary": s, "cold_resumes": cold,
+                                     "delegation_shadow": advice})
