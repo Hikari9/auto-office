@@ -159,3 +159,30 @@ def test_no_reroute_without_a_seed_or_a_selected_fresh_decision():
     no_seed["request"]["preferred_seed"] = None
     assert dispatch._outdated_slate(old, no_seed) is None
     assert dispatch._outdated_slate(old, _fresh("S", status="no_qualifying_candidate")) is None
+
+
+# ------------------------------------------------------------------ #850 §4: the orchestrator plans
+
+
+@pytest.mark.parametrize("gear,effort", [("M", "low"), ("L", "medium"), ("XL", "high")])
+def test_an_explicit_planner_follows_the_run_gear_table(gear, effort):
+    run = {"gear": gear}
+    seed = candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, "S", role="planner")
+    assert [(e["model_id"], e["effort"]) for e in seed] == [
+        ("claude-opus-5-5", effort), ("gpt-6-astra", effort), ("gemini-4-argon", effort)]
+    assert seed[0]["harness"] == "claude" and seed[1]["harness"] == "codex"
+
+
+@pytest.mark.parametrize("gear", ["XS", "S", "express", None])
+def test_xs_s_and_legacy_gears_have_no_gear_planner_table(gear):
+    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": gear}, None, role="planner") \
+        == FLAT_SEED
+
+
+def test_no_new_gear_queues_a_dedicated_planner_by_default():
+    from office import config
+    cfg = config.load_yaml(config.default_config_path())
+    for gear in ("XS", "S", "M", "L", "XL"):
+        risk = config.resolve_risk(cfg, "repo", None, False)
+        risk["size_class"] = gear
+        assert config.resolve_gates(gear, risk, cfg)["dedicated_planner"] is False, gear

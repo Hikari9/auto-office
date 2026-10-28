@@ -802,7 +802,8 @@ def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: s
 
 def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
                     role: str = "executor"):
-    """A per-size seed wins, then the #809 ideal size slate for a sized XS-XL run, then a flat seed.
+    """A per-size seed wins, then the #809 ideal size slate for a sized XS-XL run (the gear's planner table for an
+    explicit planner), then a flat seed.
     The slate is the default, so a flat seed (an old `roles.executor.preferred_seed`) cannot shadow it;
     a legacy run without a size still reads the flat seed. Qualification is independently enforced
     downstream at actual dispatch."""
@@ -812,6 +813,9 @@ def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
         return by_size[size]
     if _uses_size_slate(policy_cfg, run, size, role):
         return executor_slates.ideal_seed(size)
+    if role == "planner" and run.get("gear") in executor_slates.PLANNER_BY_GEAR:
+        # By run gear, not task size: an explicitly requested planner (#850 §4).
+        return executor_slates.planner_seed(run["gear"])
     return policy_cfg.get("preferred_seed") or None
 
 

@@ -11,8 +11,8 @@ from office import config, contract, executor_slates, planfile, risk, state, tas
     ("XS", False, False, False),
     ("S", False, True, False),
     ("M", False, True, False),
-    ("L", True, True, True),
-    ("XL", True, True, True),
+    ("L", True, True, False),
+    ("XL", True, True, False),
 ])
 def test_new_gear_funding_is_independent_of_low_safety_risk(gear, plan_review, code_review, planner):
     cfg = config.load_yaml(config.default_config_path())

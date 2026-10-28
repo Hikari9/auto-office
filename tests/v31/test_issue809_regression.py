@@ -17,8 +17,8 @@ ESTIMATE = "inline=10 dedicated=20 minutes: the loaded session skips an eight mi
     ("XS", False, False, False, False),
     ("S", False, True, False, False),
     ("M", False, True, False, False),
-    ("L", True, True, True, False),
-    ("XL", True, True, True, True),
+    ("L", True, True, False, False),
+    ("XL", True, True, False, True),
 ])
 def test_every_gear_row_matches_its_funded_gates(gear, plan_review, code_review, planner, goldfish):
     cfg = config.load_yaml(config.default_config_path())

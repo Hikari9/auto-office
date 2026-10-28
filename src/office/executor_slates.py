@@ -31,6 +31,21 @@ IDEAL = {
            ("gemini-4-argon", "high", None)),
 }
 
+# Planner routes, by RUN gear (#850 §4), used only when the user asks for a standalone planner: the root
+# orchestrator plans every run by default. XS and S have no automatic planner and no invented slate.
+PLANNER_BY_GEAR = {
+    "M": (("claude-opus-5-5", "low", "claude"), ("gpt-6-astra", "low", "codex"), ("gemini-4-argon", "low", None)),
+    "L": (("claude-opus-5-5", "medium", "claude"), ("gpt-6-astra", "medium", "codex"),
+          ("gemini-4-argon", "medium", None)),
+    "XL": (("claude-opus-5-5", "high", "claude"), ("gpt-6-astra", "high", "codex"),
+           ("gemini-4-argon", "high", None)),
+}
+
+
+def planner_seed(gear: str | None) -> list[dict]:
+    return [{"model_id": model, "effort": effort, **({"harness": harness} if harness else {})}
+            for model, effort, harness in PLANNER_BY_GEAR.get(gear, ())]
+
 
 def new_gear_size(request: dict) -> str | None:
     """New XS-XL funding is not retroactively imposed on legacy pinned runs."""
