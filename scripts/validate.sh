@@ -28,7 +28,11 @@ unset $(git rev-parse --local-env-vars)
 # Scope test evidence to exactly the pushed commit. Dirty tracked code or
 # untracked runnable sources could shadow the committed tree and falsely pass.
 if [ "$mode" = "pr" ]; then
-  if ! git diff --quiet HEAD -- || [ -n "$(git ls-files --others --exclude-standard -- src tests scripts adapters catalog config .githooks)" ]; then
+  input_paths=(src tests scripts adapters catalog config .githooks ':(top,glob)*.py' pytest.ini tox.ini setup.cfg pyproject.toml)
+  untracked="$(git ls-files --others --exclude-standard -- "${input_paths[@]}")"
+  ignored="$(git ls-files --others --ignored --exclude-standard -- "${input_paths[@]}" | \
+    grep -Ev '(^|/)(__pycache__|\.pytest_cache)/|\.py[co]$|(^|/)\.DS_Store$' || true)"
+  if ! git diff --quiet HEAD -- || [ -n "$untracked" ] || [ -n "$ignored" ]; then
     echo "[PR GATE] Refusing a dirty source/test tree; commit changes before validation" >&2
     exit 2
   fi

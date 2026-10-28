@@ -107,8 +107,8 @@ def _is_validate_script(command: str) -> bool:
 
 
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "d5e07794201f587f32a3d599ca97d8bab347080c469533486e39447f4a184d9d",
-    "scripts/select_pr_tests.py": "1ef3de0ebd64080a64bbb52bb78cff2b1ae3a10b28cb9587da3b68705b56ef0a",
+    "scripts/validate.sh": "a79d72ca4e42faab9688903c7c42c6d71c4b254a12e294049890468b8822316c",
+    "scripts/select_pr_tests.py": "42e24afc3fb39696f8abc2d1639537956b518a63b934b3d0a7334e5d403478bd",
 }
 
 

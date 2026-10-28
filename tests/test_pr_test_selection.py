@@ -99,6 +99,13 @@ def test_test_infrastructure_requires_full_validation(pr_repo):
         selection(pr_repo)
 
 
+def test_pytest_configuration_requires_full_validation(pr_repo):
+    (pr_repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-k smoke'\n")
+    git(pr_repo, "add", "pyproject.toml")
+    with pytest.raises(SelectionError, match="Test configuration changed"):
+        selection(pr_repo)
+
+
 def test_unmapped_script_fails_closed(pr_repo):
     path = pr_repo / "scripts/new_runtime.py"
     path.parent.mkdir(exist_ok=True)
@@ -106,6 +113,21 @@ def test_unmapped_script_fails_closed(pr_repo):
     git(pr_repo, "add", "scripts/new_runtime.py")
     with pytest.raises(SelectionError, match="No tests mapped"):
         selection(pr_repo)
+
+
+def test_ignored_test_cannot_replace_committed_coverage(pr_repo):
+    (pr_repo / ".gitignore").write_text("tests/test_new_runtime.py\n")
+    (pr_repo / "tests/test_importer.py").write_text("from office import new_runtime\n")
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "tracked importer"], check=True)
+    git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (pr_repo / "tests/test_new_runtime.py").write_text("def test_fake(): pass\n")
+    (pr_repo / "src/office/new_runtime.py").write_text("pass\n")
+    git(pr_repo, "add", "src/office/new_runtime.py")
+    _, _, chosen = selection(pr_repo)
+    assert "tests/test_new_runtime.py" not in chosen
+    assert "tests/test_importer.py" in chosen
 
 
 def test_many_indirect_importers_are_bounded(pr_repo):
@@ -145,7 +167,7 @@ def test_unmapped_runtime_file_fails_closed(pr_repo):
         selection(pr_repo)
 
 
-@pytest.mark.parametrize("kind", ["tracked", "untracked_source"])
+@pytest.mark.parametrize("kind", ["tracked", "untracked_source", "root_conftest", "ignored_test"])
 def test_pr_shell_gate_rejects_uncommitted_inputs_before_install(pr_repo, kind):
     import os
     script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
@@ -157,8 +179,14 @@ def test_pr_shell_gate_rejects_uncommitted_inputs_before_install(pr_repo, kind):
                     "user.email=t@t", "commit", "-qm", "commit script"], check=True)
     if kind == "tracked":
         (pr_repo / "README.md").write_text("dirty\n")
-    else:
+    elif kind == "untracked_source":
         (pr_repo / "src/office/untracked.py").write_text("SECRET = True\n")
+    elif kind == "root_conftest":
+        (pr_repo / "conftest.py").write_text("def pytest_collection_modifyitems(items): items.clear()\n")
+    else:
+        git(pr_repo, "config", "core.excludesFile", str(pr_repo / "exclude"))
+        (pr_repo / "exclude").write_text("tests/test_ignored.py\n")
+        (pr_repo / "tests/test_ignored.py").write_text("def test_fake(): pass\n")
     proc = subprocess.run(["bash", str(dest), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True, env={**os.environ, "VALIDATE_WORKERS": "2"})
     assert proc.returncode == 2

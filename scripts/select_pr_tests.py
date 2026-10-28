@@ -60,10 +60,13 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     changed.update(git(root, "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRT", "HEAD").splitlines())
     if not changed:
         raise SelectionError("No changed files versus PR base; refusing an empty PR-test attestation")
+    if changed.intersection({"conftest.py", "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"}):
+        raise SelectionError("Test configuration changed: run full validation explicitly")
     if any(p.startswith("tests/") and not (root / p).is_file() for p in changed):
         raise SelectionError("A test file was deleted/renamed: review coverage and run full validation explicitly")
 
-    tests = sorted(p.relative_to(root).as_posix() for p in (root / "tests").rglob("test_*.py"))
+    tests = sorted(p for p in git(root, "ls-tree", "-r", "--name-only", "HEAD", "--", "tests").splitlines()
+                   if Path(p).name.startswith("test_") and p.endswith(".py"))
     if any(p.startswith("tests/") and p not in tests for p in changed):
         raise SelectionError("Test infrastructure changed: run full validation explicitly")
     selected: set[str] = set()
