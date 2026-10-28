@@ -845,7 +845,7 @@ def _run(args, unknown) -> int:
         if args.effective:
             raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
         return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard,
-                                    sizes=[v.strip().upper() for v in args.size.split(",") if v.strip()] if args.size else None), args)
+                                    sizes=[v.strip().upper() for v in args.size.split(",")] if args.size is not None else None), args)
     if cmd == "config" and args.apply_routing:
         from office import configcmd
         if args.key or args.value or args.unset or args.list_ or args.edit or args.path:

@@ -188,3 +188,13 @@ def test_route_policy_inspection_by_size(tmp_path, monkeypatch):
     assert ("claude/claude-opus-5-5@medium", "deny") in rows
     with pytest.raises(Exception):
         routecmd.policy(role="executor", effective=True, size="XXL")
+
+
+@pytest.mark.parametrize("sizes", [[""], ["", ""], ["XXL"], ["xs"], []])
+def test_route_change_rejects_malformed_sizes_instead_of_widening_the_rule(tmp_path, monkeypatch, sizes):
+    from office import routecmd
+    from office.state import OfficeError
+    target = _isolated(tmp_path, monkeypatch)
+    with pytest.raises(OfficeError):
+        routecmd.change("allow", role="executor", route="claude/claude-sonnet-5-5@high", sizes=sizes)
+    assert not target.exists()

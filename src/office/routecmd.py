@@ -151,9 +151,10 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
 
     `route` may be several comma-separated routes: one command reshuffles a role's list (#845).
     `sizes` scopes the rule to those XS-XL task sizes (#850); a rule is replaced only by one of the same scope."""
-    sizes = sorted(set(sizes), key=route_policy.SIZES.index) if sizes else None
-    if sizes and any(v not in route_policy.SIZES for v in sizes):
-        raise configcmd._usage(f"--size takes {', '.join(route_policy.SIZES)} (comma-separated)")
+    if sizes is not None:
+        if not sizes or any(v not in route_policy.SIZES for v in sizes):
+            raise configcmd._usage(f"--size takes a comma-separated list of {', '.join(route_policy.SIZES)}")
+        sizes = sorted(set(sizes), key=route_policy.SIZES.index)
     if role not in route_policy.POLICY_ROLES and not (role == "*" and wildcard):
         raise configcmd._usage(f"a specific --role is required (known: {', '.join(sorted(route_policy.POLICY_ROLES))})")
     specs = [r.strip() for r in (route or "").split(",") if r.strip()]
