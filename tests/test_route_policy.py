@@ -107,7 +107,8 @@ def test_overkill_role_and_size_scope():
 
 
 def test_shipped_discovery_catalog_exactly_matches_locked_choices():
-    rows = yaml.safe_load((paths.resources_root() / "catalog/seed.yaml").read_text())["models"]
+    from office import shipped_catalog
+    rows = shipped_catalog.load()["models"]
     actual = {(r["invocation_harness"], r["model_id"], r["effort"]) for r in rows if r.get("discovery") == "eligible"}
     expected = {(h, m, e) for h, m in (("codex", "gpt-6.1-sol"), ("claude", "claude-haiku-5-5"))
                 for e in ("low", "medium", "high", "xhigh", "max")}

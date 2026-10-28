@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from office import paths, route_policy
+from office import paths, route_policy, shipped_catalog, shipped_catalog
 from office.util import sha256_file, sha256_obj
 
 NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
@@ -279,7 +279,7 @@ def snapshot_hashes() -> dict:
     root = paths.resources_root()
     from office import adapters as adapter_mod, user_catalog
     key = (adapter_mod.files_stamp(),
-           adapter_mod._file_stamp([root / "catalog" / "seed.yaml", root / "catalog" / "lineages.yaml",
+           adapter_mod._file_stamp([*shipped_catalog.files(root), root / "catalog" / "lineages.yaml",
                                     user_catalog.path(), default_config_path()]))
     cached = _HASHES_CACHE.get(key)
     if cached is not None:
@@ -288,7 +288,7 @@ def snapshot_hashes() -> dict:
     for aid, (data, origin, p) in sorted(adapter_mod.load_sources().items()):
         if origin != "seed" and data.get("office_profiles"):
             adapters["user/" + p.name] = data
-    catalog = load_yaml(root / "catalog" / "seed.yaml")
+    catalog = shipped_catalog.load(root)
     lineages = load_yaml(root / "catalog" / "lineages.yaml")
     overlay = user_catalog.raw()
     out = {

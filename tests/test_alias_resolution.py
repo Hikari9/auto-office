@@ -78,7 +78,8 @@ def test_shipped_catalog_has_unique_model_harness_effort_rows():
     import yaml
     from office import paths
 
-    seed = yaml.safe_load((paths.resources_root() / "catalog" / "seed.yaml").read_text(encoding="utf-8"))
+    from office import shipped_catalog
+    seed = shipped_catalog.load()
     keys = [(r["model_id"], r["invocation_harness"], r["effort"]) for r in seed["models"]]
     assert len(keys) == len(set(keys)), "duplicate catalog model/harness/effort rows"
 

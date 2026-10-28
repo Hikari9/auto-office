@@ -560,7 +560,7 @@ For example, executor and code-review routes currently require a score of at lea
 
 ### The shipped catalog is the normal path
 
-Routing itself stays offline. `catalog/seed.yaml` contains the known model/harness/effort rows, invocation provenance, benchmark scores, and available cost metadata. Every run pins the catalog it started with.
+Routing itself stays offline. The shipped catalog uses `catalog/routes.tsv`, `catalog/benchmarks.tsv`, `catalog/manifest.yaml` and `catalog/provenance.yaml` for exact model/harness/effort routes, scores and evidence (see `docs/catalog-tables-migration.md`). Every run pins the catalog it started with.
 
 Legacy inactive benchmarks are kept in [`catalog/archive/legacy-nonrouting-2026-10-08.yaml`](catalog/archive/legacy-nonrouting-2026-10-08.yaml), outside the active routing catalog. Their historical scores and trust-grant evidence remain inspectable without granting route eligibility. Official model IDs and maintainer-reported model availability alone do not prove that every local harness/effort setting pins the intended model. Disabled concrete rows also disable any dynamic family alias resolving to them.
 
