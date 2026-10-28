@@ -181,6 +181,46 @@ def test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback():
     assert "Temporary Sonnet Medium M fallback" in second["selection_disclosure"]["operational_fallback"]
 
 
+def test_issue861_missing_or_unqualified_glm_f1_skips_to_terra_f2_without_fake_dispatch():
+    """Owner order remains Haiku -> GLM -> Terra, even when F1 is not qualified."""
+    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
+    terra = candidate("gpt-6.1-terra", "medium", 41)
+    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
+    unqualified_glm = candidate("glm-5.3-flash", "max", 42,
+                                harness="opencode", available=False)
+    preferred = executor_slates.ideal_seed("M")
+    assert [(c["model_id"], c["harness"], c["effort"]) for c in preferred] == [
+        ("claude-haiku-5-5", "claude", "high"),
+        ("glm-5.3-flash", "opencode", "max"),
+        ("gpt-6.1-terra", "codex", "medium"),
+    ]
+
+    for glm in (None, unqualified_glm):
+        available = [haiku, terra, sonnet] + ([glm] if glm else [])
+        decision = decide("M", available)
+        assert decision["status"] == "selected", decision
+        assert decision["selected"] == routing.candidate_id(terra), decision
+        assert "glm-5.3-flash" not in decision["selected"]
+        assert all("glm-5.3-flash" not in row["route"] for row in decision["slate"])
+        audit = executor_slates.route_summary(
+            preferred, available, decision["rejected"], decision["slate"])
+        assert [row["route"] for row in audit] == [
+            "claude/claude-haiku-5-5@high",
+            "opencode/glm-5.3-flash@max",
+            "codex/gpt-6.1-terra@medium",
+        ]
+        assert audit[0]["status"] == "unqualified"
+        assert audit[1]["status"] == ("unqualified" if glm else "not-in-catalog")
+        assert audit[2]["status"] == "selected"
+        assert not audit[1]["qualified_routes"]
+        assert audit[1]["reason"] == (
+            "exact route is missing or rejected by catalog, trust, quota, or policy")
+        assert decision["routing"]["slate"][0]["route"] == routing.candidate_id(terra)
+        if glm:
+            assert any(r["candidate"] == routing.candidate_id(glm)
+                       and r.get("category") == "untried" for r in decision["rejected"])
+
+
 def test_issue861_m_haiku_probe_gate_uses_exact_authorized_waiver_only():
     haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
     check = lambda c, size, role: routing._pool_gate(

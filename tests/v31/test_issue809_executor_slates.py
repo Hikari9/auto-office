@@ -80,8 +80,8 @@ def test_missing_gear_is_not_silently_upgraded_from_task_size():
 def test_issue861_m_slate_and_exact_floor_exception():
     assert slates.ideal_seed("M") == [
         {"model_id": "claude-haiku-5-5", "effort": "high", "harness": "claude"},
-        {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"},
         {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"},
+        {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"},
     ]
     route = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
              "benchmark_indexes": {slates.INDEX: 38}}

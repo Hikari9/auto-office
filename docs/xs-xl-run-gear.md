@@ -160,10 +160,13 @@ The historical six presets (`direct`, `direct+review`, `light`, `quick`, `expres
 
 ## M executor Haiku High transition (#861, October 28, 2026)
 
-For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, Codex
-GPT-6.1 Terra Medium, then OpenCode GLM-5.3 Flash Max. Sonnet Medium is no
-longer a preferred M route, but stays an explicitly disclosed operational
-fallback until Haiku qualifies. Other sizes, planner/reviewer funding and
+For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, OpenCode
+GLM-5.3 Flash Max, then Codex GPT-6.1 Terra Medium. GLM is preferred F1,
+but currently has no qualified exact shipped catalog route: report its
+missing/unqualified status and skip to Terra F2 when eligible. Never claim
+GLM was selected or dispatched when absent. Sonnet Medium is no longer a
+preferred M route, but stays a disclosed operational fallback until qualified
+preferred routes are available. Other sizes, planner/reviewer funding and
 historical pinned runs are unchanged.
 
 The exact `claude/claude-haiku-5-5@high` M executor/worker route has a
