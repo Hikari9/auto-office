@@ -141,6 +141,7 @@ def test_a_user_allow_skips_the_benchmark_floor_but_not_a_deny():
     ("timeout", "still thinking", "timeout"),
     ("nonzero", "error: unknown model 'gpt-9'", "unsupported-model-effort"),
     ("nonzero", "Error: reasoning effort 'max' is not supported by this model", "unsupported-model-effort"),
+    ("nonzero", "Error: unknown option '--effort' for model gpt-x", "unsupported-model-effort"),
     ("nonzero", "authentication failed: please run /login", "auth"),
     ("nonzero", "fetch failed: ECONNRESET", "transport"),
     ("nonzero", "tests failed: 3 assertions", None),

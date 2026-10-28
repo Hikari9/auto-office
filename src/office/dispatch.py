@@ -4852,7 +4852,8 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
 _ROUTE_FAILURE_SIGNATURES = (
     ("unsupported-model-effort", r"unknown model|model\b.{0,80}(not (found|supported|available|exist)|does not exist|invalid)"
                                  r"|invalid (model|effort|reasoning)|unsupported .{0,30}(effort|reasoning|model)"
-                                 r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"),
+                                 r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
+                                 r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
     ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
     ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
                   r"|service unavailable|\b50[234]\b|overloaded"),
@@ -4861,7 +4862,7 @@ _ROUTE_FAILURE_SIGNATURES = (
 
 def route_failure(classification: str | None, text: str) -> tuple[str, str] | None:
     """(reason class, detail) when a worker's end is a failure of its route (unsupported model or effort, auth,
-    timeout, transport death, launch failure), else None. The detail is the stderr tail."""
+    timeout, transport death, launch failure), else None. The detail is the tail of the harness log (stdout and stderr merged)."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("[office]")]
     tail = "\n".join(lines[-8:])[-600:]
     if classification == "launch_failed":
