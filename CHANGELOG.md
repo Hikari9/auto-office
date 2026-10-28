@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.11.2
+
+- fix(validation): compare integration failures against the pinned base, report tracked check mutations, fence stale plan reviews and revalidate accepted-task amendments (#629, #819, #802).
+
 ## 3.11.1
 
 - fix(probe): accept printed harness-major route IDs in doctor probes; refuse stale majors before launch (#858, #627).
