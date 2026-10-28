@@ -369,7 +369,7 @@ def test_unavailable_plan_review_attempts_spend_no_round(env):
 
 # ------------------------------------------------------------------ re-pinning the plan reviewer (#790)
 
-REPIN = "codex/gpt-6-luna@xhigh"
+REPIN = "codex/gpt-6-luna@medium"
 
 
 def _route_notices(env):

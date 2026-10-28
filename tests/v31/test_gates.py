@@ -460,9 +460,11 @@ def test_headless_worker_past_its_wall_cap_is_stopped_and_surfaces(env):
     approved_run(env, executor=[{"sleep": 60}, {"sleep": 60}, {"sleep": 60}])
     code, out = env.office("dispatch", "T1", env={"OFFICE_WORKER_MAX_MINUTES": "0.02"}, check=0)
     t = task_row(env)
-    assert t["status"] == "blocked" and "timeout" in (t["pause_reason"] or ""), t
+    assert t["status"] == "blocked", t
     con = env.con()
     assert {r[0] for r in con.execute("SELECT terminal_classification FROM dispatches WHERE role='executor'")} == {"timeout"}
+    failures = [json.loads(r[0]) for r in con.execute("SELECT payload_json FROM events WHERE kind='route.failed'")]
+    assert failures and all(f["classification"] == "timeout" for f in failures), failures
 
 
 def test_agy_profiles_carry_a_wall_cap():

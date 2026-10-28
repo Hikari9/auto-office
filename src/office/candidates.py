@@ -711,7 +711,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
                       next_step="office onboard --enable-free-models")
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
-    named = {"harness": harness, "model_id": (row or {}).get("model_id") or model,
+    version = adapters.route_version(harness, adapter)
+    named = {"harness": harness, "harness_version": version, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
              "effort": effort or (row or {}).get("effort") or "none",
@@ -741,7 +742,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
                 "--run <run> --reason \"<why>\""))
     return {
         "harness": harness,
-        "harness_version": adapters.route_version(harness, adapter),
+        "harness_version": version,
         "model_id": (row or {}).get("model_id") or model,
         "invocation_model_id": (row or {}).get("invocation_model_id") or model,
         "invocation_source": "user-override",

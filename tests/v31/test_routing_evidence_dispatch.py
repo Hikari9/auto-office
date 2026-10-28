@@ -141,6 +141,8 @@ def test_a_same_route_retry_links_its_predecessor_and_keeps_the_first_executor(e
 
 
 def test_a_cross_route_swap_and_swap_back_chain_every_dispatch(env):
+    env.office("route", "allow", "codex/gpt-6-astra@low", "--role", "executor", check=0)
+    env.office("route", "allow", "claude/claude-opus-5-5@medium", "--role", "executor", check=0)
     _approve(env)
     env.office("dispatch", "T1", env=_quota(env), check=0)
     env.office("revoke", "T1", env=EXTERNAL, check=0)

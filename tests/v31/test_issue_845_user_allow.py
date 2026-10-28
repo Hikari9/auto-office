@@ -114,6 +114,19 @@ def test_one_command_reshuffles_several_routes(world):
     assert {r["route"].split("/")[-1] for r in rules} == {"gpt-6.1-sol@high", "gpt-6-luna@low"}
 
 
+def test_declared_route_honors_harness_major_user_allow_and_deny(world):
+    route = "codex/gpt-6-astra@low"
+    with pytest.raises(state.Refused, match="denied"):
+        candidates.declared_candidate("codex", "gpt-6-astra", "low")
+    result = routecmd.change("allow", role="executor", route=route)
+    assert result.data["routes"][0].startswith("codex@")
+    candidate = candidates.declared_candidate("codex", "gpt-6-astra", "low")
+    assert candidate["model_id"] == "gpt-6-astra"
+    routecmd.change("deny", role="executor", route=route)
+    with pytest.raises(state.Refused, match="denied"):
+        candidates.declared_candidate("codex", "gpt-6-astra", "low")
+
+
 # ------------------------------------------------------------------ a user allow is not held to a benchmark floor
 
 def test_a_user_allow_skips_the_benchmark_floor_but_not_a_deny():

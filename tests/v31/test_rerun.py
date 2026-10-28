@@ -31,6 +31,8 @@ print(json.dumps({{"result": {{}}}}))
 
 
 def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route=None):
+    if route:
+        env.office("route", "allow", route, "--role", "executor", check=0)
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
     env.office("dispatch", "T1", *(["--as", route] if route else []), env=EXTERNAL, check=0)
     herdr = env.bin / "herdr"
@@ -372,6 +374,7 @@ CODEX = "codex@1/gpt-6-astra@low"
 
 
 def _planned_executor_ended(env, *, as_route=None):
+    env.office("route", "allow", FB1, "--role", "executor", check=0)
     _approve(env)
     args = ["dispatch", "T1", *(["--as", as_route, "--quote", "Use this executor route"] if as_route else [])]
     code, out = env.office(*args, env=_quota(env))
