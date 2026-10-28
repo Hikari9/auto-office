@@ -528,6 +528,28 @@ def _tracked_diff_snapshot(cwd: Path) -> dict[str, str]:
     return dict(zip(names, chunks))
 
 
+def _tracked_stat_snapshot(cwd: Path) -> dict[str, tuple[int, int, int, int, int] | None]:
+    """Supplement the final Git diff with evidence of tracked writes later undone.
+
+    A check may edit and restore a file before exiting, leaving an identical
+    worktree patch. ctime changes even if the check restores mtime and content;
+    an inode change also detects atomic replacements. Ignore untracked outputs.
+    """
+    names = paths.git(cwd, "ls-files", "-z", "--", check=False).split("\0")
+    snapshot = {}
+    for name in names:
+        if not name:
+            continue
+        try:
+            info = (cwd / name).lstat()
+        except FileNotFoundError:
+            snapshot[name] = None
+        else:
+            snapshot[name] = (info.st_mode, info.st_size, info.st_mtime_ns,
+                              info.st_ctime_ns, info.st_ino)
+    return snapshot
+
+
 def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
                   check_tree: bool = True) -> dict:
     from office.submit import matches_revision
@@ -553,7 +575,10 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
                         "code": f"C{i}", "severity": "material", "location": command,
                         "summary": detail, "action": "remove the unsafe manual remote write"}]),
                     "route": "deterministic", "summary": detail, "results": results}
-        before_tracked = _tracked_diff_snapshot(cwd) if check_tree else {}
+        # Integration checks use a composed checkout (not the task's revision),
+        # but must still fail closed when the check mutates tracked source.
+        before_tracked = _tracked_diff_snapshot(cwd)
+        before_stats = _tracked_stat_snapshot(cwd)
         code, out = _run_check(command, cwd, timeout, environment)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
@@ -571,21 +596,25 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             con.execute("INSERT INTO validations(id, dispatch_id, kind, command, passed, known_bad_proven, evidence_hash, created_at) "
                         "VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, rev["dispatch_id"], "check", command, int(passed), 0,
                                                     sha256_bytes(out.encode()), now_iso()))
-        if check_tree:
-            # A check can rewrite a tracked artifact after submit. Capture the
-            # actual culprit instead of returning a bare STALE verdict (#623).
-            after_tracked = _tracked_diff_snapshot(cwd)
-            changed_paths = sorted(path for path in before_tracked.keys() | after_tracked.keys()
-                                   if before_tracked.get(path) != after_tracked.get(path))
-            if changed_paths:
-                detail = (f"check {command!r} mutated tracked files: {', '.join(changed_paths)}; "
-                          "gate is stale. Make the check read-only or commit intentional generated outputs")
-                with db.transaction(con):
-                    state.emit(con, run, "gate.check_mutated_tree", detail, task_id=gate.get("task_id"),
-                               payload={"gate": gate["id"], "revision": rev["id"],
-                                        "command": command, "paths": changed_paths})
-                return {"verdict": "STALE", "summary": detail, "results": results,
-                        "mutating_check": {"command": command, "paths": changed_paths}}
+        # Even with task revision matching disabled for integration, a check
+        # must not pass against source it rewrote and then restored (#623).
+        # A check can rewrite a tracked artifact after submit. Capture the
+        # actual culprit instead of returning a bare STALE verdict (#623).
+        after_tracked = _tracked_diff_snapshot(cwd)
+        after_stats = _tracked_stat_snapshot(cwd)
+        changed_paths = sorted(path for path in
+                               before_tracked.keys() | after_tracked.keys() | before_stats.keys() | after_stats.keys()
+                               if before_tracked.get(path) != after_tracked.get(path)
+                               or before_stats.get(path) != after_stats.get(path))
+        if changed_paths:
+            detail = (f"check {command!r} mutated tracked files: {', '.join(changed_paths)}; "
+                      "gate is stale. Make the check read-only or commit intentional generated outputs")
+            with db.transaction(con):
+                state.emit(con, run, "gate.check_mutated_tree", detail, task_id=gate.get("task_id"),
+                           payload={"gate": gate["id"], "revision": rev["id"],
+                                    "command": command, "paths": changed_paths})
+            return {"verdict": "STALE", "summary": detail, "results": results,
+                    "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
             what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "

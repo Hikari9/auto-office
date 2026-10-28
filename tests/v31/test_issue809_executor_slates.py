@@ -30,7 +30,7 @@ def test_terra_effort_thresholds_do_not_claim_qualification(effort, score, large
 
 
 def test_sonnet_self_fallback_order_and_same_effort():
-    for size, effort in (("M", "medium"), ("L", "high")):
+    for size, effort in (("L", "high"),):
         seed = slates.ideal_seed(size)
         assert seed[:2] == [
             {"model_id": "claude-sonnet-5-5", "effort": effort, "harness": "claude"},
@@ -55,13 +55,13 @@ def test_opus_is_xl_only_and_sonnet_harness_is_limited():
 
 def test_conditional_missing_and_unqualified_ideal_routes_are_audited():
     pref = slates.ideal_seed("M")
-    c = {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium",
+    c = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
          "harness_version": "1", "route_status": "available"}
     cid = routing.candidate_id(c)
     summary = slates.route_summary(pref, [c], [], [{"route": cid, "rank": "PRIMARY"}])
     assert [entry["status"] for entry in summary] == [
-        "not-in-catalog", "selected", "not-in-catalog", "not-in-catalog"]
-    assert summary[1]["qualified_routes"] == [cid]
+        "selected", "not-in-catalog", "not-in-catalog"]
+    assert summary[0]["qualified_routes"] == [cid]
 
 
 def test_old_pinned_gears_do_not_inherit_new_task_size_restrictions():
@@ -75,3 +75,24 @@ def test_old_pinned_gears_do_not_inherit_new_task_size_restrictions():
 def test_missing_gear_is_not_silently_upgraded_from_task_size():
     assert slates.new_gear_size({"context": {"size_class": "L"}}) is None
     assert slates.new_gear_size({"size_class": "XL"}) is None
+
+
+def test_issue861_m_slate_and_exact_floor_exception():
+    assert slates.ideal_seed("M") == [
+        {"model_id": "claude-haiku-5-5", "effort": "high", "harness": "claude"},
+        {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"},
+        {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"},
+    ]
+    route = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
+             "benchmark_indexes": {slates.INDEX: 38}}
+    assert slates.benchmark_gate(route, "M")
+    waiver = slates.floor_exception(route, "M", "executor")
+    assert waiver and waiver["observed_score"] == 38
+    for candidate, size, role in (
+        (route, "L", "executor"), (route, "S", "executor"), (route, "M", "planner"),
+        ({**route, "harness": "agy"}, "M", "executor"),
+        ({**route, "effort": "medium"}, "M", "executor"),
+        ({**route, "model_id": "claude-sonnet-5-5"}, "M", "executor"),
+        ({**route, "benchmark_indexes": {slates.INDEX: 40}}, "M", "executor"),
+    ):
+        assert slates.floor_exception(candidate, size, role) is None

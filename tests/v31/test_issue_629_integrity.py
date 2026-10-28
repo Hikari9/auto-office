@@ -145,6 +145,49 @@ def test_mutating_check_reports_exact_source_and_paths(env):
 
 
 
+@pytest.mark.approved
+def test_restored_tracked_file_during_check_still_invalidates_gate(env):
+    from pathlib import Path
+    from office import gates, state, db
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    c = env.con()
+    try:
+        run = state.get_run(c, _rows(env, "SELECT id FROM runs")[0]["id"])
+        task = state.get_task(c, run["id"], "T1")
+        rev = dict(c.execute("SELECT * FROM revisions WHERE id=?", (task["current_revision_id"],)).fetchone())
+        d = state.get_dispatch(c, rev["dispatch_id"])
+        cwd = Path(d["worktree"])
+        original = (cwd / "calc.py").read_bytes()
+        with db.transaction(c):
+            gid = gates._new_gate(c, run, task, rev["id"], "checks", f"restored:{rev['id']}", "queued")
+        command = 'python3 -c "from pathlib import Path; p=Path(\'calc.py\'); original=p.read_bytes(); p.write_bytes(original+b\'X\'); p.write_bytes(original)"'
+        outcome = gates.run_commands(c, run, [command], cwd, rev, {"id": gid, "task_id": "T1"})
+        assert (cwd / "calc.py").read_bytes() == original  # final diff alone would miss this
+        assert outcome["verdict"] == "STALE", outcome
+        assert "calc.py" in outcome["mutating_check"]["paths"], outcome
+    finally:
+        c.close()
+
+
+def test_integration_check_mutation_blocks_composed_acceptance(env):
+    from office import state
+    # Integration uses check_tree=False to bypass a task revision match, but
+    # it must still detect that a command changed the composed source tree.
+    plan = PLAN_ONE.replace("blast_radius: repo\n",
+        "blast_radius: repo\nchecks: printf mutated >> calc.py\n")
+    approved_run(env, plan=plan,
+                 executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+    landing = json.loads(_rows(env, "SELECT landing_json FROM runs")[0]["landing_json"])
+    assert landing["integration"]["status"] == "blocked", landing
+    checks = _rows(env, "SELECT * FROM gates WHERE subject='integration' AND kind='checks'")
+    assert checks and checks[-1]["verdict"] == "STALE", checks
+    assert "calc.py" in checks[-1]["summary"], checks
+
+
 def test_integration_check_identical_failure_on_base_is_disclosed_nonblocking(env):
     plan=PLAN_ONE.replace("blast_radius: repo\n",f"blast_radius: repo\nchecks: {OLD}\n")
     approved_run(env,plan=plan,executor=[{"write":{"calc.py":GOOD_ADD},"submit":True}],

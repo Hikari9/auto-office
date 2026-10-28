@@ -447,7 +447,7 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("doctor", parents=[common])
     s.add_argument("--fix", action="store_true")
     s.add_argument("--probe-vision", action="store_true", help="run image-capability probes on visual routes (uses quota)")
-    s.add_argument("--probe-route", metavar="HARNESS/MODEL@EFFORT",
+    s.add_argument("--probe-route", metavar="HARNESS[@MAJOR]/MODEL@EFFORT",
                    help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
     s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")

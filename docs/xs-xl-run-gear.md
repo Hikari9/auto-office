@@ -156,3 +156,32 @@ Every Office-launched Herdr pane for a task, executor or reviewer, shows the tas
 ## Legacy migration and pin safety
 
 The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) continue to parse and retain their prior gating. Their `gear_model_version` is `legacy-pinned`; they are never silently mapped to XS–XL, and `direct` risk-raising amendments retain their old `express`/`full` upgrade contract. The new `run-gear-1` is only for a newly selected XS–XL run. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
+
+
+## M executor Haiku High transition (#861, October 28, 2026)
+
+For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, OpenCode
+GLM-5.3 Flash Max, then Codex GPT-6.1 Terra Medium. GLM is preferred F1,
+but currently has no qualified exact shipped catalog route: report its
+missing/unqualified status and skip to Terra F2 when eligible. Never claim
+GLM was selected or dispatched when absent. Sonnet Medium is no longer a
+preferred M route, but stays a disclosed operational fallback until qualified
+preferred routes are available. Other sizes, planner/reviewer funding and
+historical pinned runs are unchanged.
+
+The exact `claude/claude-haiku-5-5@high` M executor/worker route has a
+narrow owner-authorized AA v4.3.2 38-vs-40 size-floor exception. The real
+numeric score must be present, not invented or inferred from AA v5. The
+exception does not bypass registration, exact CLI/model/effort conformance,
+quota, discovery trial limits, permissions or safety. Keep the catalog
+`dispatchable: false`, `discovery: eligible` until proven; fall back to
+known-working routes in the meantime.
+
+**Separate explicit user-authority path (#837/#845/#850):** An authenticated
+user-owned exact role allow, user-configured preferred route, or validated
+override receipt may intentionally authorize a catalog-disabled route. This
+does **not** prove that the CLI can launch the requested model and effort, does
+not change the shipped catalog status, and is never inferred from the default
+size slate. The user's rules take precedence over shipped preferences. Such
+explicit authority follows its own scope, receipt and remaining runtime
+safeguards; it must not be portrayed as automatic Haiku qualification.
