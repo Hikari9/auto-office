@@ -46,7 +46,10 @@ def route_contract():
             "context": {"gear": "M", "size_class": "M"} if context is None else context,
         }
         request.update(extra or {})
-        return routing.route(request, executor_policy=executor_policy)
+        if executor_policy is None:
+            return routing.route(request)
+        with routing._using_executor_policy(executor_policy):
+            return routing.route(request)
     return run
 
 
