@@ -1,4 +1,7 @@
-"""A completed or crashed opencode pane without its reply is a route failure."""
+"""A completed or crashed opencode pane without its reply is a route failure.
+
+Native Herdr check on macOS: not run (fake Herdr state only).
+"""
 from __future__ import annotations
 
 import json
@@ -102,7 +105,8 @@ def test_opencode_terminal_status_is_ignored_while_pane_is_busy(env, monkeypatch
 
 
 @pytest.mark.approved
-def test_opencode_terminal_status_is_ignored_when_herdr_sample_is_missing(env, monkeypatch):
+@pytest.mark.parametrize("sample", [None, {"status": []}, {"status": {}}])
+def test_opencode_terminal_status_is_ignored_when_herdr_sample_is_missing_or_malformed(env, monkeypatch, sample):
     from office import db, dispatch, gates
 
     state_file = _fake(env, monkeypatch, gets=["gone"])
@@ -120,6 +124,7 @@ def test_opencode_terminal_status_is_ignored_when_herdr_sample_is_missing(env, m
     finally:
         con.close()
 
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample", lambda _agent: sample)
     assert gates._reviewer_pane_terminal_without_reply(
         {**d, "adapter_id": "opencode", "launcher": "herdr"}, env.tmp / "missing-reply.txt") is None
 
