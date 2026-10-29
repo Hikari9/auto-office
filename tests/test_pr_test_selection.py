@@ -70,6 +70,19 @@ def test_docs_change_still_checks_named_safety_smoke(pr_repo):
     }
 
 
+def test_missing_safety_smoke_module_fails_closed(pr_repo):
+    from scripts.select_pr_tests import SAFETY_SMOKE
+
+    # Absent from the base as well, so the deleted-test guard does not fire first.
+    git(pr_repo, "rm", "-q", SAFETY_SMOKE[0])
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "drop smoke"], check=True)
+    git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (pr_repo / "README.md").write_text("new docs\n")
+    with pytest.raises(SelectionError, match="Safety-smoke test modules are missing"):
+        selection(pr_repo)
+
+
 def test_safety_smoke_set_is_named_and_selected(pr_repo):
     from scripts.select_pr_tests import SAFETY_SMOKE
 
@@ -164,7 +177,7 @@ def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
                                "SELECTED_TESTS": selected_tests,
                                "PYTEST_ARGS_LOG": str(args_log)})
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    assert "Contract suite: tests/contracts/" in proc.stdout
+    assert "SCOPED PR tests: contract suite" in proc.stdout
     assert "contract suite + safety smoke + changed-file affected tests" in proc.stdout
     assert "5 passed" in proc.stdout
     pytest_args = args_log.read_text().splitlines()
@@ -176,8 +189,7 @@ def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     import os
 
     gate_source = (Path(__file__).resolve().parents[1] / "scripts" / "validate.sh").read_text()
-    assert 'selected_count=0' in gate_source
-    assert '[ "$selected_count" -eq 0 ]' in gate_source
+    assert '[ "${#selected_tests[@]}" -eq 0 ]' in gate_source
     script = _install_shell_gate_fixture(pr_repo)
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
