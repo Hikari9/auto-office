@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from office import candidates, executor_slates as slates
+from office import candidates, executor_slates as slates, routing
 
 
 # This is the route matrix from main's #809/#850 policy plus #861's M executor
@@ -75,11 +75,24 @@ def test_effective_shipped_routes_match_main(key, expected):
 
 def test_m_executor_haiku_high_keeps_its_floor_exception():
     candidate = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
-                 "benchmark_indexes": {slates.INDEX: 38}}
+                 "invocation_model_id": "claude-haiku-5-5", "harness_version": "1.0",
+                 "capabilities": ["builder"], "invocation_source": "local-evidence: contract fixture",
+                 "benchmark_indexes": {slates.INDEX: 38}, "quota": {"status": "ok"},
+                 "route_status": "available", "price_fields": {"input_per_mtok": 1, "output_per_mtok": 2}}
     assert slates.benchmark_gate(candidate, "M", slates.POLICY)
-    waiver = slates.floor_exception(candidate, "M", "executor", slates.POLICY)
-    assert waiver and waiver["observed_score"] == 38
-    assert waiver["model_id"] == "claude-haiku-5-5"
+    decision = routing.route({
+        "role": "executor", "playbook": "Change", "preferred_seed": slates.ideal_seed("M"),
+        "slate_anchor": True, "allow_free_models": True,
+        "policy": {"required_capabilities": ["builder"], "floor": {
+            "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
+        "context": {"gear": "M", "size_class": "M"}, "_executor_policy": slates.POLICY,
+        "candidates": [candidate],
+    })
+    assert decision["status"] == "selected", decision
+    assert routing.candidate_id(decision["candidate"]) == "claude@1/claude-haiku-5-5@high"
+    [selected_waiver] = decision["routing"]["floor_exceptions"]
+    assert selected_waiver["exception"] == "haiku-high-m-owner-authorized-floor"
+    assert selected_waiver["observed_score"] == 38
 
 
 def test_conditional_m_routes_match_main_even_when_absent_from_catalog():
