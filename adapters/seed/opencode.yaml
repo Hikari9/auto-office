@@ -152,4 +152,7 @@ office_profiles:
       argv: [mini, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
       resume_argv: [--session, "{session_id}"]
       wall_cap: true
+      # `mini` can leave a registered Herdr agent after its pane process exits.
+      # With no reply file, `done` is terminal and must permit route fallback.
+      terminal_statuses_without_reply: [done]
     max_minutes: 60
