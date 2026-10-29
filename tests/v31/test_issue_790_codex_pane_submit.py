@@ -14,6 +14,7 @@ import pytest
 
 from conftest import GOOD_ADD, approved_run
 from test_convergence_contract import APPROVED, _start
+from test_herdr_agent_launch import _calls, launch_in_herdr
 from test_issue_790_held_pointer import _Pane
 from test_review_reroute import EXECUTOR, _q
 from office import candidates, contract, dispatch, gates, review_parse, routing, state
@@ -33,7 +34,7 @@ def _codex_composer(text: str) -> str:
 
 
 class CodexPane:
-    """Scripted codex pane. `agent prompt` types the text; the first Enter after it is dropped, the second submits it."""
+    """Scripted Codex pane whose initial `agent prompt` Enter is dropped."""
 
     def __init__(self, monkeypatch, *, drop_enters: int = 1):
         self.composer, self.submitted, self.enters, self.prompts = None, False, 0, []
@@ -47,6 +48,7 @@ class CodexPane:
         if args[:2] == ("agent", "prompt"):
             self.prompts.append(args[3])
             self.composer = args[3]
+            self.enters += 1  # The initial Enter bundled into `agent prompt` is dropped.
         elif args[:2] == ("pane", "send-keys") and args[-1] == "Enter":
             self.enters += 1
             if self.composer and self.enters > self.drop_enters:
@@ -60,16 +62,73 @@ class CodexPane:
 
 def test_codex_pointer_whose_first_enter_is_dropped_is_submitted_by_one_more_enter(monkeypatch):
     pane = CodexPane(monkeypatch, drop_enters=1)
-    assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1") == "landed"
+    assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1", max_enter_tries=1) == "landed"
     assert pane.prompts == [POINTER], "the pointer must never be typed twice"
-    assert pane.enters == 2
+    assert pane.enters == 2  # Initial attempt plus one recovery Enter.
 
 
 def test_codex_pointer_that_never_submits_is_reported_held_after_bounded_enters(monkeypatch):
+    monkeypatch.delenv("OFFICE_HERDR_ENTER_TRIES", raising=False)
+    pane = CodexPane(monkeypatch, drop_enters=99)
+    assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1", max_enter_tries=1) == "held"
+    assert pane.prompts == [POINTER] and pane.enters == 2
+
+
+def test_other_harness_keeps_configured_retry_count_with_codex_shaped_pane(monkeypatch):
     monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
     pane = CodexPane(monkeypatch, drop_enters=99)
     assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1") == "held"
-    assert pane.prompts == [POINTER] and pane.enters == 2
+    assert pane.prompts == [POINTER] and pane.enters == 3
+
+
+def test_codex_recovery_limit_applies_when_the_pane_cannot_be_read(monkeypatch):
+    monkeypatch.setenv("OFFICE_HERDR_KEY_DELAY", "0")
+    monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
+    monkeypatch.delenv("OFFICE_HERDR_ENTER_TRIES", raising=False)
+    sends = []
+    monkeypatch.setattr(dispatch, "_pane_view", lambda _name: None)
+    monkeypatch.setattr(dispatch, "_herdr_quiet", lambda *args: sends.append(args))
+
+    assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1", max_enter_tries=1) == ""
+    assert [args for args in sends if args[-1] == "Enter"] == [
+        ("pane", "send-keys", "w1:p1", "Enter")]
+
+
+def test_codex_recovery_budget_is_shared_across_delivery_and_settlement(monkeypatch):
+    pane = CodexPane(monkeypatch, drop_enters=99)
+    pane.composer = POINTER
+    budget = [1]
+
+    for _ in range(2):
+        assert dispatch._submit_held("office-D1", "w1:p1", POINTER, 0, herdr=pane.herdr,
+                                     max_tries=1, enter_budget=budget) == "held"
+    assert pane.enters == 1 and budget == [0]
+
+
+@pytest.mark.approved
+def test_codex_reviewer_launch_uses_only_one_recovery_enter_across_delivery_and_settlement(env, monkeypatch):
+    monkeypatch.delenv("OFFICE_HERDR_ENTER_TRIES", raising=False)
+
+    def failed_delivery(_name, pane, _pointer, **kwargs):
+        budget = kwargs["enter_budget"]
+        budget[0] -= 1
+        dispatch._herdr_quiet("pane", "send-keys", pane, "Enter")
+        return False
+
+    monkeypatch.setattr(dispatch, "_deliver_prompt", failed_delivery)
+
+    def reads(brief):
+        pointer = (f"Read and carry out the review brief at {brief} exactly. "
+                   f"Write your complete review to {brief.parent / 'reply.txt'}; Office reads only that file, never "
+                   "your terminal. Do not edit anything else.")
+        return [_codex_composer(pointer)]
+
+    state_file, _run, _d, _ddir, result = launch_in_herdr(
+        env, monkeypatch, adapter="codex", model="fake-model", effort="high", role="reviewer",
+        output=True, reads=reads)
+    enter_calls = [call for call in _calls(state_file) if call[:2] == ["pane", "send-keys"] and call[-1] == "Enter"]
+    assert result["prompt_landed"] is False
+    assert len(enter_calls) == 1, enter_calls
 
 
 def _working_sample(monkeypatch, *, text_busy):

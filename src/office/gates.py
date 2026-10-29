@@ -1065,7 +1065,9 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
         # identity must be this reviewer's before anything is typed into it.
         try:
             with dispatch_mod.fenced_pane(run, d) as pane:
-                got = dispatch_mod.submit_prompt(name, prompt, pane=pane)
+                got = dispatch_mod.submit_prompt(name, prompt, pane=pane,
+                                                 max_enter_tries=1 if d.get("role") == "code_reviewer"
+                                                 and d.get("harness") == "codex" else None)
         except dispatch_mod.PaneMismatch as exc:
             with db.transaction(con):
                 state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompt "

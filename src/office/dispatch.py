@@ -2844,14 +2844,19 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                             "reported_session": reported["session"], "mismatch": mismatch}
     landed = False
     guard = _send_guard(run, dispatch, pane)
+    codex_reviewer = not worker and dispatch.get("harness") == "codex"
+    enter_budget = [1] if codex_reviewer else None
     if not mismatch:
         try:
-            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb, guard=guard)
+            landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
+                                     guard=guard, max_enter_tries=1 if not worker and dispatch.get("harness") == "codex"
+                                     else None, enter_budget=enter_budget)
         except PaneMismatch as exc:
             mismatch = str(exc)
             spec["pane_evidence"]["mismatch"] = mismatch
     if not landed and not mismatch:
-        landed, mismatch = _settle_unlanded_pointer(run, dispatch, spec, name, pane, pointer, seen_cb, guard, worker=worker)
+        landed, mismatch = _settle_unlanded_pointer(run, dispatch, spec, name, pane, pointer, seen_cb, guard,
+                                                    worker=worker, enter_budget=enter_budget)
         if mismatch:
             spec["pane_evidence"]["mismatch"] = mismatch
     if mismatch:
@@ -2886,7 +2891,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
 
 
 def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, pane: str, pointer: str, seen,
-                             guard, *, worker: bool) -> tuple[bool, str | None]:
+                             guard, *, worker: bool, enter_budget: list[int] | None = None) -> tuple[bool, str | None]:
     """(landed, pane mismatch) after the delivery gave up on `pointer`. An idle agent whose composer holds it gets
     Enter through the fenced, bounded path `submit_prompt` uses, never the text again (#790). A pointer Enter cannot
     submit is reported and a reviewer is marked for one retry on the same route (`retry_same_route`)."""
@@ -2909,7 +2914,9 @@ def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, p
             return False, None
     try:
         got = _submit_held(name, pane, pointer, _land_timeout(), baseline_ctx=_ctx_k(view), baseline_screen=view,
-                           seen=seen, herdr=_guarded_herdr(guard))
+                           seen=seen, herdr=_guarded_herdr(guard),
+                           max_tries=1 if not worker and dispatch.get("harness") == "codex" else None,
+                           enter_budget=enter_budget)
     except PaneMismatch as exc:
         return False, str(exc)
     if got == "landed":
@@ -3458,36 +3465,44 @@ def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
 
 
 def _submit_held(name: str, pane: str | None, prompt: str, timeout: float, *, baseline_ctx: float | None = None,
-                 baseline_screen: str | None = None, seen=None, herdr=_herdr_quiet) -> str:
+                 baseline_screen: str | None = None, seen=None, herdr=_herdr_quiet,
+                 max_tries: int | None = None, enter_budget: list[int] | None = None) -> str:
     """Submit a prompt left typed in the composer with Enter, never by sending
     the text again (that would submit it twice). `agent prompt` writes the text
     and Enter together; a TUI that is not ready to submit yet, or that takes the
     Enter as part of the paste, keeps the text. Returns 'landed'; 'absent' when
     the composer never held it; 'held' when it is still there after
     OFFICE_HERDR_ENTER_TRIES Enters; 'unknown' when the pane cannot be read
-    at the end. A composer an Enter emptied counts as landed: the harness took
-    the submit."""
+    at the end (at most once for Codex). A composer an Enter emptied counts as
+    landed: the harness took the submit."""
     tries = int(os.environ.get("OFFICE_HERDR_ENTER_TRIES", "3"))
+    if max_tries is not None:
+        tries = min(tries, max_tries)
+    if enter_budget is not None:
+        tries = min(tries, enter_budget[0])
     delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
     wait = min(timeout, float(os.environ.get("OFFICE_HERDR_ENTER_WAIT", "5")))
+    view = _pane_view(name)
     for n in range(tries):
-        view = _pane_view(name)
         # An unreadable pane may still hold the prompt: press Enter, never
         # report it absent (that would type the prompt again).
         if view is not None and not _composer_holds(view, prompt):
             return "landed" if n else "absent"
         time.sleep(delay)
+        if enter_budget is not None:
+            enter_budget[0] -= 1
         _press_enter(name, pane, herdr)
         if _prompt_landed(name, wait, baseline_ctx=baseline_ctx, baseline_screen=baseline_screen,
                           prompt=prompt, seen=seen) == "landed":
             return "landed"
-    view = _pane_view(name)
+        view = _pane_view(name)
     if view is None:
         return "unknown"
     return "held" if _composer_holds(view, prompt) else "landed"
 
 
-def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) -> str:
+def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None,
+                  max_enter_tries: int | None = None) -> str:
     """Send `text` to a live herdr agent with `agent prompt` and confirm it was
     submitted, pressing Enter for it when it is left in the composer. Returns
     'landed', 'held' (still unsubmitted after the bounded Enters) or '' (no
@@ -3501,11 +3516,13 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None) 
     if _prompt_landed(name, timeout, baseline_ctx=baseline, baseline_screen=screen,
                       prompt=text) == "landed":
         return "landed"
-    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, baseline_screen=screen, herdr=herdr)
+    got = _submit_held(name, pane, text, timeout, baseline_ctx=baseline, baseline_screen=screen, herdr=herdr,
+                       max_tries=max_enter_tries)
     return "" if got in ("absent", "unknown") else got
 
 
-def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None) -> bool:
+def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None,
+                    max_enter_tries: int | None = None, enter_budget: list[int] | None = None) -> bool:
     """Wait for the agent UI, send the one-line pointer and confirm it landed.
     A pointer left in the composer is submitted with Enter; a lost one is typed
     into the pane once and submitted (agy can drop a prompt sent right after
@@ -3537,7 +3554,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     if not _agent_up(pane, name):
         return False
     held = _submit_held(name, pane, pointer, timeout, baseline_ctx=baseline, baseline_screen=screen,
-                        seen=seen, herdr=herdr)
+                        seen=seen, herdr=herdr, max_tries=max_enter_tries, enter_budget=enter_budget)
     if held != "absent":
         return held == "landed"
     # Look again right before typing: a pointer held in any form, or a pane
@@ -3550,8 +3567,13 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     # pause, submit, and submit once more if it still has not landed.
     herdr("pane", "send-text", pane, pointer)
     delay = float(os.environ.get("OFFICE_HERDR_KEY_DELAY", "1"))
-    for _ in range(2):
+    enter_tries = 2 if max_enter_tries is None else min(2, max_enter_tries)
+    if enter_budget is not None:
+        enter_tries = min(enter_tries, enter_budget[0])
+    for _ in range(enter_tries):
         time.sleep(delay)
+        if enter_budget is not None:
+            enter_budget[0] -= 1
         herdr("pane", "send-keys", pane, "Enter")
         if _prompt_landed(name, timeout / 2, baseline_ctx=baseline, baseline_screen=screen,
                           prompt=pointer, seen=seen) == "landed":
