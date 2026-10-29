@@ -168,6 +168,7 @@ def test_request_cannot_override_resolved_executor_policy():
                          "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
                          "allowed_sources": ["local-evidence:"]}},
                          "context": {"gear": "XS", "size_class": "XS"},
+                         "_executor_policy": forged,
                          "candidates": [_candidate("claude-opus-5-5", "medium", "claude", 55)]})
     assert out["status"] == "no_qualifying_candidate", out
     assert any(r.get("category") == "size-model-restriction" for r in out["rejected"])
