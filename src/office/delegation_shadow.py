@@ -15,8 +15,10 @@ def _paths(task: Mapping) -> list[str] | None:
     raw = task.get("scope")
     if not isinstance(raw, (list, tuple)) or not raw:
         return None
-    paths = [p.strip() for p in raw if isinstance(p, str) and p.strip()]
-    return paths if paths and len(paths) == len(raw) else None
+    if any(not isinstance(p, str) or not p.strip() or p.strip().startswith("/") for p in raw):
+        return None
+    paths = [p.strip().strip("/") for p in raw if isinstance(p, str) and p.strip()]
+    return paths if paths and all(paths) and len(paths) == len(raw) else None
 
 
 def propose(tasks: Sequence[Mapping], *, parallel_requested: bool,

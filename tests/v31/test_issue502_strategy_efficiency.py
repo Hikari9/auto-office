@@ -32,6 +32,24 @@ def test_glob_scopes_overlapping_a_concrete_file_are_coupled():
     assert r["conflicts"] == [{"tasks": ["T1", "T2"], "kind": "scope-overlap"}]
 
 
+def test_absolute_scope_is_unresolved_instead_of_claiming_independence():
+    r = delegation_shadow.propose(
+        [task("T1", ["/Users/rico/Git/repo/src/foo.py"]), task("T2", ["src/foo.py"])],
+        parallel_requested=True,
+    )
+    assert r["proposal"] == "unresolved"
+    assert r["actual"] == "parallel"
+
+
+def test_trailing_slash_scope_normalizes_to_the_same_file():
+    r = delegation_shadow.propose(
+        [task("T1", ["src/foo.py/"]), task("T2", ["src/foo.py"])],
+        parallel_requested=True,
+    )
+    assert r["proposal"] == "cohesive-or-serial"
+    assert r["conflicts"] == [{"tasks": ["T1", "T2"], "kind": "scope-overlap"}]
+
+
 def test_missing_scope_and_duplicate_ids_fail_to_observe_not_to_veto():
     r = delegation_shadow.propose([task("T1", []), task("T1", ["src/b"])], parallel_requested=True)
     assert r["proposal"] == "unresolved" and r["actual"] == "parallel"
