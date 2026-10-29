@@ -4,6 +4,8 @@ Codex draws its composer with a `›` glyph and no border, and wraps the pointer
 pane below keeps state: it holds the typed text until an Enter submits it, and it drops the first Enter the
 way a TUI can when the paste is not finished. Office must press Enter once more before it declares the prompt
 unlanded, and a reviewer route it leaves must log `route.fallback` with its reason.
+
+Native Herdr check on macOS: not run (fake Herdr pane only).
 """
 from __future__ import annotations
 
