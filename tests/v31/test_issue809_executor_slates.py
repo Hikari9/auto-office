@@ -96,3 +96,9 @@ def test_issue861_m_slate_and_exact_floor_exception():
         ({**route, "benchmark_indexes": {slates.INDEX: 40}}, "M", "executor"),
     ):
         assert slates.floor_exception(candidate, size, role) is None
+
+
+@pytest.mark.parametrize("scores", [[], "malformed"])
+def test_missing_score_exception_rejects_malformed_benchmark_maps(scores):
+    candidate = {"model_id": "gemini-4-argon", "effort": "medium", "benchmark_indexes": scores}
+    assert slates.floor_exception(candidate, "L", "executor") is None

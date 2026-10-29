@@ -15,7 +15,7 @@ def policy_root(tmp_path):
     target = tmp_path / "catalog"
     target.mkdir()
     for path in source.iterdir():
-        if path.is_file():
+        if path.is_file() and not path.is_symlink():
             shutil.copy2(path, target / path.name)
     return tmp_path
 
@@ -38,7 +38,7 @@ def synthetic_candidate():
 @pytest.fixture
 def route_contract():
     def run(candidates, *, role="code_reviewer", policies=(), seed=None, required=None,
-            context=None, extra=None):
+            context=None, extra=None, executor_policy=None):
         request = {
             "role": role, "candidates": candidates, "preferred_seed": seed,
             "user_policies": list(policies), "runs_db": None,
@@ -46,7 +46,7 @@ def route_contract():
             "context": {"gear": "M", "size_class": "M"} if context is None else context,
         }
         request.update(extra or {})
-        return routing.route(request)
+        return routing.route(request, executor_policy=executor_policy)
     return run
 
 

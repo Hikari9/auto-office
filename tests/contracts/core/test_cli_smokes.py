@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -48,12 +47,15 @@ ADAPTER = {
 
 
 @pytest.fixture
-def cli_env(tmp_path):
+def cli_env(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake = bindir / "fakecli"
     fake.write_text(FAKE)
     fake.chmod(0o755)
+    ambient_office = bindir / "office"
+    ambient_office.write_text(f"#!{sys.executable}\nraise SystemExit('ambient office must not be used')\n")
+    ambient_office.chmod(0o755)
     adapters = tmp_path / "adapters"
     adapters.mkdir()
     (adapters / "fakecli.yaml").write_text(yaml.safe_dump(ADAPTER, sort_keys=False))
@@ -63,13 +65,32 @@ def cli_env(tmp_path):
                 "OFFICE_STATE_HOME": str(tmp_path / "state"), "AUTO_OFFICE_RUNS_DB": str(tmp_path / "data/runs.db"),
                 "OFFICE_SMOKE_CAPTURE": str(tmp_path / "smoke-capture.json"),
                 "PATH": os.pathsep.join([str(bindir), env.get("PATH", "")])})
+    monkeypatch.setenv("PATH", env["PATH"])
     return env
 
 
 def _office(cli_env, *args):
-    command = shutil.which("office")
-    assert command, "the repository's Office CLI must be installed for process contract tests"
-    return subprocess.run([command, *args], env=cli_env, text=True, capture_output=True, timeout=30)
+    repository = Path(__file__).resolve().parents[3]
+    command = repository / ".venv" / "bin" / "office"
+    python = repository / ".venv" / "bin" / "python3"
+    assert command.is_file(), "the reviewed checkout's Office CLI must be installed for process contract tests"
+    assert command.resolve().is_relative_to(repository.resolve()), "Office CLI must resolve inside the reviewed checkout"
+    assert python.is_file(), "the reviewed checkout's Python environment must be installed for process contract tests"
+    env = cli_env.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(repository / "src"), env.get("PYTHONPATH", "")])
+    launcher = (
+        "import sys\n"
+        "import runpy\n"
+        "from pathlib import Path\n"
+        "source = Path(sys.argv.pop(1)).resolve()\n"
+        "script = Path(sys.argv.pop(1)).resolve()\n"
+        "import office\n"
+        "assert Path(office.__file__).resolve().is_relative_to(source), office.__file__\n"
+        "sys.argv[0] = str(script)\n"
+        "runpy.run_path(str(script), run_name='__main__')\n"
+    )
+    return subprocess.run([str(python), "-c", launcher, str(repository / "src"), str(command), *args],
+                          env=env, text=True, capture_output=True, timeout=30)
 
 
 def test_cli_validates_a_user_adapter_in_an_isolated_home(cli_env):
