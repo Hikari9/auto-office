@@ -1,26 +1,45 @@
 """The production router follows mutable preference data and stable tie rules."""
-from office import executor_slates, routing
-from test_helpers import route_contract, synthetic_candidate, user_policy
 import copy
+
+from office import candidates, executor_slates, routing
+from test_helpers import route_contract, synthetic_candidate, user_policy
 
 
 def _seed(model):
     return [{"model_id": model, "effort": "low", "harness": "fake"}]
 
 
+def _configured_preference_route(rows, preferences, policy, route_contract):
+    policy["executor_preferred"]["M"] = preferences
+    seed = candidates._preferred_seed({}, {"gear": "M"}, "M", executor_policy=policy)
+    assert seed == preferences
+    return route_contract(rows, role="worker", required=["builder"], seed=seed,
+                          context={"gear": "M", "size_class": "M"}, executor_policy=policy)
+
+
 def test_preference_mutation_changes_the_runtime_winner_without_test_edits(synthetic_candidate, route_contract):
-    a, b = synthetic_candidate("fixture-a"), synthetic_candidate("fixture-b")
-    first = route_contract([a, b], seed=_seed("fixture-a"))
-    second = route_contract([a, b], seed=_seed("fixture-b"))
+    policy = copy.deepcopy(executor_slates.POLICY)
+    rows = [synthetic_candidate("fixture-a"), synthetic_candidate("fixture-b")]
+    for candidate in rows:
+        candidate["benchmark_indexes"] = {policy["benchmark_index"]: 55}
+    first = _configured_preference_route(rows, _seed("fixture-a"), copy.deepcopy(policy), route_contract)
+    second = _configured_preference_route(rows, _seed("fixture-b"), copy.deepcopy(policy), route_contract)
     assert first["status"] == second["status"] == "selected"
     assert first["selected"].endswith("fixture-a@low")
     assert second["selected"].endswith("fixture-b@low")
 
 
 def test_reversing_only_preference_data_reverses_selection(synthetic_candidate, route_contract):
+    policy = copy.deepcopy(executor_slates.POLICY)
     rows = [synthetic_candidate("fixture-a"), synthetic_candidate("fixture-b")]
-    actual = [route_contract(rows, seed=_seed(model))["selected"] for model in ("fixture-a", "fixture-b")]
-    assert actual[0].endswith("fixture-a@low") and actual[1].endswith("fixture-b@low")
+    for candidate in rows:
+        candidate["benchmark_indexes"] = {policy["benchmark_index"]: 55}
+    first = _configured_preference_route(rows, [_seed("fixture-a")[0], _seed("fixture-b")[0]],
+                                         copy.deepcopy(policy), route_contract)
+    second = _configured_preference_route(rows, [_seed("fixture-b")[0], _seed("fixture-a")[0]],
+                                          copy.deepcopy(policy), route_contract)
+    assert first["selected"].endswith("fixture-a@low")
+    assert second["selected"].endswith("fixture-b@low")
 
 
 def test_input_permutation_preserves_the_unique_preferred_winner(synthetic_candidate, route_contract):
@@ -77,17 +96,21 @@ def test_preference_cannot_make_a_quota_unsafe_candidate_eligible(synthetic_cand
     assert result["status"] == "selected" and result["selected"].endswith("fixture-b@low")
 
 
-def test_changing_the_configured_floor_changes_only_that_candidate_gate(synthetic_candidate):
+def test_changing_the_configured_floor_changes_only_that_candidate_gate(synthetic_candidate, route_contract):
     policy = copy.deepcopy(executor_slates.POLICY)
     policy["floors"] = {**policy["floors"], "M": 56}
-    other_size = "S"
-    other_score = policy["floors"][other_size]
-    other_candidate = synthetic_candidate(score=other_score)
-    other_candidate["benchmark_indexes"] = {policy["benchmark_index"]: other_score}
-    assert executor_slates.benchmark_gate(other_candidate, other_size, policy) is None
-    candidate = synthetic_candidate(score=55)
+    other_candidate = synthetic_candidate("other-size", score=policy["floors"]["S"])
+    other_candidate["benchmark_indexes"] = {policy["benchmark_index"]: policy["floors"]["S"]}
+    candidate = synthetic_candidate("target-size", score=55)
     candidate["benchmark_indexes"] = {policy["benchmark_index"]: 55}
-    assert executor_slates.benchmark_gate(candidate, "M", policy) is not None
+    target = route_contract([candidate], role="worker", required=["builder"],
+                            context={"gear": "M", "size_class": "M"}, executor_policy=policy)
+    other = route_contract([other_candidate], role="worker", required=["builder"],
+                           context={"gear": "S", "size_class": "S"}, executor_policy=policy)
+    assert target["status"] == "no_qualifying_candidate"
+    assert any(row.get("category") == "subtask-intelligence-floor" for row in target["rejected"])
+    assert other["status"] == "selected"
     policy["floors"] = {**policy["floors"], "M": 54}
-    assert executor_slates.benchmark_gate(candidate, "M", policy) is None
-    assert executor_slates.benchmark_gate(other_candidate, other_size, policy) is None
+    lowered = route_contract([candidate], role="worker", required=["builder"],
+                             context={"gear": "M", "size_class": "M"}, executor_policy=policy)
+    assert lowered["status"] == "selected"
