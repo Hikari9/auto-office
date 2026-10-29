@@ -13,3 +13,20 @@ Scoped validation is a change-relevant check, not a full-suite pass. The pre-pus
 Run `scripts/validate.sh --full` for release validation, test infrastructure changes, deleted or renamed tests, or when a task explicitly requires the full regression suite. The full command runs all tests under `tests/` with `--all`; it records a full-suite result only when the checked tree remains unchanged.
 
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
+
+## Default pytest measurement
+
+On 2026-10-29, `.venv/bin/python -m pytest -n 2` ran from the repository root with pytest's default marker selection, one sequential run per tree on the same machine. The baseline is `origin/main` (`986e9d8d`), run from a git worktree. The branch is `af9de541`, this PR's HEAD.
+
+| Tree | Collected | Passed | Failed | Skipped | Wall time |
+| --- | --- | --- | --- | --- | --- |
+| `origin/main` (`986e9d8d`) | 3,840 | 3,837 | 2 | 2 | 321.29 s |
+| branch (`af9de541`) | 3,881 | 3,877 | 3 | 2 | 358.92 s |
+
+The branch carries five T1 commits that `origin/main` lacks (`ab090d55` through `515206b4`), so the +41 collected nodes include T1 tests and this PR's new test. This run does not separate the two.
+
+Both trees fail `tests/test_checks_stale.py::test_any_other_edit_while_checks_run_is_stale` and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. The branch also fails `tests/v31/test_argon_catalog_809.py::test_argon_exception_remains_l_executor_only_and_high_is_xl`. That test already fails at T1 base `515206b4`, so it comes from base work, not this PR.
+
+pytest's summary total is one higher than the collected count on both trees. The cause is not investigated.
+
+Each tree was timed once. Wall time varies between runs: an earlier branch run at `bbbfb8b9` took 342.87 s and an earlier baseline run on a worktree without `.git` was discarded. Treat the 37.6 s difference as approximate.

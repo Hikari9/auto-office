@@ -1,7 +1,9 @@
 """Regression coverage for Auto-Office's targeted PR selector (#854)."""
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -68,6 +70,19 @@ def test_docs_change_still_checks_named_safety_smoke(pr_repo):
     }
 
 
+def test_missing_safety_smoke_module_fails_closed(pr_repo):
+    from scripts.select_pr_tests import SAFETY_SMOKE
+
+    # Absent from the base as well, so the deleted-test guard does not fire first.
+    git(pr_repo, "rm", "-q", SAFETY_SMOKE[0])
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "drop smoke"], check=True)
+    git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (pr_repo / "README.md").write_text("new docs\n")
+    with pytest.raises(SelectionError, match="Safety-smoke test modules are missing"):
+        selection(pr_repo)
+
+
 def test_safety_smoke_set_is_named_and_selected(pr_repo):
     from scripts.select_pr_tests import SAFETY_SMOKE
 
@@ -98,7 +113,7 @@ def test_pr_shell_gate_fails_closed_without_contract_tests(pr_repo, contracts):
     assert not (pr_repo / ".venv").exists()
 
 
-def _install_shell_gate_fixture(pr_repo, selected_tests):
+def _install_shell_gate_fixture(pr_repo):
     import hashlib
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
@@ -109,7 +124,14 @@ def _install_shell_gate_fixture(pr_repo, selected_tests):
         (pr_repo / path).write_text("pass\n")
     (pr_repo / "tests" / "conftest.py").write_text(
         'def pytest_addoption(parser):\n    parser.addoption("--all", action="store_true")\n')
-    (pr_repo / "tests" / "test_gate_smoke.py").write_text("def test_gate_smoke(): assert True\n")
+    smoke = pr_repo / "tests" / "v31" / "test_verification_coverage.py"
+    smoke.parent.mkdir(parents=True, exist_ok=True)
+    smoke.write_text("def test_safety_smoke(): assert True\n")
+    integrity = pr_repo / "tests" / "v31" / "test_issue_563_artifact_integrity.py"
+    integrity.write_text("def test_safety_smoke(): assert True\n")
+    selector_smoke = pr_repo / "tests" / "test_pr_test_selection.py"
+    selector_smoke.write_text("def test_safety_smoke(): assert True\n")
+    (pr_repo / "tests" / "test_affected.py").write_text("def test_affected(): assert True\n")
     contracts = pr_repo / "tests" / "contracts"
     contracts.mkdir()
     (contracts / "test_contract.py").write_text("def test_contract(): assert True\n")
@@ -117,7 +139,7 @@ def _install_shell_gate_fixture(pr_repo, selected_tests):
     (pr_repo / ".gitignore").write_text(".venv/\n")
     env_dir = pr_repo / ".venv" / "bin"
     env_dir.mkdir(parents=True)
-    real_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python3"
+    real_python = shlex.quote(sys.executable)
     fake_python = f'''#!/bin/bash
 if [ "$1" = "-c" ]; then exit 0; fi
 case "$1" in
@@ -126,7 +148,9 @@ case "$1" in
     if [ -n "$SELECTED_TESTS" ]; then printf '%s\\n' "$SELECTED_TESTS" > "$3"; else : > "$3"; fi
     exit 0 ;;
   scripts/office_runtime.py) exit 0 ;;
-  -m) exec {real_python} "$@" ;;
+  -m)
+    if [ -n "$PYTEST_ARGS_LOG" ]; then printf '%s\\n' "$@" > "$PYTEST_ARGS_LOG"; fi
+    exec {real_python} "$@" ;;
 esac
 exit 99
 '''
@@ -142,25 +166,31 @@ exit 99
 
 def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
     import os
+    from scripts.select_pr_tests import SAFETY_SMOKE
 
-    script = _install_shell_gate_fixture(pr_repo, "tests/test_gate_smoke.py")
+    script = _install_shell_gate_fixture(pr_repo)
+    selected_tests = "\n".join((*SAFETY_SMOKE, "tests/test_affected.py"))
+    args_log = pr_repo / "pytest-args.log"
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
                           env={**os.environ, "VALIDATE_WORKERS": "1",
-                               "SELECTED_TESTS": "tests/test_gate_smoke.py"})
+                               "SELECTED_TESTS": selected_tests,
+                               "PYTEST_ARGS_LOG": str(args_log)})
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    assert "Contract suite: tests/contracts/" in proc.stdout
+    assert "SCOPED PR tests: contract suite" in proc.stdout
     assert "contract suite + safety smoke + changed-file affected tests" in proc.stdout
-    assert "2 passed" in proc.stdout
+    assert "5 passed" in proc.stdout
+    pytest_args = args_log.read_text().splitlines()
+    assert "tests/contracts/" in pytest_args
+    assert (set(SAFETY_SMOKE) | {"tests/test_affected.py"}) <= set(pytest_args)
 
 
 def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     import os
 
     gate_source = (Path(__file__).resolve().parents[1] / "scripts" / "validate.sh").read_text()
-    assert 'selected_count=0' in gate_source
-    assert '[ "$selected_count" -eq 0 ]' in gate_source
-    script = _install_shell_gate_fixture(pr_repo, "")
+    assert '[ "${#selected_tests[@]}" -eq 0 ]' in gate_source
+    script = _install_shell_gate_fixture(pr_repo)
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
                           env={**os.environ, "VALIDATE_WORKERS": "1"})
@@ -171,8 +201,10 @@ def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
 def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo):
     import os
     import shutil
+    from scripts.select_pr_tests import SAFETY_SMOKE
 
-    script = _install_shell_gate_fixture(pr_repo, "tests/test_gate_smoke.py")
+    script = _install_shell_gate_fixture(pr_repo)
+    selected_tests = "\n".join((*SAFETY_SMOKE, "tests/test_affected.py"))
     python_stub = pr_repo / "python3.stub"
     shutil.copy2(pr_repo / ".venv" / "bin" / "python3", python_stub)
     shutil.rmtree(pr_repo / ".venv")
@@ -196,7 +228,7 @@ exit 99
                           capture_output=True, text=True,
                           env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
                                "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
-                               "SELECTED_TESTS": "tests/test_gate_smoke.py",
+                               "SELECTED_TESTS": selected_tests,
                                "VALIDATE_WORKERS": "1"})
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert "venv --python >=3.11 .venv" in env_log.read_text()

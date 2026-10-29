@@ -95,17 +95,14 @@ python3 scripts/check_ecosystem.py
 # Two workers maximum. PR selection still uses --all so selected integration,
 # legacy, and slow tests are never hidden by the default tier filter.
 if [ "$mode" = "pr" ]; then
-  echo "== Contract suite: tests/contracts/ (--all markers enabled)"
   selection_file="$(mktemp)"
   trap 'rm -f "$selection_file"' EXIT
   python3 scripts/select_pr_tests.py --output "$selection_file"
   selected_tests=()
-  selected_count=0
   while IFS= read -r selected_test; do
     selected_tests+=("$selected_test")
-    selected_count=$((selected_count + 1))
   done < "$selection_file"
-  if [ "$selected_count" -eq 0 ]; then
+  if [ "${#selected_tests[@]}" -eq 0 ]; then
     echo "[PR GATE] No tests selected; refusing empty scoped validation" >&2
     exit 2
   fi
