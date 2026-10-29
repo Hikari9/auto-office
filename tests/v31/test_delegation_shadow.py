@@ -35,6 +35,33 @@ def test_parallel_dispatch_keeps_the_real_decision_and_records_advice(env):
     assert response["data"]["delegation_shadow"][0]["actual"] == "parallel"
 
 
+def test_cohesive_shadow_advice_does_not_override_requested_parallel_dispatch(env, monkeypatch):
+    from office import delegation_shadow
+
+    approved_run(env, plan=PLAN_TWO)
+    original = delegation_shadow.propose
+
+    def report_coupled_scope(tasks, *, parallel_requested, cache_policy=None):
+        # Model a coupled proposal while leaving this fixture's dispatchable tasks unchanged.
+        coupled = [{"id": "T1", "scope": ["src/*.py"], "depends": []},
+                   {"id": "T2", "scope": ["src/office.py"], "depends": []}]
+        return original(coupled, parallel_requested=parallel_requested, cache_policy=cache_policy)
+
+    monkeypatch.setattr(delegation_shadow, "propose", report_coupled_scope)
+    code, output = env.office("dispatch", "T1", "T2", "--parallel",
+        env={"OFFICE_JOBS": "manual", "OFFICE_WORKER_LAUNCHER": "external"}, check=0)
+    assert code == 0, output
+    shadow = json.loads(_events(env)[0]["payload_json"])
+    assert shadow["proposal"] == "cohesive-or-serial"
+    assert shadow["actual"] == "parallel"
+    con = env.con()
+    try:
+        tasks = {r["task_id"] for r in con.execute("SELECT task_id FROM dispatches WHERE role='executor'")}
+        assert tasks == {"T1", "T2"}
+    finally:
+        con.close()
+
+
 def test_shadow_logging_on_or_off_keeps_dispatch_decisions_identical(tmp_path, monkeypatch):
     def run(root, enabled):
         with monkeypatch.context() as patch:

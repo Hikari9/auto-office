@@ -6,23 +6,19 @@ orchestrator and its authorization/review gates retain complete control.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from office import planfile
 
 SHADOW_VERSION = "delegation-shadow-1"
 
 
-def _paths(task: Mapping) -> set[str] | None:
+def _paths(task: Mapping) -> list[str] | None:
     raw = task.get("scope")
     if not isinstance(raw, (list, tuple)) or not raw:
         return None
-    paths = {str(p).strip().strip("/") for p in raw if isinstance(p, str) and p.strip()}
-    return paths if paths and len(paths) == len(raw) else None
-
-
-def _collides(left: str, right: str) -> bool:
-    # A directory envelope owns its descendants. A trailing wildcard is a
-    # directory envelope too; never take a speculative no-overlap shortcut.
-    a, b = left.removesuffix("/**").removesuffix("/*"), right.removesuffix("/**").removesuffix("/*")
-    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+    if any(not isinstance(p, str) or not p.strip() or p.strip().startswith("/") for p in raw):
+        return None
+    paths = [p.strip().strip("/") for p in raw if isinstance(p, str) and p.strip()]
+    return paths if paths and all(paths) and len(paths) == len(raw) else None
 
 
 def propose(tasks: Sequence[Mapping], *, parallel_requested: bool,
@@ -52,8 +48,7 @@ def propose(tasks: Sequence[Mapping], *, parallel_requested: bool,
                 continue
             if ids[j] in depends or ids[i] in other_depends:
                 edges.append({"tasks": [ids[j], ids[i]], "kind": "dependency"})
-            if scopes[i] is not None and scopes[j] is not None and any(
-                    _collides(a, b) for a in scopes[i] for b in scopes[j]):
+            if scopes[i] is not None and scopes[j] is not None and planfile.scopes_overlap(scopes[i], scopes[j]):
                 edges.append({"tasks": [ids[j], ids[i]], "kind": "scope-overlap"})
     if len(tasks) <= 1:
         proposal, why = "single-producer", "one selected task; fan-out is not applicable"

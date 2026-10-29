@@ -23,6 +23,33 @@ def test_dependencies_overlapping_scopes_and_directory_ancestors_are_coupled():
     assert {e["kind"] for e in r["conflicts"]} == {"dependency", "scope-overlap"}
 
 
+def test_glob_scopes_overlapping_a_concrete_file_are_coupled():
+    r = delegation_shadow.propose(
+        [task("T1", ["src/*.py"]), task("T2", ["src/foo.py"])],
+        parallel_requested=True,
+    )
+    assert r["proposal"] == "cohesive-or-serial"
+    assert r["conflicts"] == [{"tasks": ["T1", "T2"], "kind": "scope-overlap"}]
+
+
+def test_absolute_scope_is_unresolved_instead_of_claiming_independence():
+    r = delegation_shadow.propose(
+        [task("T1", ["/Users/rico/Git/repo/src/foo.py"]), task("T2", ["src/foo.py"])],
+        parallel_requested=True,
+    )
+    assert r["proposal"] == "unresolved"
+    assert r["actual"] == "parallel"
+
+
+def test_trailing_slash_scope_normalizes_to_the_same_file():
+    r = delegation_shadow.propose(
+        [task("T1", ["src/foo.py/"]), task("T2", ["src/foo.py"])],
+        parallel_requested=True,
+    )
+    assert r["proposal"] == "cohesive-or-serial"
+    assert r["conflicts"] == [{"tasks": ["T1", "T2"], "kind": "scope-overlap"}]
+
+
 def test_missing_scope_and_duplicate_ids_fail_to_observe_not_to_veto():
     r = delegation_shadow.propose([task("T1", []), task("T1", ["src/b"])], parallel_requested=True)
     assert r["proposal"] == "unresolved" and r["actual"] == "parallel"
@@ -115,6 +142,31 @@ def test_matched_evaluation_requires_quality_and_complete_metrics():
     assert not module.compare(malformed)["metrics"]["total_tokens"]["claim_ready"]
 
 
+def test_actual_usd_requires_api_billing_and_actual_cost_kinds():
+    path = Path(__file__).resolve().parents[2] / "eval/v31/compare_economics.py"
+    spec = importlib.util.spec_from_file_location("office502_compare_usd", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def arm(pair, name, billing="api", cost_kind="actual"):
+        return {"pair_id": pair, "arm": name, "task_shape": "independent", "harness": "codex",
+                "billing_mode": billing, "verified_completion": True, "integrated_defects": 0,
+                "metrics": {"actual_usd": 10 if name == "baseline" else 8},
+                "complete_metrics": ["actual_usd"], "cost_kind": cost_kind}
+
+    def comparison(rows):
+        return module.compare(rows)["metrics"]["actual_usd"]
+
+    api_rows = [arm(str(i), a) for i in range(3) for a in ("baseline", "treatment")]
+    assert comparison(api_rows)["claim_ready"]
+    subscription_rows = [arm(str(i), a, billing="subscription")
+                         for i in range(3) for a in ("baseline", "treatment")]
+    assert comparison(subscription_rows)["matched"] == 0
+    estimated_rows = [arm(str(i), a, cost_kind="estimated-nominal")
+                      for i in range(3) for a in ("baseline", "treatment")]
+    assert comparison(estimated_rows)["matched"] == 0
+
+
 def test_matched_evaluation_rejects_malformed_json_shapes():
     path = Path(__file__).resolve().parents[2] / "eval/v31/compare_economics.py"
     spec = importlib.util.spec_from_file_location("office502_compare_input", path)
@@ -122,3 +174,24 @@ def test_matched_evaluation_rejects_malformed_json_shapes():
     spec.loader.exec_module(module)
     assert module.compare({"pair_id": "1"})["error"] == "input must be a JSON array"
     assert module.compare([None])["error"] == "each array item must be an object"
+    valid = [{"pair_id": str(i), "arm": arm, "task_shape": "x", "harness": "x",
+              "billing_mode": "subscription", "verified_completion": True, "integrated_defects": 0,
+              "complete_metrics": ["total_tokens"], "metrics": {"total_tokens": 10 if arm == "baseline" else 8}}
+             for i in range(3) for arm in ("baseline", "treatment")]
+    malformed_identity = module.compare(valid + [{**valid[0], "pair_id": None}])
+    assert malformed_identity == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
+    malformed_arm = module.compare(valid + [{**valid[0], "pair_id": "extra", "arm": "control"}])
+    assert malformed_arm == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
+    whitespace_pair = module.compare(valid + [{**valid[0], "pair_id": " "}])
+    assert whitespace_pair == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
+    malformed_metrics = [{"pair_id": "1", "arm": arm, "task_shape": "x", "harness": "x",
+                          "billing_mode": "subscription", "verified_completion": True,
+                          "integrated_defects": 0, "complete_metrics": ["total_tokens"], "metrics": ["bad"]}
+                         for arm in ("baseline", "treatment")]
+    assert module.compare(malformed_metrics)["metrics"]["total_tokens"]["matched"] == 0

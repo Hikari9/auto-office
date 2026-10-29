@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 
 METRICS = ("total_tokens", "wall_seconds", "first_dispatch_seconds", "admin_turns", "quota_units", "actual_usd")
@@ -26,13 +27,17 @@ def compare(rows: list[dict]) -> dict:
         return {"error": "each array item must be an object", "rows": invalid_rows}
     pairs = defaultdict(dict)
     duplicates = []
-    for row in rows:
+    invalid_pairs = []
+    for index, row in enumerate(rows):
         key, arm = row.get("pair_id"), row.get("arm")
-        if not isinstance(key, str) or not key or arm not in ("baseline", "treatment"):
+        if not isinstance(key, str) or not key.strip() or arm not in ("baseline", "treatment"):
+            invalid_pairs.append(index)
             continue
         if arm in pairs[key]:
             duplicates.append(key)
         pairs[key][arm] = row
+    if invalid_pairs:
+        return {"error": "each row must have a non-empty pair_id and valid arm", "rows": invalid_pairs}
     accepted, excluded = [], []
     if duplicates:
         return {"error": "duplicate pair/arm entries", "pairs": sorted(set(duplicates))}
@@ -65,7 +70,10 @@ def compare(rows: list[dict]) -> dict:
             if k == "actual_usd" and (a.get("billing_mode") != "api" or
                                       a.get("cost_kind") != "actual" or b.get("cost_kind") != "actual"):
                 continue
-            before, after = (a.get("metrics") or {}).get(k), (b.get("metrics") or {}).get(k)
+            metrics_a, metrics_b = a.get("metrics"), b.get("metrics")
+            if not isinstance(metrics_a, Mapping) or not isinstance(metrics_b, Mapping):
+                continue
+            before, after = metrics_a.get(k), metrics_b.get(k)
             if not all(type(x) in (int, float) and math.isfinite(x) and x >= 0 for x in (before, after)):
                 continue
             values.append((key, before, after))
