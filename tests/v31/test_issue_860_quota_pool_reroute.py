@@ -60,9 +60,12 @@ def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_even
     d = _as_herdr(env)
     con = env.con()
     failed = "SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?"
+    cooldowns = "SELECT route, updated_at FROM route_cooldowns"
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "usage_limit" in out, out
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 1
+    first = dict(con.execute(cooldowns).fetchall())
+    assert first, first
     # Same screen and label, stored reset passed, a different reset parsed: a new episode.
     _store_episode(env, d, **{**_limit_row(env, d), "resets_at": "2026-01-01T13:30:00+00:00"})
     code, out = _wait(env, e, timeout="3")
@@ -70,10 +73,16 @@ def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_even
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
     stored = _limit_row(env, d)["resets_at"]
     assert stored > "2026-01-02", stored
-    # Repeated polls of the new episode neither add an event nor move its reset.
+    second = dict(con.execute(cooldowns).fetchall())
+    assert second.keys() == first.keys() and all(second[r] > first[r] for r in first), (first, second)
+    newest = con.execute("SELECT payload_json FROM events WHERE kind='route.failed' AND dispatch_id=? "
+                         "ORDER BY seq DESC LIMIT 1", (d["id"],)).fetchone()[0]
+    assert json.loads(newest)["demoted_until"] == stored, newest
+    # Repeated polls of the new episode add no event, move no reset, and leave the cooldowns alone.
     _wait(env, e, timeout="3")
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
     assert _limit_row(env, d)["resets_at"] == stored
+    assert dict(con.execute(cooldowns).fetchall()) == second
 
 
 def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):
