@@ -1,6 +1,7 @@
 """#563: a partial pytest tier cannot silently certify integration for landing."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -168,6 +169,8 @@ def test_scoped_gate_pins_match_reviewed_source():
         "tests/v31/test_verification_coverage.py",
         "tests/v31/test_issue_563_artifact_integrity.py",
         ".githooks/pre-push",
+        "tests/contracts/test_executor_policy.py",
+        "tests/contracts/test_route_parity.py",
     }
     assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
             for p in vc._SCOPED_GATE_SHA256} == vc._SCOPED_GATE_SHA256
@@ -413,7 +416,7 @@ def pytest_collection_modifyitems(config, items):
         return
     # integration, legacy and slow are normally deselected
 ''')
-    for name in ("test_pr_test_selection.py", "v31/test_verification_coverage.py",
+    for name in ("test_version_single_source.py", "test_pr_test_selection.py", "v31/test_verification_coverage.py",
                  "v31/test_issue_563_artifact_integrity.py"):
         path = tests / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,7 +451,7 @@ def pytest_collection_modifyitems(config, items):
     (fixture_venv / "lib").symlink_to(source / ".venv/lib", target_is_directory=True)
     shutil.copy2(source / ".venv/pyvenv.cfg", fixture_venv / "pyvenv.cfg")
     (fixture_venv / ".validate-stamp").write_text(
-        hashlib.sha1((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
+        hashlib.sha256((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
     (env.repo / ".venv").symlink_to(fixture_venv, target_is_directory=True)
     env.git("add", "-A")
     env.git("commit", "-qm", "fixture: pinned gate")
@@ -468,7 +471,7 @@ def pytest_collection_modifyitems(config, items):
     artifact = (run["landing"] or {}).get("integration") or {}
     logs = list(env.state.rglob("check-*.log"))
     assert artifact["status"] == "accepted", (artifact, [p.read_text() for p in logs])
-    assert any("4 passed" in p.read_text() and "== Validation passed" in p.read_text() for p in logs)
+    assert any(re.search(r"\b5 passed\b", p.read_text()) and "== Validation passed" in p.read_text() for p in logs), [p.read_text() for p in logs]
     assert artifact["full_suite"]["scope"] == vc.SCOPED
     assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
     land._require_run_coverage(run, artifact["commit"], con=con)

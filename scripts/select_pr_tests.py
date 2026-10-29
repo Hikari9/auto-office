@@ -15,6 +15,7 @@ from pathlib import Path
 
 # Named safety-smoke checks accompany the mandatory tests/contracts suite.
 SAFETY_SMOKE = (
+    "tests/test_version_single_source.py",
     "tests/v31/test_verification_coverage.py",
     "tests/v31/test_issue_563_artifact_integrity.py",
     "tests/test_pr_test_selection.py",
@@ -42,11 +43,20 @@ class SelectionError(RuntimeError):
     pass
 
 
-def git(root: Path, *args: str) -> str:
+def _run(root: Path, *args: str) -> str:
     proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
     if proc.returncode:
         raise SelectionError(f"git {' '.join(args)}: {proc.stderr.strip()}")
-    return proc.stdout.strip()
+    return proc.stdout
+
+
+def git(root: Path, *args: str) -> str:
+    return _run(root, *args).strip()
+
+
+def git_paths(root: Path, *args: str) -> list[str]:
+    """Paths from a `-z` listing; newline output quotes non-ASCII names and breaks matching."""
+    return [p for p in _run(root, *args).split("\0") if p]
 
 
 def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
@@ -56,8 +66,8 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     # Require a real local base; never turn a missing origin into an empty diff.
     git(root, "rev-parse", "--verify", base_ref + "^{commit}")
     base = git(root, "merge-base", "HEAD", base_ref)
-    changed = set(git(root, "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRT", base, "HEAD").splitlines())
-    changed.update(git(root, "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRT", "HEAD").splitlines())
+    changed = set(git_paths(root, "diff", "-z", "--no-renames", "--name-only", "--diff-filter=ACDMRT", base, "HEAD"))
+    changed.update(git_paths(root, "diff", "-z", "--no-renames", "--name-only", "--diff-filter=ACDMRT", "HEAD"))
     if not changed:
         raise SelectionError("No changed files versus PR base; refusing an empty PR-test attestation")
     if changed.intersection({"conftest.py", "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"}):
@@ -65,7 +75,7 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     if any(p.startswith("tests/") and not (root / p).is_file() for p in changed):
         raise SelectionError("A test file was deleted/renamed: review coverage and run full validation explicitly")
 
-    tests = sorted(p for p in git(root, "ls-tree", "-r", "--name-only", "HEAD", "--", "tests").splitlines()
+    tests = sorted(p for p in git_paths(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "tests")
                    if Path(p).name.startswith("test_") and p.endswith(".py"))
     if any(p.startswith("tests/") and p not in tests for p in changed):
         raise SelectionError("Test infrastructure changed: run full validation explicitly")

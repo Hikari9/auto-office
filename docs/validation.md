@@ -6,7 +6,7 @@ The run-level gate for an ordinary PR is `scripts/validate.sh --pr` plus an APPR
 
 The contract directory must exist and contain at least one `test_*.py` module. A missing or empty directory blocks scoped validation. Safety-smoke tests are declared in `scripts/select_pr_tests.py`; they supplement contract and affected-domain coverage rather than replace either.
 
-Scoped validation is a change-relevant check, not a full-suite pass. The pre-push hook runs the same gate and records scoped evidence separately from full-suite evidence. Landing attestation binds the committed validation script, selector, safety-smoke and integrity tests, and pre-push hook by digest. Changing one requires reviewing the attestation and updating the digest set together.
+Scoped validation is a change-relevant check, not a full-suite pass. The pre-push hook runs the same gate on every push. The gate writes scoped and full-suite receipts separately; no landing check reads them. Landing attestation binds the committed validation script, selector, safety-smoke and integrity tests, and pre-push hook by digest. Changing one requires reviewing the attestation and updating the digest set together.
 
 ## Full validation
 

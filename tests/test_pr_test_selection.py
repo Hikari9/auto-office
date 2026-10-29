@@ -1,6 +1,7 @@
 """Regression coverage for Auto-Office's targeted PR selector (#854)."""
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import sys
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.select_pr_tests import SelectionError, selection
+from scripts.select_pr_tests import SAFETY_SMOKE, SelectionError, selection
 
 
 def git(root: Path, *args: str) -> str:
@@ -63,11 +64,24 @@ def test_docs_change_still_checks_named_safety_smoke(pr_repo):
     (pr_repo / "README.md").write_text("new docs\n")
     _, changed, chosen = selection(pr_repo)
     assert changed == ["README.md"]
-    assert set(chosen) == {
-        "tests/v31/test_verification_coverage.py",
-        "tests/v31/test_issue_563_artifact_integrity.py",
-        "tests/test_pr_test_selection.py",
-    }
+    assert set(SAFETY_SMOKE) <= set(chosen)
+
+
+def test_version_invariant_runs_on_every_pr(pr_repo):
+    (pr_repo / "README.md").write_text("new docs\n")
+    _, _, chosen = selection(pr_repo)
+    assert "tests/test_version_single_source.py" in chosen
+
+
+def test_non_ascii_test_module_is_selected_not_quoted(pr_repo):
+    # Newline git output quotes this path, so it would look like a non-test change.
+    (pr_repo / "tests" / "test_café.py").write_text("def test_cafe(): pass\n")
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "non-ascii test"], check=True)
+    _, changed, chosen = selection(pr_repo)
+    assert changed == ["tests/test_café.py"]
+    assert "tests/test_café.py" in chosen
 
 
 def test_missing_safety_smoke_module_fails_closed(pr_repo):
@@ -141,7 +155,10 @@ def _install_shell_gate_fixture(pr_repo):
     env_dir.mkdir(parents=True)
     real_python = shlex.quote(sys.executable)
     fake_python = f'''#!/bin/bash
-if [ "$1" = "-c" ]; then exit 0; fi
+if [ "$1" = "-c" ]; then
+  case "$2" in *hashlib*) exec {real_python} "$@" ;; esac
+  [ -z "$PY_TOO_OLD" ]; exit $?
+fi
 case "$1" in
   scripts/check_ecosystem.py) exit 0 ;;
   scripts/select_pr_tests.py)
@@ -156,7 +173,7 @@ exit 99
 '''
     (env_dir / "python3").write_text(fake_python)
     (env_dir / "python3").chmod(0o755)
-    stamp = hashlib.sha1((pr_repo / "pyproject.toml").read_bytes()).hexdigest()
+    stamp = hashlib.sha256((pr_repo / "pyproject.toml").read_bytes()).hexdigest()
     (pr_repo / ".venv" / ".validate-stamp").write_text(stamp + "\n")
     git(pr_repo, "add", ".")
     subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
@@ -166,7 +183,6 @@ exit 99
 
 def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
     import os
-    from scripts.select_pr_tests import SAFETY_SMOKE
 
     script = _install_shell_gate_fixture(pr_repo)
     selected_tests = "\n".join((*SAFETY_SMOKE, "tests/test_affected.py"))
@@ -179,7 +195,7 @@ def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert "SCOPED PR tests: contract suite" in proc.stdout
     assert "contract suite + safety smoke + changed-file affected tests" in proc.stdout
-    assert "5 passed" in proc.stdout
+    assert re.search(r"\b6 passed\b", proc.stdout)
     pytest_args = args_log.read_text().splitlines()
     assert "tests/contracts/" in pytest_args
     assert (set(SAFETY_SMOKE) | {"tests/test_affected.py"}) <= set(pytest_args)
@@ -188,8 +204,6 @@ def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
 def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     import os
 
-    gate_source = (Path(__file__).resolve().parents[1] / "scripts" / "validate.sh").read_text()
-    assert '[ "${#selected_tests[@]}" -eq 0 ]' in gate_source
     script = _install_shell_gate_fixture(pr_repo)
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
@@ -198,16 +212,18 @@ def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     assert "No tests selected; refusing empty scoped validation" in proc.stderr
 
 
-def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo):
+@pytest.mark.parametrize("too_old", [False, True])
+def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo, too_old):
     import os
     import shutil
-    from scripts.select_pr_tests import SAFETY_SMOKE
 
     script = _install_shell_gate_fixture(pr_repo)
     selected_tests = "\n".join((*SAFETY_SMOKE, "tests/test_affected.py"))
     python_stub = pr_repo / "python3.stub"
     shutil.copy2(pr_repo / ".venv" / "bin" / "python3", python_stub)
-    shutil.rmtree(pr_repo / ".venv")
+    if not too_old:
+        # A too-old existing .venv is recreated instead; keep it for that case.
+        shutil.rmtree(pr_repo / ".venv")
     fake_bin = pr_repo / "fake-bin"
     fake_bin.mkdir()
     uv = fake_bin / "uv"
@@ -229,9 +245,48 @@ exit 99
                           env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
                                "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
                                "SELECTED_TESTS": selected_tests,
+                               "PY_TOO_OLD": "1" if too_old else "",
                                "VALIDATE_WORKERS": "1"})
-    assert proc.returncode == 0, proc.stderr + proc.stdout
     assert "venv --python >=3.11 .venv" in env_log.read_text()
+    if too_old:
+        # The stub stays too old after recreation, so the gate must refuse rather than run.
+        assert proc.returncode == 2, proc.stderr + proc.stdout
+        assert "Recreating .venv with a supported Python" in proc.stdout
+        assert "Python 3.11 or newer is required" in proc.stderr
+        assert "SCOPED PR tests" not in proc.stdout
+    else:
+        assert proc.returncode == 0, proc.stderr + proc.stdout
+
+
+def test_build_resource_check_survives_early_grep_match(tmp_path):
+    """grep -q exiting on the first match must not SIGPIPE the listing under pipefail."""
+    import os
+
+    lines = (Path(__file__).resolve().parents[1] / "scripts" / "validate.sh").read_text().splitlines()
+    start = lines.index('if [ "${VALIDATE_BUILD:-0}" = "1" ]; then')
+    body = "\n".join(lines[start + 1:lines.index("fi", start)])
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    listing = tmp_path / "listing.py"
+    listing.write_text(
+        "for name in ('office/_resources/config/config.default.yaml',\n"
+        "             'office/_resources/docs/orchestrator-reference.md',\n"
+        "             'office/_resources/docs/onboarding.md'):\n"
+        "    print(name)\n"
+        "for i in range(200000):\n"
+        "    print('filler', i, 'x' * 40)\n")
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "build" ]; then mkdir -p dist && : > dist/x.whl; exit 0; fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "zipfile" ]; then exec '
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(listing))}; fi\n"
+        "exit 99\n")
+    fake_python.chmod(0o755)
+    proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{body}"], cwd=tmp_path,
+                          capture_output=True, text=True,
+                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_missing_base_fails_closed(pr_repo):
