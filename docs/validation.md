@@ -13,3 +13,7 @@ Scoped validation is a change-relevant check, not a full-suite pass. The pre-pus
 Run `scripts/validate.sh --full` for release validation, test infrastructure changes, deleted or renamed tests, or when a task explicitly requires the full regression suite. The full command runs all tests under `tests/` with `--all`; it records a full-suite result only when the checked tree remains unchanged.
 
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
+
+## Default pytest measurement
+
+On 2026-10-29, `pytest -n 2` from the repository root collected 3,840 nodes on main (`986e9d8d`) in 265.18 seconds and 3,881 nodes on this branch (`cacb37c5`) in 305.19 seconds. Main reported 3,837 passed, 2 failed, and 1 skipped; this branch reported 3,876 passed, 3 failed, and 2 skipped. Both runs use pytest's default marker selection, so this is not the `--all` full-validation measurement tracked by issue #796. Main failed `tests/test_checks_stale.py::test_any_other_edit_while_checks_run_is_stale` and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`; the branch had those failures plus `tests/v31/test_argon_catalog_809.py::test_argon_exception_remains_l_executor_only_and_high_is_xl`.
