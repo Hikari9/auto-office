@@ -46,7 +46,7 @@ fi
 # The tree under test, taken before any check runs: a commit that lands during
 # the run must not be stamped as validated.
 start_tree=""
-[ -z "$(git status --porcelain --untracked-files=no)" ] && start_tree="$(git rev-parse 'HEAD^{tree}')"
+[ -z "$(git status --porcelain -- . ':!dist')" ] && start_tree="$(git rev-parse 'HEAD^{tree}')"
 
 # Same install as the old CI job: an editable package plus test deps, in a repo-local venv.
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
@@ -70,7 +70,7 @@ if ! .venv/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 1
 fi
 # Reinstall only when the dependency declaration changed, so an existing .venv picks up new
 # test deps (e.g. pytest-xdist) without being rebuilt on every run.
-stamp="$(shasum pyproject.toml | cut -d' ' -f1)"
+stamp="$(.venv/bin/python3 -c 'import hashlib; print(hashlib.sha256(open("pyproject.toml", "rb").read()).hexdigest())')"
 if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
   echo "== Installing package and test deps"
   # Use uv for the Hatchling/PEP 660 editable install and host pip configuration.
@@ -122,17 +122,19 @@ if [ "${VALIDATE_BUILD:-0}" = "1" ]; then
   echo "== Build the distribution"
   rm -rf dist
   python3 -m build --wheel
-  python3 -m zipfile -l dist/*.whl | grep -q office/_resources/config/config.default.yaml
-  python3 -m zipfile -l dist/*.whl | grep -q office/_resources/docs/orchestrator-reference.md
-  python3 -m zipfile -l dist/*.whl | grep -q office/_resources/docs/onboarding.md
+  # Capture the listing once: grep -q exiting early would SIGPIPE zipfile under pipefail.
+  listing="$(python3 -m zipfile -l dist/*.whl)"
+  grep -q office/_resources/config/config.default.yaml <<<"$listing"
+  grep -q office/_resources/docs/orchestrator-reference.md <<<"$listing"
+  grep -q office/_resources/docs/onboarding.md <<<"$listing"
 fi
 
 echo "== Validation passed"
-# Record the pass against the committed tree, so the pre-push hook can skip a
-# rerun: a 12-minute gate inside `git push` holds the SSH connection idle and
-# GitHub drops it (the push dies with SIGPIPE). Only a clean tree is stamped,
-# since otherwise the tree that passed is not the one being pushed.
-if [ -n "$start_tree" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] \
+# Record the pass as a receipt keyed by the committed tree. No check reads it:
+# the pre-push hook reruns this gate on every push, and landing attests from
+# run evidence (verification_coverage.py). Only a clean tree is stamped, since
+# otherwise the tree that passed is not the one being pushed.
+if [ -n "$start_tree" ] && [ -z "$(git status --porcelain -- . ':!dist')" ] \
     && [ "$(git rev-parse 'HEAD^{tree}')" = "$start_tree" ]; then
   # Keep scoped and full receipts separate; scoped results must never
   # satisfy a full-suite validation stamp.

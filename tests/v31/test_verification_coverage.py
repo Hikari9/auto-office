@@ -1,6 +1,7 @@
 """#563: a partial pytest tier cannot silently certify integration for landing."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def write_scoped_gate_artifacts(root: Path) -> None:
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            target.write_text("reviewed artifact\n")
+            target.write_text("# reviewed artifact\n")
 
 
 @pytest.mark.parametrize("commands", [
@@ -160,15 +161,24 @@ def test_scoped_noop_script_does_not_claim_coverage(tiered_repo):
 
 def test_scoped_gate_pins_match_reviewed_source():
     import hashlib
+    from scripts.select_pr_tests import SAFETY_SMOKE
     root = Path(__file__).resolve().parents[2]
-    assert set(vc._SCOPED_GATE_SHA256) == {
+    pinned = set(vc._SCOPED_GATE_SHA256)
+    # validate.sh runs every contract module, so each one on disk must be pinned.
+    contracts_dir = root / "tests/contracts"
+    contracts = {f"tests/contracts/{p.relative_to(contracts_dir).as_posix()}"
+                 for p in contracts_dir.rglob("*.py")}
+    assert {p for p in pinned if p.startswith("tests/contracts/")} == contracts
+    assert pinned - contracts == {
         "scripts/validate.sh",
         "scripts/select_pr_tests.py",
         "tests/test_pr_test_selection.py",
+        "tests/test_version_single_source.py",
         "tests/v31/test_verification_coverage.py",
         "tests/v31/test_issue_563_artifact_integrity.py",
         ".githooks/pre-push",
     }
+    assert set(SAFETY_SMOKE) <= pinned
     assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
             for p in vc._SCOPED_GATE_SHA256} == vc._SCOPED_GATE_SHA256
 
@@ -181,7 +191,7 @@ def test_scoped_gate_rejects_changed_blob(tiered_repo, changed, monkeypatch):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            target.write_text("reviewed artifact\n")
+            target.write_text("# reviewed artifact\n")
     monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
         p: hashlib.sha256((root / p).read_bytes()).hexdigest()
         for p in vc._SCOPED_GATE_SHA256
@@ -413,7 +423,7 @@ def pytest_collection_modifyitems(config, items):
         return
     # integration, legacy and slow are normally deselected
 ''')
-    for name in ("test_pr_test_selection.py", "v31/test_verification_coverage.py",
+    for name in ("test_version_single_source.py", "test_pr_test_selection.py", "v31/test_verification_coverage.py",
                  "v31/test_issue_563_artifact_integrity.py"):
         path = tests / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -448,7 +458,7 @@ def pytest_collection_modifyitems(config, items):
     (fixture_venv / "lib").symlink_to(source / ".venv/lib", target_is_directory=True)
     shutil.copy2(source / ".venv/pyvenv.cfg", fixture_venv / "pyvenv.cfg")
     (fixture_venv / ".validate-stamp").write_text(
-        hashlib.sha1((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
+        hashlib.sha256((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
     (env.repo / ".venv").symlink_to(fixture_venv, target_is_directory=True)
     env.git("add", "-A")
     env.git("commit", "-qm", "fixture: pinned gate")
@@ -468,7 +478,7 @@ def pytest_collection_modifyitems(config, items):
     artifact = (run["landing"] or {}).get("integration") or {}
     logs = list(env.state.rglob("check-*.log"))
     assert artifact["status"] == "accepted", (artifact, [p.read_text() for p in logs])
-    assert any("4 passed" in p.read_text() and "== Validation passed" in p.read_text() for p in logs)
+    assert any(re.search(r"\b5 passed\b", p.read_text()) and "== Validation passed" in p.read_text() for p in logs), [p.read_text() for p in logs]
     assert artifact["full_suite"]["scope"] == vc.SCOPED
     assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
     land._require_run_coverage(run, artifact["commit"], con=con)
