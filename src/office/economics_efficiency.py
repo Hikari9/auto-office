@@ -6,14 +6,18 @@ import json
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 
 
+def _known_token(value) -> bool:
+    return type(value) is int and value >= 0
+
+
 def summarize(rows: list[dict], *, total_dispatches: int | None = None) -> dict:
     """Describe the observed Office-attributed sample, not an entire unknown run."""
     sample = [r for r in rows if r.get("attribution") == "office"]
-    unknowns = {k: sum(r.get(k) is None for r in sample) for k in TOKEN_FIELDS}
-    components = {k: sum(r[k] for r in sample if isinstance(r.get(k), int) and r[k] >= 0)
+    unknowns = {k: sum(not _known_token(r.get(k)) for r in sample) for k in TOKEN_FIELDS}
+    components = {k: sum(r[k] for r in sample if _known_token(r.get(k)))
                   for k in TOKEN_FIELDS}
     root = [r for r in sample if r.get("role") == "root"]
-    root_parts = sum(r[k] for r in root for k in TOKEN_FIELDS if isinstance(r.get(k), int) and r[k] >= 0)
+    root_parts = sum(r[k] for r in root for k in TOKEN_FIELDS if _known_token(r.get(k)))
     total_parts = sum(components.values())
     measured_d = len({r.get("dispatch_id") for r in sample if r.get("dispatch_id")})
     complete_fields = bool(sample) and not any(unknowns.values())

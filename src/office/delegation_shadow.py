@@ -40,13 +40,13 @@ def propose(tasks: Sequence[Mapping], *, parallel_requested: bool,
     for i, task in enumerate(tasks):
         if scopes[i] is None:
             missing.append(ids[i] or f"task-{i + 1}")
-        depends = task.get("depends") or []
+        depends = task.get("depends")
         if not isinstance(depends, (list, tuple)):
             missing.append(ids[i] or f"task-{i + 1}")
             continue
         for j in range(i):
             other = tasks[j]
-            other_depends = other.get("depends") or []
+            other_depends = other.get("depends")
             if not isinstance(other_depends, (list, tuple)):
                 missing.append(ids[j] or f"task-{j + 1}")
                 continue

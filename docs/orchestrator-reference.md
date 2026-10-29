@@ -241,7 +241,6 @@ Everything under `references/OFFICE-SKILLS-V3-*.md`, `docs/v3-*.md` and the 3.0 
 `auto-execution`, `auto-review`, `auto-verification`, `auto-loop`) is 3.0-era reference. It explains where rules came from. It is
 not operational policy for 3.1+ runs, which follow `office status` and `docs/review-convergence.md`.
 
-
 ## Shadow delegation and efficiency inspection (#502)
 
 Every dispatch of multiple tasks now writes a compact `delegation.shadow` **operational decision event** to the existing run event ledger before fan-out. It compares direct task dependencies and ownership-envelope overlap, records the actual serial/parallel request and proposed independent/cohesive strategy, and explicitly says when full-run economics or cache policy are unknown. This event does not change dispatch order, inline/delegated execution rules, routing, protected work, user overrides or review. It is not a model-use or token collector, and requires no additional hook I/O.

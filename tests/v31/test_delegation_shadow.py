@@ -1,7 +1,7 @@
 """Integration regressions for #502 shadow delegation."""
 import json
 import pytest
-from conftest import PLAN_TWO, approved_run
+from conftest import Env, PLAN_TWO, approved_run
 from office import state
 
 
@@ -33,6 +33,41 @@ def test_parallel_dispatch_keeps_the_real_decision_and_records_advice(env):
         con.close()
     _, response = env.ojson("inspect", "efficiency")
     assert response["data"]["delegation_shadow"][0]["actual"] == "parallel"
+
+
+def test_shadow_logging_on_or_off_keeps_dispatch_decisions_identical(tmp_path, monkeypatch):
+    def run(root, enabled):
+        with monkeypatch.context() as patch:
+            instance = Env(root, patch)
+            approved_run(instance, plan=PLAN_TWO)
+            if not enabled:
+                emit = state.emit
+
+                def without_shadow(con, run, kind, *args, **kwargs):
+                    if kind == "delegation.shadow":
+                        return None
+                    return emit(con, run, kind, *args, **kwargs)
+
+                patch.setattr(state, "emit", without_shadow)
+            code, output = instance.office("dispatch", "T1", "T2", "--parallel",
+                env={"OFFICE_JOBS": "manual", "OFFICE_WORKER_LAUNCHER": "external"}, check=0)
+            assert code == 0, output
+            con = instance.con()
+            try:
+                run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+                decisions = [tuple(r) for r in con.execute(
+                    "SELECT task_id,role FROM dispatches WHERE run_id=? ORDER BY task_id,role", (run_id,))]
+                recorded = con.execute(
+                    "SELECT COUNT(*) FROM events WHERE run_id=? AND kind='delegation.shadow'", (run_id,)
+                ).fetchone()[0]
+            finally:
+                con.close()
+            return decisions, recorded
+
+    with_shadow = run(tmp_path / "with-shadow", True)
+    without_shadow = run(tmp_path / "without-shadow", False)
+    assert with_shadow[0] == without_shadow[0] == [("T1", "executor"), ("T2", "executor")]
+    assert with_shadow[1] == 1 and without_shadow[1] == 0
 
 
 def test_shadow_event_rolls_back_if_dispatch_transaction_fails(env, monkeypatch):

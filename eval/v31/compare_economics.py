@@ -19,6 +19,11 @@ MIN_MATCHED_FOR_CLAIM = 3
 
 
 def compare(rows: list[dict]) -> dict:
+    if not isinstance(rows, list):
+        return {"error": "input must be a JSON array"}
+    invalid_rows = [index for index, row in enumerate(rows) if not isinstance(row, dict)]
+    if invalid_rows:
+        return {"error": "each array item must be an object", "rows": invalid_rows}
     pairs = defaultdict(dict)
     duplicates = []
     for row in rows:

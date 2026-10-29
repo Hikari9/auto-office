@@ -6,7 +6,7 @@ from office import delegation_shadow, economics_efficiency
 
 
 def task(id, scope, depends=()):
-    return {"id": id, "scope": scope, "depends": list(depends)}
+    return {"id": id, "scope": scope, "depends": None if depends is None else list(depends)}
 
 
 def test_shadow_never_changes_actual_parallel_request_or_steals_authority():
@@ -25,6 +25,11 @@ def test_dependencies_overlapping_scopes_and_directory_ancestors_are_coupled():
 
 def test_missing_scope_and_duplicate_ids_fail_to_observe_not_to_veto():
     r = delegation_shadow.propose([task("T1", []), task("T1", ["src/b"])], parallel_requested=True)
+    assert r["proposal"] == "unresolved" and r["actual"] == "parallel"
+
+
+def test_unknown_dependency_evidence_does_not_claim_independence():
+    r = delegation_shadow.propose([task("T1", ["a"], None), task("T2", ["b"])], parallel_requested=True)
     assert r["proposal"] == "unresolved" and r["actual"] == "parallel"
 
 
@@ -54,6 +59,18 @@ def test_efficiency_partial_and_root_missing_not_zero():
     assert s["actual_usd_observed"] is None and s["root_share_of_actual_usd"] is None
     assert s["root_share_of_observed_token_components"] == 150 / 450
     assert s["cache_coverage"] == {"cache_read_tokens": "1/2", "cache_write_tokens": "1/2"}
+
+
+def test_malformed_token_values_are_unknown_not_measured():
+    rows = [{"role": "root", "attribution": "office", "input_tokens": True, "output_tokens": 1,
+             "cache_read_tokens": None, "cache_write_tokens": 0},
+            {"role": "executor", "attribution": "office", "input_tokens": 0, "output_tokens": 0,
+             "cache_read_tokens": 0, "cache_write_tokens": 0}]
+    s = economics_efficiency.summarize(rows)
+    assert s["missing_token_fields"]["input_tokens"] == 1
+    assert s["token_components"]["input_tokens"] == 0
+    assert s["token_coverage"] == "partial-or-unmeasured"
+    assert s["root_share_of_observed_token_components"] == 1
 
 
 def test_complete_recorded_actual_cost_is_distinct_from_subscription_quota():
@@ -94,3 +111,12 @@ def test_matched_evaluation_requires_quality_and_complete_metrics():
     assert not module.compare(rows)["metrics"]["total_tokens"]["claim_ready"]
     rows[-1]["complete_metrics"] = []
     assert module.compare(rows)["metrics"]["total_tokens"]["change_pct"] is None
+
+
+def test_matched_evaluation_rejects_malformed_json_shapes():
+    path = Path(__file__).resolve().parents[2] / "eval/v31/compare_economics.py"
+    spec = importlib.util.spec_from_file_location("office502_compare_input", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.compare({"pair_id": "1"})["error"] == "input must be a JSON array"
+    assert module.compare([None])["error"] == "each array item must be an object"
