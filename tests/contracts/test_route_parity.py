@@ -102,7 +102,7 @@ def test_effective_shipped_routes_match_main(key, expected):
             "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
         "context": {"gear": size, "size_class": size},
         "candidates": pool,
-    }, executor_policy=slates.POLICY)
+    })
     assert decision["status"] == "selected", decision
     expected_harness, expected_model, expected_effort = expected[0]
     assert routing.candidate_id(decision["candidate"]) == (
@@ -124,7 +124,7 @@ def test_m_executor_haiku_high_keeps_its_floor_exception():
             "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
         "context": {"gear": "M", "size_class": "M"},
         "candidates": [candidate],
-    }, executor_policy=slates.POLICY)
+    })
     assert decision["status"] == "selected", decision
     assert routing.candidate_id(decision["candidate"]) == "claude@1/claude-haiku-5-5@high"
     [selected_waiver] = decision["routing"]["floor_exceptions"]

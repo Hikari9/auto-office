@@ -317,7 +317,7 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
 
 
 def route(request: dict, discovery_input: dict | None = None, *,
-          connection: sqlite3.Connection | None = None, executor_policy: dict | None = None) -> dict:
+          connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
     {"candidate", "probe_key", "reservation_id", "attempt_id"} naming the one discovery
     candidate whose fresh exact probe record the request now carries. The recompute
@@ -325,7 +325,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     never swaps in a different untried route. A supplied connection belongs to the
     caller; read its current evidence without committing or closing it."""
     discovery_input = discovery_input or request.get("discovery_input")
-    executor_policy = executor_policy or executor_slates.POLICY
+    executor_policy = request.pop("_executor_policy", None) or executor_slates.load_policy()
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})
