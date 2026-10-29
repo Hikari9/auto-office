@@ -27,13 +27,17 @@ def compare(rows: list[dict]) -> dict:
         return {"error": "each array item must be an object", "rows": invalid_rows}
     pairs = defaultdict(dict)
     duplicates = []
-    for row in rows:
+    invalid_pairs = []
+    for index, row in enumerate(rows):
         key, arm = row.get("pair_id"), row.get("arm")
-        if not isinstance(key, str) or not key or arm not in ("baseline", "treatment"):
+        if not isinstance(key, str) or not key.strip() or arm not in ("baseline", "treatment"):
+            invalid_pairs.append(index)
             continue
         if arm in pairs[key]:
             duplicates.append(key)
         pairs[key][arm] = row
+    if invalid_pairs:
+        return {"error": "each row must have a non-empty pair_id and valid arm", "rows": invalid_pairs}
     accepted, excluded = [], []
     if duplicates:
         return {"error": "duplicate pair/arm entries", "pairs": sorted(set(duplicates))}

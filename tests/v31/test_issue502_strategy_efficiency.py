@@ -174,6 +174,22 @@ def test_matched_evaluation_rejects_malformed_json_shapes():
     spec.loader.exec_module(module)
     assert module.compare({"pair_id": "1"})["error"] == "input must be a JSON array"
     assert module.compare([None])["error"] == "each array item must be an object"
+    valid = [{"pair_id": str(i), "arm": arm, "task_shape": "x", "harness": "x",
+              "billing_mode": "subscription", "verified_completion": True, "integrated_defects": 0,
+              "complete_metrics": ["total_tokens"], "metrics": {"total_tokens": 10 if arm == "baseline" else 8}}
+             for i in range(3) for arm in ("baseline", "treatment")]
+    malformed_identity = module.compare(valid + [{**valid[0], "pair_id": None}])
+    assert malformed_identity == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
+    malformed_arm = module.compare(valid + [{**valid[0], "pair_id": "extra", "arm": "control"}])
+    assert malformed_arm == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
+    whitespace_pair = module.compare(valid + [{**valid[0], "pair_id": " "}])
+    assert whitespace_pair == {
+        "error": "each row must have a non-empty pair_id and valid arm", "rows": [6]
+    }
     malformed_metrics = [{"pair_id": "1", "arm": arm, "task_shape": "x", "harness": "x",
                           "billing_mode": "subscription", "verified_completion": True,
                           "integrated_defects": 0, "complete_metrics": ["total_tokens"], "metrics": ["bad"]}
