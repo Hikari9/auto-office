@@ -649,6 +649,14 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
             state.emit(con, run, "task.restacked", f"{tid} {restack['line']}", task_id=tid, dispatch_id=did)
         if resume:
             _set_resumed_from(con, did, parent["id"], session)
+        if (reroute and parent.get("stall_kind") == "usage_limit" and launch
+                and launch.get("selected") != parent.get("triple")):
+            state.emit(con, run, "route.fallback",
+                       f"{tid} rerouted after {parent['id']}'s usage_limit from {parent.get('triple')} "
+                       f"to {launch['selected']} as {did} (orchestrator-initiated)",
+                       task_id=tid, dispatch_id=did,
+                       payload={"before": parent.get("triple"), "after": launch["selected"],
+                                "source": "usage_limit", "actor": "orchestrator"})
         state.emit(con, run, "task.rerun", f"{tid} rerun {'--resume from ' + parent['id'] if resume else '--fresh'} "
                    f"as {did}", task_id=tid, dispatch_id=did)
     jobs.kick(con, run["id"])
