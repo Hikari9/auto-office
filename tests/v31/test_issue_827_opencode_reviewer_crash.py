@@ -66,14 +66,16 @@ def test_opencode_reviewer_profile_does_not_treat_a_working_pane_as_terminal(env
         con.close()
 
     profile = adapters.profile(adapters.load_all()["opencode"], "reviewer")
-    assert adapters.terminal_statuses_without_reply(adapters.load_all()["opencode"], "reviewer") == {"done"}
+    assert adapters.terminal_statuses_without_reply(adapters.load_all()["opencode"], "reviewer") == {"done", "idle"}
     assert profile["interactive"]["wall_cap"] is True
     assert gates._reviewer_pane_terminal_without_reply(
         {**d, "adapter_id": "opencode", "launcher": "herdr"}, env.tmp / "missing-reply.txt") is None
 
 
 @pytest.mark.approved
-def test_crashed_opencode_review_records_unavailable_and_attempts_fallback_without_round(env, monkeypatch):
+@pytest.mark.parametrize("pane_status", ["done", "idle"])
+def test_crashed_opencode_review_records_unavailable_and_attempts_fallback_without_round(env, monkeypatch,
+                                                                                         pane_status):
     from office import candidates, db, dispatch, gates, state
 
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
@@ -116,7 +118,7 @@ def test_crashed_opencode_review_records_unavailable_and_attempts_fallback_witho
         if pane:
             agent = dispatch.herdr_agent_name(reviewer["id"])
             fake = json.loads(state_file.read_text())
-            fake.update({"get": ["done"], "pane_agents": {"w1:p827": agent},
+            fake.update({"get": [pane_status], "pane_agents": {"w1:p827": agent},
                          "pane_kinds": {"w1:p827": "opencode"}, "content": "opencode mini exited unexpectedly"})
             state_file.write_text(json.dumps(fake))
         con.execute("UPDATE dispatches SET launcher=?, pane_id=?, status='exited', terminal_classification=?, ended_at=? "
@@ -130,7 +132,7 @@ def test_crashed_opencode_review_records_unavailable_and_attempts_fallback_witho
     try:
         result = gates.run_reviewer(con, run, gate, "code_reviewer", "review", cwd=Path(env.repo))
         assert result.get("verdict") == "UNAVAILABLE" or result.get("status") == "UNAVAILABLE", result
-        assert "Herdr pane status done" in result["summary"], result
+        assert f"Herdr pane status {pane_status}" in result["summary"], result
         assert calls == ["opencode", "claude"], calls
         assert con.execute("SELECT round FROM gates WHERE id=?", (gate["id"],)).fetchone()[0] == round_before
     finally:
