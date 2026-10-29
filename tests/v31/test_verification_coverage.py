@@ -165,7 +165,9 @@ def test_scoped_gate_pins_match_reviewed_source():
     root = Path(__file__).resolve().parents[2]
     pinned = set(vc._SCOPED_GATE_SHA256)
     # validate.sh runs every contract module, so each one on disk must be pinned.
-    contracts = {f"tests/contracts/{p.name}" for p in (root / "tests/contracts").glob("test_*.py")}
+    contracts_dir = root / "tests/contracts"
+    contracts = {f"tests/contracts/{p.relative_to(contracts_dir).as_posix()}"
+                 for p in contracts_dir.rglob("*.py")}
     assert {p for p in pinned if p.startswith("tests/contracts/")} == contracts
     assert pinned - contracts == {
         "scripts/validate.sh",

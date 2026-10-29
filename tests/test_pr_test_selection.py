@@ -83,6 +83,32 @@ def test_line_break_in_selected_test_path_fails_closed(pr_repo):
         selection(pr_repo)
 
 
+def _commit_index_path(pr_repo, path: str) -> None:
+    """Commit a blob under a name the working tree may not hold (non-UTF-8 is refused on APFS)."""
+    blob = subprocess.run(["git", "-C", str(pr_repo), "hash-object", "-w", "--stdin"],
+                          input="def test_odd(): pass\n", capture_output=True, text=True,
+                          check=True).stdout.strip()
+    git(pr_repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "odd name"], check=True)
+
+
+def test_carriage_return_in_selected_path_is_named_not_translated(pr_repo):
+    _commit_index_path(pr_repo, "tests/test_c\rx.py")
+    with pytest.raises(SelectionError, match="line break") as excinfo:
+        selection(pr_repo)
+    # Text mode would turn \r into \n, and the message would show that instead.
+    assert repr("tests/test_c\rx.py") in str(excinfo.value)
+
+
+def test_non_utf8_path_fails_closed_with_its_own_message(pr_repo):
+    import os
+
+    _commit_index_path(pr_repo, os.fsdecode(b"tests/test_bad\xff.py"))
+    with pytest.raises(SelectionError, match="non-UTF-8"):
+        selection(pr_repo)
+
+
 def test_non_ascii_test_module_is_selected_not_quoted(pr_repo):
     # Newline git output quotes this path, so it would look like a non-test change.
     (pr_repo / "tests" / "test_café.py").write_text("def test_cafe(): pass\n")

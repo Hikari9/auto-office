@@ -44,11 +44,22 @@ class SelectionError(RuntimeError):
 
 
 def _run(root: Path, *args: str) -> str:
-    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                          errors="surrogateescape")
+    # Bytes, not text=True: text mode turns a carriage return in a path into a newline.
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
     if proc.returncode:
-        raise SelectionError(f"git {' '.join(args)}: {proc.stderr.strip()}")
-    return proc.stdout
+        raise SelectionError(f"git {' '.join(args)}: {proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout.decode("utf-8", errors="surrogateescape")
+
+
+# A path crosses to the shell one per line, and the printed scope is UTF-8. A name with a
+# line break, or undecodable bytes (surrogate escapes), cannot survive either.
+_UNSAFE_NAME = re.compile(r"[\r\n\udc80-\udcff]")
+
+
+def _check_names(paths: set[str] | list[str], what: str) -> None:
+    broken = sorted(p for p in paths if _UNSAFE_NAME.search(p))
+    if broken:
+        raise SelectionError(f"{what} contains a line break or non-UTF-8 bytes: " + ", ".join(map(repr, broken)))
 
 
 def git(root: Path, *args: str) -> str:
@@ -71,6 +82,7 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     changed.update(git_paths(root, "diff", "-z", "--no-renames", "--name-only", "--diff-filter=ACDMRT", "HEAD"))
     if not changed:
         raise SelectionError("No changed files versus PR base; refusing an empty PR-test attestation")
+    _check_names(changed, "Changed path")
     if changed.intersection({"conftest.py", "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"}):
         raise SelectionError("Test configuration changed: run full validation explicitly")
     if any(p.startswith("tests/") and not (root / p).is_file() for p in changed):
@@ -142,9 +154,7 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
     if not selected:
         raise SelectionError("No test modules selected; fail closed")
     # The selection crosses to the shell as one path per line; a line break would split a name.
-    broken = sorted(t for t in selected if re.search(r"[\r\n]", t))
-    if broken:
-        raise SelectionError("Selected test path contains a line break: " + ", ".join(map(repr, broken)))
+    _check_names(selected, "Selected test path")
     return base, sorted(changed), sorted(selected)
 
 
