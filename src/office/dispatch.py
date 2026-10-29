@@ -2901,10 +2901,12 @@ def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, p
         _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
         return False, None
     if working:
-        # The pointer also occurs in a working agent's recent scrollback.
-        # A matching substring cannot prove its composer is waiting.
-        spec["landing_unconfirmed_working"] = True
-        return False, None
+        # Codex can report working while its prompt is still typed. Only its
+        # bottom `›` input row, with no busy footer, proves this is actionable;
+        # a Claude-style composer or text above the input is scrollback (#583).
+        if not (_codex_composer_holds(view, pointer) and not _pane_busy(view)):
+            spec["landing_unconfirmed_working"] = True
+            return False, None
     try:
         got = _submit_held(name, pane, pointer, _land_timeout(), baseline_ctx=_ctx_k(view), baseline_screen=view,
                            seen=seen, herdr=_guarded_herdr(guard))
@@ -3426,6 +3428,26 @@ def _composer_holds(text: str | None, prompt: str) -> bool:
     want, have = _squash(prompt), _squash(tail)
     size = min(len(want), _HELD_WINDOW)
     return bool(want) and any(want[i:i + size] in have for i in range(len(want) - size + 1))
+
+
+def _codex_composer_holds(text: str | None, prompt: str) -> bool:
+    """Whether Codex's bottom `›` input row contains a held pointer."""
+    if not text:
+        return False
+    rows = _strip_ansi(text).rstrip().splitlines()
+    footer = next((i for i in range(len(rows) - 1, -1, -1)
+                   if re.search(r"(?:context left|for shortcuts)", rows[i], re.I)), None)
+    if footer != len(rows) - 1:
+        return False
+    start = next((i for i in range(footer - 1, -1, -1)
+                  if re.match(r"^\s*›\s*", rows[i])), None)
+    if start is None:
+        return False
+    composer_rows = rows[start:footer]
+    if any(row.strip() and not (i == 0 or row.startswith(" "))
+           for i, row in enumerate(composer_rows[1:], start=1)):
+        return False
+    return _composer_holds("\n".join(composer_rows), prompt)
 
 
 def _press_enter(name: str, pane: str | None, herdr=_herdr_quiet) -> None:
