@@ -60,6 +60,22 @@ def _route_rows(seed):
     return [(row.get("harness"), row["model_id"], row["effort"]) for row in seed]
 
 
+def _candidate(model, effort, harness, score=55):
+    return {
+        "model_id": model,
+        "harness": harness,
+        "effort": effort,
+        "invocation_model_id": model,
+        "harness_version": "1.0",
+        "capabilities": ["builder"],
+        "invocation_source": "local-evidence: contract fixture",
+        "benchmark_indexes": {slates.INDEX: score},
+        "quota": {"status": "ok", "tightest_remaining_percent": 100},
+        "route_status": "available",
+        "price_fields": {"input_per_mtok": 1, "output_per_mtok": 2},
+    }
+
+
 @pytest.mark.parametrize("key, expected", MAIN_ROUTE_MATRIX.items())
 def test_effective_shipped_routes_match_main(key, expected):
     """The policy refactor preserves main's effective route matrix, including conditionals."""
@@ -71,6 +87,27 @@ def test_effective_shipped_routes_match_main(key, expected):
                                     {"model_id": "astra", "effort": "low"}]} if role == "planner" else {}
     actual = candidates._preferred_seed(policy_cfg, run, size, role=role, executor_policy=slates.POLICY)
     assert _route_rows(actual) == expected
+
+    # Entries without a harness are wildcard preferences; the candidate pool
+    # uses one fixture harness so the seed's wildcard matching is exercised.
+    pool = [_candidate(model, effort, harness or "claude")
+            for harness, model, effort in reversed(expected)]
+    decision = routing.route({
+        "role": role,
+        "playbook": "Change",
+        "preferred_seed": actual,
+        "slate_anchor": True,
+        "allow_free_models": True,
+        "policy": {"required_capabilities": ["builder"], "floor": {
+            "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
+        "context": {"gear": size, "size_class": size},
+        "candidates": pool,
+    }, executor_policy=slates.POLICY)
+    assert decision["status"] == "selected", decision
+    expected_harness, expected_model, expected_effort = expected[0]
+    assert routing.candidate_id(decision["candidate"]) == (
+        f"{expected_harness or 'claude'}@1/{expected_model}@{expected_effort}"
+    ), decision
 
 
 def test_m_executor_haiku_high_keeps_its_floor_exception():
@@ -102,3 +139,7 @@ def test_conditional_m_routes_match_main_even_when_absent_from_catalog():
     assert planner[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
     assert slates.POLICY["executor_preferred"]["M"][1]["_resolved_routes"] == []
     assert slates.POLICY["planner_preferred"]["M"][-1]["_resolved_routes"] == []
+    executor_audit = slates.route_summary(executor, [], [], [])
+    planner_audit = slates.route_summary(planner, [], [], [])
+    assert executor_audit[1]["status"] == "not-in-catalog"
+    assert planner_audit[-1]["status"] == "not-in-catalog"

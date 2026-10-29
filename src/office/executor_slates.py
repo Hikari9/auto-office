@@ -30,7 +30,13 @@ def _unique_mapping(loader, node, deep=False):
     mapping = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark,
+                f"unhashable key {key!r}", key_node.start_mark) from exc
+        if duplicate:
             raise yaml.constructor.ConstructorError(
                 "while constructing a mapping", node.start_mark,
                 f"duplicate key {key!r}", key_node.start_mark)
@@ -232,9 +238,11 @@ def floor_exception(candidate: dict, size: str | None, role: str | None = None,
                     policy: dict = POLICY) -> dict | None:
     """Apply only exact floor exceptions resolved from policy data."""
     model = candidate.get("alias_resolved_to") or candidate.get("model_id")
-    scores = candidate.get("benchmark_indexes") or {}
+    scores = candidate.get("benchmark_indexes", {})
+    if not isinstance(scores, dict):
+        return None
     index = policy["benchmark_index"]
-    raw = scores.get(index) if isinstance(scores, dict) else None
+    raw = scores.get(index)
     for rule in policy["floor_exceptions"]:
         if (size != rule["size"] or role not in (rule["role"], "worker") or model != rule["model_id"] or
                 candidate.get("effort") != rule["effort"] or
