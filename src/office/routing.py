@@ -15,6 +15,8 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,11 +31,21 @@ DEFAULT_RESERVE_PERCENT = 5.0
 # money band; its cost safety valve is routing.adaptive.budget_ceiling_multiple.
 DEFAULT_MONEY_BAND_PERCENT = 20.0
 ADAPTIVE_ROLES = set(route_learning.ADAPTIVE_ROLES)
+_executor_policy_context: ContextVar[dict | None] = ContextVar("executor_policy", default=None)
 
 _REQUIRED_OVERRIDE_FIELDS = (
     "override_id", "run_id", "family_id", "task_id", "role", "candidate_id",
     "bypass_stage", "rationale", "authorized_by", "authorized_at", "expires_at",
 )
+
+
+@contextmanager
+def _using_executor_policy(policy: dict):
+    token = _executor_policy_context.set(policy)
+    try:
+        yield
+    finally:
+        _executor_policy_context.reset(token)
 
 
 def candidate_id(c):
@@ -325,7 +337,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     never swaps in a different untried route. A supplied connection belongs to the
     caller; read its current evidence without committing or closing it."""
     discovery_input = discovery_input or request.get("discovery_input")
-    executor_policy = request.pop("_executor_policy", None) or executor_slates.load_policy()
+    executor_policy = _executor_policy_context.get() or executor_slates.load_policy()
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})

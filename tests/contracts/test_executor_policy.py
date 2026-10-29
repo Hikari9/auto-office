@@ -121,7 +121,7 @@ def test_conditional_route_becomes_selectable_when_added_by_user_overlay(
                    "allowed_sources": ["local-evidence:"]}},
         "context": {"gear": "M", "size_class": "M"},
         "candidates": [candidate],
-    }, executor_policy=slates.POLICY)
+    })
     assert result["status"] == "selected", result
     assert routing.candidate_id(result["candidate"]) == expected_route
 
@@ -136,12 +136,13 @@ def test_temporary_policy_changes_actual_seed_and_runtime_selection(policy_root)
             _candidate("gemini-3.8-flash", "medium", "agy", 40)]
 
     def select(policy, preference):
-        return routing.route({"role": "worker", "playbook": "Change", "preferred_seed": preference,
-                              "slate_anchor": True, "allow_free_models": True,
-                              "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
-                              "allowed_sources": ["local-evidence:"]}},
-                              "context": {"gear": "XS", "size_class": "XS"},
-                              "candidates": pool}, executor_policy=policy)
+        with routing._using_executor_policy(policy):
+            return routing.route({"role": "worker", "playbook": "Change", "preferred_seed": preference,
+                                  "slate_anchor": True, "allow_free_models": True,
+                                  "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
+                                  "allowed_sources": ["local-evidence:"]}},
+                                  "context": {"gear": "XS", "size_class": "XS"},
+                                  "candidates": pool})
 
     original = select(slates.POLICY, candidates._preferred_seed({}, {"gear": "XS"}, "XS"))
     changed = select(updated, seed)
@@ -156,12 +157,12 @@ def test_temporary_floor_policy_changes_runtime_eligibility(policy_root):
     source = yaml.safe_load((policy_root / "catalog" / "executor-policy.yaml").read_text())
     source["floors"]["XS"] = 45
     updated = _write_policy(policy_root, source)
-    out = routing.route({"role": "worker", "playbook": "Change", "preferred_seed": slates.ideal_seed("XS", updated),
-                         "slate_anchor": True, "allow_free_models": True,
-                         "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
-                         "allowed_sources": ["local-evidence:"]}}, "context": {"gear": "XS", "size_class": "XS"},
-                         "candidates": [_candidate("claude-haiku-5-5", "medium", "claude", 40)]},
-                         executor_policy=updated)
+    with routing._using_executor_policy(updated):
+        out = routing.route({"role": "worker", "playbook": "Change", "preferred_seed": slates.ideal_seed("XS", updated),
+                             "slate_anchor": True, "allow_free_models": True,
+                             "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
+                             "allowed_sources": ["local-evidence:"]}}, "context": {"gear": "XS", "size_class": "XS"},
+                             "candidates": [_candidate("claude-haiku-5-5", "medium", "claude", 40)]})
     assert out["status"] == "no_qualifying_candidate", out
     assert any(r.get("category") == "subtask-intelligence-floor" for r in out["rejected"])
 
