@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from office import dispatch, routing
+from office import dispatch, route_policy, routing
 from test_adaptive_dispatch import PLANNED, _approve as _approve_slate, _quota
 from test_wait import MANILA_LIMIT, _as_herdr, _go, _herdr, _limit_row, _store_episode, _wait
 
@@ -27,7 +27,7 @@ def test_only_known_opencode_free_routes_share_a_quota_pool():
 
 def test_real_usage_limit_screen_records_one_cooldown_episode_and_audit_event(env):
     _go(env)
-    session_env = _herdr(env, status="idle", pane="Free usage limit reached\n")
+    session_env = _herdr(env, status="idle", pane="sk-test-secret\nFree usage limit reached\n")
     d = _as_herdr(env)
     con = env.con()
     con.execute("UPDATE dispatches SET harness='opencode', adapter_id='opencode', "
@@ -40,11 +40,14 @@ def test_real_usage_limit_screen_records_one_cooldown_episode_and_audit_event(en
     pool = routing.shared_quota_pool_key("opencode", "glm-5.3-flash-free")
     rows = {row["route"]: row["expires_at"] for row in con.execute("SELECT route, expires_at FROM route_cooldowns")}
     assert route in rows and pool in rows and rows[route] == rows[pool]
-    assert datetime.fromisoformat(rows[pool]) > datetime.now(timezone.utc)
+    remaining = datetime.fromisoformat(rows[pool]) - datetime.now(timezone.utc)
+    ttl = timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES)
+    assert ttl - timedelta(seconds=3) < remaining <= ttl, remaining
     [event] = con.execute("SELECT payload_json FROM events WHERE kind='route.failed' AND dispatch_id=?",
                           (d["id"],)).fetchall()
     payload = json.loads(event[0])
     assert payload["reason"] == "usage_limit" and payload["quota_pool"] == pool
+    assert "sk-test-secret" not in json.dumps(payload)
     # Repeated status reads cannot mint another failure or perpetually extend TTL.
     env.office("status", env=session_env)
     again = {row["route"]: row["expires_at"] for row in con.execute("SELECT route, expires_at FROM route_cooldowns")}
@@ -83,6 +86,43 @@ def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_even
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
     assert _limit_row(env, d)["resets_at"] == stored
     assert dict(con.execute(cooldowns).fetchall()) == second
+
+
+def test_a_resolved_reset_refreshes_the_current_cooldown_without_a_second_event(env, monkeypatch):
+    _go(env)
+    e = _herdr(env, status="idle", pane="limit screen")
+    d = _as_herdr(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='opencode', adapter_id='opencode', "
+                "model='glm-5.3-flash-free', invocation_model_id='glm-5.3-flash-free', effort='max' "
+                "WHERE id=?", (d["id"],))
+    con.commit()
+    limit = {"resets_at": None, "label": "same reset", "tz": None, "local": None,
+             "fingerprint": "same-screen"}
+    monkeypatch.setattr(dispatch, "_usage_limit", lambda _text: limit)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out, out
+    before = {row["route"]: row["expires_at"]
+              for row in con.execute("SELECT route, expires_at FROM route_cooldowns")}
+    assert before and con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
+                                 (d["id"],)).fetchone()[0] == 1
+
+    reset_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    limit = {**limit, "resets_at": reset_at}
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out, out
+    after = {row["route"]: row["expires_at"]
+             for row in con.execute("SELECT route, expires_at FROM route_cooldowns")}
+    assert after.keys() == before.keys() and set(after.values()) == {reset_at.isoformat()}, (before, after)
+    assert con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
+                       (d["id"],)).fetchone()[0] == 1
+
+    _wait(env, e, timeout="3")
+    repeated = {row["route"]: row["expires_at"]
+                for row in con.execute("SELECT route, expires_at FROM route_cooldowns")}
+    assert repeated == after
+    assert con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
+                       (d["id"],)).fetchone()[0] == 1
 
 
 def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):

@@ -672,9 +672,6 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     # and shows the reset parsed now. When a stored limit with the same screen
     # has already reset, the output says so: the agent may only need `continue`.
     resets_at = limit["resets_at"]
-    prior = parse_iso(d["resets_at"]) if d.get("resets_at") else None
-    passed = (prior is not None and prior <= datetime.now(timezone.utc) and prior != resets_at
-              and d.get("limit_fingerprint") == limit["fingerprint"] and d.get("limit_label") == limit["label"])
     fields = {"stall_kind": "usage_limit", "resets_at": resets_at.isoformat() if resets_at else None,
               "limit_label": limit["label"], "limit_fingerprint": limit["fingerprint"]}
     # Persist the availability wall once per episode, not per status/wait poll.
@@ -683,16 +680,23 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
         latest = state.get_dispatch(con, d["id"]) or d
         now = datetime.now(timezone.utc)
         stored = parse_iso(latest["resets_at"]) if latest.get("resets_at") else None
+        reset_advanced = (stored is not None and stored <= now and resets_at is not None and resets_at > stored)
+        passed = (reset_advanced and latest.get("limit_fingerprint") == limit["fingerprint"]
+                  and latest.get("limit_label") == limit["label"])
+        reset_resolved = (latest.get("stall_kind") == "usage_limit"
+                          and latest.get("limit_fingerprint") == limit["fingerprint"]
+                          and latest.get("limit_label") == limit["label"]
+                          and stored is None and resets_at is not None and resets_at > now)
         # A repeated poll of the stored episode is not a new one. A later episode is: another screen or label,
-        # or the stored reset has passed and a different reset is now parsed.
+        # or the persisted reset has passed and a later reset is now parsed.
         episode = (latest.get("stall_kind") != "usage_limit"
                    or latest.get("limit_fingerprint") != limit["fingerprint"]
                    or latest.get("limit_label") != limit["label"]
-                   or (resets_at is not None and stored is not None and stored <= now and resets_at != stored))
+                   or reset_advanced)
         if any(latest.get(k) != v for k, v in fields.items()):
             con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
                         "WHERE id=?", (*fields.values(), d["id"]))
-        if episode:
+        if episode or reset_resolved:
             expires_at = resets_at if resets_at and resets_at > now else (
                 now + timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES))
             expires = expires_at.isoformat()
@@ -705,20 +709,20 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
                 con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
                             "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
                             (key, expires, now.isoformat()))
-            state.emit(con, run, "route.failed",
-                       f"{d['task_id']} route {d.get('triple')} hit usage_limit; availability cooldown "
-                       f"until {expires[:16]}Z" + (f" (shared {pool})" if pool else ""),
-                       task_id=d["task_id"], dispatch_id=d["id"],
-                       payload={"route": d.get("triple"), "harness": d.get("harness"), "model": model,
-                                "effort": d.get("effort"), "reason": "usage_limit", "classification": "usage_limit",
-                                "demoted_until": expires, "quota_pool": pool, "declared": bool(d.get("override_json")),
-                                "stderr_tail": "\n".join((act.get("text") or "").splitlines()[-8:])[-400:]})
+            if episode:
+                state.emit(con, run, "route.failed",
+                           f"{d['task_id']} route {d.get('triple')} hit usage_limit; availability cooldown "
+                           f"until {expires[:16]}Z" + (f" (shared {pool})" if pool else ""),
+                           task_id=d["task_id"], dispatch_id=d["id"],
+                           payload={"route": d.get("triple"), "harness": d.get("harness"), "model": model,
+                                    "effort": d.get("effort"), "reason": "usage_limit", "classification": "usage_limit",
+                                    "demoted_until": expires, "quota_pool": pool, "declared": bool(d.get("override_json"))})
     tail = paths.run_dir(run["id"]) / "dispatches" / d["id"] / "pane-tail.txt"
     atomic_write_text(tail, "\n".join(act["text"].splitlines()[-40:]) + "\n")
     when = (f"resets {resets_at.strftime('%Y-%m-%dT%H:%MZ')}" + (f" ({limit['tz']} {limit['local']})" if limit["tz"] else "")
             if resets_at else f"resets {limit['label'] or 'at an unknown time'} (time not resolved)")
     if passed:
-        when += (f"; the same limit screen was stored with reset {prior.strftime('%Y-%m-%dT%H:%MZ')}, now past, "
+        when += (f"; the same limit screen was stored with reset {stored.strftime('%Y-%m-%dT%H:%MZ')}, now past, "
                  f"so if this is that limit `continue` may already work")
     return f"{who}: usage_limit, {when}; pane tail in {tail}; next: office prompt {d['id']} -- continue"
 
