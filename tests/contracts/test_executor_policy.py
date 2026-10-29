@@ -40,7 +40,7 @@ def _candidate(model, effort, harness, score):
 def test_shipped_policy_is_resolved_against_catalog_facts():
     source = Path(slates.POLICY["_provenance"]["source"])
     assert slates.POLICY["_provenance"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
-    facts = {shipped_catalog.key(row): row for row in slates.POLICY["_catalog"]["models"]}
+    facts = {shipped_catalog.key(row): row for row in shipped_catalog.load()["models"]}
     for size, entries in slates.POLICY["executor_preferred"].items():
         for entry in entries:
             assert entry["_resolved_routes"]

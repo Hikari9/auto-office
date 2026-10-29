@@ -36,8 +36,8 @@ _QUOTA_CACHE: dict[str, tuple[float, dict]] = {}
 _QUOTA_TTL = 60.0
 
 
-def catalog_rows(data: dict | None = None) -> list[dict]:
-    data = shipped_catalog.load() if data is None else data
+def catalog_rows() -> list[dict]:
+    data = shipped_catalog.load()
     from office import user_catalog
     return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
 
@@ -470,8 +470,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      quota_snapshot: dict[str, dict] | None = None,
                      discovery: dict | None = None,
                      user_policies: list[dict] | None = None,
-                     allow_policies: list[dict] | None = None,
-                     catalog_data: dict | None = None) -> tuple[list[dict], list[dict]]:
+                     allow_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -497,7 +496,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     allow_pols = policies if allow_policies is None else allow_policies
     candidates, skipped, not_routable = [], [], []
     free_models_allowed = onboarding.free_models_enabled()
-    for row in catalog_rows(catalog_data):
+    for row in catalog_rows():
         harness = row.get("invocation_harness")
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
@@ -986,8 +985,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[],
-                                           allow_policies=allow_policies,
-                                           catalog_data=executor_policy["_catalog"])
+                                           allow_policies=allow_policies)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \

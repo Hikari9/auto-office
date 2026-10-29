@@ -116,7 +116,6 @@ def load_policy(root: Path | None = None) -> dict:
         x["_resolved_routes"], x["_dispatchable_routes"] = _catalog_tuple(
             catalog, x["model_id"], x["effort"], x.get("harness"), source, f"floor_exceptions.{x['name']}")
     data["_provenance"] = {"source": str(source), "sha256": hashlib.sha256(raw).hexdigest()}
-    data["_catalog"] = catalog
     return data
 
 
