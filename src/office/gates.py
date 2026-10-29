@@ -934,8 +934,9 @@ def _reviewer_pane_terminal_without_reply(d: dict, output: Path) -> str | None:
     if not statuses:
         return None
     sample = dispatch_mod._herdr_agent_sample(dispatch_mod.herdr_agent_name(d["id"]))
-    status = (sample or {}).get("status")
-    if status in statuses and sample.get("busy") is False and sample.get("text_busy") is False:
+    status = sample.get("status") if isinstance(sample, dict) else None
+    if isinstance(status, str) and status in statuses and sample.get("busy") is False \
+            and sample.get("text_busy") is False:
         return status
     return None
 
