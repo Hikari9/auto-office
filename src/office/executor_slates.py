@@ -146,6 +146,12 @@ def load_policy(root: Path | None = None) -> dict:
 
 POLICY = load_policy()
 
+_ARGON_FLOOR_EXCEPTION = next(
+    row for row in POLICY["floor_exceptions"] if row["score_evidence"] == "missing")
+FLOOR_EXCEPTION = {key: _ARGON_FLOOR_EXCEPTION[key] for key in ("model_id", "effort", "role", "size")}
+FLOOR_EXCEPTION_METADATA = {key: value for key, value in _ARGON_FLOOR_EXCEPTION.items()
+                            if key not in FLOOR_EXCEPTION}
+
 
 def __getattr__(name: str):
     """Legacy read compatibility; these views are derived from the loaded policy, never stored tables."""
@@ -161,19 +167,12 @@ def __getattr__(name: str):
     if name == "PLANNER_BY_GEAR":
         return {size: tuple((row["model_id"], row["effort"], row.get("harness")) for row in rows)
                 for size, rows in POLICY["planner_preferred"].items()}
-    if name == "FLOOR_EXCEPTION":
-        return next((dict(row) for row in POLICY["floor_exceptions"] if row["score_evidence"] == "missing"), {})
     raise AttributeError(name)
 
 
 def policy_provenance(policy: dict = POLICY) -> dict:
     return {**policy["_provenance"], "policy_version": policy["policy_version"],
             "benchmark_index": policy["benchmark_index"]}
-
-
-def policy_for(request: dict) -> dict:
-    """Return the one validated snapshot carried through this routing decision."""
-    return request.get("_executor_policy") or POLICY
 
 
 def _seed_entry(row: dict) -> dict:

@@ -317,7 +317,7 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
 
 
 def route(request: dict, discovery_input: dict | None = None, *,
-          connection: sqlite3.Connection | None = None) -> dict:
+          connection: sqlite3.Connection | None = None, executor_policy: dict | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
     {"candidate", "probe_key", "reservation_id", "attempt_id"} naming the one discovery
     candidate whose fresh exact probe record the request now carries. The recompute
@@ -325,6 +325,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     never swaps in a different untried route. A supplied connection belongs to the
     caller; read its current evidence without committing or closing it."""
     discovery_input = discovery_input or request.get("discovery_input")
+    executor_policy = executor_policy or executor_slates.POLICY
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})
@@ -375,7 +376,6 @@ def route(request: dict, discovery_input: dict | None = None, *,
     con = connection if connection is not None else _connect(db_path)
     try:
         _concurrency_snapshot(request, con)
-        executor_policy = executor_slates.policy_for(request)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.
@@ -568,7 +568,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
                              preferred_seed, allow_advisory_undercut, override_applies, override_record,
                              pool=pool if discovering else [], discovery_input=discovery_input,
-                             required=required, floor=floor, reserve=reserve)
+                             required=required, floor=floor, reserve=reserve,
+                             executor_policy=executor_policy)
 
         # 7 advisory quality anchor. A caller-supplied per-candidate `advisory_pass` is
         # read nowhere below: retention is derived purely from `preferred_seed` match,
@@ -732,7 +733,8 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
 
 
 def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,
-               reserve: float, discovery_input: dict | None, rejected: list) -> tuple[dict, dict | None]:
+               reserve: float, discovery_input: dict | None, rejected: list,
+               executor_policy: dict) -> tuple[dict, dict | None]:
     """Discovery allocation for one executor/worker decision (#494). Separate from exploration.
 
     Returns (block, trial). First call: at most one safe candidate wins a seeded draw and
@@ -794,7 +796,6 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     survivors = []
     for c in scoped:
         probe = c.get("probe")
-        executor_policy = executor_slates.policy_for(request)
         gate = (_pool_gate(c, required, floor, playbook, quarantined,
                            policy_size=executor_slates.new_gear_size(request, executor_policy), role=role,
                            executor_policy=executor_policy)
@@ -876,7 +877,7 @@ def _probe_view(probe: dict | None) -> dict | None:
 
 def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned, preferred_seed,
               allow_advisory_undercut, override_applies, override_record, *, pool=None, discovery_input=None,
-              required=None, floor=None, reserve=5.0) -> dict:
+              required=None, floor=None, reserve=5.0, executor_policy: dict) -> dict:
     """Stages 7-8 for executor/worker routes: learned eligibility, then the
     adaptive comparison (`office.adaptive`). Preference is weighted evidence; a
     gear that forbids advisory undercut still holds routes to its seed chain."""
@@ -913,13 +914,12 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     active = bool((request.get("discovery") or {}).get("settings", {}).get("enabled"))
     if active and (pool or discovery_input):
         disc, trial = _discovery(request, role, playbook, rec, pool, set(required or ()), floor,
-                                 float(reserve), discovery_input, rejected)
+                                 float(reserve), discovery_input, rejected, executor_policy)
     elif active:
         disc = {"active": True, "intent": "none", "candidate": None, "probe_key": None, "probe": None,
                 "caps": {k: dict(request["discovery"]["allocation"][k]) for k in ("probes", "trials", "rolling")},
                 "fallback": None}
     audit["rejected"] = rejected
-    executor_policy = executor_slates.policy_for(request)
     size = executor_slates.new_gear_size(request, executor_policy)
     floor_exceptions = [{"candidate": candidate_id(c), **waiver} for c in stage
                         if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(
