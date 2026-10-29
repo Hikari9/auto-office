@@ -77,7 +77,8 @@ def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_even
              "fingerprint": prior["limit_fingerprint"]}
     monkeypatch.setattr(dispatch, "_usage_limit", lambda _text: limit)
     code, out = _wait(env, e, timeout="3")
-    assert code == 3 and con.execute(failed, (d["id"],)).fetchone()[0] == 1, out
+    assert code == 3 and "now past" in out, out
+    assert con.execute(failed, (d["id"],)).fetchone()[0] == 1
     assert _limit_row(env, d)["resets_at"] == expired
 
     # A later reset for that same screen is a new episode, even after the unresolved poll.

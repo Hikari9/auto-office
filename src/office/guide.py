@@ -681,7 +681,8 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
         now = datetime.now(timezone.utc)
         stored = parse_iso(latest["resets_at"]) if latest.get("resets_at") else None
         reset_advanced = (stored is not None and stored <= now and resets_at is not None and resets_at > stored)
-        passed = (reset_advanced and latest.get("limit_fingerprint") == limit["fingerprint"]
+        passed = (stored is not None and stored <= now and (resets_at is None or resets_at > stored)
+                  and latest.get("limit_fingerprint") == limit["fingerprint"]
                   and latest.get("limit_label") == limit["label"])
         reset_resolved = (latest.get("stall_kind") == "usage_limit"
                           and latest.get("limit_fingerprint") == limit["fingerprint"]
