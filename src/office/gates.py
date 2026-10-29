@@ -805,10 +805,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
         wrote_file = output.is_file() and output.stat().st_size > 0
+        pane_terminal_status = _reviewer_pane_terminal_without_reply(d, output)
         # Wall signatures come from the harness log, never from the review
         # itself (a review of quota code must not read as a quota wall).
         log_text = "" if wrote_file else _log_text(d, ddir)
-        launch_failed = (d.get("terminal_classification") != "success" and not wrote_file) \
+        launch_failed = ((d.get("terminal_classification") != "success" or pane_terminal_status) and not wrote_file) \
             or _quota_signature(log_text) or _auth_signature(log_text)
         if not parsed.valid and not launch_failed:
             # The reviewer answered (or ended cleanly) but its reply file is
@@ -901,6 +902,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         # one case where another route is substituted.
         log_text = _log_text(d, ddir)
         reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
+        if pane_terminal_status:
+            reason += f" (Herdr pane status {pane_terminal_status})"
         wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
         if wall:
             reason += f" [{wall}]"
@@ -919,6 +922,23 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
                 "env_failures": len(failures), "exhausted": True}
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+def _reviewer_pane_terminal_without_reply(d: dict, output: Path) -> str | None:
+    """Return an adapter-declared terminal Herdr status when its reply is absent."""
+    if (output.is_file() and output.stat().st_size) or d.get("launcher") != "herdr":
+        return None
+    from office import adapters, dispatch as dispatch_mod
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
+    statuses = adapters.terminal_statuses_without_reply(adapter, "reviewer")
+    if not statuses:
+        return None
+    sample = dispatch_mod._herdr_agent_sample(dispatch_mod.herdr_agent_name(d["id"]))
+    status = sample.get("status") if isinstance(sample, dict) else None
+    if isinstance(status, str) and status in statuses and sample.get("busy") is False \
+            and sample.get("text_busy") is False:
+        return status
+    return None
 
 
 def _launch_spec(ddir: Path) -> dict:

@@ -173,6 +173,13 @@ def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
 
 
+def terminal_statuses_without_reply(adapter: dict | None, kind: str) -> set[str]:
+    """Herdr statuses that mean this profile ended without producing its reply."""
+    prof = profile(adapter or {}, kind) or {}
+    statuses = (prof.get("interactive") or {}).get("terminal_statuses_without_reply") or []
+    return {str(status) for status in statuses if isinstance(status, str) and status}
+
+
 def session_spec(adapter: dict | None) -> dict:
     """How the adapter's harness yields a session id: `assigned` (Office passes
     one at launch via `assign_arg`), `detected` (read from hook payloads and
