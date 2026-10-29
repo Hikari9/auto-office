@@ -224,6 +224,29 @@ def _cancel_claim(con, run, job_id: str, kind: str, token: str | None, reason: s
     _note(run["id"], job_id, f"cancelled: its run is {run['phase']} ({reason[:160]}); the attempt records no result")
 
 
+def _block_terminal_trial(con, run: dict, job: dict) -> None:
+    """Settle a launch trial whose recovery cannot run after its run closes."""
+    if job["kind"] not in ("launch_agent", "trial_recovery"):
+        return
+    payload = job.get("payload")
+    if not isinstance(payload, dict):
+        return
+    dispatch_id = payload.get("dispatch_id")
+    if not isinstance(dispatch_id, str) or not dispatch_id:
+        return
+    from office import dispatch
+    d = state.get_dispatch(con, dispatch_id)
+    if not d or d.get("run_id") != run["id"]:
+        return
+    trial = dispatch.open_trial(con, dispatch_id)
+    if trial:
+        task_id = d["task_id"]
+        dispatch._recovery_blocked(
+            con, run, d, trial, "launch-failed",
+            f"a gate no longer allows the fallback (run is {run['phase']})",
+            f"office dispatch {task_id} --reroute", exited=True)
+
+
 def recover(con, row, reason: str, diag: dict) -> str:
     """Settle a claim whose owner is proven dead: retry it once more while
     attempts remain, else fail the job and make its gate unavailable. Applies
@@ -236,6 +259,7 @@ def recover(con, row, reason: str, diag: dict) -> str:
     job = state.get_job(con, cur["id"])
     if state.is_terminal(run):  # a closed or abandoned run's jobs never retry (#836)
         _cancel_claim(con, run, cur["id"], cur["kind"], cur["claim_token"], reason)
+        _block_terminal_trial(con, run, job)
         return "cancelled"
     if cur["attempts"] >= cur["max_attempts"]:
         con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL WHERE id=?",
@@ -533,6 +557,7 @@ def _retire(con, run: dict, job: dict, token: str) -> None:
     try:
         with db.transaction(con):
             _cancel_claim(con, run, job["id"], job["kind"], token, "the attempt saw the closed run")
+            _block_terminal_trial(con, run, job)
     except db.StaleAttempt:
         _stale(con, run, job, token, f"its run is {run['phase']}")
 

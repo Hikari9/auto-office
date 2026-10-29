@@ -247,6 +247,60 @@ def test_a_job_attempt_whose_run_is_closed_cancels_itself_and_records_nothing(en
     assert len(events) == 1 and "cancelled" in events[0]["summary"], events
 
 
+def test_a_closed_trial_job_with_nonobject_payload_stays_cancelled(env, monkeypatch):
+    """Malformed optional trial data cannot roll back terminal job retirement."""
+    job, out = _queued(env, monkeypatch, secs=1.0)
+    con = env.con()
+    con.execute("UPDATE outbox SET kind='trial_recovery', payload_json='[]' WHERE id=?", (job["id"],))
+    _close_terminal_run(con, job["run_id"])
+    con.commit()
+
+    from office import jobs
+    assert jobs.execute(env.con(), job["id"]) == 0
+    row = _row(env.con(), job["id"])
+    assert row["status"] == "cancelled" and row["result_json"] is None and row["claim_token"] is None, row
+    assert _pending(env, job["run_id"]) == []
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE run_id=? AND kind='job.retry'",
+                             (job["run_id"],)).fetchone()[0] == 0
+
+
+def test_terminal_trial_ignores_dispatch_from_another_run(monkeypatch):
+    from office import dispatch, jobs, state
+
+    foreign = {"id": "Dforeign", "run_id": "other-run", "task_id": "T1"}
+    opened, touched = [], []
+    monkeypatch.setattr(state, "get_dispatch", lambda con, dispatch_id: foreign)
+
+    def open_trial(con, dispatch_id):
+        opened.append(dispatch_id)
+        return {"id": "trial"}
+
+    monkeypatch.setattr(dispatch, "open_trial", open_trial)
+    monkeypatch.setattr(dispatch, "_recovery_blocked", lambda *args, **kwargs: touched.append(args[2]))
+
+    jobs._block_terminal_trial(
+        None, {"id": "closed-run", "phase": "closed"},
+        {"kind": "trial_recovery", "payload": {"dispatch_id": "Dforeign"}})
+
+    assert opened == [] and touched == []
+
+
+def test_closed_trial_job_with_nonstring_dispatch_id_cancels_job(env, monkeypatch):
+    """A list dispatch id cannot roll back cancellation of a closed-run job."""
+    job, _ = _queued(env, monkeypatch, secs=1.0)
+    con = env.con()
+    con.execute("UPDATE outbox SET kind='trial_recovery', payload_json=? WHERE id=?",
+                (json.dumps({"dispatch_id": [7]}), job["id"]))
+    _close_terminal_run(con, job["run_id"])
+    con.commit()
+
+    from office import jobs
+    assert jobs.execute(env.con(), job["id"]) == 0
+    row = _row(env.con(), job["id"])
+    assert row["status"] == "cancelled" and row["result_json"] is None and row["claim_token"] is None, row
+    assert _pending(env, job["run_id"]) == []
+
+
 def test_a_dead_claim_of_a_closed_run_is_reclaimed_into_a_cancel_not_a_retry(env, monkeypatch):
     """Reclaiming a proven-dead claim on a closed run must not requeue the job
     (a later kick would restart its suite): the claim is cancelled, the gate
