@@ -14,6 +14,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -159,6 +160,73 @@ def _findings_text(con, run: dict, tid: str) -> str:
     rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND " + contract.TASK_WORK_FINDINGS + " "
                        "ORDER BY created_at", (run["id"], tid)).fetchall()
     return "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:120]}".strip() for r in rows[:8])
+
+
+def _barrier_admission_attempt() -> None:
+    path = os.environ.get("OFFICE_RESTACK_BARRIER")
+    if not path:
+        return
+    bdir = Path(path)
+    bdir.mkdir(parents=True, exist_ok=True)
+    attempt_1 = bdir / "attempt_1"
+    attempt_2 = bdir / "attempt_2"
+    try:
+        fd = os.open(str(attempt_1), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        try:
+            fd = os.open(str(attempt_2), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            pass
+
+
+@contextlib.contextmanager
+def _barrier_restack_guard():
+    path = os.environ.get("OFFICE_RESTACK_BARRIER")
+    if not path:
+        yield
+        return
+    bdir = Path(path)
+    bdir.mkdir(parents=True, exist_ok=True)
+    in_flight = bdir / "restack_in_flight"
+    collision = bdir / "collision"
+    attempt_2 = bdir / "attempt_2"
+
+    with (bdir / "restack.log").open("a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(f"enter:{os.getpid()}\n")
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    try:
+        fd = os.open(str(in_flight), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        collision.touch()
+
+    deadline = time.monotonic() + 10.0
+    while not attempt_2.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("Timed out waiting for second process admission attempt")
+        time.sleep(0.01)
+
+    time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            in_flight.unlink()
+        with (bdir / "restack.log").open("a") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(f"exit:{os.getpid()}\n")
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
@@ -551,11 +619,12 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
                       scope=tid, next_step=f"{_fresh_cmd(tid)} --as <harness>/<model>[@effort]")
     if launch and launch_prefs:
         launch = {**launch, "launch": launch_prefs}
-    if stash_wip and parent.get("worktree"):
-        with _stash_wip(Path(parent["worktree"]), tid):
-            restack = _restack(con, run, task, parent["worktree"])
-    else:
-        restack = _restack(con, run, task, parent.get("worktree"))
+    with _barrier_restack_guard():
+        if stash_wip and parent.get("worktree"):
+            with _stash_wip(Path(parent["worktree"]), tid):
+                restack = _restack(con, run, task, parent["worktree"])
+        else:
+            restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:
@@ -612,6 +681,7 @@ def _rerun_task_guard(run: dict, tid: str):
     lock_dir = paths.run_dir(run["id"]) / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"rerun-{sha256_obj(tid)[:16]}.lock"
+    _barrier_admission_attempt()
     with lock_path.open("a") as fd:
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
         try:

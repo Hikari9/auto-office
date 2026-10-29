@@ -49,7 +49,7 @@ def test_stale_accepted_dependent_can_follow_status_restack_recommendation(env, 
     assert _is_ancestor(env, newer, "HEAD", cwd=wt), "restack merges current upstream"
 
 
-def test_parallel_stale_reruns_cannot_restack_twice_or_launch_two_workers(env):
+def test_parallel_stale_reruns_cannot_restack_twice_or_launch_two_workers(env, tmp_path):
     approved_run(env, plan=PLAN_STACK, integration_reviewer=[PASS], code_reviewer=[PASS],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}},
@@ -66,10 +66,13 @@ def test_parallel_stale_reruns_cannot_restack_twice_or_launch_two_workers(env):
     finally:
         con.close()
 
+    barrier_dir = tmp_path / "barrier"
+    barrier_env = {**EXTERNAL, "OFFICE_RESTACK_BARRIER": str(barrier_dir)}
+
     def attempt():
         # Independent CLI processes, not threads entering Env.office's global
         # chdir/env/stdout mocks. This exercises actual cross-process flock.
-        return env._office_subprocess(("rerun", "T2", "--fresh"), None, EXTERNAL, None)
+        return env._office_subprocess(("rerun", "T2", "--fresh"), None, barrier_env, None)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(lambda _: attempt(), range(2)))
@@ -83,3 +86,9 @@ def test_parallel_stale_reruns_cannot_restack_twice_or_launch_two_workers(env):
         assert after == before + 1, (before, after, outcomes)
     finally:
         con.close()
+
+    assert (barrier_dir / "attempt_2").exists(), "second process must have attempted admission"
+    assert not (barrier_dir / "collision").exists(), "concurrent restack collision detected"
+    restack_log = (barrier_dir / "restack.log").read_text().splitlines()
+    restack_entries = [line for line in restack_log if line.startswith("enter:")]
+    assert len(restack_entries) == 1, f"only the first process enters restack; got {restack_log}"
