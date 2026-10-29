@@ -78,20 +78,27 @@ def _working_sample(monkeypatch, *, text_busy):
                         lambda name: {"status": "working", "busy": True, "text_busy": text_busy})
 
 
-@pytest.mark.xfail(strict=True, reason="#790 repro: a codex brief held in the composer while herdr reports working gets no "
-                                       "Enter. The fix needs a working-status check that #583's scrollback fixture "
-                                       "(working pane, no busy footer) cannot tell apart; split out as follow-up")
 def test_codex_pointer_held_while_herdr_reports_working_is_submitted(monkeypatch):
     pane = _Pane(monkeypatch, [_codex_composer(POINTER)], status="working")
     _working_sample(monkeypatch, text_busy=False)
     (landed, mismatch), spec = pane.settle()
-    assert pane.enters, f"no Enter reached a composer that holds the brief; spec={spec}"
+    assert landed is True and mismatch is None and pane.enters == [("pane", "send-keys", "w1:p1", "Enter")], \
+        f"expected one Enter on the Codex input row; spec={spec}"
     assert "landing_unconfirmed_working" not in spec
 
 
 def test_working_pane_with_a_busy_footer_and_the_pointer_in_scrollback_gets_no_enter(monkeypatch):
-    pane = _Pane(monkeypatch, [_codex_composer(POINTER)], status="working")
+    pane = _Pane(monkeypatch, [f"{BUSY}\n{_codex_composer(POINTER)}"], status="working")
     _working_sample(monkeypatch, text_busy=True)
+    (landed, mismatch), spec = pane.settle()
+    assert (landed, mismatch) == (False, None) and pane.enters == []
+    assert spec == {"landing_unconfirmed_working": True}
+
+
+def test_working_codex_pane_with_pointer_above_empty_input_row_gets_no_enter(monkeypatch):
+    view = f"{_codex_composer(POINTER)}\n› \n{FOOTER}"
+    pane = _Pane(monkeypatch, [view], status="working")
+    _working_sample(monkeypatch, text_busy=False)
     (landed, mismatch), spec = pane.settle()
     assert (landed, mismatch) == (False, None) and pane.enters == []
     assert spec == {"landing_unconfirmed_working": True}
