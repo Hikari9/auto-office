@@ -134,6 +134,7 @@ def test_codex_reviewer_launch_uses_only_one_recovery_enter_across_delivery_and_
 
 @pytest.mark.approved
 def test_codex_non_code_reviewer_reprompt_sends_only_one_recovery_enter(env, monkeypatch, tmp_path):
+    monkeypatch.delenv("OFFICE_HERDR_ENTER_TRIES", raising=False)
     approved_run(env, code_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
