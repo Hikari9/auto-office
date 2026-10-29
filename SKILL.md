@@ -24,7 +24,7 @@ it never investigates or files. Issues only: never fix the bug or open a PR as p
 - Only the user changes requirements or authorizes irreversible or external actions. Record their words verbatim with `--quote`; never paraphrase consent into existence.
 - Self-review before each phase advances: re-read the goal and done criteria against current state, then proceed, amend, or stop. This is judgement, not paperwork; there is nothing to record.
 - Raw evidence stays private. Public artifacts get summaries only.
-- A run stays on the Office version that created it. If a command says a run is pinned to another runtime (including a 3.0 run), follow the instruction it prints.
+- A run stays on the Office version that created it. If a command says a run is pinned to another runtime (including a 3.0 run), follow the instruction it prints. For ordinary PR checks, use the repository's contract suite, named safety smoke and changed-file affected tests. Require full-suite validation for test-infrastructure changes, deleted or renamed tests, release work, or an explicit task requirement; do not prescribe a fixed test roster for every PR.
 
 ## Asking the user
 

@@ -107,8 +107,12 @@ def _is_validate_script(command: str) -> bool:
 
 
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "a79d72ca4e42faab9688903c7c42c6d71c4b254a12e294049890468b8822316c",
-    "scripts/select_pr_tests.py": "42e24afc3fb39696f8abc2d1639537956b518a63b934b3d0a7334e5d403478bd",
+    "scripts/validate.sh": "696cf9a0f77a44d229481eaf32ae4c936e078d3b7ad834c1e4bb0f72375c0099",
+    "scripts/select_pr_tests.py": "57d93de67405cb49eaa0222eab80a8b9e21cfd539091ff3f6a3ba7174fed6b7c",
+    "tests/test_pr_test_selection.py": "dc88ef8ef03d39554e72d974ef826499e0bdadb9694332d49f4926f03b991fed",
+    "tests/v31/test_verification_coverage.py": "496500889cfdaf06197a9c6d019cf855782d04bbf6d0b1fd80bafeec9edb4cb0",
+    "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
+    ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
 }
 
 
@@ -125,8 +129,9 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
         return False
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         return False
-    # Trust only the reviewed gate and selector, byte for byte. Updating either
-    # requires reviewing both and updating these digests in the same change.
+    # Trust only the reviewed gate, selector, integrity tests and hook, byte for
+    # byte. Updating any of them requires reviewing the attestation and updating
+    # these digests in the same change.
     for path, expected in _SCOPED_GATE_SHA256.items():
         proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
                               capture_output=True)

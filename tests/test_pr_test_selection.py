@@ -20,6 +20,7 @@ def pr_repo(tmp_path):
     for path, text in {
         "tests/test_version_single_source.py": "def test_version(): pass\n",
         "tests/v31/test_verification_coverage.py": "def test_coverage(): pass\n",
+        "tests/v31/test_issue_563_artifact_integrity.py": "def test_artifact_integrity(): pass\n",
         "tests/test_pr_test_selection.py": "def test_selector(): pass\n",
         "tests/test_routing.py": "from office import routing\n",
         "tests/v31/test_routing_fallback.py": "from office.routing import dispatch\n",
@@ -56,15 +57,149 @@ def test_modified_test_module_is_selected(pr_repo):
     assert "tests/test_unrelated.py" in chosen
 
 
-def test_docs_change_still_checks_cross_cutting_contracts(pr_repo):
+def test_docs_change_still_checks_named_safety_smoke(pr_repo):
     (pr_repo / "README.md").write_text("new docs\n")
     _, changed, chosen = selection(pr_repo)
     assert changed == ["README.md"]
     assert set(chosen) == {
-        "tests/test_version_single_source.py",
         "tests/v31/test_verification_coverage.py",
+        "tests/v31/test_issue_563_artifact_integrity.py",
         "tests/test_pr_test_selection.py",
     }
+
+
+def test_safety_smoke_set_is_named_and_selected(pr_repo):
+    from scripts.select_pr_tests import SAFETY_SMOKE
+
+    (pr_repo / "README.md").write_text("new docs\n")
+    reasons = {}
+    _, _, chosen = selection(pr_repo, reasons=reasons)
+    assert set(SAFETY_SMOKE) <= set(chosen)
+    assert all("named safety smoke" in reasons[name] for name in SAFETY_SMOKE)
+
+
+@pytest.mark.parametrize("contracts", ["missing", "empty"])
+def test_pr_shell_gate_fails_closed_without_contract_tests(pr_repo, contracts):
+    import os
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
+    dest = pr_repo / "scripts" / "validate.sh"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(script.read_text())
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "commit script"], check=True)
+    if contracts == "empty":
+        (pr_repo / "tests" / "contracts").mkdir()
+    proc = subprocess.run(["bash", str(dest), "--pr"], cwd=pr_repo,
+                          capture_output=True, text=True, env={**os.environ, "VALIDATE_WORKERS": "2"})
+    assert proc.returncode == 2
+    assert "tests/contracts is missing or has no test modules" in proc.stderr
+    assert not (pr_repo / ".venv").exists()
+
+
+def _install_shell_gate_fixture(pr_repo, selected_tests):
+    import hashlib
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
+    (pr_repo / "scripts").mkdir(exist_ok=True)
+    (pr_repo / "scripts" / "validate.sh").write_text(script.read_text())
+    for path in ("scripts/check_ecosystem.py", "scripts/select_pr_tests.py",
+                 "scripts/office_runtime.py"):
+        (pr_repo / path).write_text("pass\n")
+    (pr_repo / "tests" / "conftest.py").write_text(
+        'def pytest_addoption(parser):\n    parser.addoption("--all", action="store_true")\n')
+    (pr_repo / "tests" / "test_gate_smoke.py").write_text("def test_gate_smoke(): assert True\n")
+    contracts = pr_repo / "tests" / "contracts"
+    contracts.mkdir()
+    (contracts / "test_contract.py").write_text("def test_contract(): assert True\n")
+    (pr_repo / "pyproject.toml").write_text("[project]\nname = 'gate-fixture'\n")
+    (pr_repo / ".gitignore").write_text(".venv/\n")
+    env_dir = pr_repo / ".venv" / "bin"
+    env_dir.mkdir(parents=True)
+    real_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python3"
+    fake_python = f'''#!/bin/bash
+if [ "$1" = "-c" ]; then exit 0; fi
+case "$1" in
+  scripts/check_ecosystem.py) exit 0 ;;
+  scripts/select_pr_tests.py)
+    if [ -n "$SELECTED_TESTS" ]; then printf '%s\\n' "$SELECTED_TESTS" > "$3"; else : > "$3"; fi
+    exit 0 ;;
+  scripts/office_runtime.py) exit 0 ;;
+  -m) exec {real_python} "$@" ;;
+esac
+exit 99
+'''
+    (env_dir / "python3").write_text(fake_python)
+    (env_dir / "python3").chmod(0o755)
+    stamp = hashlib.sha1((pr_repo / "pyproject.toml").read_bytes()).hexdigest()
+    (pr_repo / ".venv" / ".validate-stamp").write_text(stamp + "\n")
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "gate fixture"], check=True)
+    return pr_repo / "scripts" / "validate.sh"
+
+
+def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
+    import os
+
+    script = _install_shell_gate_fixture(pr_repo, "tests/test_gate_smoke.py")
+    proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
+                          capture_output=True, text=True,
+                          env={**os.environ, "VALIDATE_WORKERS": "1",
+                               "SELECTED_TESTS": "tests/test_gate_smoke.py"})
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "Contract suite: tests/contracts/" in proc.stdout
+    assert "contract suite + safety smoke + changed-file affected tests" in proc.stdout
+    assert "2 passed" in proc.stdout
+
+
+def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
+    import os
+
+    gate_source = (Path(__file__).resolve().parents[1] / "scripts" / "validate.sh").read_text()
+    assert 'selected_count=0' in gate_source
+    assert '[ "$selected_count" -eq 0 ]' in gate_source
+    script = _install_shell_gate_fixture(pr_repo, "")
+    proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
+                          capture_output=True, text=True,
+                          env={**os.environ, "VALIDATE_WORKERS": "1"})
+    assert proc.returncode == 2
+    assert "No tests selected; refusing empty scoped validation" in proc.stderr
+
+
+def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo):
+    import os
+    import shutil
+
+    script = _install_shell_gate_fixture(pr_repo, "tests/test_gate_smoke.py")
+    python_stub = pr_repo / "python3.stub"
+    shutil.copy2(pr_repo / ".venv" / "bin" / "python3", python_stub)
+    shutil.rmtree(pr_repo / ".venv")
+    fake_bin = pr_repo / "fake-bin"
+    fake_bin.mkdir()
+    uv = fake_bin / "uv"
+    uv.write_text('''#!/bin/bash
+printf '%s\\n' "$*" >> "$UV_LOG"
+if [ "$1" = "venv" ]; then
+  mkdir -p .venv/bin
+  cp "$PYTHON_STUB" .venv/bin/python3
+  chmod +x .venv/bin/python3
+  exit 0
+fi
+if [ "$1" = "pip" ]; then exit 0; fi
+exit 99
+''')
+    uv.chmod(0o755)
+    env_log = pr_repo / "uv.log"
+    proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
+                          capture_output=True, text=True,
+                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                               "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
+                               "SELECTED_TESTS": "tests/test_gate_smoke.py",
+                               "VALIDATE_WORKERS": "1"})
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "venv --python >=3.11 .venv" in env_log.read_text()
 
 
 def test_missing_base_fails_closed(pr_repo):

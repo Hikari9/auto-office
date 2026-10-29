@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select change-relevant Auto-Office tests for the local PR gate (#854).
+"""Select named safety-smoke and change-relevant tests for the local PR gate.
 
 This is a deliberately scoped regression check, NOT a proof that every test
 has run. It is tied to the merge base and refuses to guess when base
@@ -13,10 +13,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Cheap invariant checks that every PR carries; they are not exhaustive.
-ALWAYS = (
-    "tests/test_version_single_source.py",
+# Named safety-smoke checks accompany the mandatory tests/contracts suite.
+SAFETY_SMOKE = (
     "tests/v31/test_verification_coverage.py",
+    "tests/v31/test_issue_563_artifact_integrity.py",
     "tests/test_pr_test_selection.py",
 )
 SPECIAL = {
@@ -78,8 +78,11 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
             if reasons is not None:
                 reasons.setdefault(test, set()).add(reason)
 
-    for name in ALWAYS:
-        include(name, "cross-cutting smoke")
+    missing_smoke = sorted(name for name in SAFETY_SMOKE if name not in tests)
+    if missing_smoke:
+        raise SelectionError("Safety-smoke test modules are missing: " + ", ".join(missing_smoke))
+    for name in SAFETY_SMOKE:
+        include(name, "named safety smoke")
     # Direct module references in tests, including both import forms. This
     # deliberately adds affected test modules but cannot discover every indirect
     # dependency. See the printed scope disclosure and PR review requirements.
@@ -145,6 +148,7 @@ def main() -> int:
     args.output.write_text("\n".join(tests) + "\n")
     print(f"[PR GATE] HEAD {git(root, 'rev-parse', 'HEAD')}; merge base {base}")
     print(f"[PR GATE] {len(changed)} changed files: {', '.join(changed)}")
+    print(f"[PR GATE] named safety-smoke set: {', '.join(SAFETY_SMOKE)}")
     print(f"[PR GATE] {len(tests)} selected test modules (scoped, not full-suite):")
     for name in tests:
         print(f"  {name} — {'; '.join(sorted(reasons.get(name) or {'unclassified'}))}")
