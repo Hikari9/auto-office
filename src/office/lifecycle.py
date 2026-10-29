@@ -416,6 +416,9 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                           final=closeout.done(f"already {run['phase']}, worktrees retained"))
         landing = run.get("landing") or {}
         res = Result(lines=[f"{short(run['id'])} already closed | retrying closeout"])
+        retried_jobs = jobs.cancel_run_jobs(con, run["id"])
+        if retried_jobs["stopped"]:
+            res.add(f"stopped {len(retried_jobs['stopped'])} live job process(es) from the previous close")
         # A landed-externally close stores the PR URL in landing.handoff and
         # neither target nor detail; that landing is already verified, so a
         # replay sweeps instead of re-offering the handoff. The PR must be

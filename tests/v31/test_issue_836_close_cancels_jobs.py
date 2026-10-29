@@ -230,9 +230,11 @@ def test_replayed_close_stops_claim_after_close_commit_was_interrupted(env, monk
     """The committed cancelled row retains enough identity for close replay to
     stop a worker when the original close exits before its stopping phase."""
     job, out, proc = _claimed(env, monkeypatch, secs=20.0)
-    from office import db, jobs
+    from office import db, jobs, lifecycle, state
     con = env.con()
     with db.transaction(con):
+        state.update_run(con, job["run_id"], phase="closed", terminal_at="2026-10-29T00:00:00+00:00",
+                         terminal_reason="handed off", landing={"status": "handoff", "handoff": "#7"})
         rows = jobs.cancel_run_jobs_in_transaction(con, job["run_id"])
     assert len(rows) == 1 and rows[0]["status"] == "claimed", rows
     committed = _row(con, job["id"])
@@ -242,8 +244,9 @@ def test_replayed_close_stops_claim_after_close_commit_was_interrupted(env, monk
     assert committed["claim_token"] and committed["claimed_by"], committed
     assert proc.poll() is None and _probe_state(out)["now"] == 1
 
-    replay = jobs.cancel_run_jobs(con, job["run_id"])
-    assert replay["cancelled"] == 0 and replay["stopped"] == [job["id"]], replay
+    monkeypatch.setattr(lifecycle, "_closeout", lambda *args, **kwargs: None)
+    replay = lifecycle.close(con, state.get_run(con, job["run_id"]))
+    assert any("stopped 1 live job process(es)" in line for line in replay.lines), replay.lines
     assert _until(lambda: _check_gone(out, started=True)), _probe_state(out)
     proc.wait(timeout=30)
     stopped = _row(con, job["id"])
