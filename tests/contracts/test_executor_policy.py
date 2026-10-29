@@ -76,6 +76,13 @@ def test_policy_rejects_duplicate_yaml_keys(policy_root):
         slates.load_policy(policy_root)
 
 
+def test_policy_rejects_unhashable_yaml_mapping_keys(policy_root):
+    path = policy_root / "catalog" / "executor-policy.yaml"
+    path.write_text(path.read_text() + "\n[bad]: value\n")
+    with pytest.raises(slates.ExecutorPolicyError, match="unhashable key"):
+        slates.load_policy(policy_root)
+
+
 def test_conditional_unshipped_routes_remain_in_the_policy(policy_root):
     data = yaml.safe_load((policy_root / "catalog" / "executor-policy.yaml").read_text())
     glm = next(row for row in data["executor_preferred"]["M"] if row["model_id"] == "glm-5.3-flash")
