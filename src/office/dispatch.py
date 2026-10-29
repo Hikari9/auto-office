@@ -2829,8 +2829,8 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not mismatch:
         try:
             landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
-                                     guard=guard, max_enter_tries=1 if not worker and dispatch.get("harness") == "codex"
-                                     else None, enter_budget=enter_budget)
+                                     guard=guard, max_enter_tries=1 if codex_reviewer else None,
+                                     enter_budget=enter_budget)
         except PaneMismatch as exc:
             mismatch = str(exc)
             spec["pane_evidence"]["mismatch"] = mismatch
