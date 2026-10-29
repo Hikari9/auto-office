@@ -42,7 +42,7 @@ def write_scoped_gate_artifacts(root: Path) -> None:
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            target.write_text("reviewed artifact\n")
+            target.write_text("# reviewed artifact\n")
 
 
 @pytest.mark.parametrize("commands", [
@@ -184,7 +184,7 @@ def test_scoped_gate_rejects_changed_blob(tiered_repo, changed, monkeypatch):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            target.write_text("reviewed artifact\n")
+            target.write_text("# reviewed artifact\n")
     monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
         p: hashlib.sha256((root / p).read_bytes()).hexdigest()
         for p in vc._SCOPED_GATE_SHA256
