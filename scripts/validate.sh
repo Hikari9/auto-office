@@ -46,7 +46,7 @@ fi
 # The tree under test, taken before any check runs: a commit that lands during
 # the run must not be stamped as validated.
 start_tree=""
-[ -z "$(git status --porcelain)" ] && start_tree="$(git rev-parse 'HEAD^{tree}')"
+[ -z "$(git status --porcelain -- . ':!dist')" ] && start_tree="$(git rev-parse 'HEAD^{tree}')"
 
 # Same install as the old CI job: an editable package plus test deps, in a repo-local venv.
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
@@ -134,7 +134,7 @@ echo "== Validation passed"
 # the pre-push hook reruns this gate on every push, and landing attests from
 # run evidence (verification_coverage.py). Only a clean tree is stamped, since
 # otherwise the tree that passed is not the one being pushed.
-if [ -n "$start_tree" ] && [ -z "$(git status --porcelain)" ] \
+if [ -n "$start_tree" ] && [ -z "$(git status --porcelain -- . ':!dist')" ] \
     && [ "$(git rev-parse 'HEAD^{tree}')" = "$start_tree" ]; then
   # Keep scoped and full receipts separate; scoped results must never
   # satisfy a full-suite validation stamp.

@@ -44,7 +44,8 @@ class SelectionError(RuntimeError):
 
 
 def _run(root: Path, *args: str) -> str:
-    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          errors="surrogateescape")
     if proc.returncode:
         raise SelectionError(f"git {' '.join(args)}: {proc.stderr.strip()}")
     return proc.stdout
@@ -140,6 +141,10 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
                 "add an explicit test or a selector mapping before landing")
     if not selected:
         raise SelectionError("No test modules selected; fail closed")
+    # The selection crosses to the shell as one path per line; a line break would split a name.
+    broken = sorted(t for t in selected if re.search(r"[\r\n]", t))
+    if broken:
+        raise SelectionError("Selected test path contains a line break: " + ", ".join(map(repr, broken)))
     return base, sorted(changed), sorted(selected)
 
 

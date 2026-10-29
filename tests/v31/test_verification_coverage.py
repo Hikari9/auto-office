@@ -161,17 +161,22 @@ def test_scoped_noop_script_does_not_claim_coverage(tiered_repo):
 
 def test_scoped_gate_pins_match_reviewed_source():
     import hashlib
+    from scripts.select_pr_tests import SAFETY_SMOKE
     root = Path(__file__).resolve().parents[2]
-    assert set(vc._SCOPED_GATE_SHA256) == {
+    pinned = set(vc._SCOPED_GATE_SHA256)
+    # validate.sh runs every contract module, so each one on disk must be pinned.
+    contracts = {f"tests/contracts/{p.name}" for p in (root / "tests/contracts").glob("test_*.py")}
+    assert {p for p in pinned if p.startswith("tests/contracts/")} == contracts
+    assert pinned - contracts == {
         "scripts/validate.sh",
         "scripts/select_pr_tests.py",
         "tests/test_pr_test_selection.py",
+        "tests/test_version_single_source.py",
         "tests/v31/test_verification_coverage.py",
         "tests/v31/test_issue_563_artifact_integrity.py",
         ".githooks/pre-push",
-        "tests/contracts/test_executor_policy.py",
-        "tests/contracts/test_route_parity.py",
     }
+    assert set(SAFETY_SMOKE) <= pinned
     assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
             for p in vc._SCOPED_GATE_SHA256} == vc._SCOPED_GATE_SHA256
 

@@ -73,6 +73,16 @@ def test_version_invariant_runs_on_every_pr(pr_repo):
     assert "tests/test_version_single_source.py" in chosen
 
 
+def test_line_break_in_selected_test_path_fails_closed(pr_repo):
+    # One name holds a newline and a pytest option; split at the newline it becomes an argument.
+    (pr_repo / "tests" / "test_evil\n-k x.py").write_text("def test_evil(): pass\n")
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", "line break name"], check=True)
+    with pytest.raises(SelectionError, match="line break"):
+        selection(pr_repo)
+
+
 def test_non_ascii_test_module_is_selected_not_quoted(pr_repo):
     # Newline git output quotes this path, so it would look like a non-test change.
     (pr_repo / "tests" / "test_café.py").write_text("def test_cafe(): pass\n")
