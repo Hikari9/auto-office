@@ -416,6 +416,9 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                           final=closeout.done(f"already {run['phase']}, worktrees retained"))
         landing = run.get("landing") or {}
         res = Result(lines=[f"{short(run['id'])} already closed | retrying closeout"])
+        retried_jobs = jobs.cancel_run_jobs(con, run["id"])
+        if retried_jobs["stopped"]:
+            res.add(f"stopped {len(retried_jobs['stopped'])} live job process(es) from the previous close")
         # A landed-externally close stores the PR URL in landing.handoff and
         # neither target nor detail; that landing is already verified, so a
         # replay sweeps instead of re-offering the handoff. The PR must be
@@ -453,7 +456,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
-    stopped_jobs = jobs.stop_cancelled_jobs(cancelled_jobs)
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     state.write_projection(con, run["id"])
     from office import dispatch, rerun
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
@@ -648,7 +651,7 @@ def _stop_work(con, run: dict) -> tuple[list, list[dict]]:
 def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> list[str]:
     """After a run ends: stop live agents, close panes and tab, drop the plan draft."""
     from office import jobs
-    stopped_jobs = jobs.stop_cancelled_jobs(cancelled_jobs)
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     for row in live:
         if row["pid"] and pid_alive(row["pid"]):
             try:
