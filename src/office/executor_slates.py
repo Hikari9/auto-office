@@ -175,11 +175,6 @@ def policy_provenance(policy: dict = POLICY) -> dict:
             "benchmark_index": policy["benchmark_index"]}
 
 
-def policy_for(request: dict) -> dict:
-    """Return the one validated snapshot carried through this routing decision."""
-    return request.get("_executor_policy") or POLICY
-
-
 def _seed_entry(row: dict) -> dict:
     return {key: row[key] for key in ("model_id", "effort", "harness") if row.get(key) is not None}
 

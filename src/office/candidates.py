@@ -1050,7 +1050,6 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "task_id": task_id,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
-        "_executor_policy": executor_policy,
     }
     if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
@@ -1093,8 +1092,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             request["strict_seed_user_authorized"] = True
         if override or manual:
             request["manual_route"] = True
-    result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
-    result.get("request", request).pop("_executor_policy", None)
+    result = (routing.route(request, connection=con, executor_policy=executor_policy)
+              if observe or con.in_transaction else routing.route(request, executor_policy=executor_policy))
     if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_policy["floors"] and seed:
         ideal = executor_slates.route_summary(seed, candidates, result.get("rejected") or [],
                                               result.get("slate") or [])
