@@ -11,6 +11,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it. Under `convergence-v1` a task is accepted on its own checks, and independent and visual review judge each lane's composed result (`docs/review-convergence.md`).
 
 Prefer existing targeted tests, regression tests, static/type/lint, build/package, focused runtime, then broader suites when justified.
+For an ordinary Auto Office PR, follow the repository's `scripts/validate.sh --pr` gate. It runs `tests/contracts/`, its named safety-smoke set and tests affected by changed files. Run the explicit full suite when test infrastructure changes, tests are deleted or renamed, release validation is required, or the task contract calls for it; do not require a fixed test roster for every PR. Scoped results must remain labeled scoped.
 
 Do not treat exit code zero or a green gate alone as proof. Where practical, demonstrate critical gates fail on known-bad/mutated input before trusting green.
 

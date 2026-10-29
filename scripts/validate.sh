@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full validation remains available; --pr selects changed-file tests for PRs (#854).
+# Full validation remains available; --pr runs contracts, safety smoke and affected tests.
 # No GitHub Actions CI by maintainer decision (#120).
 # The pre-push hook invokes --pr; bare invocation keeps the full regression gate.
 # VALIDATE_BUILD=1 also builds the wheel and checks it carries the packaged resources.
@@ -36,6 +36,10 @@ if [ "$mode" = "pr" ]; then
     echo "[PR GATE] Refusing a dirty source/test tree; commit changes before validation" >&2
     exit 2
   fi
+  if [ ! -d tests/contracts ] || [ -z "$(find tests/contracts -type f -name 'test_*.py' -print -quit)" ]; then
+    echo "[PR GATE] tests/contracts is missing or has no test modules; refusing scoped validation" >&2
+    exit 2
+  fi
 fi
 
 
@@ -48,20 +52,32 @@ start_tree=""
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
 # pip is configured for --user installs on some hosts, which a venv (and build's isolated env) rejects.
 export PIP_USER=0
+if [ -x .venv/bin/python3 ] && ! .venv/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+  echo "== Recreating .venv with a supported Python"
+  rm -rf .venv
+fi
 if [ ! -x .venv/bin/python3 ]; then
   echo "== Creating .venv"
-  python3 -m venv .venv
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --python '>=3.11' .venv
+  else
+    python3 -m venv .venv
+  fi
+fi
+if ! .venv/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+  echo "[VALIDATE] Python 3.11 or newer is required" >&2
+  exit 2
 fi
 # Reinstall only when the dependency declaration changed, so an existing .venv picks up new
 # test deps (e.g. pytest-xdist) without being rebuilt on every run.
 stamp="$(shasum pyproject.toml | cut -d' ' -f1)"
 if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
   echo "== Installing package and test deps"
-  # A .venv made by `uv run`/`uv venv` has no pip; install through uv when that is the case.
-  if .venv/bin/python3 -m pip --version >/dev/null 2>&1; then
-    .venv/bin/python3 -m pip install -q -e '.[test]' build
-  else
+  # Use uv for the Hatchling/PEP 660 editable install and host pip configuration.
+  if command -v uv >/dev/null 2>&1; then
     uv pip install -q --python .venv/bin/python3 -e '.[test]' build
+  else
+    .venv/bin/python3 -m pip install -q -e '.[test]' build
   fi
   echo "$stamp" > .venv/.validate-stamp
 fi
@@ -79,19 +95,22 @@ python3 scripts/check_ecosystem.py
 # Two workers maximum. PR selection still uses --all so selected integration,
 # legacy, and slow tests are never hidden by the default tier filter.
 if [ "$mode" = "pr" ]; then
+  echo "== Contract suite: tests/contracts/ (--all markers enabled)"
   selection_file="$(mktemp)"
   trap 'rm -f "$selection_file"' EXIT
   python3 scripts/select_pr_tests.py --output "$selection_file"
   selected_tests=()
+  selected_count=0
   while IFS= read -r selected_test; do
     selected_tests+=("$selected_test")
+    selected_count=$((selected_count + 1))
   done < "$selection_file"
-  if [ "${#selected_tests[@]}" -eq 0 ]; then
+  if [ "$selected_count" -eq 0 ]; then
     echo "[PR GATE] No tests selected; refusing empty scoped validation" >&2
     exit 2
   fi
-  echo "== SCOPED PR tests (--all markers enabled; NOT a full-suite pass)"
-  python3 -m pytest "${selected_tests[@]}" -q -n "${VALIDATE_WORKERS:-2}" --all
+  echo "== SCOPED PR tests: contract suite + safety smoke + changed-file affected tests"
+  python3 -m pytest tests/contracts/ "${selected_tests[@]}" -q -n "${VALIDATE_WORKERS:-2}" --all
 else
   echo "== Full test suite (unit, integration, legacy, slow; visual tests skip without Playwright)"
   python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
