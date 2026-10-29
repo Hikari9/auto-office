@@ -33,11 +33,13 @@ The three CLI smoke tests invoke the real `office` executable in child processes
 
 ## Measurement
 
+Run-level acceptance uses `scripts/validate.sh --pr` and an approved convergence review. The full suite is optional and is not the run-level gate.
+
 Measured on this Mac (Apple Silicon, macOS, 18 logical CPUs; CPython 3.14.8) with `/usr/bin/time -l .venv/bin/python -m pytest -n 2 tests/contracts/core -q`:
 
 - 41 named functions, 51 collected nodes; 51 passed.
-- Wall time: 1.65 seconds (the host load averages were 22.36 / 41.36 / 39.05 during this run).
-- Maximum resident set size: 62,685,184 bytes (59.8 MiB).
+- Wall time: 1.94 seconds (host load averages were 4.24 / 9.33 / 10.46 before the run).
+- Maximum resident set size: 64,421,888 bytes (61.4 MiB).
 
 This is the new core suite measurement, not a measurement of the PR selector or the historical full suite.
 
@@ -48,6 +50,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | Legacy module | Disposition |
 |---|---|
 | `tests/contracts/test_executor_policy.py` | keep |
+| `tests/contracts/test_route_parity.py` | keep |
 | `tests/test_adapters.py` | keep |
 | `tests/test_agy_usage.py` | keep |
 | `tests/test_alias_resolution.py` | keep |

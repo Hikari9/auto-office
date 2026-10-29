@@ -21,7 +21,8 @@ if args[:1] == ["--version"]:
 if args[:1] == ["models"]:
     print("acme/fast-1"); raise SystemExit(0)
 prompt = sys.stdin.read()
-Path(os.environ["OFFICE_SMOKE_CAPTURE"]).write_text(json.dumps({{"argv": args, "prompt": prompt}}))
+Path(os.environ["OFFICE_SMOKE_CAPTURE"]).write_text(json.dumps({{"argv": args, "prompt": prompt,
+    "provider_credential_present": "OPENAI_API_KEY" in os.environ}}))
 print("READY")
 '''
 
@@ -46,6 +47,25 @@ ADAPTER = {
 }
 
 
+def _cli_environment(tmp_path, bindir, adapters):
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    return {
+        "HOME": str(home),
+        "PATH": os.pathsep.join([str(bindir), os.defpath]),
+        "OFFICE_USER_CONFIG": str(tmp_path / "config.yaml"),
+        "OFFICE_USER_ADAPTERS": str(adapters),
+        "OFFICE_DATA_HOME": str(tmp_path / "data"),
+        "OFFICE_STATE_HOME": str(tmp_path / "state"),
+        "AUTO_OFFICE_RUNS_DB": str(tmp_path / "data/runs.db"),
+        "OFFICE_SMOKE_CAPTURE": str(tmp_path / "smoke-capture.json"),
+    }
+
+
+def _has_provider_credential(env):
+    return "OPENAI_API_KEY" in env
+
+
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
@@ -59,12 +79,7 @@ def cli_env(tmp_path, monkeypatch):
     adapters = tmp_path / "adapters"
     adapters.mkdir()
     (adapters / "fakecli.yaml").write_text(yaml.safe_dump(ADAPTER, sort_keys=False))
-    env = os.environ.copy()
-    env.update({"OFFICE_USER_CONFIG": str(tmp_path / "config.yaml"),
-                "OFFICE_USER_ADAPTERS": str(adapters), "OFFICE_DATA_HOME": str(tmp_path / "data"),
-                "OFFICE_STATE_HOME": str(tmp_path / "state"), "AUTO_OFFICE_RUNS_DB": str(tmp_path / "data/runs.db"),
-                "OFFICE_SMOKE_CAPTURE": str(tmp_path / "smoke-capture.json"),
-                "PATH": os.pathsep.join([str(bindir), env.get("PATH", "")])})
+    env = _cli_environment(tmp_path, bindir, adapters)
     monkeypatch.setenv("PATH", env["PATH"])
     return env
 
@@ -77,7 +92,7 @@ def _office(cli_env, *args):
     assert command.resolve().is_relative_to(repository.resolve()), "Office CLI must resolve inside the reviewed checkout"
     assert python.is_file(), "the reviewed checkout's Python environment must be installed for process contract tests"
     env = cli_env.copy()
-    env["PYTHONPATH"] = os.pathsep.join([str(repository / "src"), env.get("PYTHONPATH", "")])
+    env["PYTHONPATH"] = str(repository / "src")
     launcher = (
         "import sys\n"
         "import runpy\n"
@@ -99,7 +114,9 @@ def test_cli_validates_a_user_adapter_in_an_isolated_home(cli_env):
     assert json.loads(result.stdout)["data"]["valid"] is True
 
 
-def test_cli_smokes_only_the_scripted_fake_harness(cli_env):
+def test_cli_smokes_only_the_scripted_fake_harness(cli_env, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sentinel-secret")
+    assert not _has_provider_credential(cli_env)
     result = _office(cli_env, "harness", "smoke", "fakecli", "--model", "acme/fast-1",
                      "--effort", "medium", "--timeout", "10", "--json")
     assert result.returncode == 0, result.stderr + result.stdout
@@ -109,6 +126,7 @@ def test_cli_smokes_only_the_scripted_fake_harness(cli_env):
     launch = json.loads(Path(cli_env["OFFICE_SMOKE_CAPTURE"]).read_text())
     assert launch["argv"] == ["--model", "acme/fast-1", "--effort", "medium"]
     assert launch["prompt"].strip()
+    assert launch["provider_credential_present"] is False
 
 
 def test_cli_model_registration_and_policy_allow_are_read_back(cli_env):
