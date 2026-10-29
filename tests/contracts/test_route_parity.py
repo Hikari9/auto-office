@@ -85,9 +85,9 @@ def test_m_executor_haiku_high_keeps_its_floor_exception():
         "slate_anchor": True, "allow_free_models": True,
         "policy": {"required_capabilities": ["builder"], "floor": {
             "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
-        "context": {"gear": "M", "size_class": "M"}, "_executor_policy": slates.POLICY,
+        "context": {"gear": "M", "size_class": "M"},
         "candidates": [candidate],
-    })
+    }, executor_policy=slates.POLICY)
     assert decision["status"] == "selected", decision
     assert routing.candidate_id(decision["candidate"]) == "claude@1/claude-haiku-5-5@high"
     [selected_waiver] = decision["routing"]["floor_exceptions"]

@@ -98,3 +98,8 @@ def test_cli_model_registration_and_policy_allow_are_read_back(cli_env):
     config = yaml.safe_load(Path(cli_env["OFFICE_USER_CONFIG"]).read_text())
     assert config["routing"]["user_policy"]["role_rules"] == [
         {"role": "executor", "route": "fakecli@1/fast-1@medium", "state": "allow"}]
+    effective = _office(cli_env, "route", "policy", "--effective", "--role", "executor", "--json")
+    assert effective.returncode == 0, effective.stderr + effective.stdout
+    rows = json.loads(effective.stdout)["data"]["effective"]
+    route = next(row for row in rows if row["route"].endswith("/fast-1@medium"))
+    assert route["state"] == "allow"
