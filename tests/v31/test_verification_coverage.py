@@ -1,6 +1,7 @@
 """#563: a partial pytest tier cannot silently certify integration for landing."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -33,6 +34,15 @@ python3 -m pytest tests/ -q -n "${VALIDATE_WORKERS:-2}" --all
     git("add", ".")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "tier config")
     return root, git("rev-parse", "HEAD")
+
+
+def write_scoped_gate_artifacts(root: Path) -> None:
+    """Materialize every digest-pinned input in a small committed fixture."""
+    for path in vc._SCOPED_GATE_SHA256:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text("# reviewed artifact\n")
 
 
 @pytest.mark.parametrize("commands", [
@@ -100,6 +110,7 @@ def test_pr_script_scope_is_not_full_suite_and_does_not_enqueue_full_duplicate(t
     )
     (root / "scripts" / "select_pr_tests.py").write_text("print('select tests')\n")
     import hashlib
+    write_scoped_gate_artifacts(root)
     monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
         p: hashlib.sha256((root / p).read_bytes()).hexdigest()
         for p in vc._SCOPED_GATE_SHA256
@@ -150,16 +161,37 @@ def test_scoped_noop_script_does_not_claim_coverage(tiered_repo):
 
 def test_scoped_gate_pins_match_reviewed_source():
     import hashlib
+    from scripts.select_pr_tests import SAFETY_SMOKE
     root = Path(__file__).resolve().parents[2]
+    pinned = set(vc._SCOPED_GATE_SHA256)
+    # validate.sh runs every contract module, so each one on disk must be pinned.
+    contracts_dir = root / "tests/contracts"
+    contracts = {f"tests/contracts/{p.relative_to(contracts_dir).as_posix()}"
+                 for p in contracts_dir.rglob("*.py")}
+    assert {p for p in pinned if p.startswith("tests/contracts/")} == contracts
+    assert pinned - contracts == {
+        "scripts/validate.sh",
+        "scripts/select_pr_tests.py",
+        "tests/test_pr_test_selection.py",
+        "tests/test_version_single_source.py",
+        "tests/v31/test_verification_coverage.py",
+        "tests/v31/test_issue_563_artifact_integrity.py",
+        ".githooks/pre-push",
+    }
+    assert set(SAFETY_SMOKE) <= pinned
     assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
             for p in vc._SCOPED_GATE_SHA256} == vc._SCOPED_GATE_SHA256
 
 
-@pytest.mark.parametrize("changed", ["scripts/validate.sh", "scripts/select_pr_tests.py"])
+@pytest.mark.parametrize("changed", list(vc._SCOPED_GATE_SHA256))
 def test_scoped_gate_rejects_changed_blob(tiered_repo, changed, monkeypatch):
     import hashlib
     root, _ = tiered_repo
-    (root / "scripts/select_pr_tests.py").write_text("selector\n")
+    for path in vc._SCOPED_GATE_SHA256:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text("# reviewed artifact\n")
     monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
         p: hashlib.sha256((root / p).read_bytes()).hexdigest()
         for p in vc._SCOPED_GATE_SHA256
@@ -338,6 +370,7 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
     (scripts / "validate.sh").chmod(0o755)
     # Exercise the lifecycle with a deliberately small test-only trusted gate.
     import hashlib
+    write_scoped_gate_artifacts(env.repo)
     monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
         p: hashlib.sha256((env.repo / p).read_bytes()).hexdigest()
         for p in vc._SCOPED_GATE_SHA256
@@ -372,7 +405,7 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
 
 
 @pytest.mark.review_contract("v3.1")
-def test_pinned_gate_executes_for_composed_commit(env):
+def test_pinned_gate_executes_for_composed_commit(env, monkeypatch):
     """Run the actual pinned gate and selector through Office integration."""
     import hashlib
     import shutil
@@ -390,15 +423,29 @@ def pytest_collection_modifyitems(config, items):
         return
     # integration, legacy and slow are normally deselected
 ''')
-    for name in ("test_version_single_source.py", "test_pr_test_selection.py",
-                 "v31/test_verification_coverage.py"):
+    for name in ("test_version_single_source.py", "test_pr_test_selection.py", "v31/test_verification_coverage.py",
+                 "v31/test_issue_563_artifact_integrity.py"):
         path = tests / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("def test_fixture_smoke(): assert True\n")
+    contract = tests / "contracts" / "test_fixture_contract.py"
+    contract.parent.mkdir(parents=True)
+    contract.write_text("def test_fixture_contract(): assert True\n")
     scripts = env.repo / "scripts"
     scripts.mkdir()
     for name in ("validate.sh", "select_pr_tests.py"):
         shutil.copy2(source / "scripts" / name, scripts / name)
+    hook = env.repo / ".githooks" / "pre-push"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    # This lifecycle test uses a tiny fixture suite; the production digest pin
+    # is checked independently by test_scoped_gate_pins_match_reviewed_source.
+    import hashlib
+    write_scoped_gate_artifacts(env.repo)
+    monkeypatch.setattr(vc, "_SCOPED_GATE_SHA256", {
+        p: hashlib.sha256((env.repo / p).read_bytes()).hexdigest()
+        for p in vc._SCOPED_GATE_SHA256
+    })
     # Keep the gate's surrounding ecosystem checks lightweight in this fixture.
     (scripts / "check_ecosystem.py").write_text("print('fixture ecosystem')\n")
     (scripts / "office_runtime.py").write_text("print('fixture adapter')\n")
@@ -411,7 +458,7 @@ def pytest_collection_modifyitems(config, items):
     (fixture_venv / "lib").symlink_to(source / ".venv/lib", target_is_directory=True)
     shutil.copy2(source / ".venv/pyvenv.cfg", fixture_venv / "pyvenv.cfg")
     (fixture_venv / ".validate-stamp").write_text(
-        hashlib.sha1((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
+        hashlib.sha256((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
     (env.repo / ".venv").symlink_to(fixture_venv, target_is_directory=True)
     env.git("add", "-A")
     env.git("commit", "-qm", "fixture: pinned gate")
@@ -431,7 +478,7 @@ def pytest_collection_modifyitems(config, items):
     artifact = (run["landing"] or {}).get("integration") or {}
     logs = list(env.state.rglob("check-*.log"))
     assert artifact["status"] == "accepted", (artifact, [p.read_text() for p in logs])
-    assert any("3 passed" in p.read_text() and "== Validation passed" in p.read_text() for p in logs)
+    assert any(re.search(r"\b5 passed\b", p.read_text()) and "== Validation passed" in p.read_text() for p in logs), [p.read_text() for p in logs]
     assert artifact["full_suite"]["scope"] == vc.SCOPED
     assert vc.attested_checks(con, run, artifact["commit"]) == ["scripts/validate.sh --pr"]
     land._require_run_coverage(run, artifact["commit"], con=con)

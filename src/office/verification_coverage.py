@@ -107,8 +107,22 @@ def _is_validate_script(command: str) -> bool:
 
 
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "a79d72ca4e42faab9688903c7c42c6d71c4b254a12e294049890468b8822316c",
-    "scripts/select_pr_tests.py": "42e24afc3fb39696f8abc2d1639537956b518a63b934b3d0a7334e5d403478bd",
+    "scripts/validate.sh": "24c65e6e3cd90eb81d7ce777d5dc7798b05ae76714c3e618c925d7f693304157",
+    "scripts/select_pr_tests.py": "ebdf1a495c490bc1d81b758f6a27c9925ac07518d504887ef4cfe3da2b5ff5d5",
+    "tests/test_pr_test_selection.py": "e94154d0575e7a518a241e5f0c36e778d1c0bb6c9792a181a0d06835446ffd4b",
+    "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
+    "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
+    "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
+    ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
+    "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
+    "tests/contracts/test_route_parity.py": "abbfc5288b84e1a9af689e971f2e325902b01af1aae2f5a78d12331f613aa689",
+    "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
+    "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
+    "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",
+    "tests/contracts/core/test_policy_precedence.py": "e685bc86e30fa398622f3b9f27dee53a58054e95d07d38bce1acdc962a9b97cb",
+    "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
+    "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
+    "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
 }
 
 
@@ -125,8 +139,9 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
         return False
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         return False
-    # Trust only the reviewed gate and selector, byte for byte. Updating either
-    # requires reviewing both and updating these digests in the same change.
+    # Trust only the reviewed gate, selector, integrity tests and hook, byte for
+    # byte. Updating any of them requires reviewing the attestation and updating
+    # these digests in the same change.
     for path, expected in _SCOPED_GATE_SHA256.items():
         proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
                               capture_output=True)

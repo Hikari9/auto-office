@@ -794,29 +794,33 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
-def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: str) -> bool:
+def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: str,
+                     executor_policy: dict | None = None) -> bool:
     """True when the #809 ideal slate, not a user seed, nominates this sized XS-XL run's routes (#846)."""
-    return (role in routing.ADAPTIVE_ROLES and run.get("gear") in executor_slates.FLOORS
-            and task_size in executor_slates.FLOORS
+    executor_policy = executor_policy or executor_slates.POLICY
+    sizes = executor_policy["floors"]
+    return (role in routing.ADAPTIVE_ROLES and run.get("gear") in sizes
+            and task_size in sizes
             and task_size not in (policy_cfg.get("preferred_seed_by_size") or {}))
 
 
 def _preferred_seed(policy_cfg: dict, run: dict, task_size: str | None = None,
-                    role: str = "executor"):
+                    role: str = "executor", executor_policy: dict | None = None):
     """A per-size seed wins, then the #809 ideal size slate for a sized XS-XL run (the gear's planner table for an
     explicit planner), then a flat seed.
     The slate is the default, so a flat seed (an old `roles.executor.preferred_seed`) cannot shadow it;
     a legacy run without a size still reads the flat seed. Qualification is independently enforced
     downstream at actual dispatch."""
+    executor_policy = executor_policy or executor_slates.POLICY
     size = task_size or (run.get("risk") or {}).get("size_class")
     by_size = policy_cfg.get("preferred_seed_by_size") or {}
     if size in by_size:
         return by_size[size]
-    if _uses_size_slate(policy_cfg, run, size, role):
-        return executor_slates.ideal_seed(size)
-    if role == "planner" and run.get("gear") in executor_slates.PLANNER_BY_GEAR:
+    if _uses_size_slate(policy_cfg, run, size, role, executor_policy):
+        return executor_slates.ideal_seed(size, executor_policy)
+    if role == "planner" and run.get("gear") in executor_policy["planner_preferred"]:
         # By run gear, not task size: an explicitly requested planner (#850 §4).
-        return executor_slates.planner_seed(run["gear"])
+        return executor_slates.planner_seed(run["gear"], executor_policy)
     return policy_cfg.get("preferred_seed") or None
 
 
@@ -956,6 +960,11 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     reads the supplied evidence connection without emitting quota notices."""
     from office import onboarding
 
+    try:
+        executor_policy = executor_slates.load_policy()
+    except executor_slates.ExecutorPolicyError as exc:
+        raise state.Refused("executor-policy-invalid", str(exc),
+                            next_step="repair the shipped executor policy/catalog and retry") from exc
     live = required_user_policies(run.get("repo_root"))
     policy_cfg = role_policy(config, role)
     # An explicit --route names its model, so it is not held to the family floor.
@@ -968,7 +977,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     sized_work = role in routing.ADAPTIVE_ROLES
     effective_task_size = (descriptor_for_route.get("task_size") if sized_work else None) or \
         (run.get("risk") or {}).get("size_class")
-    seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role)
+    seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role,
+                                                   executor_policy=executor_policy)
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
                       route_policy.user_policy(config), *live]
@@ -1041,7 +1051,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
     }
-    if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role):
+    if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
         request["slate_anchor"] = True
     if declared:
@@ -1082,8 +1092,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             request["strict_seed_user_authorized"] = True
         if override or manual:
             request["manual_route"] = True
-    result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
-    if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_slates.FLOORS and seed:
+    with routing._using_executor_policy(executor_policy):
+        result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
+    if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_policy["floors"] and seed:
         ideal = executor_slates.route_summary(seed, candidates, result.get("rejected") or [],
                                               result.get("slate") or [])
         result["ideal_route_order"] = ideal

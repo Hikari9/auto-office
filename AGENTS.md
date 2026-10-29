@@ -15,6 +15,10 @@ Every PR that lands on `main` bumps the release version in that same PR, followi
 - Parallel PRs that bump the same version conflict. Rebase, take the next free version, and update the `CHANGELOG.md` line.
 - The bump is part of the change, not a separate release step. Do not skip it, and do not stop on a classifier block: report the exact command that was blocked.
 
+## Validation
+
+For an ordinary PR, run `scripts/validate.sh --pr`: it always runs `tests/contracts/`, the named safety-smoke set and tests selected for changed files. Use `scripts/validate.sh --full` for test infrastructure changes, deleted or renamed tests, release work, or when the task requires full regression coverage. See `docs/validation.md`.
+
 ## Routing contract (3.9, #845)
 
 - **A user allow is sufficient.** `office route allow <route>[,<route>...] --role <role>` (or an exact entry of a role's `preferred_seed`) makes the route dispatchable at once. No conformance probe, vision proof, trust act or benchmark floor gates it, and it outranks a catalog or user-overlay `dispatchable: false`. Only a deny, quota, review independence, the adapter's own capabilities and a launch profile for the role still apply. For a visual route the allow stands in for the per-route `vision` proof (the adapter must still have a vision launch profile), per the #845 mandate.

@@ -15,6 +15,8 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,11 +31,21 @@ DEFAULT_RESERVE_PERCENT = 5.0
 # money band; its cost safety valve is routing.adaptive.budget_ceiling_multiple.
 DEFAULT_MONEY_BAND_PERCENT = 20.0
 ADAPTIVE_ROLES = set(route_learning.ADAPTIVE_ROLES)
+_executor_policy_context: ContextVar[dict | None] = ContextVar("executor_policy", default=None)
 
 _REQUIRED_OVERRIDE_FIELDS = (
     "override_id", "run_id", "family_id", "task_id", "role", "candidate_id",
     "bypass_stage", "rationale", "authorized_by", "authorized_at", "expires_at",
 )
+
+
+@contextmanager
+def _using_executor_policy(policy: dict):
+    token = _executor_policy_context.set(policy)
+    try:
+        yield
+    finally:
+        _executor_policy_context.reset(token)
 
 
 def candidate_id(c):
@@ -339,6 +351,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     never swaps in a different untried route. A supplied connection belongs to the
     caller; read its current evidence without committing or closing it."""
     discovery_input = discovery_input or request.get("discovery_input")
+    executor_policy = _executor_policy_context.get() or executor_slates.load_policy()
     role = request["role"]
     playbook = request.get("playbook")
     policy = request.get("policy", {})
@@ -394,7 +407,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         # automatic selection and only where its role and size scope match.
         policies = request.get("user_policies") or []
         size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
-        new_policy_size = executor_slates.new_gear_size(request)
+        new_policy_size = executor_slates.new_gear_size(request, executor_policy)
         pool = []  # discovery candidates: never in the eligible slate, whatever the role
         role_states = {}
         # An explicit caller value wins; otherwise the user's consent decides, so a caller that
@@ -429,7 +442,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             elif overkill:
                 rejected.append({"candidate": cid, "stage": 1, "reason": overkill, "category": "overkill"})
             elif (role in ADAPTIVE_ROLES and
-                  (restriction := executor_slates.model_restriction(c, new_policy_size)) and
+                  (restriction := executor_slates.model_restriction(c, new_policy_size, executor_policy)) and
                   not (request.get("manual_route") and cid in
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
@@ -485,7 +498,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
-            waiver = (executor_slates.floor_exception(c, new_policy_size, role)
+            waiver = (executor_slates.floor_exception(c, new_policy_size, role, executor_policy)
                       if role in ADAPTIVE_ROLES else None)
             passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))
             if _explicit_allow(role_states[cid]):
@@ -494,7 +507,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if not passed and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": reason})
                 continue
-            size_reason = (executor_slates.benchmark_gate(c, new_policy_size)
+            size_reason = (executor_slates.benchmark_gate(c, new_policy_size, executor_policy)
                            if role in ADAPTIVE_ROLES and not waiver else None)
             if size_reason and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": size_reason,
@@ -581,7 +594,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
             return _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned,
                              preferred_seed, allow_advisory_undercut, override_applies, override_record,
                              pool=pool if discovering else [], discovery_input=discovery_input,
-                             required=required, floor=floor, reserve=reserve)
+                             required=required, floor=floor, reserve=reserve,
+                             executor_policy=executor_policy)
 
         # 7 advisory quality anchor. A caller-supplied per-candidate `advisory_pass` is
         # read nowhere below: retention is derived purely from `preferred_seed` match,
@@ -690,7 +704,8 @@ def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> No
 
 
 def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
-               *, policy_size: str | None = None, role: str | None = None) -> tuple[int, str, str] | None:
+               *, policy_size: str | None = None, role: str | None = None,
+               executor_policy: dict | None = None) -> tuple[int, str, str] | None:
     """The non-probe gates for a discovery candidate: (stage, reason, blocked token) or None.
     An unknown benchmark score is not a failure here (the scorer prices that uncertainty);
     a known low score, low effort, disallowed source, quarantine, missing capability and a
@@ -708,15 +723,16 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
     # benchmark, but it must never trial a candidate with a *known* score below
     # the independently sized subtask floor, nor violate XL-only Opus.
     if policy_size:
-        model_reason = executor_slates.model_restriction(c, policy_size)
+        executor_policy = executor_policy or executor_slates.POLICY
+        model_reason = executor_slates.model_restriction(c, policy_size, executor_policy)
         if model_reason:
             return 1, model_reason, "floor"
-        known = (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX)
+        known = (c.get("benchmark_indexes") or {}).get(executor_policy["benchmark_index"])
         if known is not None:
             # #861: a discovery probe may use the same exact M owner waiver,
             # but still cannot be dispatched without verified conformance.
-            waiver = executor_slates.floor_exception(c, policy_size, role)
-            task_reason = executor_slates.benchmark_gate(c, policy_size) if not waiver else None
+            waiver = executor_slates.floor_exception(c, policy_size, role, executor_policy)
+            task_reason = executor_slates.benchmark_gate(c, policy_size, executor_policy) if not waiver else None
             if task_reason:
                 return 4, task_reason, "floor"
     supported = c.get("supported_playbooks")
@@ -743,7 +759,8 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
 
 
 def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,
-               reserve: float, discovery_input: dict | None, rejected: list) -> tuple[dict, dict | None]:
+               reserve: float, discovery_input: dict | None, rejected: list,
+               executor_policy: dict) -> tuple[dict, dict | None]:
     """Discovery allocation for one executor/worker decision (#494). Separate from exploration.
 
     Returns (block, trial). First call: at most one safe candidate wins a seeded draw and
@@ -806,7 +823,8 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     for c in scoped:
         probe = c.get("probe")
         gate = (_pool_gate(c, required, floor, playbook, quarantined,
-                           policy_size=executor_slates.new_gear_size(request), role=role)
+                           policy_size=executor_slates.new_gear_size(request, executor_policy), role=role,
+                           executor_policy=executor_policy)
                 or _quota_gate(c, reserve))
         if gate:
             stage, why, token = gate
@@ -885,7 +903,7 @@ def _probe_view(probe: dict | None) -> dict | None:
 
 def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, learned, preferred_seed,
               allow_advisory_undercut, override_applies, override_record, *, pool=None, discovery_input=None,
-              required=None, floor=None, reserve=5.0) -> dict:
+              required=None, floor=None, reserve=5.0, executor_policy: dict) -> dict:
     """Stages 7-8 for executor/worker routes: learned eligibility, then the
     adaptive comparison (`office.adaptive`). Preference is weighted evidence; a
     gear that forbids advisory undercut still holds routes to its seed chain."""
@@ -922,15 +940,16 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     active = bool((request.get("discovery") or {}).get("settings", {}).get("enabled"))
     if active and (pool or discovery_input):
         disc, trial = _discovery(request, role, playbook, rec, pool, set(required or ()), floor,
-                                 float(reserve), discovery_input, rejected)
+                                 float(reserve), discovery_input, rejected, executor_policy)
     elif active:
         disc = {"active": True, "intent": "none", "candidate": None, "probe_key": None, "probe": None,
                 "caps": {k: dict(request["discovery"]["allocation"][k]) for k in ("probes", "trials", "rolling")},
                 "fallback": None}
     audit["rejected"] = rejected
-    size = executor_slates.new_gear_size(request)
+    size = executor_slates.new_gear_size(request, executor_policy)
     floor_exceptions = [{"candidate": candidate_id(c), **waiver} for c in stage
-                        if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(c, size, role))]
+                        if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(
+                            c, size, role, executor_policy))]
     if floor_exceptions:
         audit["floor_exceptions"] = floor_exceptions
     if trial:
@@ -953,7 +972,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # A discovery trial was not in the ordinary eligible stage. Persist its
         # exact benchmark waiver too; otherwise a selected trial would lack the
         # owner-authorized floor exception in its durable routing receipt.
-        if waiver := executor_slates.floor_exception(c, size, role):
+        if waiver := executor_slates.floor_exception(c, size, role, executor_policy):
             audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
     if disc:
         audit["discovery"] = disc
@@ -962,7 +981,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     chosen = by_id[slate[0]["route"]]
     cid = candidate_id(chosen)
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
-    if (executor_slates.new_gear_size(request) == "M" and not request.get("manual_route")
+    if (executor_slates.new_gear_size(request, executor_policy) == "M" and not request.get("manual_route")
             and (chosen.get("alias_resolved_to") or chosen.get("model_id")) == "claude-sonnet-5-5"
             and chosen.get("effort") == "medium"):
         disclosure["operational_fallback"] = (

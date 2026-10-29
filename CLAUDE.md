@@ -8,7 +8,7 @@ Auto Office is an agent engineering lifecycle (intent → plan → routed execut
 
 ```bash
 uv tool install --force --editable '.[visual]'     # puts `office` on PATH from this checkout
-scripts/validate.sh --pr                           # PR-scoped gate, selects changed-file tests; creates .venv
+scripts/validate.sh --pr                           # contract suite + named safety smoke + changed-file tests
 scripts/validate.sh                                # explicit full regression suite, takes 40+ minutes
 
 .venv/bin/python -m pytest -n 2                    # default: in-process unit smoke tier
@@ -25,8 +25,9 @@ git config core.hooksPath .githooks                # enable the pre-push gate
 
 - Cap pytest workers at 2 (`-n 2`); the gate does the same.
 - There is no remote CI. Pre-push invokes `scripts/validate.sh --pr` and records scoped trees in `office-pr-validated`; explicit full validation records `office-validated`. A scoped receipt **never** attests the full suite.
-- For PR changes, set the plan's **run-level** `## Requirements` `checks: scripts/validate.sh --pr`. The selector compares with the merge base of `origin/main`, discloses its scope and runs selected modules with `--all` (including their `integration`, `legacy`, and `slow` cases). `office land` accepts recorded, integrity-checked scoped results, explicitly labeled **scoped** instead of **full**. Bare `pytest` still omits extra tiers and is not sufficient for landing; use `scripts/validate.sh` for explicit full-suite coverage. Reviewers must evaluate omitted cross-module risk; these targeted checks are not proof of every regression being absent. A missing base or no changed files fails closed.
-- Test infrastructure changes and deleted or renamed tests require full validation. Scoped landing proof pins the exact reviewed validation script and selector in `verification_coverage.py`; review and update both digests whenever either file changes.
+- For PR changes, set the plan's **run-level** `## Requirements` `checks: scripts/validate.sh --pr`. The gate runs `tests/contracts/`, the named safety-smoke set and changed-file affected tests with `--all` (including selected `integration`, `legacy`, and `slow` cases). It reports scoped coverage, never a full-suite pass. `office land` accepts recorded, integrity-checked scoped results, explicitly labeled **scoped** instead of **full**. Reviewers evaluate omitted cross-module risk; scoped checks do not prove every regression absent. A missing or empty contract directory, missing base or no changed files fails closed.
+- Test infrastructure changes, deleted or renamed tests, and release work require `scripts/validate.sh --full`. Scoped landing proof pins the validation script, selector, safety-smoke and integrity tests, and pre-push hook in `verification_coverage.py`; review and update the digest set together whenever one of those artifacts changes.
+- See `docs/validation.md` for the PR gate's scope and evidence rules.
 - Markers (`pyproject.toml`): `integration`, `legacy`, `slow` are deselected by default. `approved` starts from an approved-plan snapshot. `review_contract(name)` pins the run's review contract (v3.1 suites test pinned pre-#337 runs).
 - Tests use isolated homes and scripted fake harness binaries. Never call a real model from a test.
 - Property tests use Hypothesis (`from hypothesis import given`). Use one where an invariant over generated inputs says more than a table of examples, not to convert ordinary example tests. `tests/conftest.py` loads a deterministic profile (`derandomize`, no example database); `HYPOTHESIS_PROFILE=explore` randomises and widens a one-off hunt. Keep a shrunk counterexample as an `@example(...)`. Keep a named example where the example itself is the contract or the historical regression.
