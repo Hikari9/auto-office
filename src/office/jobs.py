@@ -210,6 +210,43 @@ def _log_tail(run_id: str, job_id: str, since: int = 0, limit: int = 1500) -> st
     return data.decode("utf-8", "replace")[-limit:].strip()
 
 
+def _cancel_claim(con, run, job_id: str, kind: str, token: str | None, reason: str) -> None:
+    """Settle one claimed row of a terminal run as cancelled (#836): the result
+    nothing reads is never written, only the audit event. Caller holds the tx;
+    fenced attempts raise StaleAttempt at their next transaction instead."""
+    cur = con.execute("UPDATE outbox SET status='cancelled', finished_at=?, claimed_pid=NULL, claim_token=NULL "
+                      "WHERE id=? AND status='claimed' AND claim_token=?",
+                      (now_iso(), job_id, token))
+    if cur.rowcount == 0:
+        raise db.StaleAttempt(f"job {job_id} attempt {token} no longer owns its claim")
+    state.emit(con, run, "job.cancelled", f"{kind} job {job_id} cancelled: its run is {run['phase']}",
+               audience="runtime", payload={"job": job_id, "kind": kind, "why": reason[:200]})
+    _note(run["id"], job_id, f"cancelled: its run is {run['phase']} ({reason[:160]}); the attempt records no result")
+
+
+def _block_terminal_trial(con, run: dict, job: dict) -> None:
+    """Settle a launch trial whose recovery cannot run after its run closes."""
+    if job["kind"] not in ("launch_agent", "trial_recovery"):
+        return
+    payload = job.get("payload")
+    if not isinstance(payload, dict):
+        return
+    dispatch_id = payload.get("dispatch_id")
+    if not isinstance(dispatch_id, str) or not dispatch_id:
+        return
+    from office import dispatch
+    d = state.get_dispatch(con, dispatch_id)
+    if not d or d.get("run_id") != run["id"]:
+        return
+    trial = dispatch.open_trial(con, dispatch_id)
+    if trial:
+        task_id = d["task_id"]
+        dispatch._recovery_blocked(
+            con, run, d, trial, "launch-failed",
+            f"a gate no longer allows the fallback (run is {run['phase']})",
+            f"office dispatch {task_id} --reroute", exited=True)
+
+
 def recover(con, row, reason: str, diag: dict) -> str:
     """Settle a claim whose owner is proven dead: retry it once more while
     attempts remain, else fail the job and make its gate unavailable. Applies
@@ -220,6 +257,10 @@ def recover(con, row, reason: str, diag: dict) -> str:
         return "settled"
     run = state.get_run(con, cur["run_id"])
     job = state.get_job(con, cur["id"])
+    if state.is_terminal(run):  # a closed or abandoned run's jobs never retry (#836)
+        _cancel_claim(con, run, cur["id"], cur["kind"], cur["claim_token"], reason)
+        _block_terminal_trial(con, run, job)
+        return "cancelled"
     if cur["attempts"] >= cur["max_attempts"]:
         con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL WHERE id=?",
                     (reason[:2000], now_iso(), cur["id"]))
@@ -291,6 +332,59 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
             return  # a trial's failed launch is recovered (fallback, or a blocker with a next step), not just blocked
         state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"launch failed: {err[:200]}")
         state.emit(con, run, "task.blocked", f"{task_id} could not launch: {err[:120]}", task_id=task_id)
+
+
+# ------------------------------------------------------------------ a terminal run's outstanding jobs (#836)
+
+def _cancel_pending(con, run_id: str, reason: str) -> list[dict]:
+    """Cancel every queued or claimed row in the caller's transaction."""
+    run = state.get_run(con, run_id)
+    rows = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
+                                         (run_id,)).fetchall()]
+    for row in rows:
+        con.execute("UPDATE outbox SET status='cancelled', finished_at=?, claimed_pid=NULL, claim_token=NULL "
+                    "WHERE id=? AND status=?", (now_iso(), row["id"], row["status"]))
+        if run:
+            state.emit(con, run, "job.cancelled", f"{row['kind']} job {row['id']} cancelled: {reason}",
+                       audience="runtime", payload={"job": row["id"], "kind": row["kind"], "was": row["status"]})
+        _note(run_id, row["id"], f"cancelled: {reason}")
+    return rows
+
+
+def cancel_run_jobs_in_transaction(con, run_id: str, reason: str = "its run is closed") -> list[dict]:
+    """Cancel every pending job while the caller commits the run's terminal state."""
+    return _cancel_pending(con, run_id, reason)
+
+
+def stop_cancelled_jobs(rows: list[dict]) -> list[str]:
+    """Stop live attempts after their claims have been cancelled and committed."""
+    return [row["id"] for row in rows if row["status"] == "claimed" and _stop_claim(row)]
+
+
+def _stop_claim(row: dict) -> bool:
+    """Stop a cancelled job's live attempt: its claimant process first (so no
+    next check command can be started), then any check group the attempt left
+    registered and still running. Only a claimant whose recorded start time
+    proves the pid is still the job's own process is signalled, the way a
+    revoke is (#453)."""
+    from office import dispatch
+    from office.util import claim_signalable
+    stopped = claim_signalable(row["claimed_pid"], row["claimed_by"]) and dispatch._killpg(row["claimed_pid"])
+    _stop_children(row["run_id"], row["id"])
+    return stopped
+
+
+def cancel_run_jobs(con, run_id: str, reason: str = "its run is closed") -> dict:
+    """Sweep pending rows from an already-closed run and stop claimed attempts.
+
+    Normal terminal transitions cancel jobs in their own transaction. This
+    remains for replaying closeout on runs closed by older Office versions.
+    Late results are rejected by the attempt's fencing; no row is requeued."""
+    with db.transaction(con):
+        rows = _cancel_pending(con, run_id, reason)
+    stopped = stop_cancelled_jobs(rows)
+    return {"cancelled": len(rows), "kinds": sorted({row["kind"] for row in rows}),
+            "stopped": stopped}
 
 
 # ------------------------------------------------------------------ starting jobs
@@ -404,6 +498,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
     job = state.get_job(con, job_id)
     run = state.get_run(con, job["run_id"])
     try:
+        if state.is_terminal(run):  # the close beat this attempt to it (#836)
+            _retire(con, run, job, token)
+            return 0
         if not (version.serves(run["office_version"], job["office_version"])
                 and version.serves(run["office_version"], job["payload"].get("office_version"))):
             raise state.Refused("packet-version-mismatch",
@@ -450,6 +547,19 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         with db.unfenced():
             kick(con, run["id"])
     return 0
+
+
+def _retire(con, run: dict, job: dict, token: str) -> None:
+    """A job attempt whose run is already terminal: it settles its own claim as
+    cancelled and records only the audit event (#836). A result for a closed
+    run is never written; if the close already cancelled the row, this raises
+    StaleAttempt and the discard is audit-free either way."""
+    try:
+        with db.transaction(con):
+            _cancel_claim(con, run, job["id"], job["kind"], token, "the attempt saw the closed run")
+            _block_terminal_trial(con, run, job)
+    except db.StaleAttempt:
+        _stale(con, run, job, token, f"its run is {run['phase']}")
 
 
 def _stale(con, run: dict, job: dict, token: str, why: str) -> None:
@@ -555,9 +665,11 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     return code or 1
 
 
-def _stop_children(run_id: str, job_id: str, token: str) -> list[int]:
-    """Stop the check process groups this attempt's dead worker left running.
-    Only a group whose leader still has its recorded start time is signalled."""
+def _stop_children(run_id: str, job_id: str, token: str | None = None) -> list[int]:
+    """Stop the check process groups a job's attempts left running: by default
+    those of the attempt named by `token`, with None every live group of the
+    job. Only a group whose leader still has its recorded start time is
+    signalled."""
     from office.util import process_is
     stopped = []
     try:
@@ -570,7 +682,7 @@ def _stop_children(run_id: str, job_id: str, token: str) -> list[int]:
         except ValueError:
             continue
         pgid = rec.get("pgid")
-        if rec.get("attempt") != token or not process_is(pgid, rec.get("start")):
+        if (token is not None and rec.get("attempt") != token) or not process_is(pgid, rec.get("start")):
             continue
         try:
             os.killpg(pgid, signal.SIGTERM)
