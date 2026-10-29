@@ -15,7 +15,7 @@ def policy_root(tmp_path):
     target = tmp_path / "catalog"
     target.mkdir()
     for path in source.iterdir():
-        if path.is_file():
+        if path.is_file() and not path.is_symlink():
             shutil.copy2(path, target / path.name)
     return tmp_path
 
