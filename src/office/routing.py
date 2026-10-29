@@ -375,12 +375,13 @@ def route(request: dict, discovery_input: dict | None = None, *,
     con = connection if connection is not None else _connect(db_path)
     try:
         _concurrency_snapshot(request, con)
+        executor_policy = executor_slates.policy_for(request)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.
         policies = request.get("user_policies") or []
         size_class = request.get("size_class") or (request.get("context") or {}).get("size_class")
-        new_policy_size = executor_slates.new_gear_size(request)
+        new_policy_size = executor_slates.new_gear_size(request, executor_policy)
         pool = []  # discovery candidates: never in the eligible slate, whatever the role
         role_states = {}
         # An explicit caller value wins; otherwise the user's consent decides, so a caller that
@@ -415,7 +416,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             elif overkill:
                 rejected.append({"candidate": cid, "stage": 1, "reason": overkill, "category": "overkill"})
             elif (role in ADAPTIVE_ROLES and
-                  (restriction := executor_slates.model_restriction(c, new_policy_size)) and
+                  (restriction := executor_slates.model_restriction(c, new_policy_size, executor_policy)) and
                   not (request.get("manual_route") and cid in
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
@@ -471,7 +472,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
-            waiver = (executor_slates.floor_exception(c, new_policy_size, role)
+            waiver = (executor_slates.floor_exception(c, new_policy_size, role, executor_policy)
                       if role in ADAPTIVE_ROLES else None)
             passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))
             if _explicit_allow(role_states[cid]):
@@ -480,7 +481,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if not passed and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": reason})
                 continue
-            size_reason = (executor_slates.benchmark_gate(c, new_policy_size)
+            size_reason = (executor_slates.benchmark_gate(c, new_policy_size, executor_policy)
                            if role in ADAPTIVE_ROLES and not waiver else None)
             if size_reason and not override_applies(cid, 4):
                 rejected.append({"candidate": cid, "stage": 4, "reason": size_reason,
@@ -676,7 +677,8 @@ def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> No
 
 
 def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
-               *, policy_size: str | None = None, role: str | None = None) -> tuple[int, str, str] | None:
+               *, policy_size: str | None = None, role: str | None = None,
+               executor_policy: dict | None = None) -> tuple[int, str, str] | None:
     """The non-probe gates for a discovery candidate: (stage, reason, blocked token) or None.
     An unknown benchmark score is not a failure here (the scorer prices that uncertainty);
     a known low score, low effort, disallowed source, quarantine, missing capability and a
@@ -694,15 +696,16 @@ def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
     # benchmark, but it must never trial a candidate with a *known* score below
     # the independently sized subtask floor, nor violate XL-only Opus.
     if policy_size:
-        model_reason = executor_slates.model_restriction(c, policy_size)
+        executor_policy = executor_policy or executor_slates.POLICY
+        model_reason = executor_slates.model_restriction(c, policy_size, executor_policy)
         if model_reason:
             return 1, model_reason, "floor"
-        known = (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX)
+        known = (c.get("benchmark_indexes") or {}).get(executor_policy["benchmark_index"])
         if known is not None:
             # #861: a discovery probe may use the same exact M owner waiver,
             # but still cannot be dispatched without verified conformance.
-            waiver = executor_slates.floor_exception(c, policy_size, role)
-            task_reason = executor_slates.benchmark_gate(c, policy_size) if not waiver else None
+            waiver = executor_slates.floor_exception(c, policy_size, role, executor_policy)
+            task_reason = executor_slates.benchmark_gate(c, policy_size, executor_policy) if not waiver else None
             if task_reason:
                 return 4, task_reason, "floor"
     supported = c.get("supported_playbooks")
@@ -791,8 +794,10 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     survivors = []
     for c in scoped:
         probe = c.get("probe")
+        executor_policy = executor_slates.policy_for(request)
         gate = (_pool_gate(c, required, floor, playbook, quarantined,
-                           policy_size=executor_slates.new_gear_size(request), role=role)
+                           policy_size=executor_slates.new_gear_size(request, executor_policy), role=role,
+                           executor_policy=executor_policy)
                 or _quota_gate(c, reserve))
         if gate:
             stage, why, token = gate
@@ -914,9 +919,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
                 "caps": {k: dict(request["discovery"]["allocation"][k]) for k in ("probes", "trials", "rolling")},
                 "fallback": None}
     audit["rejected"] = rejected
-    size = executor_slates.new_gear_size(request)
+    executor_policy = executor_slates.policy_for(request)
+    size = executor_slates.new_gear_size(request, executor_policy)
     floor_exceptions = [{"candidate": candidate_id(c), **waiver} for c in stage
-                        if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(c, size, role))]
+                        if role in ADAPTIVE_ROLES and (waiver := executor_slates.floor_exception(
+                            c, size, role, executor_policy))]
     if floor_exceptions:
         audit["floor_exceptions"] = floor_exceptions
     if trial:
@@ -939,7 +946,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # A discovery trial was not in the ordinary eligible stage. Persist its
         # exact benchmark waiver too; otherwise a selected trial would lack the
         # owner-authorized floor exception in its durable routing receipt.
-        if waiver := executor_slates.floor_exception(c, size, role):
+        if waiver := executor_slates.floor_exception(c, size, role, executor_policy):
             audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
     if disc:
         audit["discovery"] = disc
@@ -948,7 +955,7 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     chosen = by_id[slate[0]["route"]]
     cid = candidate_id(chosen)
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
-    if (executor_slates.new_gear_size(request) == "M" and not request.get("manual_route")
+    if (executor_slates.new_gear_size(request, executor_policy) == "M" and not request.get("manual_route")
             and (chosen.get("alias_resolved_to") or chosen.get("model_id")) == "claude-sonnet-5-5"
             and chosen.get("effort") == "medium"):
         disclosure["operational_fallback"] = (

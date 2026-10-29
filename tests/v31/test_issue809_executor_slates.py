@@ -60,7 +60,7 @@ def test_conditional_missing_and_unqualified_ideal_routes_are_audited():
     cid = routing.candidate_id(c)
     summary = slates.route_summary(pref, [c], [], [{"route": cid, "rank": "PRIMARY"}])
     assert [entry["status"] for entry in summary] == [
-        "selected", "not-in-catalog", "not-in-catalog"]
+        "selected", "not-in-catalog"]
     assert summary[0]["qualified_routes"] == [cid]
 
 
@@ -80,7 +80,6 @@ def test_missing_gear_is_not_silently_upgraded_from_task_size():
 def test_issue861_m_slate_and_exact_floor_exception():
     assert slates.ideal_seed("M") == [
         {"model_id": "claude-haiku-5-5", "effort": "high", "harness": "claude"},
-        {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"},
         {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"},
     ]
     route = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",

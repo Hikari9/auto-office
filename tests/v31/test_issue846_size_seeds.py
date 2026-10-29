@@ -169,7 +169,8 @@ def test_an_explicit_planner_follows_the_run_gear_table(gear, effort):
     run = {"gear": gear}
     seed = candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, "S", role="planner")
     assert [(e["model_id"], e["effort"]) for e in seed] == [
-        ("claude-opus-5-5", effort), ("gpt-6-astra", effort), ("gemini-4-argon", effort)]
+        ("claude-opus-5-5", effort), ("gpt-6-astra", effort),
+        *([] if (gear, effort) == ("M", "low") else [("gemini-4-argon", effort)])]
     assert seed[0]["harness"] == "claude" and seed[1]["harness"] == "codex"
 
 

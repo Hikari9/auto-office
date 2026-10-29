@@ -1,0 +1,60 @@
+# #871: Mutable executor/planner policy data. Runtime catalog route facts remain in TSV files.
+schema_version: 1
+policy_version: xs-xl-executor-slates-2026-10-28-861
+benchmark_index: Artificial Analysis Intelligence Index v4.3.2
+floors: {XS: 31, S: 38, M: 40, L: 44, XL: 47}
+executor_preferred:
+  XS:
+    - {model_id: claude-haiku-5-5, effort: medium, harness: claude}
+    - {model_id: gemini-3.8-flash, effort: low}
+    - {model_id: gpt-6.1-terra, effort: low, harness: codex}
+  S:
+    - {model_id: gemini-3.8-flash, effort: medium}
+    - {model_id: claude-haiku-5-5, effort: high, harness: claude}
+    - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
+  M:
+    - {model_id: claude-haiku-5-5, effort: high, harness: claude}
+    - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
+  L:
+    - {model_id: claude-sonnet-5-5, effort: high, harness: claude}
+    - {model_id: claude-sonnet-5-5, effort: high, harness: agy}
+    - {model_id: gpt-6.1-terra, effort: high, harness: codex}
+    - {model_id: gemini-4-argon, effort: medium}
+  XL:
+    - {model_id: claude-opus-5-5, effort: medium, harness: claude}
+    - {model_id: gpt-6.1-sol, effort: medium, harness: codex}
+    - {model_id: gemini-4-argon, effort: high}
+planner_preferred:
+  M:
+    - {model_id: claude-opus-5-5, effort: low, harness: claude}
+    - {model_id: gpt-6-astra, effort: low, harness: codex}
+  L:
+    - {model_id: claude-opus-5-5, effort: medium, harness: claude}
+    - {model_id: gpt-6-astra, effort: medium, harness: codex}
+    - {model_id: gemini-4-argon, effort: medium}
+  XL:
+    - {model_id: claude-opus-5-5, effort: high, harness: claude}
+    - {model_id: gpt-6-astra, effort: high, harness: codex}
+    - {model_id: gemini-4-argon, effort: high}
+model_restrictions:
+  - {model_id: claude-opus-5-5, allowed_sizes: [XL], reason: "Opus 5.5 is reserved for XL subtasks (got {size})"}
+  - {model_id: claude-sonnet-5-5, allowed_harnesses: [claude, agy], reason: "Sonnet 5.5 harness must be Claude Code or agy"}
+floor_exceptions:
+  - name: haiku-high-m-owner-authorized-floor
+    model_id: claude-haiku-5-5
+    effort: high
+    harness: claude
+    size: M
+    role: executor
+    score_evidence: numeric-below-floor
+    minimum_score: 38
+    authorization: "owner authorization #861"
+    not_waived: [registration, conformance, trust, quota, risk]
+  - name: argon-medium-l-intelligence-floor
+    model_id: gemini-4-argon
+    effort: medium
+    size: L
+    role: executor
+    score_evidence: missing
+    authorization: "score unpublished; no score fabricated"
+    not_waived: [registration, conformance, trust, quota, risk]

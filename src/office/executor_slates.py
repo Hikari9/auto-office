@@ -5,128 +5,229 @@ capability, quota, discovery, and exact invocation qualification gates.
 """
 from __future__ import annotations
 
+import hashlib
 import math
+from pathlib import Path
+from string import Formatter
 
-INDEX = "Artificial Analysis Intelligence Index v4.3.2"
-FLOORS = {"XS": 31, "S": 38, "M": 40, "L": 44, "XL": 47}
-VERSION = "xs-xl-executor-slates-2026-10-28-861"
-# Each tuple: concrete model ID, exact effort, harness (None = any qualified).
-IDEAL = {
-    "XS": (("claude-haiku-5-5", "medium", "claude"),
-           ("gemini-3.8-flash", "low", None),
-           ("gpt-6.1-terra", "low", "codex")),
-    "S": (("gemini-3.8-flash", "medium", None),
-          ("claude-haiku-5-5", "high", "claude"),
-          ("gpt-6.1-terra", "medium", "codex")),
-    "M": (("claude-haiku-5-5", "high", "claude"),
-          ("glm-5.3-flash", "max", "opencode"),
-          ("gpt-6.1-terra", "medium", "codex")),
-    "L": (("claude-sonnet-5-5", "high", "claude"),
-          ("claude-sonnet-5-5", "high", "agy"),
-          ("gpt-6.1-terra", "high", "codex"),
-          ("gemini-4-argon", "medium", None)),
-    "XL": (("claude-opus-5-5", "medium", "claude"),
-           ("gpt-6.1-sol", "medium", "codex"),
-           ("gemini-4-argon", "high", None)),
-}
+import yaml
 
-# Planner routes, by RUN gear (#850 §4), used only when the user asks for a standalone planner: the root
-# orchestrator plans every run by default. XS and S have no automatic planner and no invented slate.
-PLANNER_BY_GEAR = {
-    "M": (("claude-opus-5-5", "low", "claude"), ("gpt-6-astra", "low", "codex"), ("gemini-4-argon", "low", None)),
-    "L": (("claude-opus-5-5", "medium", "claude"), ("gpt-6-astra", "medium", "codex"),
-          ("gemini-4-argon", "medium", None)),
-    "XL": (("claude-opus-5-5", "high", "claude"), ("gpt-6-astra", "high", "codex"),
-           ("gemini-4-argon", "high", None)),
-}
+from office import paths, shipped_catalog
+
+SIZES = ("XS", "S", "M", "L", "XL")
+EFFORTS = frozenset(("none", "low", "medium", "high", "xhigh", "max"))
 
 
-def planner_seed(gear: str | None) -> list[dict]:
-    return [{"model_id": model, "effort": effort, **({"harness": harness} if harness else {})}
-            for model, effort, harness in PLANNER_BY_GEAR.get(gear, ())]
+class ExecutorPolicyError(ValueError):
+    """Invalid or unresolved executor policy; routing must fail closed."""
 
 
-def new_gear_size(request: dict) -> str | None:
+def _catalog_tuple(catalog: dict, model_id: str, effort: str, harness: str | None,
+                   source: Path, scope: str) -> tuple[list[str], list[str]]:
+    known = [row for row in catalog.get("models", []) if row.get("model_id") == model_id and
+             row.get("effort") == effort and
+             (harness is None or row.get("invocation_harness") == harness)]
+    key = (model_id, effort, harness)
+    if not known:
+        raise ExecutorPolicyError(f"{source}: {scope} references nonexistent catalog tuple {key}")
+    resolved = [shipped_catalog.key(row) for row in known]
+    dispatchable = [shipped_catalog.key(row) for row in known if row.get("dispatchable") is not False]
+    return resolved, dispatchable
+
+
+def load_policy(root: Path | None = None) -> dict:
+    """Load and resolve policy against shipped catalog facts in the same snapshot."""
+    source = (Path(root) if root is not None else paths.resources_root()) / "catalog/executor-policy.yaml"
+    try:
+        raw = source.read_bytes()
+        data = yaml.safe_load(raw)
+        catalog = shipped_catalog.load(root)
+    except (OSError, yaml.YAMLError, shipped_catalog.CatalogError) as exc:
+        raise ExecutorPolicyError(f"{source}: cannot load executor policy/catalog: {exc}") from exc
+    if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+        raise ExecutorPolicyError(f"{source}: unsupported executor-policy schema")
+    for name in ("policy_version", "benchmark_index"):
+        if not isinstance(data.get(name), str) or not data[name].strip():
+            raise ExecutorPolicyError(f"{source}: {name} must be a nonempty string")
+    floors = data.get("floors")
+    if not isinstance(floors, dict) or set(floors) != set(SIZES) or any(
+            type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in floors.values()):
+        raise ExecutorPolicyError(f"{source}: floors must specify finite nonnegative values for XS-XL")
+    for field, sizes in (("executor_preferred", SIZES), ("planner_preferred", ("M", "L", "XL"))):
+        slates = data.get(field)
+        if not isinstance(slates, dict) or set(slates) != set(sizes):
+            raise ExecutorPolicyError(f"{source}: {field} must provide exactly {', '.join(sizes)}")
+        for size, entries in slates.items():
+            if not isinstance(entries, list) or not entries:
+                raise ExecutorPolicyError(f"{source}: {field}.{size} must be nonempty")
+            seen = set()
+            for item in entries:
+                if (not isinstance(item, dict) or not {"model_id", "effort"} <= set(item) or
+                        set(item) - {"model_id", "effort", "harness"} or
+                        not isinstance(item.get("model_id"), str) or not item["model_id"].strip() or
+                        not isinstance(item.get("effort"), str) or item["effort"] not in EFFORTS or
+                        (item.get("harness") is not None and (not isinstance(item["harness"], str) or
+                                                              not item["harness"].strip()))):
+                    raise ExecutorPolicyError(f"{source}: invalid {field}.{size} route")
+                key = (item["model_id"], item["effort"], item.get("harness"))
+                if key in seen:
+                    raise ExecutorPolicyError(f"{source}: duplicate {field}.{size} route {key}")
+                seen.add(key)
+                item["_resolved_routes"], item["_dispatchable_routes"] = _catalog_tuple(
+                    catalog, item["model_id"], item["effort"], item.get("harness"), source, f"{field}.{size}")
+    restrictions = data.get("model_restrictions")
+    if not isinstance(restrictions, list):
+        raise ExecutorPolicyError(f"{source}: model_restrictions must be a list")
+    catalog_models = {row.get("model_id") for row in catalog.get("models", [])}
+    for r in restrictions:
+        if (not isinstance(r, dict) or not isinstance(r.get("model_id"), str) or
+                not isinstance(r.get("reason"), str) or
+                (("allowed_sizes" in r) == ("allowed_harnesses" in r))):
+            raise ExecutorPolicyError(f"{source}: invalid model restriction")
+        if r["model_id"] not in catalog_models:
+            raise ExecutorPolicyError(f"{source}: model restriction references unknown catalog model {r['model_id']!r}")
+        try:
+            fields = {field for _, field, _, _ in Formatter().parse(r["reason"]) if field is not None}
+            if not fields <= {"size"}:
+                raise ValueError("unsupported format field")
+            r["reason"].format(size="XS")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ExecutorPolicyError(f"{source}: invalid model restriction reason template") from exc
+        if "allowed_sizes" in r and (not isinstance(r["allowed_sizes"], list) or any(x not in SIZES for x in r["allowed_sizes"])):
+            raise ExecutorPolicyError(f"{source}: invalid allowed_sizes")
+        if "allowed_harnesses" in r and (not isinstance(r["allowed_harnesses"], list) or any(not isinstance(x, str) or not x for x in r["allowed_harnesses"])):
+            raise ExecutorPolicyError(f"{source}: invalid allowed_harnesses")
+    exceptions = data.get("floor_exceptions")
+    if not isinstance(exceptions, list):
+        raise ExecutorPolicyError(f"{source}: floor_exceptions must be a list")
+    for x in exceptions:
+        if (not isinstance(x, dict) or any(not isinstance(x.get(k), str) or not x[k] for k in
+                ("name", "model_id", "effort", "size", "role", "score_evidence", "authorization")) or
+                x["size"] not in SIZES or x["effort"] not in EFFORTS or x["role"] != "executor" or
+                x["score_evidence"] not in ("missing", "numeric-below-floor") or
+                not isinstance(x.get("not_waived"), list) or not x["not_waived"] or
+                any(not isinstance(item, str) or not item for item in x["not_waived"]) or
+                (x.get("harness") is not None and (not isinstance(x["harness"], str) or not x["harness"]))):
+            raise ExecutorPolicyError(f"{source}: invalid floor exception")
+        if x["score_evidence"] == "numeric-below-floor" and (
+                type(x.get("minimum_score")) not in (int, float) or not math.isfinite(x["minimum_score"]) or
+                x["minimum_score"] >= floors[x["size"]]):
+            raise ExecutorPolicyError(f"{source}: numeric exception must have a finite below-floor minimum")
+        x["_resolved_routes"], x["_dispatchable_routes"] = _catalog_tuple(
+            catalog, x["model_id"], x["effort"], x.get("harness"), source, f"floor_exceptions.{x['name']}")
+    data["_provenance"] = {"source": str(source), "sha256": hashlib.sha256(raw).hexdigest()}
+    data["_catalog"] = catalog
+    return data
+
+
+POLICY = load_policy()
+
+
+def __getattr__(name: str):
+    """Legacy read compatibility; these views are derived from the loaded policy, never stored tables."""
+    if name == "INDEX":
+        return POLICY["benchmark_index"]
+    if name == "FLOORS":
+        return POLICY["floors"]
+    if name == "VERSION":
+        return POLICY["policy_version"]
+    if name == "IDEAL":
+        return {size: tuple((row["model_id"], row["effort"], row.get("harness")) for row in rows)
+                for size, rows in POLICY["executor_preferred"].items()}
+    if name == "PLANNER_BY_GEAR":
+        return {size: tuple((row["model_id"], row["effort"], row.get("harness")) for row in rows)
+                for size, rows in POLICY["planner_preferred"].items()}
+    if name == "FLOOR_EXCEPTION":
+        return next((dict(row) for row in POLICY["floor_exceptions"] if row["score_evidence"] == "missing"), {})
+    raise AttributeError(name)
+
+
+def policy_provenance(policy: dict = POLICY) -> dict:
+    return {**policy["_provenance"], "policy_version": policy["policy_version"],
+            "benchmark_index": policy["benchmark_index"]}
+
+
+def policy_for(request: dict) -> dict:
+    """Return the one validated snapshot carried through this routing decision."""
+    return request.get("_executor_policy") or POLICY
+
+
+def _seed_entry(row: dict) -> dict:
+    return {key: row[key] for key in ("model_id", "effort", "harness") if row.get(key) is not None}
+
+
+def planner_seed(gear: str | None, policy: dict = POLICY) -> list[dict]:
+    return [_seed_entry(row) for row in policy["planner_preferred"].get(gear, ())]
+
+
+def new_gear_size(request: dict, policy: dict = POLICY) -> str | None:
     """New XS-XL funding is not retroactively imposed on legacy pinned runs."""
     context = request.get("context") or {}
     gear = context.get("gear") or request.get("run_gear")
     # Raw routing callers, replay fixtures, and historical requests without a
     # declared run gear are NOT implicitly upgraded to #809 policy.
-    if gear not in FLOORS:
+    if gear not in policy["floors"]:
         return None
     size = request.get("size_class") or context.get("size_class")
-    return size if size in FLOORS else None
+    return size if size in policy["floors"] else None
 
 
-def ideal_seed(task_size: str | None) -> list[dict]:
-    return [{"model_id": model, "effort": effort,
-             **({"harness": harness} if harness else {})}
-            for model, effort, harness in IDEAL.get(task_size, ())]
+def ideal_seed(task_size: str | None, policy: dict = POLICY) -> list[dict]:
+    return [_seed_entry(row) for row in policy["executor_preferred"].get(task_size, ())]
 
 
-def model_restriction(candidate: dict, size: str | None) -> str | None:
+def model_restriction(candidate: dict, size: str | None, policy: dict = POLICY) -> str | None:
     """Automatic-only model restrictions; explicit user routes have own gates."""
-    if size not in FLOORS:
+    if size not in policy["floors"]:
         return None
     model = candidate.get("alias_resolved_to") or candidate.get("model_id") or ""
-    if model == "claude-opus-5-5" and size != "XL":
-        return f"Opus 5.5 is reserved for XL subtasks (got {size})"
-    if model == "claude-sonnet-5-5" and candidate.get("harness") not in ("claude", "agy"):
-        return "Sonnet 5.5 harness must be Claude Code or agy"
+    for restriction in policy["model_restrictions"]:
+        if restriction["model_id"] != model:
+            continue
+        if "allowed_sizes" in restriction and size not in restriction["allowed_sizes"]:
+            return restriction["reason"].format(size=size)
+        if "allowed_harnesses" in restriction and candidate.get("harness") not in restriction["allowed_harnesses"]:
+            return restriction["reason"].format(size=size)
     return None
 
 
-def benchmark_gate(candidate: dict, size: str | None) -> str | None:
+def benchmark_gate(candidate: dict, size: str | None, policy: dict = POLICY) -> str | None:
     """Fail closed on missing, incompatible, malformed or below-floor scores."""
-    if size not in FLOORS:
+    if size not in policy["floors"]:
         return None  # historical runs lacking task size retain their old role floor
     scores = candidate.get("benchmark_indexes") or {}
-    raw = scores.get(INDEX) if isinstance(scores, dict) else None
+    index, floor = policy["benchmark_index"], policy["floors"][size]
+    raw = scores.get(index) if isinstance(scores, dict) else None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return f"{size} subtask requires numeric {INDEX} >= {FLOORS[size]}; exact-effort benchmark missing"
-    if not math.isfinite(raw) or raw < FLOORS[size]:
-        return f"{size} subtask requires {INDEX} >= {FLOORS[size]} (got {raw})"
+        return f"{size} subtask requires numeric {index} >= {floor}; exact-effort benchmark missing"
+    if not math.isfinite(raw) or raw < floor:
+        return f"{size} subtask requires {index} >= {floor} (got {raw})"
     return None
 
 
-# User-approved (#809, 2026-10-27) and deliberately narrow: only this exact model,
-# effort, role and subtask size may pass the AA floor while its score is unpublished.
-FLOOR_EXCEPTION = {"model_id": "gemini-4-argon", "effort": "medium", "role": "executor", "size": "L"}
-
-
-def floor_exception(candidate: dict, size: str | None, role: str | None = None) -> dict | None:
-    """Audited exact-route exceptions: Argon Medium L (#809), Haiku High M (#861).
-
-    Haiku requires its real AA v4.3.2 numeric score 38. Neither exception
-    invents a score or waives conformance, quota, permissions or safety.
-    """
-    # #861: exact owner-authorized M floor exception; never amend the pinned score.
+def floor_exception(candidate: dict, size: str | None, role: str | None = None,
+                    policy: dict = POLICY) -> dict | None:
+    """Apply only exact floor exceptions resolved from policy data."""
     model = candidate.get("alias_resolved_to") or candidate.get("model_id")
-    if (size == "M" and role in ("executor", "worker") and model == "claude-haiku-5-5"
-            and candidate.get("effort") == "high" and candidate.get("harness") == "claude"):
-        scores = candidate.get("benchmark_indexes") or {}
-        raw = scores.get(INDEX) if isinstance(scores, dict) else None
-        # The owner authorized the documented numeric score 38, not missing
-        # or arbitrarily weaker benchmark evidence. Scores >=40 need no waiver.
-        if type(raw) not in (int, float) or not math.isfinite(raw) or raw < 38 or raw >= FLOORS[size]:
-            return None
-        return {"exception": "haiku-high-m-owner-authorized-floor", "model_id": model,
-                "effort": "high", "harness": "claude", "size": size,
-                "index": INDEX, "observed_score": raw,
-                "waived": f"{INDEX} >= {FLOORS[size]} (owner authorization #861)",
-                "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
-    if size != FLOOR_EXCEPTION["size"] or role not in (FLOOR_EXCEPTION["role"], "worker"):
-        return None
-    model = candidate.get("alias_resolved_to") or candidate.get("model_id")
-    if model != FLOOR_EXCEPTION["model_id"] or candidate.get("effort") != FLOOR_EXCEPTION["effort"]:
-        return None
-    scores = candidate.get("benchmark_indexes")
-    if isinstance(scores, dict) and scores.get(INDEX) is not None:
-        return None
-    return {"exception": "argon-medium-l-intelligence-floor", "model_id": model,
-            "effort": candidate["effort"], "size": size, "index": INDEX,
-            "waived": f"{INDEX} >= {FLOORS[size]} (score unpublished; no score fabricated)",
-            "not_waived": ["registration", "conformance", "trust", "quota", "risk"]}
+    scores = candidate.get("benchmark_indexes") or {}
+    index = policy["benchmark_index"]
+    raw = scores.get(index) if isinstance(scores, dict) else None
+    for rule in policy["floor_exceptions"]:
+        if (size != rule["size"] or role not in (rule["role"], "worker") or model != rule["model_id"] or
+                candidate.get("effort") != rule["effort"] or
+                ("harness" in rule and candidate.get("harness") != rule["harness"])):
+            continue
+        if rule["score_evidence"] == "numeric-below-floor":
+            if type(raw) not in (int, float) or not math.isfinite(raw) or raw < rule["minimum_score"] or raw >= policy["floors"][size]:
+                continue
+        elif isinstance(scores, dict) and scores.get(index) is not None:
+            continue
+        return {"exception": rule["name"], "model_id": model, "effort": rule["effort"], "size": size,
+                "index": index, **({"harness": rule["harness"]} if "harness" in rule else {}),
+                **({"observed_score": raw} if rule["score_evidence"] == "numeric-below-floor" else {}),
+                "waived": f"{index} >= {policy['floors'][size]} ({rule['authorization']})",
+                "not_waived": list(rule["not_waived"])}
+    return None
 
 
 def route_summary(preferences: list[dict], candidates: list[dict],
