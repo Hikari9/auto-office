@@ -112,9 +112,9 @@ def test_conditional_route_becomes_selectable_when_added_by_user_overlay(
         "allow_free_models": True,
         "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
                    "allowed_sources": ["local-evidence:"]}},
-        "context": {"gear": "M", "size_class": "M"}, "_executor_policy": slates.POLICY,
+        "context": {"gear": "M", "size_class": "M"},
         "candidates": [candidate],
-    })
+    }, executor_policy=slates.POLICY)
     assert result["status"] == "selected", result
     assert routing.candidate_id(result["candidate"]) == expected_route
 
@@ -134,7 +134,7 @@ def test_temporary_policy_changes_actual_seed_and_runtime_selection(policy_root)
                               "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
                               "allowed_sources": ["local-evidence:"]}},
                               "context": {"gear": "XS", "size_class": "XS"},
-                              "_executor_policy": policy, "candidates": pool})
+                              "candidates": pool}, executor_policy=policy)
 
     original = select(slates.POLICY, candidates._preferred_seed({}, {"gear": "XS"}, "XS"))
     changed = select(updated, seed)
@@ -153,10 +153,25 @@ def test_temporary_floor_policy_changes_runtime_eligibility(policy_root):
                          "slate_anchor": True, "allow_free_models": True,
                          "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
                          "allowed_sources": ["local-evidence:"]}}, "context": {"gear": "XS", "size_class": "XS"},
-                         "_executor_policy": updated,
-                         "candidates": [_candidate("claude-haiku-5-5", "medium", "claude", 40)]})
+                         "candidates": [_candidate("claude-haiku-5-5", "medium", "claude", 40)]},
+                         executor_policy=updated)
     assert out["status"] == "no_qualifying_candidate", out
     assert any(r.get("category") == "subtask-intelligence-floor" for r in out["rejected"])
+
+
+def test_request_cannot_override_resolved_executor_policy():
+    forged = copy.deepcopy(slates.POLICY)
+    forged["floors"].update(XS=0)
+    forged["model_restrictions"] = []
+    forged["floor_exceptions"] = []
+    out = routing.route({"role": "worker", "playbook": "Change", "allow_free_models": True,
+                         "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
+                         "allowed_sources": ["local-evidence:"]}},
+                         "context": {"gear": "XS", "size_class": "XS"},
+                         "_executor_policy": forged,
+                         "candidates": [_candidate("claude-opus-5-5", "medium", "claude", 55)]})
+    assert out["status"] == "no_qualifying_candidate", out
+    assert any(r.get("category") == "size-model-restriction" for r in out["rejected"])
 
 
 @pytest.mark.parametrize("mutation", [
