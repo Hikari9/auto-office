@@ -972,6 +972,10 @@ def review_route_notice(con, run: dict, gate: dict, role: str, before: str | Non
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
     state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
                               stage=role, extra={"notice": "review", "gate": gate["id"]})
+    if kind == "reviewer-fallback":
+        state.emit(con, run, "route.fallback", f"{scope} {role} fell back from {before or 'unrecorded'} to {after}: {reason}",
+                   task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                   payload={"before": before, "after": after, "reason": reason, "stage": role, "gate": gate["id"]})
 
 
 def review_route_lines(con, run_id: str, *, skip_task: str | None = None, limit: int | None = None) -> list[str]:
@@ -1062,7 +1066,8 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
         # identity must be this reviewer's before anything is typed into it.
         try:
             with dispatch_mod.fenced_pane(run, d) as pane:
-                got = dispatch_mod.submit_prompt(name, prompt, pane=pane)
+                got = dispatch_mod.submit_prompt(name, prompt, pane=pane,
+                                                 max_enter_tries=1 if d.get("harness") == "codex" else None)
         except dispatch_mod.PaneMismatch as exc:
             with db.transaction(con):
                 state.emit(con, run, "review.reprompt", f"{d.get('task_id') or 'plan'} {d['role']} {d['id']}: re-prompt "
