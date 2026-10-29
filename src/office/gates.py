@@ -971,6 +971,10 @@ def review_route_notice(con, run: dict, gate: dict, role: str, before: str | Non
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
     state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
                               stage=role, extra={"notice": "review", "gate": gate["id"]})
+    if kind == "reviewer-fallback":
+        state.emit(con, run, "route.fallback", f"{scope} {role} fell back from {before or 'unrecorded'} to {after}: {reason}",
+                   task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                   payload={"before": before, "after": after, "reason": reason, "stage": role, "gate": gate["id"]})
 
 
 def review_route_lines(con, run_id: str, *, skip_task: str | None = None, limit: int | None = None) -> list[str]:
