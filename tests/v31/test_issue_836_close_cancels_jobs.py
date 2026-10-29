@@ -158,12 +158,39 @@ def test_landed_externally_close_cancels_a_claimed_check_job_and_never_restarts_
     run_id, gate_id = job["run_id"], json.loads(job["payload_json"])["gate_id"]
     env.git("commit", "-qa", "-m", "external PR lands the run's work by hand", "--allow-empty")
     _gh(env, env.git("rev-parse", "HEAD").strip())
+    from office import db
+    connect = db.connect
+    tx_id = [0, None]
+    transitions = []
+
+    def traced_connect(*args, **kwargs):
+        con = connect(*args, **kwargs)
+
+        def trace(statement):
+            sql = " ".join(statement.lower().split())
+            if sql.startswith("begin "):
+                tx_id[0] += 1
+                tx_id[1] = tx_id[0]
+            elif sql.startswith("update runs set") and "phase='closed'" in sql:
+                transitions.append(("closed", tx_id[1]))
+            elif sql.startswith("update outbox set status='cancelled'"):
+                transitions.append(("cancelled", tx_id[1]))
+            elif sql in ("commit", "rollback"):
+                tx_id[1] = None
+
+        con.set_trace_callback(trace)
+        return con
+
+    monkeypatch.setattr(db, "connect", traced_connect)
     code, closed = env.office("close", "--landed-externally", "https://github.com/o/r/pull/7",
                               "--quote", "PR 7 landed this run's work")
     assert code == 0, closed
     assert "landed externally via" in closed and "closed on the user's word" in closed
     [(kinds, tail)] = re.findall(r"^cancelled \d+ outstanding outbox job\(s\) \(([^)]+)\)(.*)$", closed, flags=re.M)
     assert "run_checks" in kinds and "stopped 1 live job process(es)" in tail, closed
+    close_txs = {tx for kind, tx in transitions if kind == "closed"}
+    cancel_txs = {tx for kind, tx in transitions if kind == "cancelled"}
+    assert len(close_txs) == 1 and cancel_txs == close_txs, transitions
 
     # every pending and claimed row of the closed run is terminal, right with the close
     assert _pending(env, run_id) == []

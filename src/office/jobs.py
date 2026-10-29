@@ -351,15 +351,11 @@ def _stop_claim(row: dict) -> bool:
 
 
 def cancel_run_jobs(con, run_id: str, reason: str = "its run is closed") -> dict:
-    """Closeout of a terminal run: mark every pending and claimed outbox row
-    terminal and stop the live processes of the claimed ones (#836).
+    """Sweep pending rows from an already-closed run and stop claimed attempts.
 
-    The run's closing transaction wrote phase=terminal and cancelled its queued
-    rows (`lifecycle._stop_work`), but claimed rows stay owned by running
-    `office _job` processes, whatever they are mid-way through. This settles
-    those too, at close, while the worktrees the claims check into still exist.
-    Late results are rejected by the attempt's fencing anyway; nothing here is
-    queued again and no later command reclaims or restarts the run's work."""
+    Normal terminal transitions cancel jobs in their own transaction. This
+    remains for replaying closeout on runs closed by older Office versions.
+    Late results are rejected by the attempt's fencing; no row is requeued."""
     with db.transaction(con):
         rows = _cancel_pending(con, run_id, reason)
     stopped = stop_cancelled_jobs(rows)
