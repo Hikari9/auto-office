@@ -111,6 +111,8 @@ def test_matched_evaluation_requires_quality_and_complete_metrics():
     assert not module.compare(rows)["metrics"]["total_tokens"]["claim_ready"]
     rows[-1]["complete_metrics"] = []
     assert module.compare(rows)["metrics"]["total_tokens"]["change_pct"] is None
+    malformed = [dict(row, complete_metrics="total_tokens", integrated_defects=0) for row in rows]
+    assert not module.compare(malformed)["metrics"]["total_tokens"]["claim_ready"]
 
 
 def test_matched_evaluation_rejects_malformed_json_shapes():

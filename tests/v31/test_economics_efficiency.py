@@ -1,6 +1,6 @@
 """Integration tests for #502 efficiency inspect, default-off and missing data."""
 from conftest import approved_run
-from office import economics
+from office import economics, version
 
 
 def _usage(env, *, turn, role, attribution="office", cost_kind="unknown", cost=None,
@@ -61,3 +61,21 @@ def test_partial_usage_keeps_unknown_and_excludes_outside(env):
     assert summary["token_coverage"] == "partial-or-unmeasured"
     assert summary["cache_coverage"] == {"cache_read_tokens": "1/2", "cache_write_tokens": "1/2"}
     assert "subscription quota are not billed dollars" in " ".join(data["lines"])
+
+
+def test_non_object_shadow_event_payload_does_not_break_efficiency_inspect(env):
+    approved_run(env)
+    con = env.con()
+    try:
+        run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+        for payload in ("null", "[]"):
+            con.execute("INSERT INTO events(run_id,kind,audience,summary,payload_json,office_version,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (run_id, "delegation.shadow", "orchestrator", "test", payload,
+                         version.current(), "2030-01-01T00:00:00Z"))
+    finally:
+        con.close()
+    code, data = env.ojson("inspect", "efficiency")
+    assert code == 0
+    assert data["data"]["delegation_shadow"] == []
+    assert "no fan-out observation recorded" in " ".join(data["lines"])

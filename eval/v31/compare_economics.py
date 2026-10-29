@@ -56,7 +56,11 @@ def compare(rows: list[dict]) -> dict:
     for k in METRICS:
         values = []
         for key, a, b in accepted:
-            if k not in (a.get("complete_metrics") or []) or k not in (b.get("complete_metrics") or []):
+            complete_a, complete_b = a.get("complete_metrics"), b.get("complete_metrics")
+            if not all(isinstance(names, list) and all(isinstance(name, str) for name in names)
+                       for names in (complete_a, complete_b)):
+                continue
+            if k not in complete_a or k not in complete_b:
                 continue
             if k == "actual_usd" and (a.get("billing_mode") != "api" or
                                       a.get("cost_kind") != "actual" or b.get("cost_kind") != "actual"):

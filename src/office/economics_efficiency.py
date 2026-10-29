@@ -87,6 +87,8 @@ def inspect(con, run: dict):
             payload = json.loads(r["payload_json"] or "{}")
         except (TypeError, ValueError):
             continue
+        if not isinstance(payload, dict):
+            continue
         advice.append({"seq": r["seq"], **payload})
     if advice:
         latest = advice[0]
