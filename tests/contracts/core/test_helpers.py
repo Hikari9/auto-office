@@ -1,4 +1,4 @@
-"""Small synthetic inputs for runtime contracts; no mutable catalog values."""
+"""Shared fixtures for the focused policy contract modules."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -56,7 +56,3 @@ def user_policy():
         return {"role_rules": list(rules), "denied": [], "overkill": [], "ceilings": {},
                 "sources": {"role_rules": "user"}}
     return make
-
-
-def rule(role, route, state, **fields):
-    return {"role": role, "route": route, "state": state, **fields}

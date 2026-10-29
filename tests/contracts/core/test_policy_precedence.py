@@ -1,5 +1,6 @@
 """Role policy, explicit authority and scope produce the documented outcomes."""
 from office import route_policy
+from test_helpers import route_contract, synthetic_candidate, user_policy
 
 def rule(role, route, state, **fields):
     return {"role": role, "route": route, "state": state, **fields}

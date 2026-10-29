@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from office import config, executor_slates, route_policy, shipped_catalog
+from test_helpers import policy_root
 
 
 def test_executor_policy_provenance_matches_the_source_bytes():
