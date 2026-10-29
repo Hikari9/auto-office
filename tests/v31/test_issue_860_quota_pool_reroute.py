@@ -9,7 +9,7 @@ import pytest
 
 from office import dispatch, routing
 from test_adaptive_dispatch import PLANNED, _approve as _approve_slate, _quota
-from test_wait import _as_herdr, _go, _herdr, _wait
+from test_wait import MANILA_LIMIT, _as_herdr, _go, _herdr, _limit_row, _store_episode, _wait
 
 
 def test_only_known_opencode_free_routes_share_a_quota_pool():
@@ -52,6 +52,28 @@ def test_real_usage_limit_screen_records_one_cooldown_episode_and_audit_event(en
     assert con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
                        (d["id"],)).fetchone()[0] == 1
     assert not con.execute("SELECT 1 FROM events WHERE kind='route.policy_changed'").fetchone()
+
+
+def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_event(env):
+    _go(env)
+    e = _herdr(env, status="idle", pane=MANILA_LIMIT)
+    d = _as_herdr(env)
+    con = env.con()
+    failed = "SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?"
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "usage_limit" in out, out
+    assert con.execute(failed, (d["id"],)).fetchone()[0] == 1
+    # Same screen and label, stored reset passed, a different reset parsed: a new episode.
+    _store_episode(env, d, **{**_limit_row(env, d), "resets_at": "2026-01-01T13:30:00+00:00"})
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and "now past" in out, out
+    assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
+    stored = _limit_row(env, d)["resets_at"]
+    assert stored > "2026-01-02", stored
+    # Repeated polls of the new episode neither add an event nor move its reset.
+    _wait(env, e, timeout="3")
+    assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
+    assert _limit_row(env, d)["resets_at"] == stored
 
 
 def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):

@@ -681,14 +681,18 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
     # This is a temporary provider quota cooldown, never a role-policy deny.
     with db.transaction(con):
         latest = state.get_dispatch(con, d["id"]) or d
+        now = datetime.now(timezone.utc)
+        stored = parse_iso(latest["resets_at"]) if latest.get("resets_at") else None
+        # A repeated poll of the stored episode is not a new one. A later episode is: another screen or label,
+        # or the stored reset has passed and a different reset is now parsed.
         episode = (latest.get("stall_kind") != "usage_limit"
                    or latest.get("limit_fingerprint") != limit["fingerprint"]
-                   or latest.get("limit_label") != limit["label"])
+                   or latest.get("limit_label") != limit["label"]
+                   or (resets_at is not None and stored is not None and stored <= now and resets_at != stored))
         if any(latest.get(k) != v for k, v in fields.items()):
             con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
                         "WHERE id=?", (*fields.values(), d["id"]))
         if episode:
-            now = datetime.now(timezone.utc)
             expires_at = resets_at if resets_at and resets_at > now else (
                 now + timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES))
             expires = expires_at.isoformat()
