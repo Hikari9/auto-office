@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from office import dispatch, routing
+from test_adaptive_dispatch import PLANNED, _approve as _approve_slate, _quota
 from test_wait import _as_herdr, _go, _herdr, _wait
 
 
@@ -62,6 +63,28 @@ def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):
     assert "dispatched T1" not in out
     assert con.execute("SELECT COUNT(*) FROM events WHERE kind='dispatch'").fetchone()[0] == count
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
+
+
+def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env):
+    _approve_slate(env, plan=PLANNED)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0, out
+    con = env.con()
+    parent = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC LIMIT 1").fetchone())
+    con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, stall_kind='usage_limit' WHERE id=?",
+                (parent["id"],))
+    con.commit()
+
+    code, out = env.office("rerun", "T1", "--fresh", "--reroute", env=_quota(env, claude=1))
+    assert code == 0, out
+    latest = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC LIMIT 1").fetchone())
+    assert latest["triple"] != parent["triple"], (parent["triple"], latest["triple"], out)
+    rows = con.execute("SELECT payload_json FROM events WHERE kind='route.fallback' AND dispatch_id=?",
+                       (latest["id"],)).fetchall()
+    assert len(rows) == 1
+    event = json.loads(rows[0][0])
+    assert event["before"] == parent["triple"] and event["after"] == latest["triple"], event
+    assert event["source"] == "usage_limit" and event["actor"] == "orchestrator", event
 
 
 def test_expired_shared_quota_pool_key_releases_the_entire_provider(env):
