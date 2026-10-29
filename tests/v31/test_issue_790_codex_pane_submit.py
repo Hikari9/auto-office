@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from test_convergence_contract import APPROVED, _start
+from test_issue_790_held_pointer import _Pane
 from test_review_reroute import EXECUTOR, _q
 from office import dispatch
 
@@ -64,6 +67,14 @@ def test_codex_pointer_that_never_submits_is_reported_held_after_bounded_enters(
     pane = CodexPane(monkeypatch, drop_enters=99)
     assert dispatch.submit_prompt("office-D1", POINTER, pane="w1:p1") == "held"
     assert pane.prompts == [POINTER] and pane.enters == 2
+
+
+@pytest.mark.xfail(strict=True, reason="#790 repro: dispatch._settle_unlanded_pointer sends no Enter while herdr reports "
+                                       "working; fix is pending the dispatch.py scope amendment")
+def test_codex_pointer_held_while_herdr_reports_working_is_submitted(monkeypatch):
+    pane = _Pane(monkeypatch, [_codex_composer(POINTER)], status="working")
+    (landed, mismatch), spec = pane.settle()
+    assert pane.enters, f"no Enter reached a composer that holds the brief; spec={spec}"
 
 
 def test_reviewer_route_left_for_another_logs_route_fallback_with_its_reason(env, monkeypatch):
