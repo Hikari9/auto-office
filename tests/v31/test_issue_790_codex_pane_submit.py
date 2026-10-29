@@ -8,6 +8,7 @@ unlanded, and a reviewer route it leaves must log `route.fallback` with its reas
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,33 @@ def test_codex_reviewer_launch_uses_only_one_recovery_enter_across_delivery_and_
     assert len(enter_calls) == 1, enter_calls
 
 
+@pytest.mark.approved
+def test_codex_non_code_reviewer_reprompt_sends_only_one_recovery_enter(env, monkeypatch, tmp_path):
+    monkeypatch.delenv("OFFICE_HERDR_ENTER_TRIES", raising=False)
+    approved_run(env, code_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+        pane = CodexPane(monkeypatch, drop_enters=2)
+        monkeypatch.setattr(gates, "_agent_alive", lambda _name: True)
+        monkeypatch.setattr(dispatch, "fenced_pane", lambda _run, _d: nullcontext("w1:p1"))
+        monkeypatch.setattr(gates, "_await_file", lambda *_args: "")
+        monkeypatch.setattr(gates.state, "emit", lambda *_args, **_kwargs: None)
+        reviewer = {"id": "D790", "launcher": "herdr", "pane_id": "w1:p1", "role": "plan_reviewer",
+                    "harness": "codex", "triple": "codex/fake-model/high"}
+        parsed = review_parse.parse("", plan_review=True, visual=False, contract=contract.of(run))
+
+        _text, _parsed, reason = gates._reprompt_until_valid(
+            con, run, reviewer, tmp_path, tmp_path / "reply.txt", parsed,
+            plan_review=True, visual=False)
+        assert pane.prompts and len(pane.prompts) == 1
+        assert pane.enters == 2  # Initial Enter plus exactly one recovery Enter.
+        assert reason and "typed but unsubmitted" in reason
+    finally:
+        con.close()
+
+
 def _working_sample(monkeypatch, *, text_busy):
     """herdr's agent status reads `working`; `text_busy` says whether the pane text shows a busy footer."""
     monkeypatch.setattr(dispatch, "_herdr_agent_sample",
@@ -187,6 +215,7 @@ def _herdr_reviewer_run(env, monkeypatch, *, classification: str, reply: str | N
                 "VALUES('G790', ?, 'T1', 'T1', 'code_review', 'd1-790', 'running', ?)", (run["id"], now_iso()))
     gate = dict(con.execute("SELECT * FROM gates WHERE id='G790'").fetchone())
     calls = []
+    launched_ids = []
     routes = [
         {"harness": "opencode", "adapter_id": "opencode", "model_id": "fake-model",
          "invocation_model_id": "fake-model", "effort": "high", "harness_version": "2.0.29"},
@@ -204,6 +233,7 @@ def _herdr_reviewer_run(env, monkeypatch, *, classification: str, reply: str | N
 
     def launch(_run, reviewer, _kind, ddir, *, output, **_kwargs):
         # A live herdr pane (herdr reports it idle), the reviewer's own exit classification, and its reply file.
+        launched_ids.append(reviewer["id"])
         if reply is not None:
             output.write_text(reply)
         con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p790', status='exited', "
@@ -224,14 +254,16 @@ def _herdr_reviewer_run(env, monkeypatch, *, classification: str, reply: str | N
         result = gates.run_reviewer(con, run, gate, "code_reviewer", "review", cwd=Path(env.repo))
     finally:
         con.close()
-    return result, calls
+    return result, calls, launched_ids
 
 
 @pytest.mark.parametrize("reply", [None, "Looks fine to me, no verdict line."])
 def test_live_reviewer_with_empty_or_verdictless_reply_is_reprompted_before_fallback(env, monkeypatch, reply):
     reprompts: list = []
-    result, calls = _herdr_reviewer_run(env, monkeypatch, classification="success", reply=reply, reprompt_calls=reprompts)
+    result, calls, launched_ids = _herdr_reviewer_run(
+        env, monkeypatch, classification="success", reply=reply, reprompt_calls=reprompts)
     assert len(reprompts) >= 1, "the same reviewer must be re-prompted before any fallback"
+    assert reprompts == launched_ids, "the re-prompt must target the reviewer that left the empty reply"
     assert calls == ["opencode"], calls
     assert result.get("verdict") == "APPROVED", result
 
@@ -239,7 +271,7 @@ def test_live_reviewer_with_empty_or_verdictless_reply_is_reprompted_before_fall
 @pytest.mark.parametrize("classification", ["nonzero", "timeout"])
 def test_crashed_or_timed_out_live_reviewer_falls_back_without_reprompt(env, monkeypatch, classification):
     reprompts: list = []
-    result, calls = _herdr_reviewer_run(env, monkeypatch, classification=classification, reply=None,
-                                        reprompt_calls=reprompts)
+    result, calls, _launched_ids = _herdr_reviewer_run(env, monkeypatch, classification=classification, reply=None,
+                                                       reprompt_calls=reprompts)
     assert reprompts == [], "a launch failure is never re-prompted (#827)"
     assert calls == ["opencode", "claude"], calls
