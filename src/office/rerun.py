@@ -8,6 +8,7 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import sqlite3
@@ -451,7 +452,7 @@ def _mode_required(tid: str) -> Usage:
                  next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
 
 
-def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
+def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
           as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
           review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
           stash_wip: bool = False) -> Result:
@@ -481,7 +482,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
-    if task["status"] in ("accepted", "cancelled"):
+    if task["status"] == "cancelled" or (task["status"] == "accepted" and not gates.stale_dependency(con, run, task)):
+        # A stale accepted dependent is the exception: status already recommends rerun.
+        # The next launch preserves accepted evidence, with one writer and one lease (#856).
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
@@ -595,6 +598,37 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"
     return res
+
+
+@contextlib.contextmanager
+def _rerun_task_guard(run: dict, tid: str):
+    """Serialize admission through restack and launch for one task/worktree.
+
+    request_launch's SQLite transaction prevents duplicate live dispatches, but
+    the restack edits the physical worktree before that transaction. A stable
+    per-task flock makes a second rerun recheck status after the first launch.
+    The kernel releases this lock after process death (#856).
+    """
+    lock_dir = paths.run_dir(run["id"]) / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"rerun-{sha256_obj(tid)[:16]}.lock"
+    with lock_path.open("a") as fd:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+
+def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
+          as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
+          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+          stash_wip: bool = False) -> Result:
+    with _rerun_task_guard(run, tid):
+        return _rerun_locked(con, run, tid, resume=resume, fresh=fresh, reroute=reroute,
+                             as_model=as_model, quote=quote, cli=cli, external=external,
+                             review_as=review_as, review_cli=review_cli, review_external=review_external,
+                             stash_wip=stash_wip)
 
 
 def _reclaim():
