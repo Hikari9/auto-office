@@ -8,6 +8,7 @@ unlanded, and a reviewer route it leaves must log `route.fallback` with its reas
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,32 @@ def test_codex_reviewer_launch_uses_only_one_recovery_enter_across_delivery_and_
     enter_calls = [call for call in _calls(state_file) if call[:2] == ["pane", "send-keys"] and call[-1] == "Enter"]
     assert result["prompt_landed"] is False
     assert len(enter_calls) == 1, enter_calls
+
+
+@pytest.mark.approved
+def test_codex_non_code_reviewer_reprompt_sends_only_one_recovery_enter(env, monkeypatch, tmp_path):
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": ""}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+        pane = CodexPane(monkeypatch, drop_enters=2)
+        monkeypatch.setattr(gates, "_agent_alive", lambda _name: True)
+        monkeypatch.setattr(dispatch, "fenced_pane", lambda _run, _d: nullcontext("w1:p1"))
+        monkeypatch.setattr(gates, "_await_file", lambda *_args: "")
+        monkeypatch.setattr(gates.state, "emit", lambda *_args, **_kwargs: None)
+        reviewer = {"id": "D790", "launcher": "herdr", "pane_id": "w1:p1", "role": "plan_reviewer",
+                    "harness": "codex", "triple": "codex/fake-model/high"}
+        parsed = review_parse.parse("", plan_review=True, visual=False, contract=contract.of(run))
+
+        _text, _parsed, reason = gates._reprompt_until_valid(
+            con, run, reviewer, tmp_path, tmp_path / "reply.txt", parsed,
+            plan_review=True, visual=False)
+        assert pane.prompts and len(pane.prompts) == 1
+        assert pane.enters == 2  # Initial Enter plus exactly one recovery Enter.
+        assert reason and "typed but unsubmitted" in reason
+    finally:
+        con.close()
 
 
 def _working_sample(monkeypatch, *, text_busy):
