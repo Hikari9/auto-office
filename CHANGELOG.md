@@ -8,7 +8,7 @@ One line or short list per version, newest first. The version itself lives only 
 - fix(rerun): make stale accepted dependent reruns actionable and serialize restacks (#856).
 - fix(close): stop claimed integration checks and prevent retries after an externally landed close (#836).
 - fix(review): treat crashed OpenCode reviewer panes without replies as route failures (#827).
-- fix(review): resubmit held Codex brief pointers and log reviewer fallback reasons (#790).
+- fix(review): resubmit held Codex brief pointers with composer Enter fix and log reviewer fallback reasons (#790).
 - feat(economics): add shadow delegation assessment and sampled efficiency reporting with measured win gates (#502).
 
 ## 3.11.2
