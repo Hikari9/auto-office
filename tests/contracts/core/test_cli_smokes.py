@@ -14,12 +14,15 @@ import yaml
 
 FAKE = f'''#!{sys.executable}
 import os, sys
+from pathlib import Path
+import json
 args = sys.argv[1:]
 if args[:1] == ["--version"]:
     print("fakecli 1.0"); raise SystemExit(0)
 if args[:1] == ["models"]:
     print("acme/fast-1"); raise SystemExit(0)
-sys.stdin.read()
+prompt = sys.stdin.read()
+Path(os.environ["OFFICE_SMOKE_CAPTURE"]).write_text(json.dumps({{"argv": args, "prompt": prompt}}))
 print("READY")
 '''
 
@@ -58,6 +61,7 @@ def cli_env(tmp_path):
     env.update({"OFFICE_USER_CONFIG": str(tmp_path / "config.yaml"),
                 "OFFICE_USER_ADAPTERS": str(adapters), "OFFICE_DATA_HOME": str(tmp_path / "data"),
                 "OFFICE_STATE_HOME": str(tmp_path / "state"), "AUTO_OFFICE_RUNS_DB": str(tmp_path / "data/runs.db"),
+                "OFFICE_SMOKE_CAPTURE": str(tmp_path / "smoke-capture.json"),
                 "PATH": os.pathsep.join([str(bindir), env.get("PATH", "")])})
     return env
 
@@ -75,11 +79,15 @@ def test_cli_validates_a_user_adapter_in_an_isolated_home(cli_env):
 
 
 def test_cli_smokes_only_the_scripted_fake_harness(cli_env):
-    result = _office(cli_env, "harness", "smoke", "fakecli", "--model", "acme/fast-1", "--timeout", "10", "--json")
+    result = _office(cli_env, "harness", "smoke", "fakecli", "--model", "acme/fast-1",
+                     "--effort", "medium", "--timeout", "10", "--json")
     assert result.returncode == 0, result.stderr + result.stdout
     record = json.loads(result.stdout)["data"]
     assert record["result"] == "launched" and record["trust"] == "unchanged"
     assert (Path(cli_env["OFFICE_DATA_HOME"]) / "harness-smoke.jsonl").is_file()
+    launch = json.loads(Path(cli_env["OFFICE_SMOKE_CAPTURE"]).read_text())
+    assert launch["argv"] == ["--model", "acme/fast-1", "--effort", "medium"]
+    assert launch["prompt"].strip()
 
 
 def test_cli_model_registration_and_policy_allow_are_read_back(cli_env):
