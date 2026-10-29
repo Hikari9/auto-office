@@ -8,11 +8,13 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -158,6 +160,73 @@ def _findings_text(con, run: dict, tid: str) -> str:
     rows = con.execute("SELECT code, location, summary FROM findings WHERE run_id=? AND task_id=? AND " + contract.TASK_WORK_FINDINGS + " "
                        "ORDER BY created_at", (run["id"], tid)).fetchall()
     return "; ".join(f"{r['code']} {r['location'] or ''} {r['summary'][:120]}".strip() for r in rows[:8])
+
+
+def _barrier_admission_attempt() -> None:
+    path = os.environ.get("OFFICE_RESTACK_BARRIER")
+    if not path:
+        return
+    bdir = Path(path)
+    bdir.mkdir(parents=True, exist_ok=True)
+    attempt_1 = bdir / "attempt_1"
+    attempt_2 = bdir / "attempt_2"
+    try:
+        fd = os.open(str(attempt_1), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        try:
+            fd = os.open(str(attempt_2), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            pass
+
+
+@contextlib.contextmanager
+def _barrier_restack_guard():
+    path = os.environ.get("OFFICE_RESTACK_BARRIER")
+    if not path:
+        yield
+        return
+    bdir = Path(path)
+    bdir.mkdir(parents=True, exist_ok=True)
+    in_flight = bdir / "restack_in_flight"
+    collision = bdir / "collision"
+    attempt_2 = bdir / "attempt_2"
+
+    with (bdir / "restack.log").open("a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(f"enter:{os.getpid()}\n")
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    try:
+        fd = os.open(str(in_flight), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        collision.touch()
+
+    deadline = time.monotonic() + 10.0
+    while not attempt_2.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("Timed out waiting for second process admission attempt")
+        time.sleep(0.01)
+
+    time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            in_flight.unlink()
+        with (bdir / "restack.log").open("a") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(f"exit:{os.getpid()}\n")
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
@@ -451,7 +520,7 @@ def _mode_required(tid: str) -> Usage:
                  next_step=f"office rerun {tid} --resume | {_fresh_cmd(tid)}")
 
 
-def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
+def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
           as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
           review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
           stash_wip: bool = False) -> Result:
@@ -481,7 +550,9 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     task = state.get_task(con, run["id"], tid)
     if task is None:
         raise Usage("unknown-task", f"no task {tid}")
-    if task["status"] in ("accepted", "cancelled"):
+    if task["status"] == "cancelled" or (task["status"] == "accepted" and not gates.stale_dependency(con, run, task)):
+        # A stale accepted dependent is the exception: status already recommends rerun.
+        # The next launch preserves accepted evidence, with one writer and one lease (#856).
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
@@ -548,11 +619,12 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
                       scope=tid, next_step=f"{_fresh_cmd(tid)} --as <harness>/<model>[@effort]")
     if launch and launch_prefs:
         launch = {**launch, "launch": launch_prefs}
-    if stash_wip and parent.get("worktree"):
-        with _stash_wip(Path(parent["worktree"]), tid):
-            restack = _restack(con, run, task, parent["worktree"])
-    else:
-        restack = _restack(con, run, task, parent.get("worktree"))
+    with _barrier_restack_guard():
+        if stash_wip and parent.get("worktree"):
+            with _stash_wip(Path(parent["worktree"]), tid):
+                restack = _restack(con, run, task, parent["worktree"])
+        else:
+            restack = _restack(con, run, task, parent.get("worktree"))
     if restack:
         extra = {**(extra or {}), "restack": {k: restack.get(k) for k in ("merged", "conflict", "unmerged", "reopened")}}
         if resume:
@@ -595,6 +667,38 @@ def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool 
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
     res.next = "exceptions only; office status"
     return res
+
+
+@contextlib.contextmanager
+def _rerun_task_guard(run: dict, tid: str):
+    """Serialize admission through restack and launch for one task/worktree.
+
+    request_launch's SQLite transaction prevents duplicate live dispatches, but
+    the restack edits the physical worktree before that transaction. A stable
+    per-task flock makes a second rerun recheck status after the first launch.
+    The kernel releases this lock after process death (#856).
+    """
+    lock_dir = paths.run_dir(run["id"]) / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"rerun-{sha256_obj(tid)[:16]}.lock"
+    _barrier_admission_attempt()
+    with lock_path.open("a") as fd:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+
+def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,
+          as_model: str | None = None, quote: str | None = None, cli: str | None = None, external: bool = False,
+          review_as: str | None = None, review_cli: str | None = None, review_external: bool = False,
+          stash_wip: bool = False) -> Result:
+    with _rerun_task_guard(run, tid):
+        return _rerun_locked(con, run, tid, resume=resume, fresh=fresh, reroute=reroute,
+                             as_model=as_model, quote=quote, cli=cli, external=external,
+                             review_as=review_as, review_cli=review_cli, review_external=review_external,
+                             stash_wip=stash_wip)
 
 
 def _reclaim():
