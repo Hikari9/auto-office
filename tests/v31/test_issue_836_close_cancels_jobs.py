@@ -226,6 +226,62 @@ def test_landed_externally_close_cancels_a_claimed_check_job_and_never_restarts_
     assert len(events) == 1 and json.loads(events[0]["payload_json"])["job"] == job["id"], events
 
 
+def test_replayed_close_stops_claim_after_close_commit_was_interrupted(env, monkeypatch):
+    """The committed cancelled row retains enough identity for close replay to
+    stop a worker when the original close exits before its stopping phase."""
+    job, out, proc = _claimed(env, monkeypatch, secs=20.0)
+    from office import db, jobs
+    con = env.con()
+    with db.transaction(con):
+        rows = jobs.cancel_run_jobs_in_transaction(con, job["run_id"])
+    assert len(rows) == 1 and rows[0]["status"] == "claimed", rows
+    committed = _row(con, job["id"])
+    from office.util import claim_signalable
+    assert committed["status"] == "cancelled" and claim_signalable(
+        committed["claimed_pid"], committed["claimed_by"])
+    assert committed["claim_token"] and committed["claimed_by"], committed
+    assert proc.poll() is None and _probe_state(out)["now"] == 1
+
+    replay = jobs.cancel_run_jobs(con, job["run_id"])
+    assert replay["cancelled"] == 0 and replay["stopped"] == [job["id"]], replay
+    assert _until(lambda: _check_gone(out, started=True)), _probe_state(out)
+    proc.wait(timeout=30)
+    stopped = _row(con, job["id"])
+    assert stopped["status"] == "cancelled" and stopped["result_json"] is None, stopped
+    assert stopped["claimed_pid"] is None and stopped["claim_token"] is None, stopped
+    assert _probe_state(out)["runs"] == 1
+
+
+def test_failure_after_close_is_stale_and_does_not_retry_or_mutate_gate(env, monkeypatch):
+    """A handler failure that arrives after close cannot resurrect its row or
+    turn the now-irrelevant gate into an unavailable failure."""
+    job, out = _queued(env, monkeypatch, secs=1.0)
+    gate_id = json.loads(job["payload_json"])["gate_id"]
+    from office import db, jobs, state
+    con = env.con()
+    # Exercise the row's own status/token fence, independently of db.transaction's
+    # process-local attempt fence; the SQL guard must survive even without it.
+    monkeypatch.setattr(db, "_check_fence", lambda _con: None)
+
+    def fail_after_close(handler_con, run, claimed_job):
+        with db.transaction(handler_con):
+            state.update_run(handler_con, run["id"], phase="closed", terminal_at="2026-10-29T00:00:00+00:00",
+                             terminal_reason="landed externally")
+            jobs.cancel_run_jobs_in_transaction(handler_con, run["id"])
+        raise RuntimeError("late handler failure")
+
+    monkeypatch.setattr(jobs, "_handlers", lambda: {job["kind"]: fail_after_close})
+    assert jobs.execute(con, job["id"]) == 1
+    row = _row(con, job["id"])
+    assert row["status"] == "cancelled" and row["error"] is None and row["result_json"] is None, row
+    assert row["claim_token"] is not None  # durable stop request remains for closeout replay
+    assert _gate(env, gate_id)["verdict"] is None
+    assert con.execute("SELECT COUNT(*) FROM events WHERE run_id=? AND kind IN ('job.failed','job.retry')",
+                       (job["run_id"],)).fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM events WHERE run_id=? AND kind='job.stale_attempt'",
+                       (job["run_id"],)).fetchone()[0] == 1
+
+
 def test_a_job_attempt_whose_run_is_closed_cancels_itself_and_records_nothing(env, monkeypatch):
     """A start that beat its close back to it: the attempt sees the run is
     terminal as soon as it holds its claim, settles the row as cancelled and

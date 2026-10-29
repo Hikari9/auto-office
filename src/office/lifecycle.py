@@ -453,7 +453,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
-    stopped_jobs = jobs.stop_cancelled_jobs(cancelled_jobs)
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     state.write_projection(con, run["id"])
     from office import dispatch, rerun
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
@@ -648,7 +648,7 @@ def _stop_work(con, run: dict) -> tuple[list, list[dict]]:
 def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> list[str]:
     """After a run ends: stop live agents, close panes and tab, drop the plan draft."""
     from office import jobs
-    stopped_jobs = jobs.stop_cancelled_jobs(cancelled_jobs)
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     for row in live:
         if row["pid"] and pid_alive(row["pid"]):
             try:

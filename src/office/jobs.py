@@ -342,7 +342,10 @@ def _cancel_pending(con, run_id: str, reason: str) -> list[dict]:
     rows = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed')",
                                          (run_id,)).fetchall()]
     for row in rows:
-        con.execute("UPDATE outbox SET status='cancelled', finished_at=?, claimed_pid=NULL, claim_token=NULL "
+        # A claimed identity is the durable stop request. Keep it on the
+        # terminal row until closeout confirms the process is gone, so replay
+        # after a crash between commit and stop can still find the worker.
+        con.execute("UPDATE outbox SET status='cancelled', finished_at=? "
                     "WHERE id=? AND status=?", (now_iso(), row["id"], row["status"]))
         if run:
             state.emit(con, run, "job.cancelled", f"{row['kind']} job {row['id']} cancelled: {reason}",
@@ -356,9 +359,22 @@ def cancel_run_jobs_in_transaction(con, run_id: str, reason: str = "its run is c
     return _cancel_pending(con, run_id, reason)
 
 
-def stop_cancelled_jobs(rows: list[dict]) -> list[str]:
-    """Stop live attempts after their claims have been cancelled and committed."""
-    return [row["id"] for row in rows if row["status"] == "claimed" and _stop_claim(row)]
+def stop_cancelled_jobs(con, rows: list[dict]) -> list[str]:
+    """Stop live attempts and clear their durable stop request once gone."""
+    stopped = []
+    from office import util
+    for row in rows:
+        if row["status"] not in ("claimed", "cancelled") or row.get("claimed_pid") is None:
+            continue
+        signaled = _stop_claim(row)
+        if signaled:
+            stopped.append(row["id"])
+        if not util.claim_signalable(row["claimed_pid"], row.get("claimed_by")):
+            with db.transaction(con):
+                con.execute("UPDATE outbox SET claimed_pid=NULL, claimed_by=NULL, claim_token=NULL "
+                            "WHERE id=? AND status='cancelled' AND claim_token=?",
+                            (row["id"], row.get("claim_token")))
+    return stopped
 
 
 def _stop_claim(row: dict) -> bool:
@@ -382,8 +398,13 @@ def cancel_run_jobs(con, run_id: str, reason: str = "its run is closed") -> dict
     Late results are rejected by the attempt's fencing; no row is requeued."""
     with db.transaction(con):
         rows = _cancel_pending(con, run_id, reason)
-    stopped = stop_cancelled_jobs(rows)
-    return {"cancelled": len(rows), "kinds": sorted({row["kind"] for row in rows}),
+        pending_ids = {row["id"] for row in rows}
+        rows.extend(dict(r) for r in con.execute(
+            "SELECT * FROM outbox WHERE run_id=? AND status='cancelled' AND claimed_pid IS NOT NULL",
+            (run_id,)).fetchall() if r["id"] not in pending_ids)
+    stopped = stop_cancelled_jobs(con, rows)
+    return {"cancelled": sum(row["status"] != "cancelled" for row in rows),
+            "kinds": sorted({row["kind"] for row in rows if row["status"] != "cancelled"}),
             "stopped": stopped}
 
 
@@ -513,8 +534,11 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         handler = _handlers()[job["kind"]]
         result = handler(con, run, job) or {}
         with db.transaction(con):
-            con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL WHERE id=? "
-                        "AND claim_token=?", (dumps(result), now_iso(), job_id, token))
+            cur = con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL, "
+                              "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' AND claim_token=?",
+                              (dumps(result), now_iso(), job_id, token))
+            if cur.rowcount == 0:
+                raise db.StaleAttempt(f"job {job_id} attempt {token} no longer owns its claim")
     except db.StaleAttempt as exc:
         _stale(con, run, job, token, str(exc))
         return 1
@@ -523,20 +547,31 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         tb = traceback.format_exc(limit=8)
         try:
             with db.transaction(con):
-                row = con.execute("SELECT attempts, max_attempts FROM outbox WHERE id=?", (job_id,)).fetchone()
+                row = con.execute("SELECT attempts, max_attempts FROM outbox WHERE id=? AND status='claimed' "
+                                  "AND claim_token=?", (job_id, token)).fetchone()
+                current_run = state.get_run(con, run["id"])
+                if row is None or state.is_terminal(current_run):
+                    raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim or its run closed")
                 permanent = isinstance(exc, state.Refused) or row["attempts"] >= row["max_attempts"]
                 if permanent:
-                    con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL WHERE id=?",
-                                (err[:2000], now_iso(), job_id))
+                    cur = con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, "
+                                      "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' "
+                                      "AND claim_token=?", (err[:2000], now_iso(), job_id, token))
+                    if cur.rowcount == 0:
+                        raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim")
                     state.emit(con, run, "job.failed", f"{job['kind']} failed: {err[:160]}",
                                payload={"job": job_id, "claim": token, "traceback": tb})
                     on_permanent_failure(con, run, job, err)
                 else:
                     backoff = (datetime.now(timezone.utc) + timedelta(seconds=15 * row["attempts"])).isoformat()
-                    con.execute("UPDATE outbox SET status='queued', error=?, not_before=?, claimed_pid=NULL, "
-                                "claim_token=NULL, kicked_at=NULL WHERE id=?", (err[:2000], backoff, job_id))
+                    cur = con.execute("UPDATE outbox SET status='queued', error=?, not_before=?, claimed_pid=NULL, "
+                                      "claimed_by=NULL, claim_token=NULL, kicked_at=NULL WHERE id=? "
+                                      "AND status='claimed' AND claim_token=?", (err[:2000], backoff, job_id, token))
+                    if cur.rowcount == 0:
+                        raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim")
         except db.StaleAttempt as stale:
             _stale(con, run, job, token, f"{stale} (its own failure was {err[:200]})")
+            return 1
         sys.stderr.write(tb)
         if mode() != "inline":
             with db.unfenced():
