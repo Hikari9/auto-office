@@ -116,6 +116,13 @@ _SCOPED_GATE_SHA256 = {
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
     "tests/contracts/test_route_parity.py": "abbfc5288b84e1a9af689e971f2e325902b01af1aae2f5a78d12331f613aa689",
+    "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
+    "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
+    "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",
+    "tests/contracts/core/test_policy_precedence.py": "e685bc86e30fa398622f3b9f27dee53a58054e95d07d38bce1acdc962a9b97cb",
+    "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
+    "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
+    "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
 }
 
 
