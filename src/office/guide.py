@@ -693,9 +693,15 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
                    or latest.get("limit_fingerprint") != limit["fingerprint"]
                    or latest.get("limit_label") != limit["label"]
                    or reset_advanced)
-        if any(latest.get(k) != v for k, v in fields.items()):
+        updates = fields.copy()
+        if (resets_at is None and stored is not None
+                and latest.get("stall_kind") == "usage_limit"
+                and latest.get("limit_fingerprint") == limit["fingerprint"]
+                and latest.get("limit_label") == limit["label"]):
+            updates["resets_at"] = latest["resets_at"]
+        if any(latest.get(k) != v for k, v in updates.items()):
             con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
-                        "WHERE id=?", (*fields.values(), d["id"]))
+                        "WHERE id=?", (*updates.values(), d["id"]))
         if episode or reset_resolved:
             expires_at = resets_at if resets_at and resets_at > now else (
                 now + timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES))

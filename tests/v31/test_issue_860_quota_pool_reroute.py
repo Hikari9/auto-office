@@ -57,7 +57,7 @@ def test_real_usage_limit_screen_records_one_cooldown_episode_and_audit_event(en
     assert not con.execute("SELECT 1 FROM events WHERE kind='route.policy_changed'").fetchone()
 
 
-def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_event(env):
+def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_event(env, monkeypatch):
     _go(env)
     e = _herdr(env, status="idle", pane=MANILA_LIMIT)
     d = _as_herdr(env)
@@ -69,13 +69,25 @@ def test_a_later_limit_episode_after_its_reset_records_a_fresh_cooldown_and_even
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 1
     first = dict(con.execute(cooldowns).fetchall())
     assert first, first
-    # Same screen and label, stored reset passed, a different reset parsed: a new episode.
-    _store_episode(env, d, **{**_limit_row(env, d), "resets_at": "2026-01-01T13:30:00+00:00"})
+    # Same screen and label, stored reset passed; an unresolved poll must not erase that boundary.
+    expired = "2026-01-01T13:30:00+00:00"
+    prior = _limit_row(env, d)
+    _store_episode(env, d, **{**prior, "resets_at": expired})
+    limit = {"resets_at": None, "label": prior["limit_label"], "tz": None, "local": None,
+             "fingerprint": prior["limit_fingerprint"]}
+    monkeypatch.setattr(dispatch, "_usage_limit", lambda _text: limit)
+    code, out = _wait(env, e, timeout="3")
+    assert code == 3 and con.execute(failed, (d["id"],)).fetchone()[0] == 1, out
+    assert _limit_row(env, d)["resets_at"] == expired
+
+    # A later reset for that same screen is a new episode, even after the unresolved poll.
+    reset_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    limit = {**limit, "resets_at": reset_at}
     code, out = _wait(env, e, timeout="3")
     assert code == 3 and "now past" in out, out
     assert con.execute(failed, (d["id"],)).fetchone()[0] == 2
     stored = _limit_row(env, d)["resets_at"]
-    assert stored > "2026-01-02", stored
+    assert stored == reset_at.isoformat(), stored
     second = dict(con.execute(cooldowns).fetchall())
     assert second.keys() == first.keys() and all(second[r] > first[r] for r in first), (first, second)
     newest = con.execute("SELECT payload_json FROM events WHERE kind='route.failed' AND dispatch_id=? "
