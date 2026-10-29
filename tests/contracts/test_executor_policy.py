@@ -9,7 +9,7 @@ import shutil
 import pytest
 import yaml
 
-from office import candidates, executor_slates as slates, routing, shipped_catalog
+from office import candidates, executor_slates as slates, routing, shipped_catalog, user_catalog
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def test_shipped_policy_is_resolved_against_catalog_facts():
     facts = {shipped_catalog.key(row): row for row in shipped_catalog.load()["models"]}
     for size, entries in slates.POLICY["executor_preferred"].items():
         for entry in entries:
-            assert entry["_resolved_routes"]
+            assert entry["_resolved_routes"] or entry.get("conditional") is True
             assert set(entry["_dispatchable_routes"]) <= set(entry["_resolved_routes"])
             assert all(facts[key].get("dispatchable") is not False for key in entry["_dispatchable_routes"])
         assert slates.ideal_seed(size) == [
@@ -66,6 +66,57 @@ def test_policy_rejects_nonexistent_but_retains_known_disabled_tuple_as_fact(pol
     route = next(row for row in policy["executor_preferred"]["XS"] if row["model_id"] == "claude-haiku-5-5")
     assert route["_resolved_routes"]
     assert not route["_dispatchable_routes"]
+
+
+def test_policy_rejects_duplicate_yaml_keys(policy_root):
+    path = policy_root / "catalog" / "executor-policy.yaml"
+    source = path.read_text()
+    path.write_text(source.replace("floors: {XS: 31,", "floors: {XS: 31, XS: 32,", 1))
+    with pytest.raises(slates.ExecutorPolicyError, match="duplicate key 'XS'"):
+        slates.load_policy(policy_root)
+
+
+def test_conditional_unshipped_routes_remain_in_the_policy(policy_root):
+    data = yaml.safe_load((policy_root / "catalog" / "executor-policy.yaml").read_text())
+    glm = next(row for row in data["executor_preferred"]["M"] if row["model_id"] == "glm-5.3-flash")
+    argon = next(row for row in data["planner_preferred"]["M"] if row["model_id"] == "gemini-4-argon")
+    assert glm["conditional"] is True and argon["conditional"] is True
+    policy = _write_policy(policy_root, data)
+    assert policy["executor_preferred"]["M"][1]["_resolved_routes"] == []
+    assert policy["planner_preferred"]["M"][-1]["_resolved_routes"] == []
+    assert slates.ideal_seed("M", policy)[1] == {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"}
+    assert slates.planner_seed("M", policy)[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
+
+    data["executor_preferred"]["M"][1].pop("conditional")
+    (policy_root / "catalog" / "executor-policy.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    with pytest.raises(slates.ExecutorPolicyError, match="nonexistent catalog tuple"):
+        slates.load_policy(policy_root)
+
+
+@pytest.mark.parametrize(("role", "model", "effort", "harness", "expected_route"), [
+    ("executor", "glm-5.3-flash", "max", "opencode", "opencode@1/glm-5.3-flash@max"),
+    ("planner", "gemini-4-argon", "low", "agy", "agy@1/gemini-4-argon@low"),
+])
+def test_conditional_route_becomes_selectable_when_added_by_user_overlay(
+        role, model, effort, harness, expected_route):
+    [overlay_row] = user_catalog.apply([], {"models": [{
+        "model_id": model, "invocation_model_id": model, "invocation_harness": harness,
+        "effort": effort, "dispatchable": True,
+    }], "disabled": []})
+    candidate = _candidate(model, effort, harness, 55)
+    seed = slates.ideal_seed("M") if role == "executor" else slates.planner_seed("M")
+    preference = next(row for row in seed if row["model_id"] == model)
+    assert overlay_row["dispatchable"] is True
+    result = routing.route({
+        "role": role, "playbook": "Change", "preferred_seed": [preference], "slate_anchor": True,
+        "allow_free_models": True,
+        "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none",
+                   "allowed_sources": ["local-evidence:"]}},
+        "context": {"gear": "M", "size_class": "M"}, "_executor_policy": slates.POLICY,
+        "candidates": [candidate],
+    })
+    assert result["status"] == "selected", result
+    assert routing.candidate_id(result["candidate"]) == expected_route
 
 
 def test_temporary_policy_changes_actual_seed_and_runtime_selection(policy_root):

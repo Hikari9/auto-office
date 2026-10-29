@@ -14,6 +14,7 @@ executor_preferred:
     - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
   M:
     - {model_id: claude-haiku-5-5, effort: high, harness: claude}
+    - {model_id: glm-5.3-flash, effort: max, harness: opencode, conditional: true}
     - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
   L:
     - {model_id: claude-sonnet-5-5, effort: high, harness: claude}
@@ -28,6 +29,7 @@ planner_preferred:
   M:
     - {model_id: claude-opus-5-5, effort: low, harness: claude}
     - {model_id: gpt-6-astra, effort: low, harness: codex}
+    - {model_id: gemini-4-argon, effort: low, conditional: true}
   L:
     - {model_id: claude-opus-5-5, effort: medium, harness: claude}
     - {model_id: gpt-6-astra, effort: medium, harness: codex}

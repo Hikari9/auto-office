@@ -191,6 +191,7 @@ def test_issue861_missing_or_unqualified_glm_f1_skips_to_terra_f2_without_fake_d
     preferred = executor_slates.ideal_seed("M")
     assert [(c["model_id"], c["harness"], c["effort"]) for c in preferred] == [
         ("claude-haiku-5-5", "claude", "high"),
+        ("glm-5.3-flash", "opencode", "max"),
         ("gpt-6.1-terra", "codex", "medium"),
     ]
 
@@ -205,10 +206,15 @@ def test_issue861_missing_or_unqualified_glm_f1_skips_to_terra_f2_without_fake_d
             preferred, available, decision["rejected"], decision["slate"])
         assert [row["route"] for row in audit] == [
             "claude/claude-haiku-5-5@high",
+            "opencode/glm-5.3-flash@max",
             "codex/gpt-6.1-terra@medium",
         ]
         assert audit[0]["status"] == "unqualified"
-        assert audit[1]["status"] == "selected"
+        assert audit[1]["status"] == ("unqualified" if glm else "not-in-catalog")
+        assert audit[2]["status"] == "selected"
+        assert not audit[1]["qualified_routes"]
+        assert audit[1]["reason"] == (
+            "exact route is missing or rejected by catalog, trust, quota, or policy")
         assert decision["routing"]["slate"][0]["route"] == routing.candidate_id(terra)
         if glm:
             assert any(r["candidate"] == routing.candidate_id(glm)

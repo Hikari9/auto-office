@@ -22,6 +22,25 @@ class ExecutorPolicyError(ValueError):
     """Invalid or unresolved executor policy; routing must fail closed."""
 
 
+class _UniqueSafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _unique_mapping(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark,
+                f"duplicate key {key!r}", key_node.start_mark)
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
 def _catalog_tuple(catalog: dict, model_id: str, effort: str, harness: str | None,
                    source: Path, scope: str) -> tuple[list[str], list[str]]:
     known = [row for row in catalog.get("models", []) if row.get("model_id") == model_id and
@@ -40,7 +59,7 @@ def load_policy(root: Path | None = None) -> dict:
     source = (Path(root) if root is not None else paths.resources_root()) / "catalog/executor-policy.yaml"
     try:
         raw = source.read_bytes()
-        data = yaml.safe_load(raw)
+        data = yaml.load(raw, Loader=_UniqueSafeLoader)
         catalog = shipped_catalog.load(root)
     except (OSError, yaml.YAMLError, shipped_catalog.CatalogError) as exc:
         raise ExecutorPolicyError(f"{source}: cannot load executor policy/catalog: {exc}") from exc
@@ -63,9 +82,10 @@ def load_policy(root: Path | None = None) -> dict:
             seen = set()
             for item in entries:
                 if (not isinstance(item, dict) or not {"model_id", "effort"} <= set(item) or
-                        set(item) - {"model_id", "effort", "harness"} or
+                        set(item) - {"model_id", "effort", "harness", "conditional"} or
                         not isinstance(item.get("model_id"), str) or not item["model_id"].strip() or
                         not isinstance(item.get("effort"), str) or item["effort"] not in EFFORTS or
+                        ("conditional" in item and not isinstance(item["conditional"], bool)) or
                         (item.get("harness") is not None and (not isinstance(item["harness"], str) or
                                                               not item["harness"].strip()))):
                     raise ExecutorPolicyError(f"{source}: invalid {field}.{size} route")
@@ -73,8 +93,13 @@ def load_policy(root: Path | None = None) -> dict:
                 if key in seen:
                     raise ExecutorPolicyError(f"{source}: duplicate {field}.{size} route {key}")
                 seen.add(key)
-                item["_resolved_routes"], item["_dispatchable_routes"] = _catalog_tuple(
-                    catalog, item["model_id"], item["effort"], item.get("harness"), source, f"{field}.{size}")
+                try:
+                    item["_resolved_routes"], item["_dispatchable_routes"] = _catalog_tuple(
+                        catalog, item["model_id"], item["effort"], item.get("harness"), source, f"{field}.{size}")
+                except ExecutorPolicyError:
+                    if item.get("conditional") is not True:
+                        raise
+                    item["_resolved_routes"], item["_dispatchable_routes"] = [], []
     restrictions = data.get("model_restrictions")
     if not isinstance(restrictions, list):
         raise ExecutorPolicyError(f"{source}: model_restrictions must be a list")
