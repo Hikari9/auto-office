@@ -108,10 +108,10 @@ def _is_validate_script(command: str) -> bool:
 
 _SCOPED_GATE_SHA256 = {
     "scripts/validate.sh": "24c65e6e3cd90eb81d7ce777d5dc7798b05ae76714c3e618c925d7f693304157",
-    "scripts/select_pr_tests.py": "9923396cced85b4e9e341b37c5f084efe45c928d2b08cfad461a627878bcb40e",
-    "tests/test_pr_test_selection.py": "e18b762773dcabd3e804cddafd104f4269c077ed0bbe3716cf3ef31e5c7093a4",
+    "scripts/select_pr_tests.py": "ebdf1a495c490bc1d81b758f6a27c9925ac07518d504887ef4cfe3da2b5ff5d5",
+    "tests/test_pr_test_selection.py": "e94154d0575e7a518a241e5f0c36e778d1c0bb6c9792a181a0d06835446ffd4b",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
-    "tests/v31/test_verification_coverage.py": "1a115cffdf0da04de1afc98a8ffd8f277a3c4ab2743afdd8e4c5d80a5eab9a95",
+    "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
