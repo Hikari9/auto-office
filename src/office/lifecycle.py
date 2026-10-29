@@ -407,7 +407,7 @@ def reconcile_repository(con, run: dict) -> str | None:
 
 
 def close(con, run: dict, *, handoff: str | None = None) -> Result:
-    from office import cleanup, closeout, dispatch, gates, guide
+    from office import cleanup, closeout, dispatch, gates, guide, jobs
     if state.is_terminal(run):
         # A crash may have committed terminal status before the cleanup tail.
         # Replay does not reopen the run, label learning twice, or repeat pane teardown.
@@ -416,6 +416,9 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                           final=closeout.done(f"already {run['phase']}, worktrees retained"))
         landing = run.get("landing") or {}
         res = Result(lines=[f"{short(run['id'])} already closed | retrying closeout"])
+        retried_jobs = jobs.cancel_run_jobs(con, run["id"])
+        if retried_jobs["stopped"]:
+            res.add(f"stopped {len(retried_jobs['stopped'])} live job process(es) from the previous close")
         # A landed-externally close stores the PR URL in landing.handoff and
         # neither target nor detail; that landing is already verified, so a
         # replay sweeps instead of re-offering the handoff. The PR must be
@@ -448,10 +451,12 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
                          archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
+        cancelled_jobs = jobs.cancel_run_jobs_in_transaction(con, run["id"])
         _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     state.write_projection(con, run["id"])
     from office import dispatch, rerun
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
@@ -459,6 +464,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     planpath.remove(Path(run["repo_root"]), run)
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
+    _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
     res.lines.extend(cleanup.offer(con, run))
@@ -596,7 +602,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
                           final=closeout.done("terminal transition committed; retry office close"))
         if recovered:
             landing_recovery.require_current(con, current, recovered[1])
-        live = _stop_work(con, run)
+        live, cancelled_jobs = _stop_work(con, run)
         con.execute("UPDATE gates SET status='cancelled', stale_reason='landed externally' WHERE run_id=? "
                     "AND status IN ('queued','running','waiting')", (run["id"],))
         if landing["quote"]:
@@ -614,7 +620,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
                    f"{receipt['digest'][7:19]}")
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
-    _finish_terminal(con, run, live)
+    stopped_jobs = _finish_terminal(con, run, live, cancelled_jobs)
     lines = [f"{short(run['id'])} closed | landed externally via {pr['url']} ({pr['merge_commit'][:12]})"]
     if unproven:
         lines.append(f"not in the merge commit, closed on the user's word: {', '.join(unproven)}")
@@ -624,25 +630,28 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
                      "squash proof recorded separately from commit ancestry")
     res = Result(lines=lines + [f"archive receipt {receipt['digest'][7:15]}"], data={"archive_digest": receipt["digest"],
                                                                                    "landing": landing})
+    _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
     res.lines.extend(cleanup.offer(con, run))
     return res
 
 
-def _stop_work(con, run: dict) -> list:
-    """Cancel queued jobs and mark live dispatches cancelled. Caller holds the tx."""
-    con.execute("UPDATE outbox SET status='cancelled', finished_at=? WHERE run_id=? AND status='queued'",
-                (now_iso(), run["id"]))
+def _stop_work(con, run: dict) -> tuple[list, list[dict]]:
+    """Cancel run jobs and mark live dispatches cancelled in the terminal transaction."""
+    from office import jobs
+    cancelled = jobs.cancel_run_jobs_in_transaction(con, run["id"])
     live = con.execute("SELECT id, pid FROM dispatches WHERE run_id=? AND status IN ('launching','running')",
                        (run["id"],)).fetchall()
     for row in live:
         con.execute("UPDATE dispatches SET status='cancelled', ended_at=? WHERE id=?", (now_iso(), row["id"]))
-    return live
+    return live, cancelled
 
 
-def _finish_terminal(con, run: dict, live: list) -> None:
+def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> list[str]:
     """After a run ends: stop live agents, close panes and tab, drop the plan draft."""
+    from office import jobs
+    stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
     for row in live:
         if row["pid"] and pid_alive(row["pid"]):
             try:
@@ -654,6 +663,7 @@ def _finish_terminal(con, run: dict, live: list) -> None:
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+    return stopped_jobs
 
 
 def abandon(con, run: dict, reason: str) -> Result:
@@ -663,7 +673,7 @@ def abandon(con, run: dict, reason: str) -> Result:
         current = state.get_run(con, run["id"])
         if state.is_terminal(current):
             return Result(lines=[f"{short(run['id'])} already {current['phase']}"])
-        live = _stop_work(con, run)
+        live, cancelled_jobs = _stop_work(con, run)
         receipt = _archive_receipt(con, current, {"status": "abandoned"}, None)
         scoring.label_run_outcomes(con, run["id"], "abandoned")
         state.update_run(con, run["id"], phase="abandoned", terminal_at=now_iso(),
@@ -672,8 +682,19 @@ def abandon(con, run: dict, reason: str) -> Result:
         state.emit(con, current, "run.abandoned", f"run abandoned: {reason.strip()[:80]}")
         _release_all(con, run["id"], "abandoned")
         _end_bindings(con, run["id"])
-    _finish_terminal(con, run, live)
-    return Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
+    stopped_jobs = _finish_terminal(con, run, live, cancelled_jobs)
+    res = Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
+    _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
+    return res
+
+
+def _append_cancelled_jobs(res: Result, rows: list[dict], stopped: list[str]) -> None:
+    if rows:
+        kinds = sorted({row["kind"] for row in rows})
+        line = f"cancelled {len(rows)} outstanding outbox job(s) ({', '.join(kinds)})"
+        if stopped:
+            line += f"; stopped {len(stopped)} live job process(es)"
+        res.lines.append(line)
 
 
 def _release_all(con, run_id: str, reason: str) -> None:

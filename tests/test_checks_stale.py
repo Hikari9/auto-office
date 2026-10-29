@@ -97,4 +97,4 @@ def test_any_other_edit_before_checks_is_stale(con, worktree):
 
 def test_any_other_edit_while_checks_run_is_stale(con, worktree):
     out = gates._run_commands(con, RUN, ["echo 'x = 3' > calc.py"], worktree, _rev(worktree), _gate(con), {})
-    assert out["verdict"] == "STALE" and "while checks ran" in out["summary"], out
+    assert out["verdict"] == "STALE" and "mutated tracked files: calc.py" in out["summary"], out

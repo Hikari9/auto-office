@@ -47,6 +47,9 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
     if what == "economics":
         from office import economics
         return economics.inspect(con, run)
+    if what in ("efficiency", "orchestration-efficiency"):
+        from office import economics_efficiency
+        return economics_efficiency.inspect(con, run)
     if what in ("convergence", "lane", "lanes", "scope"):
         from office import convergence
         lines = convergence.inspect_lines(con, run, ident)
@@ -61,7 +64,7 @@ def inspect(con, run: dict, what: str | None, ident: str | None) -> Result:
             data = {**data, "findings": [dict(f) for f in con.execute(query, params)]}
         return Result(lines=lines, data=data)
     raise Usage("unknown-view", f"cannot inspect {what!r}",
-                next_step="office inspect run|plan|task|gate|evidence|amendments|events|route|learner|trust|convergence|economics [id]")
+                next_step="office inspect run|plan|task|gate|evidence|amendments|events|route|learner|trust|convergence|economics|efficiency [id]")
 
 
 def _plan(con, run, ident) -> Result:

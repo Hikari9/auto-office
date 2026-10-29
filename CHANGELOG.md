@@ -8,6 +8,15 @@ One line or short list per version, newest first. The version itself lives only 
 - test(contracts): lean policy-driven runtime contract suite with handwritten metamorphic oracles and fault-injection proofs (#871 PR B).
 - test(gate): switch ordinary PR validation to the lean contract suite and affected-domain selection, with truthful scoped attestations (#871 PR C).
 
+## 3.12.0
+
+- fix(routing): demote provider-wide quota pools on usage limits and reject unsafe live reroutes (#860).
+- fix(rerun): make stale accepted dependent reruns actionable and serialize restacks (#856).
+- fix(close): stop claimed integration checks and prevent retries after an externally landed close (#836).
+- fix(review): treat crashed OpenCode reviewer panes without replies as route failures (#827).
+- fix(review): resubmit held Codex brief pointers with composer Enter fix and log reviewer fallback reasons (#790).
+- feat(economics): add shadow delegation assessment and sampled efficiency reporting with measured win gates (#502).
+
 ## 3.11.2
 
 - fix(validation): compare integration failures against the pinned base, report tracked check mutations, fence stale plan reviews and revalidate accepted-task amendments (#629, #819, #802).

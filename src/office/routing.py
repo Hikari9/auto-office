@@ -74,9 +74,23 @@ def harness_demotion_key(harness: str | None) -> str:
     return f"{harness or ''}/*"
 
 
-def _demotion_keys(c: dict) -> tuple[str, str]:
-    return (demotion_key(c.get("harness"), c.get("invocation_model_id") or c.get("model_id"), c.get("effort")),
+def shared_quota_pool_key(harness: str | None, model: str | None) -> str | None:
+    """Known common provider quota only: OpenCode's *-free models share the free-tier wall.
+
+    Never demote a paid OpenCode route, a different provider, or an unproven
+    shared pool based on a single failed model (#860).
+    """
+    if (harness or "").lower() == "opencode" and (model or "").lower().endswith("-free"):
+        return "pool:opencode:free"
+    return None
+
+
+def _demotion_keys(c: dict) -> tuple[str, ...]:
+    model = c.get("invocation_model_id") or c.get("model_id")
+    keys = (demotion_key(c.get("harness"), model, c.get("effort")),
             harness_demotion_key(c.get("harness")))
+    pool = shared_quota_pool_key(c.get("harness"), model)
+    return keys + ((pool,) if pool else ())
 
 
 def preferred_rank(c, preferred_seed):

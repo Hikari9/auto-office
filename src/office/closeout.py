@@ -126,12 +126,22 @@ def mark_ready(repo: str, ref: str, owned: set[str] | frozenset[str] = frozenset
 
 
 def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[list[str], str | None, str]:
-    """After a merged close: sync base, remove run worktrees. Returns (lines, ask, summary)."""
+    """After a merged close: stop the run's outstanding jobs (#836), sync base,
+    remove run worktrees. Returns (lines, ask, summary)."""
+    from office import jobs
+    cancelled = jobs.cancel_run_jobs(con, run["id"])
+    lines = []
+    if cancelled["cancelled"]:
+        line = f"cancelled {cancelled['cancelled']} outstanding outbox job(s) ({', '.join(cancelled['kinds'])})"
+        if cancelled["stopped"]:
+            line += f"; stopped {len(cancelled['stopped'])} live job process(es)"
+        lines.append(line)
+    jobs_part = f", {cancelled['cancelled']} job(s) cancelled" if cancelled["cancelled"] else ""
     repo = Path(run["repo_root"])
     base = base_branch(run, landing)
     sync = sync_base(repo, base)
     cleaned = remove_worktrees(con, run)
-    lines = [sync["line"]]
+    lines.append(sync["line"])
     from office import deploy_artifacts
     for archive in deploy_artifacts.receipt(run):
         lines.append(f"rollback output preserved: {archive['archive']} ({len(archive['files'])} files; manifest.json)")
@@ -144,7 +154,7 @@ def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[lis
         lines.append(f"kept branch(es) git branch -d refused (not merged locally): {', '.join(cleaned['branches_kept'][:4])}")
     what = f"{pr} merged" if pr else "merged"
     base_part = (f"{base} synced" if sync["synced"] else f"{base} sync skipped")
-    summary = f"{what}, {base_part}, {len(cleaned['removed'])} worktree(s) removed"
+    summary = f"{what}, {base_part}, {len(cleaned['removed'])} worktree(s) removed{jobs_part}"
     if cleaned["kept"]:
         summary += f", {len(cleaned['kept'])} kept"
     if cleaned["branches_kept"]:
