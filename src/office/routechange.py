@@ -314,7 +314,8 @@ def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str 
     match = _CANDIDATE.fullmatch(route)
     if not match:
         return None, None, None
-    harness, effort = match["harness"], match["effort"]
+    harness = match["harness"]
+    effort = None if match["effort"] == "None" else match["effort"]  # candidate_id writes a missing effort as "None"
     return harness, _invocation_model(con, run_id, route, harness, match["model"], effort), effort
 
 
@@ -376,6 +377,18 @@ def _latest_episodes(con, run_id: str) -> dict[str, tuple]:
     return latest
 
 
+def _recoverable(con, run_id: str, now: datetime) -> list[tuple]:
+    """(route, evidence row, payload, (why, instant)) for each route whose newest episode is available and unrecorded.
+    Read-only."""
+    found = []
+    for route, (row, payload) in _latest_episodes(con, run_id).items():
+        if _recorded(con, run_id, row["seq"]):
+            continue
+        if (basis := _available_basis(con, run_id, row, payload, now)) is not None:
+            found.append((route, row, payload, basis))
+    return found
+
+
 def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]:
     """Record one `route.recovered` per route a non-terminal run fell back from or avoided that is available again.
     Keyed by the evidence's seq, so each episode is recorded once. Only events are written: no dispatch, task or
@@ -383,15 +396,11 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
     if state.is_terminal(run):
         return []
     now = now or datetime.now(timezone.utc)
+    if not _recoverable(con, run["id"], now):  # read-only: a sweep with nothing to record takes no writer lock
+        return []
     seqs = []
-    with db.transaction(con):  # judged and recorded under the writer lock, on each route's newest episode at that moment
-        for route, (row, payload) in _latest_episodes(con, run["id"]).items():
-            if _recorded(con, run["id"], row["seq"]):
-                continue
-            found = _available_basis(con, run["id"], row, payload, now)
-            if found is None:
-                continue
-            basis, at = found
+    with db.transaction(con):  # judged again under the writer lock, so a concurrent sweep cannot record the same episode
+        for route, row, payload, (basis, at) in _recoverable(con, run["id"], now):
             harness, model, effort = _route_parts(con, run["id"], row, payload)
             seqs.append(state.emit(
                 con, run, RECOVERED_KIND, _available_text(route, basis), task_id=row["task_id"],
@@ -403,12 +412,14 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
 
 def _considered_since(con, run_id: str, at: str, route: str, role: str | None) -> bool:
     """Whether routing since `at` (the instant the route became available) used or passed over the route: a dispatch
-    or review gate on the route itself, or a dispatch of the same role that routing chose for (not pinned to a declared
-    route, which skips the ranking)."""
+    or review gate on the route itself, a review that left it, or a dispatch of the same role that routing chose for
+    (not pinned to a declared route, which skips the ranking)."""
     return con.execute(
         "SELECT 1 FROM dispatches WHERE run_id=? AND started_at>? AND (triple=? OR (role IS ? AND override_json IS NULL)) "
-        "UNION ALL SELECT 1 FROM gates WHERE run_id=? AND created_at>? AND route=? LIMIT 1",
-        (run_id, at, route, role, run_id, at, route)).fetchone() is not None
+        "UNION ALL SELECT 1 FROM gates WHERE run_id=? AND created_at>? AND route=? "
+        "UNION ALL SELECT 1 FROM events WHERE run_id=? AND created_at>? AND kind='route.changed' "
+        "AND json_extract(payload_json,'$.notice')='review' AND json_extract(payload_json,'$.before')=? LIMIT 1",
+        (run_id, at, route, role, run_id, at, route, run_id, at, route)).fetchone() is not None
 
 
 def recovery_lines(con, run: dict) -> list[str]:
