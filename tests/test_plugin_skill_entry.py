@@ -7,7 +7,7 @@ from pathlib import Path
 
 from scripts.check_ecosystem import check_plugin_skills, frontmatter
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _hub():
