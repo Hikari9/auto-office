@@ -12,6 +12,7 @@ import subprocess
 import sys
 from typing import Callable
 
+from office import portable
 from office.util import now_iso
 
 Probe = Callable[[list[str]], str]
@@ -34,7 +35,7 @@ def _unavailable(unit: str, source: str) -> dict:
     return _sample("unavailable", None, unit, source)
 
 
-def cpu(*, loadavg: Callable[[], tuple] = os.getloadavg, cores: Callable[[], int | None] = os.cpu_count) -> dict:
+def cpu(*, loadavg: Callable[[], tuple | None] = portable.loadavg, cores: Callable[[], int | None] = os.cpu_count) -> dict:
     """1-minute load average per core (1.0 means every core busy)."""
     source = "loadavg/cpu_count"
     try:

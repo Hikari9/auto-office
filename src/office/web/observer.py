@@ -12,7 +12,6 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
-from urllib.parse import quote
 
 
 def open_readonly(path: str | Path) -> sqlite3.Connection:
@@ -20,7 +19,7 @@ def open_readonly(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path).expanduser().resolve()
     if not db_path.is_file():
         raise FileNotFoundError(f"runs.db not found: {db_path}")
-    con = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True, timeout=30,
+    con = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=30,
                           isolation_level=None, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA busy_timeout=30000")

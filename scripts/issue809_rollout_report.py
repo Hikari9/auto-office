@@ -16,7 +16,6 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -32,7 +31,7 @@ def main() -> int:
     path = args.runs_db.expanduser().resolve()
     if not path.is_file():
         parser.error("runs.db COPY does not exist; no empty success report will be invented")
-    uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
+    uri = path.as_uri() + "?mode=ro"
     try:
         con = sqlite3.connect(uri, uri=True)
         con.row_factory = sqlite3.Row

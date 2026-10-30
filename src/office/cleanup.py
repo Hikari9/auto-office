@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
-from office import db, paths, state
+from office import db, paths, portable, state
 from office.result import Result
 from office.state import Refused
 from office.util import now_iso, pid_alive, short
@@ -28,19 +28,18 @@ def _git(repo: Path, *argv: str) -> subprocess.CompletedProcess:
 
 @contextlib.contextmanager
 def _lock(run: dict):
-    import fcntl
     root = paths.state_home() / "cleanup-locks"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (root / (run["id"] + ".lock")).open("a") as fd:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fd, blocking=False)
         except OSError as exc:
             raise Refused("cleanup-running", f"cleanup for {short(run['id'])} is running",
                           preserved="all worktrees", next_step="retry office close --run " + short(run["id"])) from exc
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            portable.unlock(fd)
 
 
 def _registered(repo: Path) -> dict[Path, dict]:

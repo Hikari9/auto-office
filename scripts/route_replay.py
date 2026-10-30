@@ -44,7 +44,6 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from urllib.parse import quote
 
 try:
     import office  # noqa: F401  (probe only: is the package importable)
@@ -66,7 +65,7 @@ def live_db() -> Path:
 def snapshot(src: Path, dest_dir: Path) -> Path:
     """A consistent copy of `src`, taken through SQLite's backup API on a read-only connection."""
     dest = dest_dir / "runs-copy.db"
-    ro = sqlite3.connect(f"file:{quote(str(src))}?mode=ro", uri=True, timeout=30)
+    ro = sqlite3.connect(f"{Path(os.path.abspath(src)).as_uri()}?mode=ro", uri=True, timeout=30)
     try:
         out = sqlite3.connect(str(dest))
         try:

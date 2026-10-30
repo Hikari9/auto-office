@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.14
+
+The `office` CLI runs natively on Windows (#915, rebased from #916). New `office.portable` replaces `fcntl`, `killpg`, `os.kill(pid, 0)` (which kills on Windows), `start_new_session`, `os.uname` and `os.getloadavg`; binary-safe `os.open` flags; README documents the git install (the PyPI `auto-office` is a different project), Python pinning and Windows notes; D142-7 superseded.
+
 ## 3.31.13
 
 The agy quota probe now reads the `daily-cloudcode-pa` host agy 1.5 itself uses, falling back to `cloudcode-pa` only on failure (#1339). The production host reported idle 100% windows and no Gemini 4 bucket, so Hydrogen passed the reserve gate with about 0% left. The probe also reports a `gemini-4` family, which reads as exhausted when no bucket is reported, and agy `gemini-4*` routes gate on it.
