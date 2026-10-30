@@ -39,16 +39,29 @@ def test_install_check_offers_the_three_choices():
         assert choice in section, choice
 
 
-def test_install_check_names_the_saved_choice_path():
-    assert "${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice" in _install_check()
+def test_install_check_names_the_saved_choice_path_and_reads_and_writes_it():
+    section = _install_check()
+
+    assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"' in section
+    assert 'cat "$CFG"' in section
+    assert "mkdir -p" in section
+    assert "exactly `lean`" in section
 
 
-def test_install_check_installs_from_pypi_then_onboards():
+def test_install_check_asks_once_before_installing():
+    section = _install_check()
+
+    assert "ask once" in section
+    assert section.index("Install the CLI (Recommended)") < section.index("`uv tool install auto-office`")
+
+
+def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
     section = _install_check()
 
     assert "uv tool install auto-office" in section
     assert "office install --no-hooks" in section
     assert "office doctor" in section
+    assert "Stop at the first failure" in section
 
 
 def test_install_check_hands_off_to_the_lean_skill():
@@ -88,11 +101,15 @@ def test_ecosystem_check_accepts_relative_skill_directories(tmp_path):
 def test_ecosystem_check_rejects_paths_outside_the_plugin(tmp_path):
     (tmp_path / "plugin").mkdir()
     (tmp_path / "outside").mkdir()
-    _write_manifest(tmp_path / "plugin", ["../outside"])
+    (tmp_path / "plugin" / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
+    _write_manifest(tmp_path / "plugin", ["./../outside", "./linked"])
 
     errors = check_plugin_skills(tmp_path / "plugin")
 
-    assert errors == [".claude-plugin/plugin.json: skills entry '../outside' must be a ./ directory inside the plugin"]
+    assert errors == [
+        ".claude-plugin/plugin.json: skills entry './../outside' must be a ./ directory inside the plugin",
+        ".claude-plugin/plugin.json: skills entry './linked' must be a ./ directory inside the plugin",
+    ]
 
 
 def test_ecosystem_check_rejects_absolute_and_file_entries(tmp_path):

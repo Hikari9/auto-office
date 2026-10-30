@@ -37,9 +37,9 @@ Take every decision to the user through the harness's native question tool when 
 
 Detection: !`command -v office || echo "office: not found"`
 - **Found:** run `office --version`. If the release differs from this directory's `src/office/_version.py` or `office doctor` prints `install: STALE`, tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
-- **Not found:** if `${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice` contains `lean`, hand off. Otherwise ask once, natively (see Asking the user): **Install the CLI (Recommended)**, **Lean for this request**, **Lean, don't ask again** (writes `lean` to that file first).
-- **Install:** `uv tool install auto-office`, `office install --no-hooks` (onboarding offers hooks), `office doctor`, then continue below.
-- **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there.
+- **Not found:** the saved choice is `CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"`; if `cat "$CFG"` prints exactly `lean`, hand off. Otherwise ask once, natively (see Asking the user): **Install the CLI (Recommended)**, **Lean for this request**, **Lean, don't ask again** (first `mkdir -p` the directory and write `lean` to `$CFG`; if the write fails, tell the user the choice was not saved).
+- **Install:** `uv tool install auto-office`, `office install --no-hooks` (onboarding offers hooks), `office doctor`. Stop at the first failure, report that command, and offer the lean hand-off. On success, continue below.
+- **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there. If that Skill call fails, read `skills/auto-office-lean/SKILL.md` in this skill's directory and follow it.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
 
