@@ -15,14 +15,20 @@ def row(model, effort, *, lineage=None, version=None, score=48):
             "quota": {"status": "ok", "tightest_remaining_percent": 100}}
 
 
-def test_six_terra_rows_are_present_but_do_not_fake_conformance():
+def test_six_terra_rows_are_present_and_only_probed_efforts_dispatch():
     catalog = shipped_catalog.load()["models"]
     expected = {"none": 33, "low": 36, "medium": 41, "high": 44, "xhigh": 45, "max": 48}
     found = {r["effort"]: r for r in catalog if r["model_id"] == "gpt-6.1-terra"}
     assert set(found) == set(expected)
     assert {e: r["benchmark_indexes"][INDEX] for e, r in found.items()} == expected
-    assert all(r.get("dispatchable") is False and r.get("discovery") == "eligible"
-               for r in found.values())
+    probed = {"low", "medium", "high"}
+    for effort in probed:
+        row = found[effort]
+        assert row.get("dispatchable") is not False
+        assert str(row["invocation_source"]).startswith("local-evidence:")
+        assert f"at effort {effort}" in row["invocation_source"]
+    assert all(found[e].get("dispatchable") is False and found[e].get("discovery") == "eligible"
+               for e in set(found) - probed)
 
 
 def recommend(rows, **extra):
