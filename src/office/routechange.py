@@ -349,6 +349,8 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
             return "demotion lapsed", max(expiries)
         deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
         return None if deadline > now else ("demotion lapsed", deadline)
+    if payload.get("skip_class") == "other":  # a trust or capability skip: the route was never avoided for quota or auth
+        return None
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",

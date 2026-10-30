@@ -48,6 +48,11 @@ def _using_executor_policy(policy: dict):
         _executor_policy_context.reset(token)
 
 
+# Rejection categories that mean a route was avoided for quota or auth (#921). Others (trust, capability, concurrency)
+# are not recovered when their route becomes available again.
+QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited", "route-demoted", "quota"})
+
+
 def candidate_id(c):
     """Route identity `harness@major/model_id@effort`. Trust keys on the harness major,
     so a point release never resets it; the full `harness_version` stays in disclosure."""
@@ -577,11 +582,13 @@ def route(request: dict, discovery_input: dict | None = None, *,
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "quota",
+                                 "reason": "projected quota crosses reserve while safe alternative exists"})
             stage = safe + unknown
         elif unknown:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "known quota crosses reserve; only unknown candidates remain"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "quota",
+                                 "reason": "known quota crosses reserve; only unknown candidates remain"})
             stage = unknown
         else:
             _reject_pool(pool, rejected, "protected quota blocks every qualifying route")
