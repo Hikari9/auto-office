@@ -726,7 +726,7 @@ def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1
     monkeypatch.setattr(gates, "_agent_alive", lambda name: True)
     sent = []
     monkeypatch.setattr(dispatch, "submit_prompt",
-                        lambda name, text, pane=None: sent.append((name, text, pane, bool(in_fence))) or landed)
+                        lambda name, text, *, pane=None, guard=None, max_enter_tries=None: sent.append((name, text, pane, bool(in_fence), max_enter_tries)) or landed)
     monkeypatch.setattr(dispatch, "fenced_pane", fence)
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
@@ -735,7 +735,7 @@ def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1
         run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
         run = {**run, "gates": {"review_reprompt_max": 1}}
         d = {"id": "D1", "launcher": "herdr", "pane_id": pane_id, "role": "code_reviewer", "task_id": "T1",
-             "triple": "codex/test@high", "gate_id": gate_id}
+             "harness": "codex", "triple": "codex/test@high", "gate_id": gate_id}
         got = gates._reprompt_until_valid(con, run, d, env.tmp, env.tmp / "reply.txt", review_parse.parse(""),
                                           plan_review=False, visual=False)
         events = [r["summary"] for r in con.execute("SELECT summary FROM events WHERE kind='review.reprompt'")]
@@ -762,6 +762,7 @@ def test_the_review_reprompt_is_sent_only_inside_the_pane_identity_fence(env, mo
 
     sent, _, events = _reprompt(env, monkeypatch, fence, in_fence=inside)
     assert entered == ["D1"] and len(sent) == 1 and sent[0][2] == "FENCED:p9" and sent[0][3] is True
+    assert sent[0][4] == 1, "codex reviewer recovery must be bounded to 1 Enter"
     assert events and "re-prompted 1/1" in events[0]
 
 
@@ -796,6 +797,7 @@ def test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command(env, mo
     gid = _gates(env, "convergence_review")[0]["id"]
     sent, (_, _, reason), _ = _reprompt(env, monkeypatch, _fenced, gate_id=gid, landed="held")
     assert len(sent) == 1 and "typed but unsubmitted" in reason, reason
+    assert sent[0][4] == 1, "codex reviewer recovery must be bounded to 1 Enter"
     assert "office review L-T1:convergence --as <harness>/<model>" in reason and "waive" not in reason, reason
 
 
