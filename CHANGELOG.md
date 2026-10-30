@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.0
+
+- fix: address recurring orchestrator stalls and auto-wake issues (#922, #919, #895, #918, #920, #921).
+
 ## 3.13.0
 
 - refactor(policy): externalize executor/planner size slates, benchmark floors, restrictions and authorized exceptions into one validated catalog policy (#871 PR A).
