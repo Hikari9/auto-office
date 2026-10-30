@@ -2,15 +2,19 @@
 keeps check_timeout_seconds, and a timed-out check names the setting to raise."""
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
-from office import db, gates
+from office import db, gates, paths, verification_coverage
 
 RUN = {"id": "r1"}
 REV = {"id": "R1", "commit_sha": "0" * 40, "dispatch_id": "D1"}
 GATE = {"id": "G1", "task_id": "T1"}
 CFG = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 7200}
-FULL = ["scripts/validate.sh", "./scripts/validate.sh", "bash scripts/validate.sh", "scripts/validate.sh --full"]
+FULL = ["scripts/validate.sh", "./scripts/validate.sh", "bash scripts/validate.sh", "scripts/validate.sh --full",
+        "bash -e scripts/validate.sh", "scripts/validate.sh --full > out.log 2>&1", "scripts/validate.sh --full 2>&1",
+        "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &", "scripts/validate.sh --full # note"]
 
 
 @pytest.fixture
@@ -84,3 +88,45 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
     assert "timed out after 7200s; raise verification.full_suite_timeout_seconds" in outcome["summary"], outcome
     assert "office resume" in outcome["summary"], outcome
     assert started == [7200]  # no automatic re-run of the full suite
+
+
+@pytest.mark.parametrize("command", ["scripts/validate.sh --pr > out.log 2>&1", "scripts/validate.sh --pr | tail -5",
+                                     "echo scripts/validate.sh", "pytest -q tests/x.py", "scripts/validate.sh --pr --full"])
+def test_non_full_suite_commands_keep_the_check_timeout(command):
+    assert not verification_coverage.is_full_suite(command)
+    assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
+
+
+def _commit(repo, name, text):
+    (repo / name).write_text(text)
+    subprocess.run(["git", "-C", str(repo), "add", name], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name],
+                   check=True)
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+@pytest.mark.parametrize("command, limit", [("scripts/validate.sh", 7200), ("scripts/validate.sh --pr", 1800)])
+def test_preexisting_rerun_on_base_uses_the_same_timeout(con, tmp_path, monkeypatch, command, limit):
+    # The base re-run of a failing check must get the limit the check got on the task revision.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    base = _commit(repo, "calc.py", "x = 1\n")
+    head = _commit(repo, "calc.py", "x = 2\n")
+    log = tmp_path / "check-1.log"
+    log.write_text("boom\n")
+    checkout = tmp_path / "base"
+    checkout.mkdir()
+    (paths.run_dir("r1") / "evidence" / "T1" / "R1").mkdir(parents=True)  # _run_commands creates this first
+    started = []
+
+    monkeypatch.setattr(gates.state, "pinned_config", lambda run: {"verification": CFG})
+    monkeypatch.setattr(gates, "detached_checkout", lambda *a, **k: checkout)
+    monkeypatch.setattr(gates, "remove_checkout", lambda *a, **k: None)
+    monkeypatch.setattr(gates, "_run_check", lambda cmd, cwd, timeout, env: (started.append(timeout) or (1, "boom\n")))
+    outcome = {"results": [{"command": command, "exit": 1, "log": str(log), "cwd": str(repo)}]}
+    rev = {"id": "R1", "commit_sha": head, "base_commit": base, "dispatch_id": "D1"}
+    run = {"id": "r1", "repo_root": str(repo)}
+    gates.preexisting_failures(con, run, rev, GATE, outcome)
+    assert started == [limit]

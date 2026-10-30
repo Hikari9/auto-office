@@ -111,9 +111,18 @@ def _is_validate_script(command: str) -> bool:
 
 
 def is_full_suite(command: str) -> bool:
-    """The full regression run `--pr` does not replace: bare `scripts/validate.sh` or `--full`."""
-    return _is_validate_script(command) or _validate_words(command) in (
-        ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
+    """The full regression run `--pr` does not replace: bare `scripts/validate.sh` or `--full`.
+
+    Redirections, pipes, backgrounding and trailing comments do not change which suite runs,
+    so the simple command is cut before them. Coverage evidence keeps the strict matcher above."""
+    head =re.split(r"\|\||\d*[|;&<>\n]|(?:^|\s)#", command, maxsplit=1)[0]
+    words = _tokens(head)
+    if words[:1] in (["bash"], ["sh"]):
+        words = words[1:]
+        while words[:1] and words[0].startswith("-"):
+            words = words[1:]
+    return words in (["scripts/validate.sh"], ["./scripts/validate.sh"],
+                     ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
 
 
 _SCOPED_GATE_SHA256 = {
