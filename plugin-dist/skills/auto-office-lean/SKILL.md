@@ -1,6 +1,7 @@
 ---
 name: auto-office-lean
 description: Explicit-invocation-only lean Auto Office engineering orchestrator. Use ONLY when the user selects /auto-office-lean or explicitly requests Lean mode, never for ordinary engineering requests. Preserve its existing role-first execution and review behavior without requiring the Office CLI.
+disable-model-invocation: true
 ---
 
 # Auto Office Lean

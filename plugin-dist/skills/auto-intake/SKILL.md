@@ -1,6 +1,7 @@
 ---
 name: auto-intake
 description: Explicit-invocation-only historical Auto Office v3 intake reference spoke. Use ONLY on /auto-intake or an explicit direct selection of this intake skill; do not auto-activate for routine planning or engineering. Preserve the original interviewer behavior for pinned old runs.
+disable-model-invocation: true
 ---
 
 # Auto Intake

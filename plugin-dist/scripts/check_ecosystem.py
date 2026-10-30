@@ -65,7 +65,12 @@ def frontmatter(path):
     if not m: return False,'missing YAML frontmatter', None, text
     try: fm=yaml.safe_load(m.group(1))
     except Exception as e: return False,f'bad YAML frontmatter: {e}', None, text
-    if set(fm or {}) != {'name','description'}: return False,f'frontmatter keys must be exactly name+description, got {set(fm or {})}', fm, text
+    required = {'name', 'description'}
+    allowed = required | {'disable-model-invocation'}
+    keys = set(fm or {})
+    if not required <= keys or keys - allowed: return False,f'frontmatter requires name+description and only optional invocation control, got {keys}', fm, text
+    if 'disable-model-invocation' in fm and not isinstance(fm['disable-model-invocation'], bool):
+        return False,'disable-model-invocation must be a boolean', fm, text
     if not re.match(r'^[a-z0-9-]+$', fm['name']): return False,'bad name', fm, text
     if not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
