@@ -217,8 +217,9 @@ def test_ecosystem_check_accepts_relative_skill_directories(tmp_path):
 def test_ecosystem_check_rejects_paths_outside_the_plugin(tmp_path):
     (tmp_path / "plugin").mkdir()
     (tmp_path / "outside").mkdir()
+    (tmp_path / "plugin" / "skills").mkdir()
     (tmp_path / "plugin" / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
-    _write_manifest(tmp_path / "plugin", ["../outside", "./../outside", "./linked"])
+    _write_manifest(tmp_path / "plugin", ["./", "./skills/", "../outside", "./../outside", "./linked"])
 
     errors = check_plugin_skills(tmp_path / "plugin")
 
@@ -231,13 +232,15 @@ def test_ecosystem_check_rejects_paths_outside_the_plugin(tmp_path):
 
 def test_ecosystem_check_rejects_absolute_and_file_entries(tmp_path):
     (tmp_path / "SKILL.md").write_text("---\n", encoding="utf-8")
-    _write_manifest(tmp_path, [str(tmp_path), "./SKILL.md"])
+    (tmp_path / "skills").mkdir()
+    _write_manifest(tmp_path, ["./", "./skills/", str(tmp_path), "./SKILL.md"])
 
     assert len(check_plugin_skills(tmp_path)) == 2
 
 
 def test_ecosystem_check_reports_null_byte_entries_without_crashing(tmp_path):
-    _write_manifest(tmp_path, ["./\x00"])
+    (tmp_path / "skills").mkdir()
+    _write_manifest(tmp_path, ["./", "./skills/", "./\x00"])
 
     assert check_plugin_skills(tmp_path) == [
         ".claude-plugin/plugin.json: skills entry './\\x00' must be a ./ directory inside the plugin",

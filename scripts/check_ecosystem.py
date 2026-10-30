@@ -57,7 +57,6 @@ SKILL_LINE_BUDGETS = {
     'skills/office-submit/SKILL.md': 106,
 }
 
-
 def frontmatter(path):
     text=path.read_text(encoding='utf-8')
     m=re.match(r'^---\n(.*?)\n---\n',text,re.S)
@@ -69,13 +68,11 @@ def frontmatter(path):
     if not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
 
-
 def discovered_skills(root):
     return sorted(
         path for path in root.rglob('SKILL.md')
         if not any(part.startswith('.') or part == 'mutants' for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
     )
-
 
 def check_skill_budgets(root=ROOT):
     """Return errors for SKILL.md files that exceed their configured budgets."""
@@ -96,7 +93,6 @@ def check_skill_budgets(root=ROOT):
         if count > budget:
             errors.append(f'{relative}: {count} lines exceeds line budget of {budget}')
     return errors
-
 
 def check_versions(root=ROOT):
     """One release identity: src/office/_version.py is the only place a version is written.
@@ -128,23 +124,28 @@ def check_versions(root=ROOT):
     return errors
 
 
+
 def check_plugin_skills(root=ROOT):
-    """A Claude plugin manifest may list skill paths. Each must be a ./ directory inside the plugin."""
+    """The Claude plugin must expose the root SKILL.md and skills/. Each entry is a ./ directory inside the plugin."""
     manifest = root / '.claude-plugin' / 'plugin.json'
     if not manifest.exists():
         return []
     skills = json.loads(manifest.read_text()).get('skills')
-    if skills is None:
-        return []
     if not isinstance(skills, list) or not all(isinstance(entry, str) for entry in skills):
         return ['.claude-plugin/plugin.json: skills must be a list of paths']
     errors = []
     plugin_root = root.resolve()
+    exposed = set()
     for entry in skills:
         valid = entry.startswith('./') and '\x00' not in entry
         target = (root / entry).resolve() if valid else None
         if not valid or not target.is_dir() or not target.is_relative_to(plugin_root):
             errors.append(f'.claude-plugin/plugin.json: skills entry {entry!r} must be a ./ directory inside the plugin')
+        else:
+            exposed.add(target)
+    for required in ('./', './skills/'):
+        if (root / required).resolve() not in exposed:
+            errors.append(f'.claude-plugin/plugin.json: skills must expose {required!r}')
     return errors
 
 
@@ -171,7 +172,6 @@ def check_skill_metadata(root=ROOT):
                 f'must equal skill name {fm["name"]!r}'
             )
     return errors
-
 
 def main():
     errors=[]
