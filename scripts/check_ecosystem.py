@@ -123,6 +123,7 @@ def check_versions(root=ROOT):
                 errors.append(f".claude-plugin/marketplace.json:{entry.get('name')}: must not hardcode version")
     return errors
 
+
 def check_plugin_skills(root=ROOT):
     """A Claude plugin manifest may list skill paths. Each must be a ./ directory inside the plugin."""
     manifest = root / '.claude-plugin' / 'plugin.json'
