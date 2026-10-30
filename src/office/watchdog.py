@@ -80,16 +80,18 @@ def progress(d: dict, activity: dict | None = None) -> str | None:
 
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "fish"}
+MAX_TREE = 512  # processes walked under one agent; a larger tree is unknown, never a stall
 
 
 def child_state(d: dict) -> bool | None:
     """Whether the executor's agent is waiting on a command it started, such as a background monitor or `office wait`:
     True or False, or None when the process table cannot be read. Unknown is never a stall (#895).
 
-    The agent's own tools run as shell children. A shell child with a live child of its own is a command in flight.
-    Other children, such as MCP servers, live as long as the session and say nothing about the executor. A command
-    that detaches (setsid, a double fork) leaves the agent's tree and is not seen. The agent is verified by its recorded
-    start time, so a reused pid never counts; with no verifiable agent there is nothing to wait on."""
+    A shell anywhere under the agent that has a live child of its own is a command in flight: the agent's tools run
+    that way, possibly beneath a harness wrapper. Other processes, such as MCP servers, live as long as the session
+    and say nothing about the executor. A command that detaches (setsid, a double fork) leaves the agent's tree and is
+    not seen. The agent is verified by its recorded start time, so a reused pid never counts; with no verifiable agent
+    there is nothing to wait on. The walk is bounded: a tree larger than MAX_TREE is unknown."""
     rec = dispatch._recorded_identity({"id": d["run_id"]}, d["id"], "agent") or {}
     root, started = rec.get("pid"), rec.get("c_start")
     if not root or not started:
@@ -104,7 +106,20 @@ def child_state(d: dict) -> bool | None:
     kids: dict[int, list[int]] = {}
     for pid, (ppid, _command, _began) in live.items():
         kids.setdefault(ppid, []).append(pid)
-    return any(_is_shell(live[pid][1]) and kids.get(pid) for pid in kids.get(root, []))
+    seen, frontier = {root}, [root]
+    while frontier:
+        if len(seen) > MAX_TREE:
+            return None
+        nxt = []
+        for pid in frontier:
+            for kid in kids.get(pid, []):
+                if kid not in seen:
+                    seen.add(kid)
+                    if _is_shell(live[kid][1]) and kids.get(kid):
+                        return True
+                    nxt.append(kid)
+        frontier = nxt
+    return False
 
 
 def _is_shell(command: str) -> bool:

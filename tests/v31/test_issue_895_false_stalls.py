@@ -151,6 +151,30 @@ def test_idle_executor_with_only_an_mcp_server_is_reported(env, monkeypatch):
     assert did in line and "idle" in line and "without submitting" in line, line
 
 
+def test_a_shell_under_a_harness_wrapper_is_work_in_flight(env, monkeypatch):
+    con, run, did = _idle_executor(env, monkeypatch)
+    wrapper = [_row(5300, AGENT, "node /opt/harness/wrapper.js"), _row(5301, 5300, f"/bin/zsh -c eval '{WAIT}'"),
+               _row(5302, 5301, WAIT)]
+    _script_agent(monkeypatch, _table(extra=wrapper))
+    assert guide._idle_executors(con, run, {did: _idle_act()}) == []
+
+
+def test_an_mcp_server_with_its_own_child_is_still_reported(env, monkeypatch):
+    con, run, did = _idle_executor(env, monkeypatch)
+    _script_agent(monkeypatch, _table(extra=[_row(5101, 5100, "node helper.js")]))
+    (line,) = guide._idle_executors(con, run, {did: _idle_act()})
+    assert "without submitting" in line, line
+
+
+def test_a_headless_executor_waiting_on_a_command_is_not_reported(env, monkeypatch):
+    """The supervisor's pid is not the agent: the recorded agent identity decides."""
+    con, run, did = _idle_executor(env, monkeypatch)
+    con.execute("UPDATE dispatches SET launcher='process', pid=9999 WHERE id=?", (did,))
+    con.commit()
+    _script_agent(monkeypatch, _table(in_flight=True))
+    assert guide._idle_executors(con, run, {did: _idle_act()}) == []
+
+
 def test_idle_bash_shell_with_no_command_is_reported(env, monkeypatch):
     con, run, did = _idle_executor(env, monkeypatch)
     _script_agent(monkeypatch, _table(extra=[_row(5001, 4242, "/bin/zsh -c source snapshot.sh")]))
