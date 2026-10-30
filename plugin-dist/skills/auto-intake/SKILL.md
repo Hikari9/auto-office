@@ -1,6 +1,6 @@
 ---
 name: auto-intake
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 intake spoke. Use when the planner runs the interactive requirements interview before freezing intent — covering the twelve-item floor in one or two batched question rounds (or a structured-question tool, per harness) and deriving the five frozen fields from the answers. This spoke is planner-owned and requires talking to the user directly. Do not use to ask about gear, which is declared, not interviewed.
+description: Explicit-invocation-only historical Auto Office v3 intake reference spoke. Use ONLY on /auto-intake or an explicit direct selection of this intake skill; do not auto-activate for routine planning or engineering. Preserve the original interviewer behavior for pinned old runs.
 ---
 
 # Auto Intake
