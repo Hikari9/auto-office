@@ -134,13 +134,23 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
 
     Sampling can run in `office status` and a separate wait watchdog. There is
     no authority transition and no assumption about the meaning of spinner UI.
+    The review wall budget does not need a progress sample, so an unreadable pane
+    cannot hide it. `budget_only` (a running self-review subagent) evaluates only
+    that budget: the no-progress clock is not reported.
     """
     if d.get("ended_at") or d.get("status") != "running":
         return None
-    sample = progress(d, activity)
-    if sample is None:
-        return None
     now = now_iso()
+    age = (parse_iso(now) - parse_iso(d["started_at"])).total_seconds() if d.get("started_at") else 0
+    if role == "reviewer" and age >= threshold("review_wall"):
+        if budget_only:
+            return (f"self-review subagent {d['id']} is still running {int(age)}s past review wall budget "
+                    f"{int(threshold('review_wall'))}s; inspect or stop it before any retry")
+        return (f"{d['role']} reviewer {d['id']}: {int(age)}s elapsed past review wall budget "
+                f"{int(threshold('review_wall'))}s; preserve the attempt, inspect its output and retry through Office review policy")
+    sample = progress(d, activity)
+    if sample is None or budget_only:
+        return None
     old = d.get("watchdog_progress_hash")
     since = d.get("watchdog_progress_since")
     if sample != old or not since:
@@ -150,11 +160,7 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
                         (sample, now, d["id"]))
         since = now
     seconds = (parse_iso(now) - parse_iso(since)).total_seconds()
-    age = (parse_iso(now) - parse_iso(d["started_at"])).total_seconds() if d.get("started_at") else 0
-    if role == "reviewer" and age >= threshold("review_wall"):
-        return (f"{d['role']} reviewer {d['id']}: {int(age)}s elapsed past review wall budget "
-                f"{int(threshold('review_wall'))}s; preserve the attempt, inspect its output and retry through Office review policy")
-    if budget_only or seconds < threshold(role):
+    if seconds < threshold(role):
         return None
     if role == "executor" and child_state(d) is not False:
         # A live child (a background monitor, `office wait`) is work in flight: restart the clock.

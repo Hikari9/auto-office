@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from test_wait import _go
 
 from office import dispatch, guide, rerun, root_wake, state, watchdog
@@ -115,6 +117,32 @@ def test_a_running_self_review_subagent_past_its_wall_budget_is_still_a_stall(en
     con, run, gate_id, did = _reviewer_gate(env, monkeypatch, kind="self_review_subagent", started_for=7200.0)
     (line,) = watchdog.reviewer_stalls(con, run)
     assert did in line and "review wall budget" in line, line
+
+
+UNREADABLE = [
+    None,
+    {"alive": False, "busy": False, "hash": None, "text": None},
+    {"alive": True, "busy": False, "hash": "h-blocked", "text": "Approve?\n", "status": "blocked"},
+]
+
+
+@pytest.mark.parametrize("activity", UNREADABLE, ids=["unreachable", "gone", "blocked"])
+def test_past_budget_is_reported_even_when_the_pane_is_unreadable(env, monkeypatch, activity):
+    monkeypatch.setenv("OFFICE_REVIEW_WALL_S", "3600")
+    con, run, _, did = _reviewer_gate(env, monkeypatch, kind="self_review_subagent", started_for=7200.0)
+    monkeypatch.setattr(rerun, "agent_activity", lambda d: activity)
+    (line,) = watchdog.reviewer_stalls(con, run)
+    assert did in line and "review wall budget" in line, line
+
+
+def test_the_wall_budget_boundary_for_a_self_review_subagent(env, monkeypatch):
+    monkeypatch.setenv("OFFICE_REVIEW_WALL_S", "3600")
+    con, run, gate_id, _ = _reviewer_gate(env, monkeypatch, kind="self_review_subagent", started_for=3599.0)
+    assert watchdog.reviewer_stalls(con, run) == []
+    con.execute("UPDATE dispatches SET started_at=? WHERE gate_id=?", (_ago(3600.0), gate_id))
+    con.commit()
+    (line,) = watchdog.reviewer_stalls(con, run)
+    assert "review wall budget" in line, line
 
 
 def test_watchdog_tick_stays_quiet_for_a_running_self_review_subagent(env, monkeypatch):
