@@ -6,7 +6,7 @@ eligibility, validation and persistence, so the skill never writes config or jud
 
 ## Missing CLI
 
-The root `auto-office` skill runs `command -v office` before onboarding. If `office` is missing, it asks once: **Install the CLI** (`uv tool install auto-office`, `office install --no-hooks`, `office doctor`, then onboarding), **Lean for this request** (hands off to `auto-office:auto-office-lean`), or **Lean, don't ask again**, which also writes `lean` to `${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice`. A saved `lean` skips the question. Onboarding below runs only once the CLI is installed.
+The root `auto-office` skill runs `command -v office` before onboarding. If `office` is missing, it asks once: **Install the CLI** (`uv tool install auto-office`, `office install --no-hooks`, `office doctor`, then onboarding), **Lean for this request** (hands off to `auto-office:auto-office-lean`), or **Lean, don't ask again**, which also writes `lean` to `${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice`. A saved `lean` skips the question; to ask again, delete that file. Onboarding below runs only once the CLI is installed.
 
 ## Contract
 

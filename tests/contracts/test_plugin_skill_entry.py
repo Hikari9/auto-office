@@ -23,6 +23,11 @@ def _saved_choice_write_command():
     return re.search(r"\(in one shell command: `([^`]+)`", _install_check()).group(1)
 
 
+def _saved_choice_read_command():
+    set_cfg = re.search(r"set `(CFG=[^`]+)`", _install_check()).group(1)
+    return f'{set_cfg}; cat "$CFG"'
+
+
 def test_claude_manifest_exposes_root_skill_and_skills_dir():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
 
@@ -63,7 +68,7 @@ def test_install_check_asks_once_before_installing():
     section = _install_check()
     not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
 
-    assert "ask once" in not_found
+    assert "ask once per session" in not_found
     assert "uv tool install auto-office" not in not_found
 
 
@@ -91,6 +96,7 @@ def test_install_check_asks_before_repairing_a_failed_doctor():
     assert "If doctor fails, ask once, natively" in found
     assert "**Repair the install**" in found
     assert "repair only on yes" in found
+    assert "**Lean for this request** (hand off now)" in found
     assert found.index("ask once, natively") < found.index("office install --no-hooks")
 
 
@@ -132,11 +138,48 @@ def test_saved_choice_write_failure_exits_nonzero(tmp_path):
     assert result.returncode != 0
 
 
+def test_saved_choice_read_prints_lean_when_saved(tmp_path):
+    cfg_dir = tmp_path / "cfg" / "auto-office"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "install-choice").write_text("lean\n", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "lean"
+
+
+def test_saved_choice_read_prints_nothing_when_absent(tmp_path):
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_saved_choice_falls_back_to_home_config_when_xdg_unset(tmp_path):
+    cfg_dir = tmp_path / ".config" / "auto-office"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "install-choice").write_text("lean", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "lean"
+
+
 def test_install_check_no_longer_stops_to_ask_approval():
     section = _install_check().lower()
 
     assert "stop and ask" not in section
     assert "approve installing" not in section
+
+
+def test_onboarding_doc_explains_resetting_the_saved_choice():
+    doc = (ROOT / "docs" / "onboarding.md").read_text(encoding="utf-8")
+
+    assert "to ask again, delete that file" in doc
 
 
 def test_install_check_keeps_stale_upgrade_guidance():
