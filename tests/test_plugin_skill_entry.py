@@ -1,0 +1,212 @@
+"""The curated Claude plugin ships the full root skill, with opt-in missing-CLI onboarding."""
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+from scripts.check_ecosystem import check_plugin_skills, frontmatter
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _hub():
+    return (ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _install_check():
+    text = _hub()
+    return text[text.index("## Install check"):text.index("## First-run onboarding")]
+
+
+def _saved_choice_write_command():
+    return re.search(r"\(in one shell command: `([^`]+)`", _install_check()).group(1)
+
+
+def _saved_choice_read_command():
+    set_cfg = re.search(r"set `(CFG=[^`]+)`", _install_check()).group(1)
+    return f'{set_cfg}; cat "$CFG"'
+
+
+def test_claude_marketplace_exposes_curated_root_skill_only():
+    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert "skills" not in manifest  # legacy paths would leak eight retired skills
+    assert marketplace["plugins"][0]["source"] == "./plugin-dist"
+    assert (ROOT / "plugin-dist/skills/auto-office/SKILL.md").read_bytes() == (ROOT / "SKILL.md").read_bytes()
+
+
+def test_root_skill_frontmatter_is_named_auto_office():
+    ok, _, fm, _ = frontmatter(ROOT / "SKILL.md")
+
+    assert ok and fm["name"] == "auto-office"
+
+
+def test_install_check_detects_cli_without_failing_skill_load():
+    assert '!`command -v office || echo "office: not found"`' in _install_check()
+
+
+def test_install_check_offers_the_three_choices():
+    section = _install_check()
+
+    for choice in ("Install the CLI (Recommended)", "Lean for this request", "Lean, don't ask again"):
+        assert choice in section, choice
+
+
+def test_install_check_names_the_saved_choice_path_and_reads_and_writes_it():
+    section = _install_check()
+
+    assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"' in section
+    assert 'cat "$CFG"' in section
+    assert "in one shell command, set `CFG=" in section
+    assert "prints `lean`" in section
+    assert "(a trailing newline is fine)" in section
+    assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"; mkdir -p "$(dirname "$CFG")" && printf lean >| "$CFG"' in section
+    assert "the choice was not saved" in section
+    assert "continue this request as **Lean for this request**" in section
+
+
+def test_install_check_asks_once_before_installing():
+    section = _install_check()
+    not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
+
+    assert "ask once per session" in not_found
+    assert not_found.index('cat "$CFG"') < not_found.index("ask once per session")
+    assert "uv tool install auto-office" not in not_found
+
+
+def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
+    section = _install_check()
+
+    assert "uv tool install auto-office" in section
+    assert "office install --no-hooks" in section
+    assert "office doctor" in section
+    assert "Stop at the first failure" in section
+
+
+def test_install_check_hands_off_to_the_lean_skill():
+    section = _install_check()
+
+    assert "auto-office:auto-office-lean" in section
+    assert "../auto-office-lean/SKILL.md" in section
+    assert "Either Lean choice: hand off" in section
+
+
+def test_install_check_asks_before_repairing_a_failed_doctor():
+    section = _install_check()
+    found = section[section.index("- **Found:**"):section.index("- **Not found:**")]
+
+    assert "If doctor fails, ask once, natively" in found
+    assert "**Repair the install**" in found
+    assert "repair only on yes" in found
+    assert "**Lean for this request** (hand off now)" in found
+    assert found.index("ask once, natively") < found.index("office install --no-hooks")
+
+
+def test_install_check_checks_path_before_running_office_install():
+    section = _install_check()
+    install = section[section.index("- **Install:**"):section.index("- **Hand off:**")]
+
+    assert "uv tool update-shell" in install
+    assert install.index("command -v office") < install.index("`office install --no-hooks`")
+
+
+def test_install_check_stops_on_uv_failure_before_checking_path():
+    section = _install_check()
+    install = section[section.index("- **Install:**"):section.index("- **Hand off:**")]
+    uv_failure = install.index("If it fails, stop")
+    path_check = install.index("`command -v office`")
+
+    assert install.index("`uv tool install auto-office`") < uv_failure < path_check
+    assert "exit status" in install[:uv_failure]
+    assert "lean hand-off" in install[uv_failure:path_check]
+    assert install.index("`uv tool update-shell`") > path_check
+
+
+def test_saved_choice_write_command_saves_lean_under_xdg_config(tmp_path):
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    subprocess.run(["sh", "-c", _saved_choice_write_command()], env=env, check=True)
+
+    assert (tmp_path / "cfg" / "auto-office" / "install-choice").read_text(encoding="utf-8") == "lean"
+
+
+def test_saved_choice_write_failure_exits_nonzero(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(blocker)}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_write_command()], env=env, capture_output=True)
+
+    assert result.returncode != 0
+
+
+def test_saved_choice_read_prints_lean_when_saved(tmp_path):
+    cfg_dir = tmp_path / "cfg" / "auto-office"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "install-choice").write_text("lean\n", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "lean"
+
+
+def test_saved_choice_read_prints_nothing_when_absent(tmp_path):
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_saved_choice_falls_back_to_home_config_when_xdg_unset(tmp_path):
+    cfg_dir = tmp_path / ".config" / "auto-office"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "install-choice").write_text("lean", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_read_command()], env=env, capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "lean"
+
+
+def test_install_check_no_longer_stops_to_ask_approval():
+    section = _install_check().lower()
+
+    assert "stop and ask" not in section
+    assert "approve installing" not in section
+    assert "only after the user picks **install the cli**, run `uv tool install auto-office`" in section
+
+
+def test_install_check_explains_resetting_the_saved_choice():
+    section = _install_check()
+    not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
+
+    assert 'Only if the user asks to be asked again, run `rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"`' in not_found
+
+
+def test_onboarding_doc_explains_resetting_the_saved_choice():
+    doc = (ROOT / "docs" / "onboarding.md").read_text(encoding="utf-8")
+
+    assert "to ask again, delete that file" in doc
+
+
+def test_install_check_keeps_stale_upgrade_guidance():
+    section = _install_check()
+
+    assert "install: STALE" in section
+    assert "uv tool upgrade auto-office" in section
+    assert "--force --reinstall" in section
+
+
+def test_curated_marketplace_passes_ecosystem_check():
+    assert check_plugin_skills(ROOT) == []
+
+
+def test_plugin_visible_set_is_exactly_16():
+    catalog = json.loads((ROOT / "plugin-distribution.json").read_text())
+    names = {p.parent.name for p in (ROOT / "plugin-dist/skills").glob("*/SKILL.md")}
+    assert names == set(catalog["public_skills"]) and len(names) == 16
+    assert names.isdisjoint(catalog["retired_skills"])
