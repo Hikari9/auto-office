@@ -2,7 +2,7 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.13.1
+## 3.14.0
 
 - fix(jobs): terminal outbox rows keep their claim token as provenance, restoring the #705 squash-close close-replay contract after #883 (#898).
 - test(review): realign the codex Enter-recovery fixtures with #882's composer behavior so the review-reprompt tests pass again (#898).
