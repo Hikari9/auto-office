@@ -22,7 +22,7 @@ Auto Office {ver}
 
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
-  office resume --auto-wake         opt in to safe Claude/Herdr root wake-up (only when bound in its pane)
+  office resume --wake-off          turn off root wake-up; wake is on by default when bound in a Claude Herdr pane
   office status                     what matters now, ending with the next legal action
   office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
                                     question (5), or timeout (124)
@@ -258,7 +258,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
     wake = s.add_mutually_exclusive_group()
-    wake.add_argument("--auto-wake", action="store_true", help="opt in to verified Claude/Herdr root continuation")
+    wake.add_argument("--auto-wake", action="store_true",
+                      help="accepted for compatibility; root wake is armed by default (see --wake-off)")
     wake.add_argument("--wake-off", action="store_true", help="turn off autonomous root wake-up for this run")
     sp.add_parser("status", parents=[common])
     s = sp.add_parser("wait", parents=[common])
@@ -981,10 +982,10 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "resume":
         from office import lifecycle, root_wake, state
         res = lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
-        if args.auto_wake or args.wake_off:
-            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=args.wake_off))
-            if args.auto_wake:
-                root_wake.ensure(state.get_run(con, run["id"]))
+        if args.wake_off:
+            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=True))
+        elif not os.environ.get("OFFICE_DISPATCH_ID"):
+            res.notices.append(root_wake.arm_on_resume(con, state.get_run(con, run["id"])))
         return res
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
@@ -1005,7 +1006,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         run = state.get_run(con, run["id"])
         if not os.environ.get("OFFICE_DISPATCH_ID"):
             root_wake.ensure(state.get_run(con, run["id"]))
-        return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
+        with guide.waiting(run["id"]):
+            return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,

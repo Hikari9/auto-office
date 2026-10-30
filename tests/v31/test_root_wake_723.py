@@ -31,11 +31,14 @@ def events(con, run):
     return [dict(row) for row in con.execute("SELECT * FROM root_wake_intents WHERE run_id=? ORDER BY event_seq", (run["id"],))]
 
 
-def test_wake_is_opt_in_and_rejects_unverified_sessions(env, monkeypatch):
+def test_wake_is_armed_by_resume_only_for_a_verified_root_and_attach_stays_strict(env, monkeypatch):
+    """#922 changed the default: `office resume` arms wake (arm_on_resume), so the unarmed status line
+    now names why wake is not armed instead of printing nothing. `attach` itself still refuses."""
     approved_run(env)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
-    assert root_wake.lines(con, run) == []
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    assert root_wake.lines(con, run) == ["wake: unavailable (not inside a Herdr pane); use office wait"]
     monkeypatch.setenv("HERDR_PANE_ID", PANE)
     with pytest.raises(state.Refused, match="not bound"):
         root_wake.attach(con, run)
@@ -44,7 +47,10 @@ def test_wake_is_opt_in_and_rejects_unverified_sessions(env, monkeypatch):
     monkeypatch.setattr(root_wake, "_agent_in_pane", lambda _pane: None)
     with pytest.raises(state.Refused, match="did not verify"):
         root_wake.attach(con, run)
-    assert root_wake.lines(con, run) == []
+    assert root_wake.arm_on_resume(con, run).startswith("root auto-wake not armed: Herdr did not verify")
+    assert not root_wake.armed(con, run)
+    assert root_wake.lines(con, run) == [
+        "wake: unavailable (this pane is not a verified bound Claude root); office resume from it arms wake"]
 
 
 def test_worker_submit_when_root_idle_wakes_and_fake_root_continues_without_a_human(env, monkeypatch):

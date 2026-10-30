@@ -16,15 +16,26 @@ from office.util import now_iso, parse_iso, pid_alive, sha256_obj
 
 EXCLUDED = {".git", ".venv", "node_modules", ".next", "dist", "build", "__pycache__"}
 MAX_PATHS = 4000
+# kind -> (env knob, default seconds)
+_KNOBS = {
+    "executor": ("OFFICE_EXECUTOR_PROGRESS_STALL_S", 600.0),
+    "reviewer": ("OFFICE_REVIEW_NO_PROGRESS_S", 900.0),
+    "review_wall": ("OFFICE_REVIEW_WALL_S", 3600.0),
+    "queued_review": ("OFFICE_REVIEW_QUEUED_S", 900.0),
+    "closed_unread": ("OFFICE_REVIEW_UNREAD_S", 900.0),
+}
+# Gate kinds that are reviews (their queue, closure and verdict need an orchestrator decision).
+REVIEW_GATE_KINDS = ("lane", "plan_review", "convergence_review", "visual", "integration")
+# Review-gate episode kinds; each is an orchestrator event and a root-wake trigger.
+REVIEW_EVENT_KINDS = ("review.queued_too_long", "review.stalled", "review.closed_unread")
 
 
 def threshold(kind: str) -> float:
-    defaults = {"executor": 600.0, "reviewer": 900.0, "review_wall": 3600.0}
-    key = "OFFICE_REVIEW_WALL_S" if kind == "review_wall" else ("OFFICE_EXECUTOR_PROGRESS_STALL_S" if kind == "executor" else "OFFICE_REVIEW_NO_PROGRESS_S")
+    key, default = _KNOBS[kind]
     try:
-        return max(1.0, float(os.environ.get(key, defaults[kind])))
+        return max(1.0, float(os.environ.get(key, default)))
     except ValueError:
-        return defaults[kind]
+        return default
 
 
 def file_fingerprint(directory: str | None) -> str | None:
@@ -145,9 +156,10 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
     if role == "reviewer" and age >= threshold("review_wall"):
         if budget_only:
             return (f"self-review subagent {d['id']} is still running {int(age)}s past review wall budget "
-                    f"{int(threshold('review_wall'))}s; inspect or stop it before any retry")
+                    f"{int(threshold('review_wall'))}s; next: inspect or stop it before any retry")
         return (f"{d['role']} reviewer {d['id']}: {int(age)}s elapsed past review wall budget "
-                f"{int(threshold('review_wall'))}s; preserve the attempt, inspect its output and retry through Office review policy")
+                f"{int(threshold('review_wall'))}s; preserve the attempt; next: inspect its output, then "
+                f"office review {d.get('task_id') or 'plan'} to retry under review policy")
     sample = progress(d, activity)
     if sample is None or budget_only:
         return None
@@ -177,8 +189,10 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
             f"{d.get('task_id') or 'plan'} through a valid fallback (no verdict or round was minted)")
 
 
-def reviewer_stalls(con, run: dict) -> list[str]:
-    """Reviewers have an independent watchdog: executor state is irrelevant. A running self-review subagent
+def reviewer_stall_items(con, run: dict) -> list[tuple[str, str]]:
+    """(dispatch id, reason) for each running reviewer past a bound. Reads panes for Herdr launches.
+
+    Reviewers have an independent watchdog: executor state is irrelevant. A running self-review subagent
     owns its no-progress clock, so only its review_wall budget is reported (#895, A1)."""
     from office import rerun, self_review_subagents
     owned = self_review_subagents.running_dispatch_ids(con, run["id"])
@@ -190,5 +204,78 @@ def reviewer_stalls(con, run: dict) -> list[str]:
         act = rerun.agent_activity(d) if d.get("launcher") == "herdr" else None
         note = check(con, run, d, role="reviewer", activity=act, budget_only=d["id"] in owned)
         if note:
-            out.append(note)
+            out.append((d["id"], note))
     return out
+
+
+def reviewer_stalls(con, run: dict) -> list[str]:
+    return [note for _, note in reviewer_stall_items(con, run)]
+
+
+def _age(ts: str, now: str) -> float:
+    return (parse_iso(now) - parse_iso(ts)).total_seconds()
+
+
+def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
+    """Review gates past a bound, one dict per episode: `kind` (its event), `episode` (the dedupe key),
+    `text` (the blocker line) and `next` (the concrete step). `probe` adds running reviewers, which
+    read panes. A review that is running and within its bounds matches nothing.
+
+    queued-too-long: a task review gate still queued past its bound with a live or unknown owner
+    (a dead owner is already a stall in guide.stalls). stalled: a running reviewer past its bound.
+    closed-unread: a closed review gate whose verdict event no orchestrator read has followed."""
+    from office import gates as gates_mod
+    now = now_iso()
+    marks = ",".join("?" for _ in REVIEW_GATE_KINDS)
+    out = []
+    for g in con.execute(f"SELECT * FROM gates WHERE run_id=? AND kind IN ({marks}) AND status='queued' "
+                         "AND task_id IS NOT NULL ORDER BY created_at", (run["id"], *REVIEW_GATE_KINDS)).fetchall():
+        age = _age(g["created_at"], now)
+        owner, detail = gates_mod.owner_state(con, run, g)
+        if age < threshold("queued_review") or owner not in ("queued", "alive", "unknown"):
+            continue
+        task = g["task_id"]
+        out.append({"kind": "review.queued_too_long", "episode": g["id"],
+                    "text": f"{task} {g['kind']} review {g['id']} queued {int(age)}s past its bound ({detail})",
+                    "next": f"office revoke {task}, then office review {task} to relaunch on the same revision"})
+    if probe:
+        for dispatch_id, note in reviewer_stall_items(con, run):
+            # A stall that recovered and stalled again is a new episode: key on the progress it restarted from.
+            since = con.execute("SELECT watchdog_progress_since FROM dispatches WHERE id=?",
+                                (dispatch_id,)).fetchone()[0]
+            _, sep, action = note.partition("; next: ")
+            out.append({"kind": "review.stalled", "episode": f"{dispatch_id}:{since}", "text": note,
+                        "next": action if sep else "office status"})
+    cursor = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'",
+                         (run["id"],)).fetchone()
+    last = cursor[0] if cursor else 0
+    for g in con.execute(f"SELECT * FROM gates WHERE run_id=? AND kind IN ({marks}) AND status='done' "
+                         "AND finished_at IS NOT NULL ORDER BY finished_at", (run["id"], *REVIEW_GATE_KINDS)).fetchall():
+        age = _age(g["finished_at"], now)
+        if age < threshold("closed_unread"):
+            continue
+        # The verdict is the first verdict-kind event for this gate's task after it closed. Another
+        # task's events never count, so a later review elsewhere cannot re-flag a verdict already read.
+        verdict = con.execute("SELECT seq FROM events WHERE run_id=? AND task_id IS ? AND created_at>=? AND "
+                              "(kind LIKE 'gate.%' OR kind LIKE 'plan.%' OR kind LIKE 'convergence.%') "
+                              "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"])).fetchone()
+        if verdict is None or verdict[0] <= last:
+            continue
+        scope = g["task_id"] or "plan"
+        out.append({"kind": "review.closed_unread", "episode": g["id"],
+                    "text": f"{scope} {g['kind']} review {g['id']} closed {int(age)}s ago and its verdict is unread",
+                    "next": f"office context to read the {scope} verdict, then act on it"})
+    return out
+
+
+def record_review_episodes(con, run: dict, episodes: list[dict]) -> None:
+    """One orchestrator event per episode, deduplicated on its payload key like watchdog.stall.
+    Caller holds the transaction."""
+    from office import state
+    for ep in episodes:
+        seen = con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? "
+                           "AND json_extract(payload_json, '$.episode')=? LIMIT 1",
+                           (run["id"], ep["kind"], ep["episode"])).fetchone()
+        if not seen:
+            state.emit(con, run, ep["kind"], f"{ep['text']}; next: {ep['next']}"[:300],
+                       audience="orchestrator", payload={"episode": ep["episode"]})

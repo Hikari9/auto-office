@@ -37,6 +37,8 @@ ACTIONABLE = frozenset({
     "pr.error", "pr.merged", "worker.signal", "watchdog.stall", "amendment.applied", "amendment.contract_changed",
     "requirements.changed", "finding.disposition", "authority.plan", "authority.land",
     "ctx.high",
+    # review gates past a bound (#919)
+    "review.queued_too_long", "review.stalled", "review.closed_unread",
 })
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
@@ -148,6 +150,21 @@ def _agent_in_pane(pane: str) -> tuple[str, str] | None:
     if not isinstance(agent, dict) or agent.get("pane_id") != pane or agent.get("agent") != "claude":
         return None
     return name, agent.get("status") or agent.get("agent_status") or "unknown"
+
+
+def armed(con, run: dict) -> bool:
+    return _binding(con, run["id"]) is not None
+
+
+def arm_on_resume(con, run: dict) -> str:
+    """Default wake for `office resume`. Never refuses: a root that cannot be verified resumes unarmed."""
+    from office.state import Refused
+    try:
+        text = attach(con, run)
+    except Refused as exc:
+        return f"root auto-wake not armed: {exc.message}"
+    ensure(run)
+    return text
 
 
 def attach(con, run: dict, *, off: bool = False) -> str:
@@ -517,18 +534,30 @@ def metrics(con, run: dict) -> dict:
             "last_delivery": last, "last_delivery_ms": delay}
 
 
+def _unarmed_line(con, run: dict) -> str:
+    if con.execute("SELECT 1 FROM root_wake_bindings WHERE run_id=? AND enabled=0", (run["id"],)).fetchone():
+        return "wake: off (--wake-off); office resume from the bound root pane re-arms it"
+    if not os.environ.get("HERDR_PANE_ID"):
+        return "wake: unavailable (not inside a Herdr pane); use office wait"
+    return "wake: unavailable (this pane is not a verified bound Claude root); office resume from it arms wake"
+
+
 def lines(con, run: dict) -> list[str]:
+    """The wake state line `office status` prints for every non-terminal run."""
+    if state.is_terminal(run):
+        return []
     binding = _binding(con, run["id"])
     if not binding:
-        return []
+        return [_unarmed_line(con, run)]
     counts = dict(con.execute("SELECT state, COUNT(*) FROM root_wake_intents WHERE run_id=? "
                               "GROUP BY state", (run["id"],)).fetchall())
     waiting = counts.get("pending", 0) + counts.get("retry", 0) + counts.get("claimed", 0)
     failed = counts.get("awaiting_attachment", 0)
     delivered = counts.get("delivered", 0)
-    text = f"auto-wake: Claude/Herdr opted in; queued {waiting}, delivered/unobserved {delivered}, awaiting attachment {failed}"
+    text = (f"wake: armed (Claude agent {binding['agent_name']} in Herdr pane {binding['pane_id']}); "
+            f"queued {waiting}, delivered/unobserved {delivered}, awaiting attachment {failed}")
     if failed:
-        text += "; next: inspect pane before office resume --auto-wake"
+        text += "; next: inspect pane before office resume"
     last_ms = metrics(con, run).get("last_delivery_ms")
     if last_ms is not None:
         text += f"; last completion wake {last_ms}ms"
@@ -544,9 +573,12 @@ def watchdog_tick(con, run: dict) -> str:
     """
     if not _binding(con, run["id"]) or state.is_terminal(state.get_run(con, run["id"])):
         return "inactive"
-    from office import guide, questions
+    from office import guide, questions, watchdog
+    episodes = watchdog.review_episodes(con, run, probe=True)
+    with db.transaction(con):
+        watchdog.record_review_episodes(con, run, episodes)
     _, _, acts = questions.scan(con, run)
-    stalls = guide.stalls(con, run, acts=acts)
+    stalls = guide.stalls(con, run, acts=acts, episodes=episodes)
     stable = tuple(sorted(re.sub(r"\b\d+s\b", "Xs", s) for s in stalls))
     signature = sha256_obj(stable) if stalls else None
     with db.transaction(con):

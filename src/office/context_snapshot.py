@@ -279,6 +279,14 @@ def render(snap: dict) -> list[str]:
     return out
 
 
+# Root turn rule (#922): a turn that ends with nothing armed is never woken for an event.
+TURN_RULE = ("turn: arm `office wait` instead of ending the turn on an event-dependent step "
+             "(root wake is on by default in a bound Claude Herdr pane; --wake-off disables it)")
+
+
 def context(con, run: dict, *, since: int | None = None) -> Result:
     snap = snapshot(con, run, since=since)
-    return Result(lines=render(snap), next=snap["next"] or "office status", data=snap)
+    lines = render(snap)
+    if not state.is_terminal(run):
+        lines.append(TURN_RULE)
+    return Result(lines=lines, next=snap["next"] or "office status", data=snap)
