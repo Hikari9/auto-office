@@ -37,6 +37,8 @@ APPROVED is permitted only when no blocking finding remains on that same revisio
 
 The agent that invoked /auto-review COORDINATES remediation; it need NOT personally fix anything. It can fix inline (executor invoker), delegate one or more fixes to separate executors (orchestrator invoker), or coordinate a specifically assigned other owner. Preserve explicit assignments. The reviewer remains independent, read-only and separate from the actual producer/fixer in every case.
 
+Keep one durable invoker-owned ledger across caller/fixer changes. Optionally use the pure `scripts/standalone_review_rounds.py:record` guard to check the three-round counter, unavailable attempts, independence receipts, and INTAKE_GAP pauses; it does not launch reviewers, verify permissions or authorize APPROVED. A missing ledger is a blocker, never an excuse to reset the cap.
+
 Count only completed, valid substantive reviewer verdicts. The INITIAL review is round 1; repairs may earn round 2 and round 3, never round 4. Failed launches, unavailable routes, bad transcripts and invalid reviews do not consume rounds. Prefer the same independent reviewer context on a corrected SHA when safe, but never compromise independence. Maintain an invoker-owned ledger with round, reviewer identity, immutable SHA, verdict, findings, fix owner, and resolution. Changing fixer, caller or review surface never resets the cap.
 
 After round 3, if blockers remain, STOP with RECHECK and outstanding evidence; no hidden waiver, self-approval, reset or manufactured APPROVED. INTAKE_GAP pauses for the owner's real decision and is not an authorization to continue. Report an unresolved review as blocked, not accepted.
