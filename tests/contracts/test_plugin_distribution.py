@@ -91,3 +91,15 @@ def test_review_rounds_account_for_unavailable_and_owner_delegation():
         assert "never round 4" in skill
         assert "consumes no substantive round" in skill
         assert max_rounds == 3
+
+
+def test_opt_in_only_skill_descriptions():
+    for name in ("auto-office", "auto-office-lean", "auto-intake", "auto-review", "auto-takeover"):
+        text = (ROOT / "plugin-dist/skills" / name / "SKILL.md").read_text()
+        description = text.split("\n---\n", 1)[0].lower()
+        if name == "auto-takeover":
+            assert "only an explicit user request" in description
+        else:
+            assert "explicit" in description
+        if name == "auto-office-lean":
+            assert "never for ordinary engineering requests" in description
