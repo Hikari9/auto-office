@@ -13,7 +13,7 @@ import shutil
 import time
 from pathlib import Path
 
-from office import frontdoor, legacy, paths, read_scope, runtime_default
+from office import frontdoor, legacy, paths, portable as osportable, read_scope, runtime_default
 from office.result import Result
 
 MARKER = "--office-managed"
@@ -43,20 +43,22 @@ SHELL_GUARD = {"claude": ("shell.pre", "PreToolUse", "Bash")}
 def office_command() -> str:
     exe = shutil.which("office")
     if exe:
-        return exe
-    shim = paths.data_home() / "bin" / "office"
-    return str(shim)
+        return osportable.hook_executable(exe)
+    shim = paths.data_home() / "bin" / osportable.SHIM_NAME
+    return osportable.hook_executable(str(shim))
 
 
 def _write_shim() -> Path:
     """A stable `office` launcher for source checkouts that were not installed
     with uv; it runs the registered current runtime."""
-    shim = paths.data_home() / "bin" / "office"
+    shim = paths.data_home() / "bin" / osportable.SHIM_NAME
     argv, env = frontdoor.current_argv()
-    lines = ["#!/bin/sh"]
-    for k, v in env.items():
-        lines.append(f'export {k}="{v}"')
-    lines.append('exec ' + " ".join(f'"{a}"' for a in argv) + ' "$@"')
+    if osportable.IS_WINDOWS:
+        lines = ["@echo off"] + [f'set "{k}={v}"' for k, v in env.items()]
+        lines.append(" ".join(f'"{a}"' for a in argv) + " %*")
+    else:
+        lines = ["#!/bin/sh"] + [f'export {k}="{v}"' for k, v in env.items()]
+        lines.append('exec ' + " ".join(f'"{a}"' for a in argv) + ' "$@"')
     shim.parent.mkdir(parents=True, exist_ok=True)
     shim.write_text("\n".join(lines) + "\n")
     shim.chmod(0o755)

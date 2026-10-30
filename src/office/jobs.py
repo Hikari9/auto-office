@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import json
 import os
 import signal
@@ -48,11 +47,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from office import db, frontdoor, paths, state, version
+from office import db, frontdoor, paths, portable, state, version
 from office.util import ALIVE, DEAD, UNKNOWN, claim_identity, claim_liveness, dumps, now_iso, process_start
 
 KICK_THROTTLE_SECONDS = 10
 LOCK_FD_ENV = "OFFICE_JOB_LOCK_FD"
+# Windows cannot hand a lock descriptor to a child (no `pass_fds`): the supervisor keeps the lock
+# for as long as the worker runs and tells it so with this value instead of a descriptor.
+LOCK_HELD = "held-by-supervisor"
 # A spawn waits this long for the lock: a liveness probe holds it for an instant.
 LOCK_WAIT_SECONDS = 2.0
 
@@ -109,7 +111,7 @@ def try_lock(run_id: str, job_id: str, *, wait: float = 0.0) -> int | None:
     deadline = time.time() + wait
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fd, blocking=False)
             return fd
         except OSError as exc:
             if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES) or time.time() >= deadline:
@@ -128,13 +130,13 @@ def _lock_state(run_id: str, job_id: str) -> tuple[str, str]:
     except OSError as exc:
         return UNKNOWN, f"its execution lock cannot be opened ({exc.strerror})"
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(fd, blocking=False)
     except OSError as exc:
         if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
             return ALIVE, "a live process holds its execution lock"
         return UNKNOWN, f"its execution lock cannot be probed ({exc.strerror})"
     else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        portable.unlock(fd)
         return DEAD, "no process holds its execution lock (worker, supervisor and checks are gone)"
     finally:
         os.close(fd)
@@ -164,6 +166,8 @@ _ATTEMPTS: list[tuple[str, str, str, int | None]] = []
 def attempt_lock_fds() -> tuple[int, ...]:
     """The execution lock a child process of this attempt must inherit, so the
     lock outlives the worker for as long as its check commands run."""
+    if portable.IS_WINDOWS:
+        return ()
     return tuple(fd for *_, fd in _ATTEMPTS[-1:] if fd is not None)
 
 
@@ -457,7 +461,7 @@ def spawn(job_id: str, run_id: str) -> None:
     log = open(path, "ab")
     try:
         subprocess.Popen(argv + ["_job", job_id], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         env=env, start_new_session=True, close_fds=True, cwd=_child_cwd(run_id))
+                         env=env, **portable.session_kwargs(), close_fds=True, cwd=_child_cwd(run_id))
     finally:
         log.close()
 
@@ -487,13 +491,15 @@ def new_token() -> str:
     return "A" + uuid.uuid4().hex[:12]
 
 
-def execute(con, job_id: str, *, token: str | None = None, lock_fd: int | None = None) -> int:
+def execute(con, job_id: str, *, token: str | None = None, lock_fd: int | None = None,
+            lock_held: bool = False) -> int:
     """Claim and run one job as one fenced attempt. Returns a process exit code.
-    Without `lock_fd` (inline mode, tests) the attempt takes the lock itself."""
+    Without `lock_fd` (inline mode, tests) the attempt takes the lock itself,
+    unless `lock_held`: its supervisor holds the lock and could not pass it down."""
     row = con.execute("SELECT run_id, status FROM outbox WHERE id=?", (job_id,)).fetchone()
     if row is None or row["status"] != "queued":
         return 0
-    own = lock_fd is None
+    own = lock_fd is None and not lock_held
     if own:
         lock_fd = try_lock(row["run_id"], job_id, wait=LOCK_WAIT_SECONDS)
         if lock_fd is None:
@@ -621,6 +627,8 @@ def _worker(job_id: str, token: str) -> int:
     lock_fd = int(fd) if fd and fd.isdigit() else None
     con = db.connect()
     try:
+        if fd == LOCK_HELD:
+            return execute(con, job_id, token=token, lock_held=True)
         if lock_fd is None:
             return execute(con, job_id, token=token)
         return execute(con, job_id, token=token, lock_fd=lock_fd)
@@ -667,15 +675,17 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     env.update(extra_env)
     env.pop(frontdoor.HOP_ENV, None)
     env.pop("OFFICE_WORKER_TAG", None)
-    env[LOCK_FD_ENV] = str(lock_fd)
-    os.set_inheritable(lock_fd, True)
+    inherit = {} if portable.IS_WINDOWS else {"pass_fds": (lock_fd,)}
+    env[LOCK_FD_ENV] = LOCK_HELD if portable.IS_WINDOWS else str(lock_fd)
+    if not portable.IS_WINDOWS:
+        os.set_inheritable(lock_fd, True)
     log = log_path(run_id, job_id)
     offset = log.stat().st_size if log.exists() else 0
     started = now_iso()
     _note(run_id, job_id, f"attempt {token}: supervisor pid {os.getpid()} starts a worker")
     try:
         proc = subprocess.Popen(argv + ["_job", job_id, "--attempt", token], stdin=subprocess.DEVNULL, env=env,
-                                pass_fds=(lock_fd,), cwd=_child_cwd(run_id))
+                                cwd=_child_cwd(run_id), **inherit)
     except OSError as exc:
         _note(run_id, job_id, f"attempt {token}: the worker could not start: {exc}")
         return 1
@@ -720,7 +730,7 @@ def _stop_children(run_id: str, job_id: str, token: str | None = None) -> list[i
         if (token is not None and rec.get("attempt") != token) or not process_is(pgid, rec.get("start")):
             continue
         try:
-            os.killpg(pgid, signal.SIGTERM)
+            portable.killpg(pgid, signal.SIGTERM)
             stopped.append(pgid)
         except OSError:
             continue

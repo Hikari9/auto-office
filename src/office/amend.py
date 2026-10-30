@@ -8,13 +8,12 @@ A newer amendment supersedes an older unapplied one.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import re
 import uuid
 from pathlib import Path
 
-from office import db, jobs, paths, planfile, planpath, plans, routing, state
+from office import db, jobs, paths, planfile, planpath, plans, portable, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, loads, now_iso, sha256_bytes
@@ -151,11 +150,11 @@ def _draft_lock(plan_path: Path | None):
         yield
         return
     with open(plan_path.parent / ".amend.lock", "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        portable.lock_exclusive(fh)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def _amend_plan(con, run, scope, delta, contract, redirect, plan_path, no_review, reason, edits) -> Result:

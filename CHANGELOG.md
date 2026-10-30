@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.13.1
+
+- fix(windows): the `office` CLI runs natively on Windows (#915). New `office.portable` replaces `fcntl`, `killpg`, `os.kill(pid, 0)` (which kills on Windows), `start_new_session`, `os.uname` and `os.getloadavg`; binary-safe `os.open` flags; README documents the git install (the PyPI `auto-office` is a different project), Python pinning and Windows notes; D142-7 superseded.
+
 ## 3.13.0
 
 - refactor(policy): externalize executor/planner size slates, benchmark floors, restrictions and authorized exceptions into one validated catalog policy (#871 PR A).

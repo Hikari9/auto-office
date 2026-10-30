@@ -42,7 +42,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from office import closeout, db, gates, integration, paths, prs, state, verification_coverage
+from office import closeout, db, gates, integration, paths, portable, prs, state, verification_coverage
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, short
@@ -147,19 +147,18 @@ def _require_unchanged(con, run: dict, snap: dict, when: str, preserved: str = "
 def _land_lock(run: dict):
     """One `office land` per run at a time: two concurrent lands would both
     see no deploy record and both deploy. A flock dies with its process."""
-    import fcntl
     path = paths.run_dir(run["id"]) / "land.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fh, blocking=False)
         except OSError:
             raise Refused("land-running", f"another office land is running for run {short(run['id'])}",
                           preserved="the running land", next_step="wait for it to finish, then office land again")
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def _tree(repo: Path, commit: str) -> str:
@@ -990,7 +989,7 @@ def copy_env_files(repo: Path, checkout: Path, entries: list[str]) -> list[str]:
         if not anchor.resolve().is_relative_to(dest_root):
             raise refuse(entry, "resolves outside the deploy checkout")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # private until the mode is applied
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | portable.O_BINARY, 0o600)  # private until the mode is applied
         with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
             shutil.copyfileobj(inp, out)
         shutil.copymode(src, dest)

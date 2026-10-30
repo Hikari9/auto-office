@@ -6,6 +6,7 @@ No real model is called.
 import copy
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -51,7 +52,7 @@ class World:
         monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp / "state"))
         monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp / "user-config.yaml"))
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", *([os.path.join(os.environ["SystemRoot"], "System32"), os.path.dirname(shutil.which("git") or "")] if sys.platform == "win32" else [])]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         for name in ("codex", "claude"):
             script = self.bin / name

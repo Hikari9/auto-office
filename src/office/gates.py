@@ -20,19 +20,17 @@ stale, or missing is ever treated as approved.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office import briefs, candidates, contract, db, jobs, paths, planfile, portable, review_parse, routing, state, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
@@ -497,14 +495,14 @@ def check_slot(limit: int, *, poll: float = 2.0):
         for i in range(limit):
             fh = open(slots / f"slot-{i}.lock", "a")
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                portable.lock_exclusive(fh, blocking=False)
             except OSError:
                 fh.close()
                 continue
             try:
                 yield i
             finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                portable.unlock(fh)
                 fh.close()
             return
         time.sleep(poll)
@@ -639,7 +637,7 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
     attempt of this job can start its checks while any process of this one
     lives, and a timeout stops the whole group, not just the shell."""
     proc = subprocess.Popen(command, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, env=env, start_new_session=True,
+                            stderr=subprocess.PIPE, text=True, env=env, **portable.session_kwargs(),
                             pass_fds=jobs.attempt_lock_fds())
     jobs.register_child(proc.pid)
     try:
@@ -647,7 +645,7 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
         return proc.returncode, (stdout or "") + (stderr or "")
     except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
+            portable.killpg(proc.pid, portable.SIGKILL)
         try:
             stdout, _ = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
@@ -659,10 +657,10 @@ def host_overloaded() -> str | None:
     """A timeout under heavy host load (parallel suites) is the environment,
     not the code: the same tree that timed out at 1800s with load 100+ passed
     in 223s alone. Says why when the 1-minute load is over twice the CPU count."""
-    try:
-        load = os.getloadavg()[0]
-    except OSError:
+    averages = portable.loadavg()
+    if averages is None:
         return None
+    load = averages[0]
     cpus = os.cpu_count() or 1
     limit = float(os.environ.get("OFFICE_CHECK_LOAD_FACTOR", "2")) * cpus
     return f"host load {load:.0f} exceeds {limit:.0f} ({cpus} CPUs)" if load > limit else None

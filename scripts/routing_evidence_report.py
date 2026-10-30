@@ -34,7 +34,6 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
-from urllib.parse import quote
 
 try:
     from office import route_learning
@@ -467,7 +466,7 @@ def sha256_file(path: Path) -> str:
 
 def open_readonly(path: Path) -> sqlite3.Connection:
     """The only way this report opens a database: URI mode=ro, then query_only. It never creates the file."""
-    con = sqlite3.connect(f"file://{quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=30)
+    con = sqlite3.connect(f"{Path(os.path.abspath(path)).as_uri()}?mode=ro", uri=True, timeout=30)
     con.execute("PRAGMA query_only=ON")
     return con
 

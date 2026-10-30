@@ -8,7 +8,6 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import sqlite3
@@ -18,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, portable, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -194,12 +193,12 @@ def _barrier_restack_guard():
     attempt_2 = bdir / "attempt_2"
 
     with (bdir / "restack.log").open("a") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        portable.lock_exclusive(f.fileno())
         try:
             f.write(f"enter:{os.getpid()}\n")
             f.flush()
         finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            portable.unlock(f.fileno())
 
     try:
         fd = os.open(str(in_flight), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -221,12 +220,12 @@ def _barrier_restack_guard():
         with contextlib.suppress(OSError):
             in_flight.unlink()
         with (bdir / "restack.log").open("a") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            portable.lock_exclusive(f.fileno())
             try:
                 f.write(f"exit:{os.getpid()}\n")
                 f.flush()
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                portable.unlock(f.fileno())
 
 
 def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
@@ -691,11 +690,11 @@ def _rerun_task_guard(run: dict, tid: str):
     lock_path = lock_dir / f"rerun-{sha256_obj(tid)[:16]}.lock"
     _barrier_admission_attempt()
     with lock_path.open("a") as fd:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        portable.lock_exclusive(fd.fileno())
         try:
             yield
         finally:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            portable.unlock(fd.fileno())
 
 
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,

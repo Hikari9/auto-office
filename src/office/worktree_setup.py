@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import time
 from pathlib import Path
 
-from office import db, state
+from office import db, portable, state
 from office.util import sha256_bytes
 
 KINDS = ("task", "integration", "check")
@@ -102,13 +101,13 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
     started, timed_out = time.time(), False
     with log.open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cfg["setup"], shell=True, cwd=str(wt), stdout=fh, stderr=subprocess.STDOUT,
-                                env=env, start_new_session=True)
+                                env=env, **portable.session_kwargs())
         try:
             code = proc.wait(timeout=cfg["timeout"])
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                portable.killpg(proc.pid, portable.SIGKILL)
             except OSError:
                 proc.kill()
             proc.wait()

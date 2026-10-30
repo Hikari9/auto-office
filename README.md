@@ -99,17 +99,23 @@ Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude
 
 ### 1. Install the CLI
 
-For normal use:
+Install from this repository. The `auto-office` name on PyPI is a different project that provides no `office` executable, so `uv tool install auto-office` does not install this CLI.
 
 ```bash
-uv tool install auto-office
+uv tool install git+https://github.com/Hikari9/auto-office
 ```
 
 For browser capture and visual gates:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 ```
+
+Platforms: macOS, Linux and native Windows (PowerShell or cmd.exe; WSL also works). Windows notes:
+
+- Install [Git for Windows](https://gitforwindows.org/). Office drives `git`, and plan checks written as shell strings run through `cmd.exe` unless the command names `bash` explicitly.
+- If `uv` picks a Python that has no `pyyaml` wheel and needs a C compiler, pin one: `uv tool install --python 3.12 git+https://github.com/Hikari9/auto-office`.
+- A Windows process cannot see another process's environment or working directory, so Office cannot prove a failed worker's process tree is gone. When a discovery-trial route fails, the automatic fallback to a known-working route therefore stays blocked on Windows; Office stops with the `office rerun`/`--reroute` hint instead.
 
 The visual extra installs Playwright support and uses the local Chrome. Without it, a visual gate that requires capture reports `CAPTURE_BLOCKED`; it does not quietly pass.
 
@@ -668,7 +674,7 @@ failing subroutes still produce application findings.
 Install the visual extra when you expect browser/UI work:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 office doctor --probe-vision
 ```
 
