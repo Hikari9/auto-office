@@ -2,6 +2,15 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.13.1
+
+- fix(jobs): terminal outbox rows keep their claim token as provenance, restoring the #705 squash-close close-replay contract after #883 (#898).
+- test(review): realign the codex Enter-recovery fixtures with #882's composer behavior so the review-reprompt tests pass again (#898).
+- fix(plan-review): a stale PASS ends plan review while a stale round keeps open defects and ATTENTION blocking, the round-budget rule is one shared helper, and a round already in flight reviews an amended revision without re-queueing (#892).
+- test(gates): run-check fixtures fail with the task's change, not on base, and the #809 M executor slate is read from effective policy instead of a frozen tuple (#892).
+- fix(amend): `--as` is refused on every amendment except `office amend route` with nothing recorded, and `amend route` refuses plan-amendment flags and empty-valued or amendment-only flags instead of dropping them, with the drift guard derived from the parser (#896).
+- fix(gates): full-suite checks run under `verification.full_suite_timeout_seconds` (default 7200), a check timeout names its limit and the setting to raise, and only Office's own kill records a timeout (#897).
+
 ## 3.13.0
 
 - refactor(policy): externalize executor/planner size slates, benchmark floors, restrictions and authorized exceptions into one validated catalog policy (#871 PR A).
