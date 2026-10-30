@@ -1728,23 +1728,19 @@ def reply_hard_bound() -> float:
     return _env_seconds("OFFICE_REPLY_HARD_BOUND_S", REPLY_HARD_BOUND_S)
 
 
-def _reply_digest(path: Path) -> str | None:
+def _reply_bytes(path: Path) -> bytes | None:
     try:
-        data = path.read_bytes()
+        return path.read_bytes() or None
     except OSError:
         return None
-    return hashlib.sha256(data).hexdigest() if data else None
 
 
-def _reply_complete(run: dict, dispatch: dict, output: Path) -> bool:
-    """Whether the reply file holds a complete verdict the review contract accepts. A busy pane's reply is ingested
-    early only then (#918, A6). The reviewer flags follow the dispatch role; a mismatch only makes a reply read as
-    incomplete, which holds it back."""
+def _reply_complete(run: dict, dispatch: dict, data: bytes) -> bool:
+    """Whether the reply holds a complete verdict the review contract accepts. A busy pane's reply is ingested
+    early only then (#918, A6). `data` is the same read the stability digest was taken from. The reviewer flags
+    follow the dispatch role; a mismatch only makes a reply read as incomplete, which holds it back."""
     from office import contract, gates, review_parse
-    try:
-        text = output.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
+    text = data.decode("utf-8", errors="replace")
     parsed = review_parse.parse(gates._last_block(text), plan_review=dispatch["role"] == "plan_reviewer",
                                 visual=dispatch["role"] in ("visual_reviewer", "visual_verifier"),
                                 contract=contract.of(run))
@@ -3724,7 +3720,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         finally:
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
-        digest = _reply_digest(output) if size else None
+        data = _reply_bytes(output) if size else None
+        digest = hashlib.sha256(data).hexdigest() if data else None
         # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
         unchanged = digest is not None and digest == last_digest
         if not unchanged:
@@ -3750,7 +3747,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # changing is the only evidence left, so it bounds the wait.
             return 0, "success"
         if unchanged and not worker and time.monotonic() - settled_since >= busy_settle \
-                and _reply_complete(run, first, output):
+                and data is not None and _reply_complete(run, first, data):
             # A reviewer's complete reply has been byte-identical for the settle window while its pane still draws a
             # turn: the agent is not writing it, so the pane's busy text does not hold it back (#918, A6).
             return 0, "success"

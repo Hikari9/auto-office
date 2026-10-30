@@ -60,6 +60,27 @@ def test_an_incomplete_reply_is_not_ingested_while_the_pane_reads_busy(env, monk
 
 
 @pytest.mark.approved
+@pytest.mark.parametrize("reply, ingested", [
+    # Complete only under convergence-v1: a RECHECK verdict, with its NEXT and a blocking FINDING.
+    ("VERDICT: RECHECK\nNEXT: fix F1\nFINDING F1 | high | blocking | a.py:1 | bad | fix it", True),
+    # Complete under v3.1 but not under convergence-v1, which needs a NEXT line: the contract must be consulted.
+    ("VERDICT: APPROVED\n", False),
+])
+def test_the_run_contract_decides_whether_a_busy_reply_is_complete(env, monkeypatch, reply, ingested):
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text(reply)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.05")
+    _pane_samples(monkeypatch, lambda n: dict(BUSY), limit=40)
+    if ingested:
+        assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    else:
+        with pytest.raises(Stop):
+            dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
+
+
+@pytest.mark.approved
 def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     _fake(env, monkeypatch)
     _, d = _live_dispatch(env, monkeypatch)
