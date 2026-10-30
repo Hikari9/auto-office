@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import stat
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,15 @@ def file_map(root: Path) -> dict[str, bytes]:
     return result
 
 
+def canonical_source(root: Path, path: str) -> Path | None:
+    """Map a generated entry to its authored source; metadata is generated."""
+    if path == "skills/auto-office/SKILL.md":
+        return root / "SKILL.md"
+    if path == "skills/auto-office/agents/openai.yaml":
+        return None
+    return root / path
+
+
 def check(root: Path = ROOT) -> list[str]:
     expected = file_map(root)
     dist = root / DIST
@@ -71,6 +81,11 @@ def check(root: Path = ROOT) -> list[str]:
     errors += [f"plugin-dist: unexpected {p}" for p in sorted(actual.keys() - expected.keys())]
     errors += [f"plugin-dist: stale copy {p}" for p in sorted(expected.keys() & actual.keys())
                if actual[p] != expected[p]]
+    for path in sorted(expected.keys() & actual.keys()):
+        source = canonical_source(root, path)
+        if source is not None and source.exists():
+            if bool(source.stat().st_mode & stat.S_IXUSR) != bool((dist / path).stat().st_mode & stat.S_IXUSR):
+                errors.append(f"plugin-dist: executable bit mismatch {path}")
     skills = sorted(p.removeprefix("skills/").removesuffix("/SKILL.md")
                     for p in actual if p.startswith("skills/") and p.endswith("/SKILL.md")
                     and p.count("/") == 2)
@@ -100,6 +115,9 @@ def sync(root: Path = ROOT) -> int:
         target = dist / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+        source = canonical_source(root, path)
+        if source is not None and source.exists():
+            target.chmod(stat.S_IMODE(source.stat().st_mode))
     return len(expected)
 
 
