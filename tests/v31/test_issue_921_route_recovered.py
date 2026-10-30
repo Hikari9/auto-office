@@ -29,10 +29,11 @@ def recovered(env):
     return [json.loads(e["payload_json"]) for e in events(env, RECOVERED)]
 
 
-def expire(env, d, when=PAST):
+def expire(env, d, when=None):
+    """Lapse the route's demotion. Default: now, after the failed dispatch started, as a real 30-minute cooldown does."""
     key = routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"])
     with db.transaction(env.con):
-        env.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (when, key))
+        env.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (when or now_iso(), key))
 
 
 def failed_route(env, text="error: unknown model"):
@@ -48,12 +49,20 @@ def review_fallback(env, before, after="codex@1/gpt-6-luna@low"):
                                   "quota")
 
 
-def probe_pass(env, route, probed_at):
+def probe_pass(env, route, probed_at, invocation=None):
     m = routechange._CANDIDATE.fullmatch(route)
     with db.transaction(env.con):
         env.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
                         "VALUES(?,?,?,?,?,?)",
-                        (f"probe:{route}:{probed_at}", m["harness"], m["model"], m["effort"], "pass", probed_at))
+                        (f"probe:{route}:{probed_at}", m["harness"], invocation or m["model"], m["effort"], "pass",
+                         probed_at))
+
+
+def review_dispatch(env, route, invocation):
+    """The failed reviewer dispatch a review route change names; it records the invocation model the route ran as."""
+    with db.transaction(env.con):
+        env.con.execute("INSERT INTO dispatches(id, run_id, role, triple, invocation_model_id, started_at) "
+                        "VALUES(?,?,?,?,?,?)", (f"rd-{route}", "run-A", "code_reviewer", route, invocation, PAST))
 
 
 def cooldown(env, route, when):
@@ -78,6 +87,7 @@ def test_a_live_demotion_records_nothing_and_a_lapsed_one_records_once(plain):
     assert sweep(plain) == []  # one per episode, however often a tick or status sweeps
 
     [rec] = recovered(plain)
+    assert rec.pop("available_at")  # the instant the demotion lapsed
     assert rec == {"route": d["triple"], "harness": d["harness"], "model": d["invocation_model_id"],
                    "effort": d["effort"], "role": "executor", "basis": "demotion lapsed",
                    "episode": failed["seq"], "evidence": "route.failed"}
@@ -118,6 +128,25 @@ def test_a_review_that_left_its_route_recovers_only_on_a_passing_reprobe_after_i
     [rec] = recovered(cold)
     assert rec["route"] == CODEX and rec["basis"] == "re-probe passed" and rec["episode"] == evidence["seq"]
     assert rec["evidence"] == "route.changed" and rec["role"] == "code_reviewer" and seq > evidence["seq"]
+
+
+ALIAS = "claude@1/sonnet@high"  # model_id sonnet runs as invocation claude-sonnet-5
+
+
+def test_an_aliased_review_route_recovers_under_its_invocation_model(cold):
+    review_dispatch(cold, ALIAS, "claude-sonnet-5")
+    review_fallback(cold, ALIAS)
+    probe_pass(cold, ALIAS, FUTURE, invocation="claude-sonnet-5")
+    [seq] = sweep(cold)
+    assert recovered(cold)[0]["basis"] == "re-probe passed" and recovered(cold)[0]["model"] == "claude-sonnet-5"
+
+
+def test_an_aliased_review_route_with_a_live_invocation_cooldown_is_not_recovered(cold):
+    review_dispatch(cold, ALIAS, "claude-sonnet-5")
+    review_fallback(cold, ALIAS)
+    cooldown(cold, routing.cooldown_key("claude", "claude-sonnet-5"), FUTURE)
+    probe_pass(cold, ALIAS, FUTURE, invocation="claude-sonnet-5")
+    assert sweep(cold) == []
 
 
 def test_a_review_route_with_a_live_demotion_is_not_recovered_by_a_pass(cold):
@@ -233,9 +262,18 @@ def test_a_later_recovery_of_the_same_route_shows_again_after_a_dispatch(plain):
         state.emit(plain.con, run(plain), "route.failed", "again", task_id="T1",
                    payload={"route": d["triple"], "harness": d["harness"], "model": d["invocation_model_id"],
                             "effort": d["effort"], "reason": "auth"})
-    expire(plain, d)
+    expire(plain, d, when=now_iso())  # available after the dispatch above
     sweep(plain)
     assert len(routechange.recovery_lines(plain.con, run(plain))) == 1
+
+
+def test_a_dispatch_between_the_lapse_and_the_first_sweep_clears_the_line(plain, monkeypatch):
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    d = failed_route(plain)
+    expire(plain, d)  # available now
+    plain.dispatch("T2")  # routing used the route before any sweep recorded the recovery
+    assert routechange.recovery_lines(plain.con, run(plain)) == []
+    assert line_for(d["triple"], "demotion lapsed") not in guide.status(plain.con, run(plain)).lines
 
 
 def test_an_unrelated_dispatch_does_not_clear_the_line(plain):
