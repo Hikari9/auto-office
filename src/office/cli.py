@@ -1045,7 +1045,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                           next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart)
+                                        restart=args.restart, cwd=cwd)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()

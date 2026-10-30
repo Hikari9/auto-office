@@ -9,6 +9,7 @@ Agents never run here: the dispatch is launched external, so its row stays live.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -142,6 +143,7 @@ def test_amend_route_with_as_relaunches_on_the_named_route(live):
 ])
 @pytest.mark.parametrize("identity", [
     ("OFFICE_DISPATCH_ID", "OFFICE_ROLE"),
+    ("OFFICE_DISPATCH_ID",),
     ("OFFICE_ROLE",),
 ])
 def test_a_worker_cannot_change_its_own_route(live, route_args, identity):
@@ -154,6 +156,19 @@ def test_a_worker_cannot_change_its_own_route(live, route_args, identity):
     worker = {k: markers[k] for k in (*identity, "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_JOBS")}
     before = _state(con)
     code, out = live.office("amend", "route", "T1", *route_args, env=worker)
+    assert code == 4, out
+    assert "worker-cannot-change-route" in out, out
+    assert _state(con) == before
+
+
+@pytest.mark.approved
+def test_a_restarted_executor_in_its_task_worktree_cannot_change_its_route(live):
+    # A restarted executor can lose its dispatch env and still run in its task worktree; submit resolves it from cwd.
+    con = live.con()
+    d = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
+    before = _state(con)
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, cwd=Path(d["worktree"]),
+                            env={"OFFICE_RUN_ID": d["run_id"], "OFFICE_TASK_ID": "T1", "OFFICE_JOBS": "manual"})
     assert code == 4, out
     assert "worker-cannot-change-route" in out, out
     assert _state(con) == before
