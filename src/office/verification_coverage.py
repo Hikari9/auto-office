@@ -110,57 +110,13 @@ def _is_validate_script(command: str) -> bool:
     return _validate_words(command) in (["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 
-_OPERATOR_CHARS = frozenset("();<>|&")
-_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-_FULL_SUITE_WORDS = (["scripts/validate.sh"], ["./scripts/validate.sh"],
-                     ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
-
-
-def _simple_commands(command: str) -> list[list[str]]:
-    """Words of each simple command in a shell line. Operators (; && || | & and parentheses)
-    separate commands. A redirection is dropped with its fd digit and target. Quoted text is one word."""
-    lexer = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return []
-    commands, words, skip_target = [], [], False
-    for tok in tokens:
-        if skip_target:
-            skip_target = False
-        elif tok and set(tok) <= _OPERATOR_CHARS:
-            if "<" in tok or ">" in tok:
-                if words and words[-1].isdigit():
-                    words.pop()
-                skip_target = True
-            else:
-                commands.append(words)
-                words = []
-        else:
-            words.append(tok)
-    commands.append(words)
-    return [words for words in commands if words]
-
-
-def _is_full_suite_words(words: list[str]) -> bool:
-    while words and _ASSIGNMENT.fullmatch(words[0]):
-        words = words[1:]
-    if words[:1] in (["bash"], ["sh"]):
-        words = words[1:]
-        while words[:1] and words[0].startswith("-"):
-            flag = words.pop(0)
-            if flag in ("-o", "-O"):  # the option's value is the next word
-                words = words[1:]
-    return words in _FULL_SUITE_WORDS
-
-
 def is_full_suite(command: str) -> bool:
     """The full regression run `--pr` does not replace: bare `scripts/validate.sh` or `--full`.
 
-    A line is a full-suite check when any of its simple commands is one. Redirections, chaining
-    and comments do not change which suite runs. Coverage evidence keeps the strict matcher above."""
-    return any(_is_full_suite_words(words) for words in _simple_commands(command))
+    Only the plain forms are recognized. Redirections, chaining and other shell forms are not
+    parsed, so they keep check_timeout_seconds (AMENDMENT A2)."""
+    return _is_validate_script(command) or _validate_words(command) in (
+        ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
 
 
 _SCOPED_GATE_SHA256 = {

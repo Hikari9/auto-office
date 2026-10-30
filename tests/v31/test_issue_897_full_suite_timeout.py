@@ -13,11 +13,7 @@ REV = {"id": "R1", "commit_sha": "0" * 40, "dispatch_id": "D1"}
 GATE = {"id": "G1", "task_id": "T1"}
 CFG = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 7200}
 FULL = ["scripts/validate.sh", "./scripts/validate.sh", "bash scripts/validate.sh", "scripts/validate.sh --full",
-        "bash -e scripts/validate.sh", "scripts/validate.sh --full > out.log 2>&1", "scripts/validate.sh --full 2>&1",
-        "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &", "scripts/validate.sh --full # note",
-        "bash -o pipefail scripts/validate.sh", "cd x && scripts/validate.sh --full", "false || scripts/validate.sh --full",
-        "scripts/validate.sh --pr; scripts/validate.sh --full", "scripts/validate.sh --full && echo ok",
-        "2>&1 scripts/validate.sh --full", "(scripts/validate.sh --full)", 'echo "a|b" && scripts/validate.sh --full']
+        "./scripts/validate.sh --full"]
 
 
 @pytest.fixture
@@ -93,7 +89,13 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
     assert started == [7200]  # no automatic re-run of the full suite
 
 
-@pytest.mark.parametrize("command", ["scripts/validate.sh --pr > out.log 2>&1", "scripts/validate.sh --pr | tail -5",
+# AMENDMENT A2: only the canonical argv is full suite. Other shell forms keep check_timeout_seconds.
+@pytest.mark.parametrize("command", ["scripts/validate.sh --pr", "scripts/validate.sh --pr > out.log 2>&1",
+                                     "scripts/validate.sh --full > out.log 2>&1", "scripts/validate.sh --full 2>&1",
+                                     "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &",
+                                     "scripts/validate.sh --full # note", "bash -e scripts/validate.sh",
+                                     "bash -o pipefail scripts/validate.sh", "cd x && scripts/validate.sh --full",
+                                     "scripts/validate.sh --pr; scripts/validate.sh --full", "(scripts/validate.sh --full)",
                                      "echo scripts/validate.sh", "pytest -q tests/x.py", "scripts/validate.sh --pr --full",
                                      "cd x && scripts/validate.sh --pr", "echo 'scripts/validate.sh --full'",
                                      "pytest -q tests/x.py ; echo done"])
