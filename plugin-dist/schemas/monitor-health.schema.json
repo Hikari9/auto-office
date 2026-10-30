@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 monitor health",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "monitor_id",
+    "session_id",
+    "sequence",
+    "status",
+    "active_panes",
+    "event_lag_ms",
+    "health_evidence",
+    "timestamp"
+  ],
+  "properties": {
+    "monitor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "failing",
+        "stopped"
+      ]
+    },
+    "active_panes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "event_lag_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "health_evidence": {
+      "type": "object",
+      "required": [
+        "checks_passed",
+        "evidence_hash"
+      ],
+      "properties": {
+        "checks_passed": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "last_ping": {
+          "type": "string"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}
