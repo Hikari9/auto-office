@@ -79,27 +79,37 @@ def progress(d: dict, activity: dict | None = None) -> str | None:
     return sha256_obj((pane, wt, logsig))
 
 
+_SHELLS = {"sh", "bash", "zsh", "dash", "fish"}
+
+
 def child_state(d: dict) -> bool | None:
-    """Whether the executor's agent process has a live child or group member, such as a background monitor or
-    `office wait`: True or False, or None when the process table cannot be read. Unknown is never a stall (#895).
-    A pane agent is verified by its recorded start time, so a reused pid never counts as the agent."""
-    if d.get("launcher") == "herdr":
-        rec = dispatch._recorded_identity({"id": d["run_id"]}, d["id"], "agent") or {}
-        root, started = rec.get("pid"), rec.get("c_start")
-        if not started:
-            return False  # no verifiable agent, so no child to wait on
-    else:
-        root, started = d.get("pid"), None
-    if not root:
+    """Whether the executor's agent is waiting on a command it started, such as a background monitor or `office wait`:
+    True or False, or None when the process table cannot be read. Unknown is never a stall (#895).
+
+    The agent's own tools run as shell children. A shell child with a live child of its own is a command in flight.
+    Other children, such as MCP servers, live as long as the session and say nothing about the executor. A command
+    that detaches (setsid, a double fork) leaves the agent's tree and is not seen. The agent is verified by its recorded
+    start time, so a reused pid never counts; with no verifiable agent there is nothing to wait on."""
+    rec = dispatch._recorded_identity({"id": d["run_id"]}, d["id"], "agent") or {}
+    root, started = rec.get("pid"), rec.get("c_start")
+    if not root or not started:
         return False
     table = dispatch._process_table()
     if table is None:
         return None
     # A zombie has exited and cannot be waiting on anything.
-    live = {pid: (ppid, pgid, began) for pid, ppid, pgid, state_, began, _ in table if not state_.startswith("Z")}
-    if root not in live or (started and live[root][2] != started):
+    live = {pid: (ppid, command, began) for pid, ppid, _pgid, state_, began, command in table if not state_.startswith("Z")}
+    if root not in live or live[root][2] != started:
         return False
-    return any(pid != root and (ppid == root or pgid == root) for pid, (ppid, pgid, _) in live.items())
+    kids: dict[int, list[int]] = {}
+    for pid, (ppid, _command, _began) in live.items():
+        kids.setdefault(ppid, []).append(pid)
+    return any(_is_shell(live[pid][1]) and kids.get(pid) for pid in kids.get(root, []))
+
+
+def _is_shell(command: str) -> bool:
+    first = (command.split() or [""])[0]
+    return first.rsplit("/", 1)[-1].lstrip("-") in _SHELLS
 
 
 def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -> str | None:

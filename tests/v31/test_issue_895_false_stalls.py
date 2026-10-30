@@ -6,8 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import approved_run
-from test_wait import EXTERNAL, _go
+from test_wait import _go
 
 from office import dispatch, guide, rerun, root_wake, state, watchdog
 from office import questions as questions_mod
@@ -22,11 +21,22 @@ def _ago(seconds: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(timespec="microseconds")
 
 
-def _table(*children, agent_start=START, agent_state="S"):
-    """ps-shaped rows: (pid, ppid, pgid, state, start, command). The agent leads its own group."""
-    rows = [(AGENT, 1, AGENT, agent_state, agent_start, "claude")]
-    rows += [(pid, AGENT, 9000 + pid, "S", START, "tail -f /dev/null") for pid in children]
-    return rows
+MCP = "node /Users/rico/.claude/plugins/cache/context-mode/context-mode/start.mjs"
+WAIT = "office wait --timeout 580"
+
+
+def _row(pid, ppid, command, state="S", began=START):
+    """A ps-shaped row: (pid, ppid, pgid, state, start, command)."""
+    return (pid, ppid, pid, state, began, command)
+
+
+def _table(*, in_flight=False, agent_start=START, extra=()):
+    """The agent's process table. An MCP server child is always present and never counts as work in flight.
+    `in_flight` adds the agent's shell running `office wait`."""
+    rows = [_row(AGENT, 1, "claude", began=agent_start), _row(5100, AGENT, MCP)]
+    if in_flight:
+        rows += [_row(5001, AGENT, f"/bin/zsh -c eval '{WAIT}'"), _row(5002, 5001, WAIT)]
+    return rows + list(extra)
 
 
 def _script_agent(monkeypatch, table, *, identity=True):
@@ -125,19 +135,44 @@ def test_queued_self_review_gate_without_an_owner_is_still_a_stall(env, monkeypa
 # --- Executor waiting on a live child --------------------------------------------------------------------------------
 
 
-def test_idle_executor_with_a_live_child_is_not_reported(env, monkeypatch):
+def test_idle_executor_with_a_command_in_flight_is_not_reported(env, monkeypatch):
     con, run, did = _idle_executor(env, monkeypatch)
-    _script_agent(monkeypatch, _table(5001))
+    _script_agent(monkeypatch, _table(in_flight=True))
     before = _executor_row(con, did)["idle_since"]
     assert guide._idle_executors(con, run, {did: _idle_act()}) == []
-    assert _executor_row(con, did)["idle_since"] > before, "the idle clock restarts while a child runs"
+    assert _executor_row(con, did)["idle_since"] > before, "the idle clock restarts while a command runs"
 
 
-def test_idle_executor_without_a_child_is_reported(env, monkeypatch):
+def test_idle_executor_with_only_an_mcp_server_is_reported(env, monkeypatch):
+    """Regression: a long-lived MCP child must not make every idle agent look busy."""
     con, run, did = _idle_executor(env, monkeypatch)
     _script_agent(monkeypatch, _table())
     (line,) = guide._idle_executors(con, run, {did: _idle_act()})
     assert did in line and "idle" in line and "without submitting" in line, line
+
+
+def test_idle_bash_shell_with_no_command_is_reported(env, monkeypatch):
+    con, run, did = _idle_executor(env, monkeypatch)
+    _script_agent(monkeypatch, _table(extra=[_row(5001, 4242, "/bin/zsh -c source snapshot.sh")]))
+    (line,) = guide._idle_executors(con, run, {did: _idle_act()})
+    assert "without submitting" in line, line
+
+
+def test_no_verifiable_agent_is_reported_as_before(env, monkeypatch):
+    """Without a recorded agent identity the pane's agent is unknown: nothing suppresses the idle report."""
+    con, run, did = _idle_executor(env, monkeypatch)
+    _script_agent(monkeypatch, _table(in_flight=True), identity=False)
+    (line,) = guide._idle_executors(con, run, {did: _idle_act()})
+    assert "without submitting" in line, line
+
+
+def test_a_zombie_agent_is_not_waiting_on_anything(env, monkeypatch):
+    con, run, did = _idle_executor(env, monkeypatch)
+    table = _table(in_flight=True)
+    table[0] = _row(AGENT, 1, "claude", state="Z")
+    _script_agent(monkeypatch, table)
+    (line,) = guide._idle_executors(con, run, {did: _idle_act()})
+    assert "without submitting" in line, line
 
 
 def test_unreadable_process_table_is_unknown_not_a_stall(env, monkeypatch):
@@ -149,28 +184,27 @@ def test_unreadable_process_table_is_unknown_not_a_stall(env, monkeypatch):
 def test_a_reused_pid_is_not_the_recorded_agent(env, monkeypatch):
     """The pid now belongs to another process, so its children are not the agent's."""
     con, run, did = _idle_executor(env, monkeypatch)
-    _script_agent(monkeypatch, _table(5001, agent_start="Mon Mar 9 10:00:00 2026"))
+    _script_agent(monkeypatch, _table(in_flight=True, agent_start="Mon Mar 9 10:00:00 2026"))
     (line,) = guide._idle_executors(con, run, {did: _idle_act()})
     assert "without submitting" in line, line
 
 
-def test_a_zombie_child_does_not_keep_an_executor_in_flight(env, monkeypatch):
+def test_a_zombie_command_does_not_keep_an_executor_in_flight(env, monkeypatch):
     con, run, did = _idle_executor(env, monkeypatch)
-    table = _table()
-    table.append((5001, AGENT, 9001, "Z", START, "<defunct>"))
-    _script_agent(monkeypatch, table)
+    extra = [_row(5001, AGENT, f"/bin/zsh -c eval '{WAIT}'"), _row(5002, 5001, WAIT, state="Z")]
+    _script_agent(monkeypatch, _table(extra=extra))
     (line,) = guide._idle_executors(con, run, {did: _idle_act()})
     assert "without submitting" in line, line
 
 
-def test_busy_executor_with_a_live_child_is_not_a_progress_stall(env, monkeypatch):
+def test_busy_executor_with_a_command_in_flight_is_not_a_progress_stall(env, monkeypatch):
     con, run, did = _idle_executor(env, monkeypatch)
     busy = {"alive": True, "busy": True, "hash": "h-busy", "text": "✽ Waiting on monitor (9m)\n", "status": "working"}
     row = _executor_row(con, did)
     con.execute("UPDATE dispatches SET watchdog_progress_hash=? WHERE id=?", (watchdog.progress(row, busy), did))
     con.commit()
     row = _executor_row(con, did)
-    _script_agent(monkeypatch, _table(5001))
+    _script_agent(monkeypatch, _table(in_flight=True))
     assert watchdog.check(con, run, row, role="executor", activity=busy) is None
     con.execute("UPDATE dispatches SET watchdog_progress_since=? WHERE id=?", (_ago(600), did))  # the clock restarted
     con.commit()
