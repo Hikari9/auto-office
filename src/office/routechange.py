@@ -326,7 +326,7 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
     the user declared is the user's choice and is never recovered here. Routing rejects a route while any of its
     cooldown keys is live, so none may be. A runtime failure is then recovered: its demotion lapsed, at the latest
     expiry. A review change set no cooldown, so it needs a re-probe that passed after it, and that pass is the instant."""
-    if payload.get("declared"):
+    if payload.get("declared") or payload.get("actor") == "user":  # the user's declaration or re-pin is the decision
         return None
     harness, model, effort = _route_parts(con, run_id, row, payload)
     if not model:
@@ -338,14 +338,18 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
     if any(expiry > now for expiry in expiries):
         return None
     if row["kind"] == "route.failed":
-        return "demotion lapsed", max(expiries, default=now)
+        # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline stands.
+        if expiries:
+            return "demotion lapsed", max(expiries)
+        deadline = payload.get("demoted_until")
+        return "demotion lapsed", parse_iso(deadline) if deadline else parse_iso(row["created_at"])
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",
                          (harness or "", model, effort or "")).fetchone()
     if not passed or parse_iso(passed[0]) <= parse_iso(row["created_at"]):
         return None
-    return "re-probe passed", parse_iso(passed[0])
+    return "re-probe passed", max([parse_iso(passed[0])] + expiries)
 
 
 def _available_text(route: str, basis: str) -> str:
@@ -357,6 +361,16 @@ def _recorded(con, run_id: str, episode: int) -> bool:
                        (run_id, RECOVERED_KIND, episode)).fetchone() is not None
 
 
+def _latest_episodes(con, run_id: str) -> dict[str, tuple]:
+    """route -> (newest evidence row, its payload). A route is judged by its newest episode only."""
+    latest: dict[str, tuple] = {}
+    for row in con.execute(_EVIDENCE_SQL, (run_id,)).fetchall():
+        payload = loads(row["payload_json"], {})
+        if route := _route_of(row, payload):
+            latest[route] = (row, payload)
+    return latest
+
+
 def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]:
     """Record one `route.recovered` per route a non-terminal run fell back from or avoided that is available again.
     Keyed by the evidence's seq, so each episode is recorded once. Only events are written: no dispatch, task or
@@ -364,17 +378,11 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
     if state.is_terminal(run):
         return []
     now = now or datetime.now(timezone.utc)
-    latest: dict[str, tuple] = {}
-    for row in con.execute(_EVIDENCE_SQL, (run["id"],)).fetchall():  # a route is judged by its newest episode
-        payload = loads(row["payload_json"], {})
-        if route := _route_of(row, payload):
-            latest[route] = (row, payload)
     seqs = []
-    for route, (row, payload) in latest.items():
-        if _recorded(con, run["id"], row["seq"]) or _available_basis(con, run["id"], row, payload, now) is None:
-            continue
-        with db.transaction(con):  # re-judged under the writer lock: a new failure may have landed meanwhile
-            if _recorded(con, run["id"], row["seq"]):
+    for route in _latest_episodes(con, run["id"]):
+        with db.transaction(con):  # judged and recorded under the writer lock, on the newest episode at that moment
+            row, payload = _latest_episodes(con, run["id"]).get(route, (None, None))
+            if row is None or _recorded(con, run["id"], row["seq"]):
                 continue
             found = _available_basis(con, run["id"], row, payload, now)
             if found is None:
