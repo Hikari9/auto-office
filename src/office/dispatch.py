@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1709,6 +1710,47 @@ def reap_orphans(con, run: dict) -> list[str]:
 # A reply untouched this long is the finished review: the dead supervisor was the only thing that would have
 # waited for the agent to stop rewriting it.
 REPLY_SETTLE_SECONDS = 30
+# A live reviewer's reply that stays byte-identical this long is final even while its pane still reads busy (#918).
+REPLY_BUSY_SETTLE_S = 60.0
+# A reply still not ingested this long after its last write needs an operator action; the status `next:` names it (#918).
+REPLY_HARD_BOUND_S = 600.0
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return max(0.0, value) if math.isfinite(value) else default
+
+
+def reply_hard_bound() -> float:
+    return _env_seconds("OFFICE_REPLY_HARD_BOUND_S", REPLY_HARD_BOUND_S)
+
+
+def _reply_digest(path: Path) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
+def reply_pending(con, run: dict) -> list[dict]:
+    """Reviewer replies written to disk whose dispatch is still open, oldest first: `id`, `task_id`, `kind` (its gate
+    kind) and `quiet` (seconds since the last write). A live watch ingests a reply once it settles (#918); this only reads."""
+    now = time.time()
+    out = []
+    for row in con.execute("SELECT d.id, d.task_id, g.kind FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+                           "WHERE d.run_id=? AND d.launcher='herdr' AND d.ended_at IS NULL AND d.status='running' "
+                           "ORDER BY d.started_at", (run["id"],)).fetchall():
+        try:
+            info = (paths.run_dir(run["id"]) / "dispatches" / row["id"] / "reply.txt").stat()
+        except OSError:
+            continue
+        if info.st_size:
+            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "quiet": now - info.st_mtime})
+    return out
 
 
 def _launch_spec(run: dict, dispatch_id: str) -> dict:
@@ -1761,10 +1803,7 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
 
 def _pane_group_wait() -> float:
     """How long a pane launch polls for the agent's foreground group (#507)."""
-    try:
-        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
-    except ValueError:
-        return 3.0
+    return _env_seconds("OFFICE_PANE_GROUP_WAIT", 3.0)
 
 
 def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
@@ -3644,6 +3683,9 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     noticed = False
     history: list[dict] = []
     last_size = None
+    last_digest = None
+    settled_since = None
+    busy_settle = _env_seconds("OFFICE_REPLY_BUSY_SETTLE_S", REPLY_BUSY_SETTLE_S)
     unknown = 0
     unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
     con = db.connect()
@@ -3667,6 +3709,12 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         finally:
             con.close()
         size = output.stat().st_size if output and output.is_file() else 0
+        digest = _reply_digest(output) if size else None
+        # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
+        unchanged = digest is not None and digest == last_digest
+        if not unchanged:
+            settled_since = time.monotonic()
+        last_digest = digest
         sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is not None:
             unknown = unknown + 1 if sample.get("busy") is None else 0
@@ -3680,12 +3728,15 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                                        f"{unknown_limit} polls; check its pane, or office revoke")
         # The result file is the evidence (R13): only a pane still drawing a
         # turn (text busy) holds it back, not a `working` status alone.
-        if size and size == last_size and (sample is None or sample.get("text_busy", sample.get("busy")) is False
-                                           or blind):
-            # Complete: written, no longer growing between two polls, and the
+        if unchanged and (sample is None or sample.get("text_busy", sample.get("busy")) is False or blind):
+            # Complete: written, no longer changing between two polls, and the
             # agent is not still mid-turn (it may rewrite the file). After the
             # pane has been unreadable past the limit, a file that stopped
-            # growing is the only evidence left, so it bounds the wait.
+            # changing is the only evidence left, so it bounds the wait.
+            return 0, "success"
+        if unchanged and not worker and time.monotonic() - settled_since >= busy_settle:
+            # A reviewer's reply has been byte-identical for the settle window while its pane still draws a turn:
+            # the agent is not writing it, so the pane's busy text does not hold it back (#918).
             return 0, "success"
         fresh_output = bool(size) and size != last_size
         last_size = size or None
