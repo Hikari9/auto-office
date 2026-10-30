@@ -75,6 +75,61 @@ def test_plan_review_ends_at_first_pass_even_on_an_older_version(env):
     assert con.execute("SELECT COUNT(*) FROM gates WHERE subject='plan'").fetchone()[0] == 2  # no p3 review
 
 
+def _plan_gates(env):
+    con = env.con()
+    try:
+        return [tuple(r) for r in con.execute("SELECT plan_version, status, verdict FROM gates WHERE subject='plan' "
+                                              "ORDER BY created_at").fetchall()]
+    finally:
+        con.close()
+
+
+def test_stale_changes_required_gives_the_current_revision_its_round(env):
+    _start(env, plan_reviewer=[{"reply": CR}, {"reply": CR}, {"reply": "VERDICT: PASS"}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.write_plan(PLAN_ONE + "\n")
+    env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
+    env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    code, data = env.ojson("status")
+    assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "stale", "CHANGES_REQUIRED"),
+                                (3, "done", "PASS")], data
+    assert data["data"]["plan_review"]["ended"] is True, data
+
+
+def test_stale_pass_with_an_open_defect_does_not_end_review(env):
+    _start(env, plan=PLAN_TWO, plan_reviewer=[{"reply": DEFECT}, {"reply": "VERDICT: PASS"},
+                                              {"reply": "VERDICT: PASS\nCLEARED P2"}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.write_plan(PLAN_TWO + "\n")
+    env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
+    env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    code, data = env.ojson("status")
+    # The stale PASS on p2 cannot end review while P2 is open; p3 is the round that clears it.
+    assert _plan_gates(env) == [(1, "done", "PLAN_DEFECT"), (2, "stale", "PASS"), (3, "done", "PASS")], data
+    con = env.con()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM findings WHERE gate_kind='plan_review' AND state='open'").fetchone()[0] == 0
+    finally:
+        con.close()
+    assert data["data"]["plan_review"]["ended"] is True, data
+
+
+def test_stale_attention_does_not_requeue_the_current_revision(env):
+    _start(env, plan_reviewer=[{"reply": CR}, {"reply": "no idea", "exit": 0}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.write_plan(PLAN_ONE + "\n")
+    env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
+    env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    code, data = env.ojson("status")  # the stale p2 review answers ATTENTION: the orchestrator decides, nothing queues
+    assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "stale", "ATTENTION")], _plan_gates(env)
+    con = env.con()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM events WHERE kind='plan.attention' AND audience='orchestrator' "
+                           "AND summary LIKE '%superseded revision%'").fetchone()[0] == 1
+    finally:
+        con.close()
+
+
 def test_initial_plan_defect_launches_nothing_until_independent_clearance(env):
     code, out = _start(env, plan=PLAN_TWO, plan_reviewer=[{"reply": DEFECT}, {"reply": "VERDICT: PASS\nCLEARED P2"}])
     env.office("approve", "plan", "--quote", "go", check=0)

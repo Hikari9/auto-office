@@ -32,7 +32,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, verification_coverage, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
@@ -437,7 +437,6 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
     if not changed and not allow_unchanged:
         return []
     cfgv = state.pinned_config(run).get("verification") or {}
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     found = []
     with check_slot(check_concurrency(cfgv)):
@@ -454,6 +453,7 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
+                timeout, _ = check_timeout(cfgv, r["command"])
                 code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
                 log = evdir / (Path(r["log"]).stem + ".base.log")
                 log.write_text(out, encoding="utf-8")
@@ -550,10 +550,21 @@ def _tracked_stat_snapshot(cwd: Path) -> dict[str, tuple[int, int, int, int, int
     return snapshot
 
 
+def check_timeout(cfgv: dict, command: str) -> tuple[int, str]:
+    """(seconds, setting) one check command runs under. The full suite runs under
+    verification.full_suite_timeout_seconds or check_timeout_seconds, whichever is
+    larger. The setting is the one that binds, so a timeout names what to raise."""
+    check = int(cfgv.get("check_timeout_seconds", 1800))
+    if verification_coverage.is_full_suite(command):
+        full = int(cfgv.get("full_suite_timeout_seconds", 7200))
+        if full >= check:
+            return full, "full_suite_timeout_seconds"
+    return check, "check_timeout_seconds"
+
+
 def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
                   check_tree: bool = True) -> dict:
     from office.submit import matches_revision
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     evdir.mkdir(parents=True, exist_ok=True)
     findings, results = [], []
@@ -563,7 +574,6 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         log = evdir / f"check-{i}.log"
         started = time.time()
         environment = _check_env(run)
-        from office import verification_coverage
         if verification_coverage._complete_pytest_command(command):
             environment.pop("PYTEST_ADDOPTS", None)
             environment.pop("PYTEST_PLUGINS", None)
@@ -579,7 +589,11 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         # but must still fail closed when the check mutates tracked source.
         before_tracked = _tracked_diff_snapshot(cwd)
         before_stats = _tracked_stat_snapshot(cwd)
+        timeout, setting = check_timeout(cfgv, command)
+        timed_out = f"timed out after {timeout}s; raise verification.{setting} to allow a longer run"
         code, out = _run_check(command, cwd, timeout, environment)
+        # Only Office's own kill is a timeout: a process that exits 124 itself is not.
+        killed = code == 124 and out.startswith(f"timed out after {timeout}s")
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -616,15 +630,16 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": detail, "results": results,
                     "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
-            what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
+            what = timed_out if killed else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
+            why = f"check {timed_out}" if killed else f"check failed (exit {code})"
             findings.append({"code": f"C{i}", "severity": "material", "location": command,
-                             "summary": f"check failed (exit {code}): {tail[-600:]}", "action": "make this check pass"})
+                             "summary": f"{why}: {tail[-600:]}", "action": "make this check pass"})
         if check_tree and not matches_revision(cwd, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
             return {"verdict": "STALE", "summary": "worktree changed while checks ran", "results": results}
     verdict = "PASS" if not findings else "CHANGES_REQUIRED"

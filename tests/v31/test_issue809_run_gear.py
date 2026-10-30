@@ -432,9 +432,18 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
             candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
-    new = decide("M", pool, gear="M")
-    assert [e["route"].split("@")[0] for e in new["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
-    assert new["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
+    # The M slate leads with the effective policy's seed routes the pool holds (#871), not a frozen tuple.
+    pooled = {(c["model_id"], c["harness"]) for c in pool}
+    seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
+            if (e["model_id"], e["harness"]) in pooled]
+    assert seed, "the M seed must name at least one pooled route"
+    m_slate = decide("M", pool, gear="M")["selection_disclosure"]["slate"]
+    assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed)]} == \
+        {(harness, model) for model, harness in seed}, m_slate
+    # On XS the Sonnet pair leads, and the same-model agy route is recorded as the self-fallback.
+    xs = decide("XS", pool, gear="XS")
+    assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
+    assert xs["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
     legacy = decide("M", pool, gear="express")
     assert "sonnet_self_fallbacks" not in legacy["routing"]
     assert len(legacy["selection_disclosure"]["slate"]) == 3

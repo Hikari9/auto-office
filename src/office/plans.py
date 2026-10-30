@@ -435,6 +435,11 @@ def plan_gates(con, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def review_in_flight(con, run: dict) -> bool:
+    """A plan-review round is queued or running for any revision of the run."""
+    return any(g["status"] in ("queued", "running") for g in plan_gates(con, run["id"]))
+
+
 def open_defects(con, run_id: str) -> list[dict]:
     """v3.1 plan defects. Convergence-contract findings carry no defect class."""
     rows = con.execute("SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='open' "
@@ -637,6 +642,24 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
                    audience="runtime", payload={"gate": gate_id, "old_version": gate["plan_version"],
                                                  "current_version": current["plan_version"],
                                                  "verdict": outcome.get("verdict"), "status": outcome.get("status")})
+        if not contract.is_convergence(current) and review_required(current) and not _pr(current).get("ended"):
+            # v3.1 (Q14, S3): a PASS on an older revision ends plan review and the current revision's deltas
+            # continue with no review job, unless a plan defect is still open: defects on older revisions stay
+            # blocking until a round clears them. Any other verdict gives the current revision its round, except
+            # ATTENTION, which the orchestrator decides (R11).
+            verdict = outcome.get("verdict")
+            if verdict == "ATTENTION":
+                state.emit(con, current, "plan.attention", f"PLAN REVIEW p{gate['plan_version']} answered ATTENTION on a "
+                           f"superseded revision (p{current['plan_version']} is current): the orchestrator decides (R11)")
+            elif verdict == "PASS" and not open_defects(con, run["id"]):
+                state.update_run(con, run["id"], plan_review={**_pr(current), "ended": True,
+                                 "ended_reason": f"PASS on p{gate['plan_version']} (superseded by p{current['plan_version']})"})
+                state.emit(con, current, "plan.pass", f"PLAN PASS p{gate['plan_version']} (superseded by "
+                           f"p{current['plan_version']}): plan review ends")
+            elif queue_plan_review(con, current, current["plan_version"]) is None:
+                pr = dict(_pr(current))
+                _spend_budget_without_pass(con, state.get_run(con, run["id"]), pr, None)
+                state.update_run(con, run["id"], plan_review=pr)
         return
     if contract.is_convergence(run) and gate["status"] == "cancelled":
         # The cycle closed (or was waived) while this round ran: its result is
@@ -686,17 +709,22 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
     else:
         state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")
-    rounds = budget_rounds(con, run)
-    maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
-    if verdict != "PASS" and rounds >= maximum and not pr.get("ended"):
-        if open_defects(con, run["id"]) and not run.get("escalations_used"):
-            state.update_run(con, run["id"], escalations_used=1)
-            queue_plan_review(con, run, state.get_run(con, run["id"])["plan_version"], escalated=True,
-                              exclude=[outcome.get("route")] if outcome.get("route") else None)
-            state.emit(con, run, "plan.escalated", "plan review budget spent with an open defect; one escalation queued")
-        elif not open_defects(con, run["id"]):
-            pr.update({"ended": True, "ended_reason": "round budget spent"})
+    if verdict != "PASS":
+        _spend_budget_without_pass(con, run, pr, [outcome.get("route")] if outcome.get("route") else None)
     state.update_run(con, run["id"], plan_review=pr)
+
+
+def _spend_budget_without_pass(con, run: dict, pr: dict, exclude: list[str] | None) -> None:
+    """The round budget is spent and the round did not pass: escalate once while a defect is open, else close."""
+    maximum = int((run.get("gates") or {}).get("plan_review_max_rounds") or 1)
+    if budget_rounds(con, run) < maximum or pr.get("ended"):
+        return
+    if open_defects(con, run["id"]) and not run.get("escalations_used"):
+        state.update_run(con, run["id"], escalations_used=1)
+        queue_plan_review(con, run, state.get_run(con, run["id"])["plan_version"], escalated=True, exclude=exclude)
+        state.emit(con, run, "plan.escalated", "plan review budget spent with an open defect; one escalation queued")
+    elif not open_defects(con, run["id"]):
+        pr.update({"ended": True, "ended_reason": "round budget spent"})
 
 
 def _convergence_plan_scope(run: dict) -> tuple[str, tuple]:

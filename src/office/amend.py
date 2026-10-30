@@ -376,7 +376,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             rereview = plans.review_after_revision(con, run, version)
             rereview = rereview if "queued" in rereview else None
         elif plans.review_required(run) and not plans.plan_review_ended(con, run):
-            rereview = plans.queue_plan_review(con, run, version)
+            # A round already in flight reviews this revision too: its first PASS ends the review (Q14, S3).
+            rereview = None if plans.review_in_flight(con, run) else plans.queue_plan_review(con, run, version)
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, ordinary)"
                    + (f" | affected {', '.join(affected)}" if affected else ""), audience="runtime")
     jobs.kick(con, run["id"])
