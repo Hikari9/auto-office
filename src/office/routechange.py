@@ -292,13 +292,17 @@ def _route_of(row, payload: dict) -> str | None:
     return payload.get("route") if row["kind"] == "route.failed" else payload.get("before")
 
 
-def _invocation_model(con, run_id: str, route: str, model_id: str) -> str:
+def _invocation_model(con, run_id: str, route: str, harness: str, model_id: str, effort: str) -> str:
     """The invocation model a candidate ran as. Cooldowns and probes key on it, and it differs from the model id for
-    aliased routes (sonnet runs as claude-sonnet-5). A dispatch of the route records it; a route never dispatched (a
-    skipped primary) has none, so its model id stands in."""
+    aliased routes (sonnet runs as claude-sonnet-5). A dispatch of the route records it. A route never dispatched (a
+    skipped primary) has no dispatch row, so the shipped catalog resolves the alias instead."""
     row = con.execute("SELECT invocation_model_id FROM dispatches WHERE run_id=? AND triple=? "
                       "AND invocation_model_id IS NOT NULL ORDER BY started_at DESC LIMIT 1", (run_id, route)).fetchone()
-    return row[0] if row else model_id
+    if row:
+        return row[0]
+    from office import route_probe  # imported here: route_probe imports candidates, which imports this package's routing
+    catalog = route_probe.catalog_row({"harness": harness, "model_id": model_id, "effort": effort})
+    return (catalog or {}).get("invocation_model_id") or model_id
 
 
 def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str | None, str | None]:
@@ -310,7 +314,8 @@ def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str 
     match = _CANDIDATE.fullmatch(route)
     if not match:
         return None, None, None
-    return match["harness"], _invocation_model(con, run_id, route, match["model"]), match["effort"]
+    harness, effort = match["harness"], match["effort"]
+    return harness, _invocation_model(con, run_id, route, harness, match["model"], effort), effort
 
 
 def _role(con, row, payload: dict) -> str | None:

@@ -8,7 +8,7 @@ import json
 from test_discovery_dispatch import Cold, cold, launched  # noqa: F401 (cold is a fixture)
 from test_issue_845_user_allow import events, fail, plain  # noqa: F401 (plain is a fixture)
 
-from office import context_snapshot, db, gates, guide, root_wake, routechange, routing, state
+from office import context_snapshot, db, gates, guide, root_wake, route_probe, routechange, routing, state
 from office.util import now_iso, parse_iso
 
 PAST = "2000-01-01T00:00:00+00:00"
@@ -141,6 +141,29 @@ def test_an_aliased_review_route_recovers_under_its_invocation_model(cold):
     probe_pass(cold, ALIAS, FUTURE, invocation="claude-sonnet-5")
     [seq] = sweep(cold)
     assert recovered(cold)[0]["basis"] == "re-probe passed" and recovered(cold)[0]["model"] == "claude-sonnet-5"
+
+
+def canonical_invocation(alias_model):
+    """The catalog's canonical invocation id for a claude alias: the id routing and the probes key on."""
+    return route_probe.catalog_row({"harness": "claude", "model_id": alias_model, "effort": "high"})["invocation_model_id"]
+
+
+def test_an_aliased_skipped_primary_with_no_dispatch_row_resolves_through_the_catalog(cold):
+    canonical = canonical_invocation("sonnet")
+    assert canonical != "sonnet"  # the alias is a real redirection, not the id itself
+    review_fallback(cold, ALIAS)  # a skipped primary: the review notice exists, no dispatch of the route
+    assert cold.con.execute("SELECT count(*) FROM dispatches WHERE triple=?", (ALIAS,)).fetchone()[0] == 0
+    probe_pass(cold, ALIAS, FUTURE, invocation=canonical)
+    [seq] = sweep(cold)
+    assert recovered(cold)[0]["model"] == canonical and recovered(cold)[0]["basis"] == "re-probe passed"
+
+
+def test_an_aliased_skipped_primary_with_a_live_canonical_cooldown_is_not_recovered(cold):
+    canonical = canonical_invocation("sonnet")
+    review_fallback(cold, ALIAS)
+    cooldown(cold, routing.cooldown_key("claude", canonical), FUTURE)
+    probe_pass(cold, ALIAS, FUTURE, invocation=canonical)
+    assert sweep(cold) == []
 
 
 def test_an_aliased_review_route_with_a_live_invocation_cooldown_is_not_recovered(cold):
