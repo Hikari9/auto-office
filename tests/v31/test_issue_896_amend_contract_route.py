@@ -54,7 +54,7 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
     before = _state(con)
     code, out = live.office("amend", "T1", "--contract", *route_args, "--", "change the T1 contract", env=EXTERNAL)
     assert code == 4, out
-    assert "amend route" in out, out
+    assert "route-not-amendment" in out and "amend route" in out, out
     assert _state(con) == before, "a refused amendment records no contract version, amendment, or route"
 
 
@@ -120,7 +120,7 @@ def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
     before = _state(con)
     code, out = live.office("amend", "T1", *route_args, "--", "tweak T1", env=EXTERNAL)
     assert code == 4, out
-    assert needle in out and "amend route" in out, out
+    assert "route-not-amendment" in out and needle in out, out
     assert _state(con) == before
 
 
@@ -133,3 +133,21 @@ def test_amend_route_with_as_relaunches_on_the_named_route(live):
     (row,) = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at")]
     assert row["triple"] == "claude@1/sonnet@high" and row["effort"] == "high", row
     assert json.loads(row["route_json"])["route_change"]["quote"] == QUOTE
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("route_args", [
+    ("--as", ROUTE, "--quote", QUOTE),
+    ("--restart", "--as", ROUTE, "--quote", QUOTE),
+])
+def test_a_worker_cannot_change_its_own_route(live, route_args):
+    # The worker env is the one a dispatch launches with; `amend route` must refuse it, not record a user route change.
+    con = live.con()
+    d = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
+    worker = {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
+              "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
+    before = _state(con)
+    code, out = live.office("amend", "route", "T1", *route_args, env=worker)
+    assert code == 4, out
+    assert "worker-cannot-change-route" in out, out
+    assert _state(con) == before

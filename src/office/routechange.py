@@ -9,6 +9,7 @@ the new model/effort, resuming its session where the harness can.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from office import adapters, candidates, db, dispatch, jobs, routing, scoring, state
@@ -24,6 +25,9 @@ DECLARABLE = (*PENDING, "accepted")
 
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
                  restart: bool = False) -> Result:
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        raise Refused("worker-cannot-change-route", "a worker cannot change its own route; the orchestrator does, on the user's words",
+                      next_step="office submit")
     if not target or not as_route:
         raise Usage("usage", "name the live dispatch and its new route", next_step=USAGE, exit_code=2)
     if not (quote or "").strip():
