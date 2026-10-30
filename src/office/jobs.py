@@ -534,8 +534,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
         handler = _handlers()[job["kind"]]
         result = handler(con, run, job) or {}
         with db.transaction(con):
-            cur = con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL, "
-                              "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' AND claim_token=?",
+            # The terminal row keeps its claim token as provenance; only the live pid is released.
+            cur = con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL "
+                              "WHERE id=? AND status='claimed' AND claim_token=?",
                               (dumps(result), now_iso(), job_id, token))
             if cur.rowcount == 0:
                 raise db.StaleAttempt(f"job {job_id} attempt {token} no longer owns its claim")
@@ -554,9 +555,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
                     raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim or its run closed")
                 permanent = isinstance(exc, state.Refused) or row["attempts"] >= row["max_attempts"]
                 if permanent:
-                    cur = con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, "
-                                      "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' "
-                                      "AND claim_token=?", (err[:2000], now_iso(), job_id, token))
+                    cur = con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL "
+                                      "WHERE id=? AND status='claimed' AND claim_token=?",
+                                      (err[:2000], now_iso(), job_id, token))
                     if cur.rowcount == 0:
                         raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim")
                     state.emit(con, run, "job.failed", f"{job['kind']} failed: {err[:160]}",
