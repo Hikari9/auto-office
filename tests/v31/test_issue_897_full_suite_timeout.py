@@ -3,6 +3,7 @@ keeps check_timeout_seconds, and a timed-out check names the setting to raise.""
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,7 @@ def _run(con, tmp_path, monkeypatch, command, *, cfg=CFG, code=0, out="", loaded
     def fake_run_check(cmd, cwd, timeout, env):
         started.append(timeout)
         if code == 124 and killed:
-            return code, f"timed out after {timeout}s\n{out}"
+            return code, gates._TimedOut(f"timed out after {timeout}s\n{out}")
         return code, out
 
     monkeypatch.setattr(gates, "_run_check", fake_run_check)
@@ -70,6 +71,16 @@ def test_exit_124_from_the_process_itself_is_not_named_as_a_timeout(con, tmp_pat
     assert summary.startswith("check failed (exit 124)") and "raise verification" not in summary, summary
 
 
+def test_exit_124_that_prints_the_kill_prefix_is_not_named_as_a_timeout(con, tmp_path, monkeypatch):
+    # The text of a kill is not evidence of one: only _run_check's TimeoutExpired branch marks a kill.
+    outcome, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124, killed=False,
+                            out="timed out after 7200s\nprinted by the check\n")
+    assert started == [7200]
+    finding = outcome["parsed"].findings[0]
+    assert finding["summary"].startswith("check failed (exit 124)") and "raise verification" not in finding["summary"]
+    assert finding["action"] == "make this check pass", finding
+
+
 def test_full_suite_timeout_is_the_configured_setting(con, tmp_path, monkeypatch):
     _, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh",
                       cfg={"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 10800})
@@ -86,6 +97,18 @@ def test_full_suite_never_gets_less_than_the_check_timeout(con, tmp_path, monkey
 def test_check_timeout_defaults_when_unset():
     assert gates.check_timeout({}, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
     assert gates.check_timeout({}, "pytest -q") == (1800, "check_timeout_seconds")
+
+
+def test_null_full_suite_setting_falls_back_to_the_default():
+    # A YAML key with no value reads as None; it must not raise inside the gate.
+    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": None}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
+
+
+@pytest.mark.parametrize("setting", [0, "", -5])
+def test_non_positive_or_blank_full_suite_setting_means_the_default(setting):
+    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": setting}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
 
 
 def test_no_src_module_reads_job_timeout_seconds():
@@ -106,6 +129,7 @@ def test_timeout_names_the_limit_and_the_setting_to_raise(con, tmp_path, monkeyp
     assert outcome["verdict"] == "CHANGES_REQUIRED", outcome
     summary = outcome["parsed"].findings[0]["summary"]
     assert summary.startswith(f"check timed out after {limit}s; raise verification.{setting}"), summary
+    assert outcome["parsed"].findings[0]["action"] == f"raise verification.{setting} or shorten the check"
 
 
 def test_real_kill_timeout_names_the_setting(con, tmp_path, monkeypatch):
@@ -156,6 +180,30 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
 def test_non_full_suite_commands_keep_the_check_timeout(command):
     assert not verification_coverage.is_full_suite(command)
     assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
+
+
+def test_carriage_return_is_refused_by_both_classifiers():
+    # sh does not split on a carriage return, so "--all\r" is not the argv it looks like.
+    assert not verification_coverage.is_full_suite("scripts/validate.sh\r")
+    assert not verification_coverage._complete_pytest_command("pytest --all\r")
+
+
+def test_real_check_exit_124_is_a_plain_result_not_a_kill():
+    code, out = gates._run_check("sh -c 'echo timed out after 60s; exit 124'", Path("."), 60, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and not isinstance(out, gates._TimedOut), out
+
+
+def test_real_kill_returns_a_timed_out_result():
+    code, out = gates._run_check("sleep 5", Path("."), 1, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and isinstance(out, gates._TimedOut) and out.startswith("timed out after 1s"), out
+
+
+def test_kill_takes_the_whole_process_group():
+    # A grandchild holds the pipe; killing only the shell leaves communicate waiting out its 10s grace.
+    started = time.monotonic()
+    code, out = gates._run_check("sh -c 'sleep 5 & sleep 5'", Path("."), 1, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and isinstance(out, gates._TimedOut)
+    assert time.monotonic() - started < 4, "the kill did not reach the grandchild"
 
 
 def _commit(repo, name, text):
