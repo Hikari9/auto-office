@@ -25,12 +25,15 @@ def con(tmp_path, monkeypatch):
     return conn
 
 
-def _run(con, tmp_path, monkeypatch, command, *, cfg=CFG, code=0, out="", loaded=None):
-    """Run one check through _run_commands; return (outcome, timeouts each _run_check call received)."""
+def _run(con, tmp_path, monkeypatch, command, *, cfg=CFG, code=0, out="", loaded=None, killed=True):
+    """Run one check through _run_commands; return (outcome, timeouts each _run_check call received).
+    `killed` makes a 124 look like Office's own kill, the output _run_check writes for one."""
     started = []
 
     def fake_run_check(cmd, cwd, timeout, env):
         started.append(timeout)
+        if code == 124 and killed:
+            return code, f"timed out after {timeout}s\n{out}"
         return code, out
 
     monkeypatch.setattr(gates, "_run_check", fake_run_check)
@@ -46,8 +49,23 @@ def test_full_suite_check_gets_the_full_suite_timeout(con, tmp_path, monkeypatch
 
 
 def test_pr_gate_keeps_check_timeout(con, tmp_path, monkeypatch):
-    _, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh --pr")
-    assert started == [1800]
+    # A non-default check limit: a hard-coded or full-suite limit for --pr cannot pass this.
+    cfg = {"check_timeout_seconds": 3000, "full_suite_timeout_seconds": 7200}
+    _, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh --pr", cfg=cfg)
+    assert started == [3000]
+
+
+def test_full_suite_timeout_tie_names_the_full_suite_setting():
+    cfg = {"check_timeout_seconds": 7200, "full_suite_timeout_seconds": 7200}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
+
+
+def test_exit_124_from_the_process_itself_is_not_named_as_a_timeout(con, tmp_path, monkeypatch):
+    outcome, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124, out="tool exited 124\n",
+                            killed=False)
+    assert started == [7200]
+    summary = outcome["parsed"].findings[0]["summary"]
+    assert summary.startswith("check failed (exit 124)") and "raise verification" not in summary, summary
 
 
 def test_full_suite_timeout_is_the_configured_setting(con, tmp_path, monkeypatch):

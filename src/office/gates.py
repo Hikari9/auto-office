@@ -592,6 +592,8 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         timeout, setting = check_timeout(cfgv, command)
         timed_out = f"timed out after {timeout}s; raise verification.{setting} to allow a longer run"
         code, out = _run_check(command, cwd, timeout, environment)
+        # Only Office's own kill is a timeout: a process that exits 124 itself is not.
+        killed = code == 124 and out.startswith(f"timed out after {timeout}s")
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -628,14 +630,14 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": detail, "results": results,
                     "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
-            what = timed_out if code == 124 else "hit a test-runner timeout"
+            what = timed_out if killed else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
-            why = f"check {timed_out}" if code == 124 else f"check failed (exit {code})"
+            why = f"check {timed_out}" if killed else f"check failed (exit {code})"
             findings.append({"code": f"C{i}", "severity": "material", "location": command,
                              "summary": f"{why}: {tail[-600:]}", "action": "make this check pass"})
         if check_tree and not matches_revision(cwd, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
