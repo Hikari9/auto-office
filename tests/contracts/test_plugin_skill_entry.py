@@ -101,6 +101,18 @@ def test_install_check_checks_path_before_running_office_install():
     assert install.index("command -v office") < install.index("`office install --no-hooks`")
 
 
+def test_install_check_stops_on_uv_failure_before_checking_path():
+    section = _install_check()
+    install = section[section.index("- **Install:**"):section.index("- **Hand off:**")]
+    uv_failure = install.index("If it fails, stop")
+    path_check = install.index("`command -v office`")
+
+    assert install.index("`uv tool install auto-office`") < uv_failure < path_check
+    assert "exit status" in install[:uv_failure]
+    assert "lean hand-off" in install[uv_failure:path_check]
+    assert install.index("`uv tool update-shell`") > path_check
+
+
 def test_saved_choice_write_command_saves_lean_under_xdg_config(tmp_path):
     env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
 
