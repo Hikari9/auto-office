@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -123,14 +124,26 @@ def test_a_replaced_cli_module_exits_with_the_retry_code(monkeypatch, capsys, fa
     assert capsys.readouterr().err.strip() == RETRY_LINE
 
 
+def test_an_unloadable_version_module_at_startup_exits_with_the_retry_code(monkeypatch, capsys):
+    """version.py is stdlib-only, so when it cannot load its file is being replaced or damaged (#920)."""
+    import office
+    from office import __main__ as entrypoint
+
+    monkeypatch.setitem(sys.modules, "office.cli", None)
+    monkeypatch.setattr(office, "version", _ReplacedModule(SyntaxError("truncated version.py")))
+
+    assert entrypoint.entry() == 75
+    assert capsys.readouterr().err.strip() == RETRY_LINE
+
+
 def test_an_import_failure_with_a_healthy_install_keeps_its_traceback(monkeypatch):
     """A missing dependency with a healthy install is not a rebuild: the original error propagates."""
     from office import __main__ as entrypoint
 
-    monkeypatch.setitem(sys.modules, "office.cli", None)
+    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
     monkeypatch.setattr(version, "current", lambda: "3.2.0")
 
-    with pytest.raises(ImportError):
+    with pytest.raises(ModuleNotFoundError, match="jsonschema"):
         entrypoint.entry()
 
 
@@ -140,6 +153,16 @@ def test_console_script_points_at_the_guarded_entry():
     with (version.SOURCE_ROOT / "pyproject.toml").open("rb") as fh:
         target = tomllib.load(fh)["project"]["scripts"]["office"]
     assert target == "office.__main__:entry"
+
+
+def test_the_wake_supervisor_skips_the_startup_probe(monkeypatch):
+    """The supervisor is a background process started on every wake; the probe would delay it (#920)."""
+    probed = []
+    monkeypatch.setattr(version, "rebuilding_reason", lambda: probed.append(1) or "ImportError: partial")
+    monkeypatch.setattr(root_wake, "supervise", lambda run_id: 0)
+
+    assert cli.main(["_wake_supervise", "some-run"]) == 0
+    assert probed == []
 
 
 def test_a_healthy_install_is_not_reported_as_rebuilding(monkeypatch):
@@ -300,6 +323,36 @@ def test_a_recovery_after_the_run_ends_clears_the_mark_without_an_event(env, mon
     assert root_wake._recover_reinstall(con, run) is True
     assert not root_wake._reinstall_mark(run["id"]).exists()
     assert _reinstalled(con, run) == []
+
+
+def test_a_failed_record_keeps_the_mark_for_the_next_healthy_tick(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    root_wake._mark_reinstall(run["id"])
+
+    real_emit = root_wake.state.emit
+
+    def failing_emit(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(root_wake.state, "emit", failing_emit)
+    with pytest.raises(RuntimeError, match="disk full"):
+        root_wake._recover_reinstall(con, run)
+    assert root_wake._reinstall_mark(run["id"]).exists()
+    assert _reinstalled(con, run) == []
+
+    monkeypatch.setattr(root_wake.state, "emit", real_emit)
+    assert root_wake._recover_reinstall(con, run) is True
+    assert len(_reinstalled(con, run)) == 1
+
+
+def test_the_mark_is_never_observable_without_its_token(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    mark = root_wake._reinstall_mark(run["id"])
+
+    assert root_wake._mark_reinstall(run["id"]) is True
+    assert re.fullmatch(r"[0-9a-f]{32}", mark.read_text())
+    assert list(mark.parent.glob(f"{mark.name}.*.tmp")) == []
 
 
 def test_mark_is_set_once_per_episode(env, monkeypatch):

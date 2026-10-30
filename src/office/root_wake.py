@@ -110,13 +110,15 @@ def _tick_failed(run_id: str, exc: Exception) -> None:
 
     Only the first failure of an episode prints. A later healthy tick records the recovery."""
     if _mark_reinstall(run_id):
-        print(f"root wake: tick failed ({type(exc).__name__}: {exc}); retrying", file=sys.stderr)
+        with contextlib.suppress(OSError):  # a closed stderr must not end the supervisor
+            print(f"root wake: tick failed ({type(exc).__name__}: {exc}); retrying", file=sys.stderr)
 
 
 def _recorded(con, run_id: str, token: str) -> bool:
     """True when an `office.reinstalled` event already carries this mark token."""
     return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='office.reinstalled' "
-                       "AND json_extract(payload_json, '$.mark')=?", (run_id, token)).fetchone() is not None
+                       "AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.mark') END = ?",
+                       (run_id, token)).fetchone() is not None
 
 
 def _recover_reinstall(con, run: dict) -> bool:
@@ -132,9 +134,9 @@ def _recover_reinstall(con, run: dict) -> bool:
         if not mark.exists():
             return False
         token = mark.read_text().strip()
-        current = state.get_run(con, run["id"])
-        if current and not state.is_terminal(current) and not _recorded(con, run["id"], token):
-            with db.transaction(con):
+        with db.transaction(con):  # the run check and the emit share one write transaction
+            current = state.get_run(con, run["id"])
+            if current and not state.is_terminal(current) and not _recorded(con, run["id"], token):
                 state.emit(con, current, "office.reinstalled",
                            "Office install was unavailable and is healthy again; resume this run from its current state",
                            payload={"mark": token})

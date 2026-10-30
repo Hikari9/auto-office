@@ -239,14 +239,15 @@ print(json.dumps({"result": result}))
     try:
         code, out = env.office("submit", cwd=wt, env=worker_env)
         assert code == 0, out
+        # Generous bound: the wake must happen, not happen fast. A 5 s bound failed under host load (SO67).
         start = time.monotonic()
-        while not marker.exists() and time.monotonic() - start < 5:
+        while not marker.exists() and time.monotonic() - start < 30:
             time.sleep(0.05)
         elapsed = time.monotonic() - start
         print(f"ISSUE_723_FAKE_HERDR_WAKE_LATENCY_MS={int(elapsed*1000)}")
-        assert marker.exists() and elapsed < 5, f"no wake within five seconds: {elapsed:.2f}s"
+        assert marker.exists() and elapsed < 30, f"no wake within thirty seconds: {elapsed:.2f}s"
         assert json.loads(marker.read_text())["agent"] == "root-claude"
-        while not responded.exists() and time.monotonic() - start < 10:
+        while not responded.exists() and time.monotonic() - start < 60:
             time.sleep(0.05)
         assert responded.exists(), (env.tmp / "root-wake.log")
         result = json.loads(responded.read_text())
