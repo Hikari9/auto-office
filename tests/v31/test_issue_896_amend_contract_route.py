@@ -58,6 +58,27 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
 
 
 @pytest.mark.approved
+@pytest.mark.parametrize("flags,needle", [
+    (("--contract",), "--contract"),
+    (("--requirements",), "--requirements"),
+    (("--add-accept", "calc.add(0, 0) == 0"), "--add-accept"),
+    (("--drop-accept", "calc.add(2, 3) == 5"), "--drop-accept"),
+    (("--add-check", "true"), "--add-check"),
+    (("--drop-check", "true"), "--drop-check"),
+    (("--set", "depends=none"), "--set"),
+    (("--reason", "why"), "--reason"),
+])
+def test_amend_route_refuses_amendment_flags_it_would_drop(live, flags, needle):
+    # A1: `amend route` must not drop an amendment-only flag and exit 0.
+    con = live.con()
+    before = _state(con)
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, *flags, env=EXTERNAL)
+    assert code == 4, out
+    assert needle in out and "nothing was recorded" in out, out
+    assert _state(con) == before
+
+
+@pytest.mark.approved
 def test_ordinary_amendment_with_route_is_refused(live):
     con = live.con()
     before = _state(con)

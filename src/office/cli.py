@@ -204,6 +204,17 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
+# `amend route` takes only --as, --quote, and --restart. These amend the plan, so `amend route` refuses them
+# instead of dropping them (#896).
+_ROUTE_AMEND_ONLY_FLAGS = {
+    "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
+    "drop_criterion": "--drop-criterion", "add_criterion": "--add-criterion", "drop_non_goal": "--drop-non-goal",
+    "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
+    "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
+    "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+}
+
+
 def _parser() -> argparse.ArgumentParser:
     def flags(**default):
         f = argparse.ArgumentParser(add_help=False)
@@ -1025,6 +1036,12 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                              reason=" ".join(args.reason or []).strip())
     if cmd == "amend" and args.scope == "route":
         from office import routechange
+        from office.state import Refused
+        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name)]
+        if given:
+            raise Refused("route-with-amendment-flags", f"{' '.join(given)} amend the plan, not a route; nothing was recorded",
+                          scope=args.delta[0] if args.delta else None, preserved="plan, contracts, and route unchanged",
+                          next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
                                         restart=args.restart)
