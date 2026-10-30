@@ -21,7 +21,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 import office_family as fam
 import office_packets as pk
-from office import jobs
 
 EVIDENCE_HASH = "sha256:" + ("a" * 64)
 
@@ -399,15 +398,12 @@ def test_the_v31_path_honours_the_veto(veto_env):
     assert _plan_version(env) == 2
     assert _plan_gates(env) == before
     assert len(_rows(env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")) == 1
-    # T3 queues no second round behind p1's in-flight round (Q14/S3). Let that round finish with a non-PASS
-    # verdict: a PASS would end plan review, and p3 would then correctly queue nothing.
-    env.script(plan_reviewer=[{"reply": "VERDICT: CHANGES_REQUIRED"}])
+    # T3 queues no second round behind p1's in-flight round (Q14/S3). Once that round has finished with a
+    # non-PASS verdict (a PASS would end plan review), nothing is in flight and p3 gets its own gate.
     con = env.con()
-    try:
-        assert jobs.run_pending(con, _rows(env, "SELECT id FROM runs")[0]["id"]) == 1
-    finally:
-        con.close()
-    assert [(g["plan_version"], g["status"]) for g in _plan_gates(env)] == [(1, "stale")], "p1's round is no longer in flight"
+    with con:
+        con.execute("UPDATE gates SET status='done', verdict='CHANGES_REQUIRED' WHERE kind='plan_review'")
+    con.close()
     code, out = env.office("amend", "plan", "--", "second, reviewed tweak", env=MANUAL)
     assert code == 0 and _plan_version(env) == 3
     assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"

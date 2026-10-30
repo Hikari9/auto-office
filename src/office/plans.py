@@ -648,6 +648,9 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
             # blocking until a round clears them. Any other verdict gives the current revision its round, except
             # ATTENTION, which the orchestrator decides (R11).
             verdict = outcome.get("verdict")
+            parsed: review_parse.Parsed | None = outcome.get("parsed")
+            for d in (parsed.defects if parsed is not None else []):
+                _record_plan_finding(con, current, gate, d, outcome.get("dispatch_id"), defect=True)
             if verdict == "ATTENTION":
                 state.emit(con, current, "plan.attention", f"PLAN REVIEW p{gate['plan_version']} answered ATTENTION on a "
                            f"superseded revision (p{current['plan_version']} is current): the orchestrator decides (R11)")
@@ -656,7 +659,8 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
                                  "ended_reason": f"PASS on p{gate['plan_version']} (superseded by p{current['plan_version']})"})
                 state.emit(con, current, "plan.pass", f"PLAN PASS p{gate['plan_version']} (superseded by "
                            f"p{current['plan_version']}): plan review ends")
-            elif queue_plan_review(con, current, current["plan_version"]) is None:
+            elif not review_in_flight(con, current) and queue_plan_review(con, current, current["plan_version"]) is None:
+                # A round still in flight already covers the current revision (Q14, S3); only a spent budget closes.
                 pr = dict(_pr(current))
                 _spend_budget_without_pass(con, state.get_run(con, run["id"]), pr, None)
                 state.update_run(con, run["id"], plan_review=pr)
