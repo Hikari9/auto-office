@@ -120,8 +120,14 @@ def test_stale_attention_does_not_requeue_the_current_revision(env):
     env.write_plan(PLAN_ONE + "\n")
     env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
     env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
-    env.ojson("status")  # the stale p2 review answers ATTENTION: the orchestrator decides, nothing queues
-    assert [g[0] for g in _plan_gates(env)] == [1, 2], _plan_gates(env)
+    code, data = env.ojson("status")  # the stale p2 review answers ATTENTION: the orchestrator decides, nothing queues
+    assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "stale", "ATTENTION")], _plan_gates(env)
+    con = env.con()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM events WHERE kind='plan.attention' AND audience='orchestrator' "
+                           "AND summary LIKE '%superseded revision%'").fetchone()[0] == 1
+    finally:
+        con.close()
 
 
 def test_initial_plan_defect_launches_nothing_until_independent_clearance(env):
