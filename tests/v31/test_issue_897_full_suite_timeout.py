@@ -125,6 +125,13 @@ def test_wrapper_timeout_keeps_the_check_limit_and_names_its_setting(con, tmp_pa
     assert summary.startswith("check timed out after 1800s; raise verification.check_timeout_seconds"), summary
 
 
+def test_loaded_exit_124_from_the_process_is_not_named_a_timeout(con, tmp_path, monkeypatch):
+    outcome, _ = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124, killed=False,
+                      out="tool exited 124\n", loaded="host load 90 exceeds 16 (8 CPUs)")
+    assert outcome["verdict"] == "UNAVAILABLE", outcome
+    assert "exited 124" in outcome["summary"] and "timed out" not in outcome["summary"], outcome
+
+
 def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path, monkeypatch):
     outcome, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124,
                             loaded="host load 90 exceeds 16 (8 CPUs)")

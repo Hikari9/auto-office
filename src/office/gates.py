@@ -630,7 +630,7 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": detail, "results": results,
                     "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
-            what = timed_out if killed else "hit a test-runner timeout"
+            what = timed_out if killed else "exited 124" if code == 124 else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
