@@ -168,6 +168,9 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
                               "status": status})
             if status in ("missing", "stale"):
                 stale.append(f"{kind} {row['id']} {status}: {row['path']}")
+    from office import routechange
+    routechange.sweep_recovered(con, r)  # same record as `office status`: a recovery is shown whichever runs first
+    recovered = routechange.recovery_lines(con, r)
     open_tasks, done_tasks = raw["tasks"]["open"], raw["tasks"]["done"]
     req = raw["req"]
     return _bound({
@@ -186,6 +189,7 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         "blocking_findings": [{**f, "summary": _clip(f["summary"])} for f in raw["findings"][:MAX_ITEMS]],
         "amendments": raw["amendments"],
         "authorizations": raw["auths"],
+        "route_recovered": recovered,
         "artifacts": artifacts,
         "events": [{**e, "summary": _clip(e["summary"])} for e in raw["events"][:MAX_ITEMS]],
         "events_truncated": len(raw["events"]) > MAX_ITEMS,
@@ -258,6 +262,7 @@ def render(snap: dict) -> list[str]:
         lines.append(f"amendment {a['id']} #{a['seq']} {a['class']} {a['status']}")
     for a in snap["authorizations"][:5]:
         lines.append(f"authorized {a['kind']} {a['target'] or ''} r{a['requirements_version']}")
+    lines.extend(snap["route_recovered"])
     bad = [a for a in snap["artifacts"] if a["status"] != "ok"]
     lines.append(f"artifacts: {len(snap['artifacts'])} referenced, {len(bad)} not verified ok (office inspect evidence)")
     for e in snap["events"]:

@@ -194,3 +194,15 @@ def test_a_later_recovery_of_the_same_route_shows_again_after_a_dispatch(plain):
 
 def test_route_recovered_wakes_the_root(plain):
     assert RECOVERED in root_wake.ACTIONABLE
+
+
+def test_context_names_the_recovered_route_until_a_dispatch_uses_or_passes_over_it(plain):
+    from office import context_snapshot
+    d = failed_route(plain)
+    expire(plain, d)
+    line = f"preferred route {d['triple']} is available again (demotion lapsed); the next review, rerun or dispatch " \
+           "ranks it normally"
+    assert line in context_snapshot.context(plain.con, run(plain)).lines  # context records the recovery itself
+
+    plain.dispatch("T2")
+    assert line not in context_snapshot.context(plain.con, run(plain)).lines
