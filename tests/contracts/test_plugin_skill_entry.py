@@ -178,7 +178,16 @@ def test_install_check_no_longer_stops_to_ask_approval():
 
 
 def test_install_check_explains_resetting_the_saved_choice():
-    assert 'rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"' in _install_check()
+    section = _install_check()
+    not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
+
+    assert 'Only if the user asks to be asked again, run `rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"`' in not_found
+
+
+def test_onboarding_doc_explains_resetting_the_saved_choice():
+    doc = (ROOT / "docs" / "onboarding.md").read_text(encoding="utf-8")
+
+    assert "to ask again, delete that file" in doc
 
 
 def test_install_check_keeps_stale_upgrade_guidance():
