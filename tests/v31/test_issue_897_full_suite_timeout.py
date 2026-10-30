@@ -14,7 +14,10 @@ GATE = {"id": "G1", "task_id": "T1"}
 CFG = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 7200}
 FULL = ["scripts/validate.sh", "./scripts/validate.sh", "bash scripts/validate.sh", "scripts/validate.sh --full",
         "bash -e scripts/validate.sh", "scripts/validate.sh --full > out.log 2>&1", "scripts/validate.sh --full 2>&1",
-        "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &", "scripts/validate.sh --full # note"]
+        "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &", "scripts/validate.sh --full # note",
+        "bash -o pipefail scripts/validate.sh", "cd x && scripts/validate.sh --full", "false || scripts/validate.sh --full",
+        "scripts/validate.sh --pr; scripts/validate.sh --full", "scripts/validate.sh --full && echo ok",
+        "2>&1 scripts/validate.sh --full", "(scripts/validate.sh --full)", 'echo "a|b" && scripts/validate.sh --full']
 
 
 @pytest.fixture
@@ -91,7 +94,9 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
 
 
 @pytest.mark.parametrize("command", ["scripts/validate.sh --pr > out.log 2>&1", "scripts/validate.sh --pr | tail -5",
-                                     "echo scripts/validate.sh", "pytest -q tests/x.py", "scripts/validate.sh --pr --full"])
+                                     "echo scripts/validate.sh", "pytest -q tests/x.py", "scripts/validate.sh --pr --full",
+                                     "cd x && scripts/validate.sh --pr", "echo 'scripts/validate.sh --full'",
+                                     "pytest -q tests/x.py ; echo done"])
 def test_non_full_suite_commands_keep_the_check_timeout(command):
     assert not verification_coverage.is_full_suite(command)
     assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
@@ -100,8 +105,8 @@ def test_non_full_suite_commands_keep_the_check_timeout(command):
 def _commit(repo, name, text):
     (repo / name).write_text(text)
     subprocess.run(["git", "-C", str(repo), "add", name], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name],
-                   check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                    "commit", "-q", "-m", name], check=True)
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
                           text=True).stdout.strip()
 
