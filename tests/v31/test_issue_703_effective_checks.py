@@ -38,7 +38,9 @@ def test_amended_task_check_and_explicit_run_check_reach_integration(env):
 
 
 def test_amended_run_check_replaces_superseded_integration_command(env):
-    original = 'python3 -c "raise RuntimeError(\'superseded-check\')"'
+    # Fails only with the task's change present (the base calc.py raises NotImplementedError), so the
+    # failure is attributable to the revision and not pre-existing on the base (#629).
+    original = 'python3 -c "import sys; sys.exit(1 if \'return a + b\' in open(\'calc.py\').read() else 0)"'
     amended = 'python3 -c "import calc; assert calc.add(10, 20) == 30"'
     plan = PLAN_ONE.replace("blast_radius: repo\n", f"blast_radius: repo\nchecks: {original}\n")
     approved_run(env, plan=plan, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],

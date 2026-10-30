@@ -142,7 +142,9 @@ def test_task_check_timeout_under_load_blocks_then_resume_reruns_it(env, monkeyp
 def test_run_checks_failing_on_a_moved_base_rebase_and_continue(env, monkeypatch):
     """Run checks that fail only because the base is stale do not discard the
     accepted work: integration rebases onto the moved main and re-checks there."""
-    plan = PLAN_STACKED.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: test -f MAIN_FIX\n", 1)
+    # Passes on the base (calc.py still raises) and fails once T1's change is composed without main's fix (#629).
+    plan = PLAN_STACKED.replace("blast_radius: repo\n",
+                                "blast_radius: repo\nchecks: ! grep -q 'return a + b' calc.py || test -f MAIN_FIX\n", 1)
     bare, _, _ = _run(env, monkeypatch, plan)
     con = env.con()
     try:
