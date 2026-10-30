@@ -361,6 +361,12 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import dispatch as dispatch_mod
     for line in dispatch_mod.headless_fallbacks(con, run):
         res.add(line)
+    replies = [] if state.is_terminal(run) else dispatch_mod.reply_pending(con, run)
+    hard = dispatch_mod.reply_hard_bound()
+    for r in replies:
+        if r["quiet"] < hard:
+            res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
+    stuck_reply = next((n for n in (_stuck_reply_next(r) for r in replies if r["quiet"] >= hard) if n), None)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
@@ -400,6 +406,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     res.next = next_action(con, run)
     if episodes:
         res.next = episodes[0]["next"]
+    elif stuck_reply:
+        res.next = stuck_reply
     elif (res.next.startswith(WAITING_ACTIONS) and not state.is_terminal(run) and _work_in_flight(con, run)
           and not root_wake.armed(con, run) and not wait_in_flight(run["id"])):
         # Nothing for the root to do and no one will wake it: it must block on `office wait`.
@@ -412,6 +420,15 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+def _stuck_reply_next(reply: dict) -> str | None:
+    """The command that relaunches a task's code review on the same revision once its reply stayed unsettled past the
+    hard bound (#918). None for other reviews, which keep their own `next:`."""
+    if reply["kind"] != "code_review" or not reply["task_id"]:
+        return None
+    return (f"office revoke {reply['id']}, then office review {reply['task_id']} "
+            "to relaunch the review on the same revision")
 
 
 def add_bug_hints(con, run: dict, res: Result) -> Result:
