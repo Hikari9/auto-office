@@ -74,16 +74,27 @@ def test_actual_routing_rejection_reasons_are_displayed_not_a_generic_failure():
     assert "no vision launch profile" in reason
     assert reason.index(primary_id) < reason.index(fallback_id)
 
-def test_allowed_primary_still_gets_real_image_proof_even_when_route_is_selectable(monkeypatch):
+
+def test_a_selectable_route_spends_no_vision_probe(monkeypatch):
+    """#845: a proven or user-allowed route already qualifies; do not probe every unproven candidate each gate."""
     primary = _candidate(0)
     probed = []
     monkeypatch.setattr(candidates, "route_role", lambda *_args, **_kwargs: {
         "status": "selected", "candidate": primary,
-        "request": {"candidates": [primary], "policy": {"quota_reserve_percent": 5}}})
-    monkeypatch.setattr(candidates, "role_policy", lambda *_: {"preferred_seed": []})
-    monkeypatch.setattr(adapters, "load_all", lambda: {"agy": {}})
-    monkeypatch.setattr(conformance, "proof_status", lambda *_: None)
-    monkeypatch.setattr(conformance, "probe_vision",
-                        lambda *_args: probed.append("image checked") or {"result": "pass"})
+        "request": {"candidates": [primary, _candidate(1)], "policy": {"quota_reserve_percent": 5}}})
+    monkeypatch.setattr(conformance, "probe_vision", lambda *_args: probed.append("probe") or {"result": "pass"})
     conformance.ensure_vision_route(object(), {"id": "run"}, {})
-    assert probed == ["image checked"]
+    assert probed == []
+
+
+def test_visual_chain_is_the_locked_order_and_deepseek_has_no_vision_profile():
+    """#910 acceptance gap: DeepSeek stays in the chain but cannot launch for images; routing must say so and move on."""
+    import yaml
+    from office import config
+    roles = config.load_yaml(config.default_config_path())["roles"]
+    assert [(e["harness"], e["model_id"], e["effort"]) for e in roles["visual_reviewer"]["preferred_seed"]] == [
+        ("agy", "gemini-3.8-flash", "low"), ("codex", "gpt-6.1-terra", "low"),
+        ("opencode", "deepseek-v4.1-flash-free", "max"), ("agy", "claude-sonnet-5-5", "medium")]
+    opencode = yaml.safe_load(open("adapters/seed/opencode.yaml"))
+    assert "vision" not in opencode["office_profiles"], \
+        "opencode gained a vision profile: probe it, then add the image-capable DeepSeek evidence and update this test"
