@@ -1,5 +1,8 @@
 """The Claude plugin ships the root auto-office skill, and its install check detects the CLI without blocking."""
 import json
+import os
+import re
+import subprocess
 from pathlib import Path
 
 from scripts.check_ecosystem import check_plugin_skills, frontmatter
@@ -14,6 +17,10 @@ def _hub():
 def _install_check():
     text = _hub()
     return text[text.index("## Install check"):text.index("## First-run onboarding")]
+
+
+def _saved_choice_write_command():
+    return re.search(r"\(in one shell command: `([^`]+)`", _install_check()).group(1)
 
 
 def test_claude_manifest_exposes_root_skill_and_skills_dir():
@@ -57,7 +64,7 @@ def test_install_check_asks_once_before_installing():
     not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
 
     assert "ask once" in not_found
-    assert not_found.index("Install the CLI (Recommended)") < section.index("`uv tool install auto-office`")
+    assert "uv tool install auto-office" not in not_found
 
 
 def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
@@ -76,10 +83,35 @@ def test_install_check_hands_off_to_the_lean_skill():
     assert "skills/auto-office-lean/SKILL.md" in section
 
 
-def test_install_check_finishes_an_incomplete_install_on_later_sessions():
+def test_install_check_asks_before_repairing_a_failed_doctor():
     section = _install_check()
+    found = section[section.index("- **Found:**"):section.index("- **Not found:**")]
 
-    assert "If doctor fails, finish the install (`office install --no-hooks`, `office doctor`); if either step fails, stop" in section
+    assert "If doctor fails, ask once, natively" in found
+    assert "**Repair the install**" in found
+    assert "repair only on yes" in found
+
+
+def test_install_check_tells_the_user_how_to_fix_path_after_install():
+    assert "uv tool update-shell" in _install_check()
+
+
+def test_saved_choice_write_command_saves_lean_under_xdg_config(tmp_path):
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
+
+    subprocess.run(["sh", "-c", _saved_choice_write_command()], env=env, check=True)
+
+    assert (tmp_path / "cfg" / "auto-office" / "install-choice").read_text(encoding="utf-8") == "lean"
+
+
+def test_saved_choice_write_failure_exits_nonzero(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "XDG_CONFIG_HOME": str(blocker)}
+
+    result = subprocess.run(["sh", "-c", _saved_choice_write_command()], env=env, capture_output=True)
+
+    assert result.returncode != 0
 
 
 def test_install_check_no_longer_stops_to_ask_approval():
@@ -132,6 +164,14 @@ def test_ecosystem_check_rejects_absolute_and_file_entries(tmp_path):
     _write_manifest(tmp_path, [str(tmp_path), "./SKILL.md"])
 
     assert len(check_plugin_skills(tmp_path)) == 2
+
+
+def test_ecosystem_check_reports_null_byte_entries_without_crashing(tmp_path):
+    _write_manifest(tmp_path, ["./\x00"])
+
+    assert check_plugin_skills(tmp_path) == [
+        ".claude-plugin/plugin.json: skills entry './\\x00' must be a ./ directory inside the plugin",
+    ]
 
 
 def test_ecosystem_check_rejects_non_list_skills(tmp_path):

@@ -137,8 +137,9 @@ def check_plugin_skills(root=ROOT):
     errors = []
     plugin_root = root.resolve()
     for entry in skills:
-        target = (root / entry).resolve()
-        if not entry.startswith('./') or not target.is_dir() or not target.is_relative_to(plugin_root):
+        valid = entry.startswith('./') and '\x00' not in entry
+        target = (root / entry).resolve() if valid else None
+        if not valid or not target.is_dir() or not target.is_relative_to(plugin_root):
             errors.append(f'.claude-plugin/plugin.json: skills entry {entry!r} must be a ./ directory inside the plugin')
     return errors
 

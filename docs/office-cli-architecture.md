@@ -159,7 +159,7 @@ For disabled hooks, absent runs, or unbound sessions, the hook shim executes wit
   - Scans and reports errors from `<state_dir>/hook-errors.jsonl`.
 - `office uninstall`:
   - Parses harness configuration files and removes only Office-managed entries whose command argv contains `--office-managed` (R4).
-  - Removes package skill symlinks.
+  - Removes Office-managed harness entries; the plugin owns skill delivery, so no skill symlinks exist to remove.
   - Creates a timestamped backup before modifying any configuration.
   - Retains run state directories and `runs.db` unless `--purge` is passed.
 
@@ -279,7 +279,7 @@ office-skills/
 │       ├── hooks/               # Fast-path shims and portable event handlers (D139-*, D141-*)
 │       ├── helpers/             # Packaged bash helper scripts (D142-8)
 │       ├── resources/           # Schemas, config defaults, catalog seeds, protocol docs (D142-2)
-│       └── skills/              # Packaged skill definitions symlinked to harnesses (D142-3)
+│       └── skills/              # Packaged skill definitions shipped by the plugin (D142-3)
 └── scripts/                     # Deprecation shims (retained for one release)
     └── office_runtime.py        # Thin wrapper: from office.runtime import main; main()
 ```
@@ -415,7 +415,7 @@ Every decision code from `decisions-all.md` appears exactly once in this index:
 | **D141-6** | Explicit CLI contract and per-harness fallbacks | [§4.5 Fallback Mechanisms per Harness (D141-6)](#45-fallback-mechanisms-per-harness-d141-6) |
 | **D142-1** | Package layout and `uv tool install` distribution | [§5.1 Package Layout Tree (D142-1, D142-2, D142-8)](#51-package-layout-tree-d142-1-d142-2-d142-8) |
 | **D142-2** | Modular runtime layout and package data resources | [§5.1 Package Layout Tree (D142-1, D142-2, D142-8)](#51-package-layout-tree-d142-1-d142-2-d142-8) |
-| **D142-3** | Single version identifier and harness skill symlinks | [§5.2 Installation and Upgrade Sequences](#52-installation-and-upgrade-sequences) |
+| **D142-3** | Single version identifier and plugin skill delivery | [§5.2 Installation and Upgrade Sequences](#52-installation-and-upgrade-sequences) |
 | **D142-4** | Upgrade sequence, hash pinning, and version drift handling | [§5.3 Versioning and Drift Policy (D142-3, D142-4)](#53-versioning-and-drift-policy-d142-3-d142-4) |
 | **D142-5** | Uninstallation sequence and state persistence | [§5.2 Installation and Upgrade Sequences](#52-installation-and-upgrade-sequences) |
 | **D142-6** | `office_shortcut.sh` deprecation and binary coexistence | [§3.6 Legacy Migration (D139-6, D142-6)](#36-legacy-migration-d139-6-d142-6) |
