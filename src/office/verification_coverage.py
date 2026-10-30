@@ -115,7 +115,7 @@ def is_full_suite(command: str) -> bool:
 
     Redirections, pipes, backgrounding and trailing comments do not change which suite runs,
     so the simple command is cut before them. Coverage evidence keeps the strict matcher above."""
-    head =re.split(r"\|\||\d*[|;&<>\n]|(?:^|\s)#", command, maxsplit=1)[0]
+    head = re.split(r"\|\||\d*[|;&<>\n]|(?:^|\s)#", command, maxsplit=1)[0]
     words = _tokens(head)
     if words[:1] in (["bash"], ["sh"]):
         words = words[1:]
