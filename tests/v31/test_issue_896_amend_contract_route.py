@@ -65,6 +65,7 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
     (("--reason", "why"), "--reason"),
     (("--reason", ""), "--reason"),
     (("--add-criterion", "x"), "--add-criterion"),
+    (("--add-criterion", ""), "--add-criterion"),
     (("--drop-criterion", "x"), "--drop-criterion"),
     (("--add-non-goal", "x"), "--add-non-goal"),
     (("--drop-non-goal", "x"), "--drop-non-goal"),
@@ -73,6 +74,8 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
     (("--add-check", "true"), "--add-check"),
     (("--drop-check", "true"), "--drop-check"),
     (("--set", "depends=none"), "--set"),
+    (("--set", ""), "--set"),
+    (("--add-check", ""), "--add-check"),
     (("--redirect", "P1"), "--redirect"),
     (("--redirect", ""), "--redirect"),
     (("--root-cause", ""), "--root-cause"),
@@ -95,11 +98,15 @@ def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
 
     from office import cli
 
-    (sub,) = [a for a in cli._parser()._actions if isinstance(a, argparse._SubParsersAction)]
-    amend_flags = {opt for a in sub.choices["amend"]._actions for opt in a.option_strings if opt.startswith("--")}
-    kept_by_route = {"--as", "--quote", "--restart", "--run", "--state-dir", "--harness", "--session", "--json",
-                     "--verbose", "--help"}
-    assert amend_flags - kept_by_route == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
+    def options(parser):
+        return {opt for a in parser._actions if not isinstance(a, argparse._HelpAction) for opt in a.option_strings
+                if opt.startswith("--")}
+
+    top = cli._parser()
+    (sub,) = [a for a in top._actions if isinstance(a, argparse._SubParsersAction)]
+    global_flags = options(top)  # the shared --run/--state-dir/... flags every subcommand inherits
+    amend_specific = options(sub.choices["amend"]) - global_flags
+    assert amend_specific - {"--as", "--quote", "--restart"} == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
 
 
 @pytest.mark.approved
