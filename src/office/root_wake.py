@@ -39,6 +39,8 @@ ACTIONABLE = frozenset({
     "ctx.high",
     # review gates past a bound (#919)
     "review.queued_too_long", "review.stalled", "review.closed_unread",
+    # the install was rebuilt under a running root wake and is healthy again (#920)
+    "office.reinstalled",
 })
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
@@ -79,6 +81,37 @@ def _flock(key: str, path: Path):
         finally:
             del held[key]
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _reinstall_mark(run_id: str) -> Path:
+    return paths.run_dir(run_id) / "root-wake-reinstall.mark"
+
+
+def _mark_reinstall(run_id: str) -> bool:
+    """Note that this run's supervisor saw the install mid-rebuild. True only for the first mark of a rebuild."""
+    mark = _reinstall_mark(run_id)
+    if mark.exists():
+        return False
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.touch()
+    return True
+
+
+def _recover_reinstall(con, run: dict) -> bool:
+    """Record one `office.reinstalled` event after a healthy tick ends a rebuild the supervisor saw (#920).
+
+    The mark is removed in the same transaction that appends the event, under the run lock, so
+    the supervisor and the watchdog thread cannot both record the same recovery."""
+    mark = _reinstall_mark(run["id"])
+    if not mark.exists():
+        return False
+    with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"), db.transaction(con):
+        if not mark.exists():
+            return False
+        state.emit(con, run, "office.reinstalled",
+                   "Office install was rebuilt and is healthy again; resume this run from its current state")
+        mark.unlink()
+    return True
 
 
 def _pane_lock(pane: str):
@@ -301,6 +334,10 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
     for e in reversed(candidates):
         if e["kind"] == "ctx.high":
             return (sha256_obj(("ctx.high", e["seq"], e["summary"])), e["summary"], human)
+    for e in reversed(candidates):
+        if e["kind"] == "office.reinstalled":
+            return (sha256_obj(("office.reinstalled", e["seq"])),
+                    f"office.reinstalled: {e['summary']}. Run `office --run {run['id']} context` first.", human)
 
     # A confirmed stall is only live while its fingerprint remains the latest
     # active watchdog state. Clearing the stall makes old event rows inert.
@@ -472,7 +509,7 @@ def poll(con, run: dict) -> str:
                    "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
                    "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
                    + guard)
-            if action.startswith("ctx-high:"):
+            if action.startswith(("ctx-high:", "office.reinstalled:")):
                 msg += "\n\n" + action
             # Herdr prompt landed != root observation. The next `office context`
             # advances the distinct observed cursor; no repeated model keepalives.
@@ -617,7 +654,10 @@ def _watchdog_loop(run_id: str) -> None:
             if not run or state.is_terminal(run) or not _binding(con, run_id):
                 return
             watchdog_tick(con, run)
+            _recover_reinstall(con, run)
         except Exception as exc:
+            if isinstance(exc, ImportError) and _mark_reinstall(run_id):
+                print("root wake: install is being rebuilt; retrying", file=sys.stderr)
             # Monitoring failures never mean a worker is stalled. Keep normal
             # completion notification healthy and retry on the next slow tick.
             print(f"root wake watchdog probe unavailable: {type(exc).__name__}", file=sys.stderr)
@@ -679,7 +719,13 @@ def supervise(run_id: str, *, once: bool = False) -> int:
                                 "lease_until=NULL, last_error='claim lease expired; inspect pane before re-attach' "
                                 "WHERE run_id=? AND state='claimed' AND lease_until<=?",
                                 (run_id, now_iso()))
-                poll(con, run)
+                try:
+                    poll(con, run)
+                    _recover_reinstall(con, run)
+                except ImportError as exc:
+                    # The install is being replaced under this process (#833, #920): keep supervising.
+                    if _mark_reinstall(run_id):
+                        print(f"root wake: install is being rebuilt ({exc}); retrying", file=sys.stderr)
             finally:
                 con.close()
             if once:

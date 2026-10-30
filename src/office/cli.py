@@ -635,6 +635,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "hook":
         from office import hooks
         return hooks.main(argv[1:])
+    if version.rebuilding_reason():  # after the hook fast path, which never needs the version probe (#920)
+        print(version.rebuild_line(), file=sys.stderr)
+        return version.REBUILD_EXIT_CODE
     from office.state import OfficeError
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)
