@@ -3,6 +3,7 @@ keeps check_timeout_seconds, and a timed-out check names the setting to raise.""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,14 @@ def test_full_suite_never_gets_less_than_the_check_timeout(con, tmp_path, monkey
 def test_check_timeout_defaults_when_unset():
     assert gates.check_timeout({}, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
     assert gates.check_timeout({}, "pytest -q") == (1800, "check_timeout_seconds")
+
+
+def test_no_src_module_reads_job_timeout_seconds():
+    # The job timeout covers the full suite only because nothing enforces it. If a reader is added,
+    # it must be at least check_timeout for every check it runs, or it cuts the full suite short.
+    readers = [p.name for p in Path(gates.__file__).parent.rglob("*.py")
+               if "job_timeout_seconds" in p.read_text(encoding="utf-8")]
+    assert readers == [], f"job_timeout_seconds is read by {readers}; make it >= check_timeout for the full suite"
 
 
 @pytest.mark.parametrize("command, limit, setting", [
