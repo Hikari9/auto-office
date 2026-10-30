@@ -35,7 +35,8 @@ def _state(con):
         "plan_version": con.execute("SELECT plan_version FROM runs WHERE id=?", (run_id,)).fetchone()[0],
         "amendments": con.execute("SELECT COUNT(*) FROM amendments WHERE run_id=?", (run_id,)).fetchone()[0],
         "dispatches": [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at")],
-        "route_events": con.execute("SELECT COUNT(*) FROM events WHERE kind='route.changed'").fetchone()[0],
+        "events": [tuple(r) for r in con.execute("SELECT kind, summary FROM events WHERE run_id=? ORDER BY seq", (run_id,))],
+        "outbox": [tuple(r) for r in con.execute("SELECT kind FROM outbox WHERE run_id=?", (run_id,))],
         "task_route": json.loads(con.execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()[0] or "null"),
     }
 
