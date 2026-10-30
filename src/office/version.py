@@ -146,15 +146,11 @@ REBUILD_EXIT_CODE = 75
 REBUILD_RETRY_SECONDS = 5
 
 
-def rebuilding_reason(*, fresh: bool = False) -> str | None:
+def rebuilding_reason() -> str | None:
     """Why this process cannot resolve its install right now, else None.
 
     Only an import or read failure counts as a rebuild. A bad OFFICE_VERSION_OVERRIDE
-    stays a RuntimeError: that is configuration, and retrying it cannot help. `fresh`
-    recomputes the identity instead of reusing the one this process cached at startup,
-    so a replacement that began after startup is seen too."""
-    if fresh and hasattr(current, "cache_clear"):
-        current.cache_clear()
+    stays a RuntimeError: that is configuration, and retrying it cannot help."""
     try:
         current()
     except (ImportError, OSError) as exc:

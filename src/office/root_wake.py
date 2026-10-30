@@ -88,17 +88,20 @@ def _reinstall_mark(run_id: str) -> Path:
 
 
 def _mark_reinstall(run_id: str) -> bool:
-    """Open a recovery episode for this run. True only for the first mark; the exclusive create makes that atomic."""
+    """Open a recovery episode for this run. True only for the first mark.
+
+    The token goes into a temp file that is hard-linked into place, so the mark never exists without its
+    token. Any OSError means the episode cannot be recorded, or one is already open; the caller keeps running."""
     mark = _reinstall_mark(run_id)
+    tmp = mark.with_name(f"{mark.name}.{uuid.uuid4().hex}.tmp")
     try:
-        mark.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return False
+        tmp.write_text(uuid.uuid4().hex)
+        os.link(tmp, mark)
     except OSError:
-        return False  # the episode cannot be recorded; the supervisor keeps running regardless
-    with os.fdopen(fd, "w") as fh:
-        fh.write(uuid.uuid4().hex)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
     return True
 
 
@@ -110,12 +113,18 @@ def _tick_failed(run_id: str, exc: Exception) -> None:
         print(f"root wake: tick failed ({type(exc).__name__}: {exc}); retrying", file=sys.stderr)
 
 
+def _recorded(con, run_id: str, token: str) -> bool:
+    """True when an `office.reinstalled` event already carries this mark token."""
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='office.reinstalled' "
+                       "AND json_extract(payload_json, '$.mark')=?", (run_id, token)).fetchone() is not None
+
+
 def _recover_reinstall(con, run: dict) -> bool:
     """Record one `office.reinstalled` event after a healthy tick ends an episode opened by `_tick_failed` (#920).
 
-    The event carries the mark's token and the mark is removed only after the event commits. A crash between
-    commit and unlink finds the token already recorded, so it removes the mark without recording again. The
-    run lock serializes the supervisor and the watchdog thread."""
+    The event carries the mark's token, and the mark is removed only after the event commits. A crash or a
+    failed unlink after commit leaves the token recorded, so the retry removes the mark without recording
+    again. A run that has ended gets no wake. The run lock serializes the supervisor and the watchdog thread."""
     mark = _reinstall_mark(run["id"])
     if not mark.exists():
         return False
@@ -123,12 +132,11 @@ def _recover_reinstall(con, run: dict) -> bool:
         if not mark.exists():
             return False
         token = mark.read_text().strip()
-        recorded = con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='office.reinstalled' "
-                               "AND payload_json LIKE ?", (run["id"], f'%"{token}"%')).fetchone()
-        if not recorded:
+        current = state.get_run(con, run["id"])
+        if current and not state.is_terminal(current) and not _recorded(con, run["id"], token):
             with db.transaction(con):
-                state.emit(con, run, "office.reinstalled",
-                           "Office install was rebuilt and is healthy again; resume this run from its current state",
+                state.emit(con, current, "office.reinstalled",
+                           "Office install was unavailable and is healthy again; resume this run from its current state",
                            payload={"mark": token})
         mark.unlink()
     return True
