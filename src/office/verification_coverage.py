@@ -99,11 +99,21 @@ def _tiered_repo(repo: Path, commit: str) -> list[str]:
     return [name for name in ("integration", "legacy", "slow") if name in conftest]
 
 
-def _is_validate_script(command: str) -> bool:
+def _validate_words(command: str) -> list[str]:
     words = _tokens(command)
     if words[:1] in (["bash"], ["sh"]):
         words = words[1:]
-    return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
+    return words
+
+
+def _is_validate_script(command: str) -> bool:
+    return _validate_words(command) in (["scripts/validate.sh"], ["./scripts/validate.sh"])
+
+
+def is_full_suite(command: str) -> bool:
+    """The full regression run `--pr` does not replace: bare `scripts/validate.sh` or `--full`."""
+    return _is_validate_script(command) or _validate_words(command) in (
+        ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
 
 
 _SCOPED_GATE_SHA256 = {

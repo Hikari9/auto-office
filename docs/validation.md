@@ -12,6 +12,8 @@ Scoped validation is a change-relevant check, not a full-suite pass. The pre-pus
 
 Run `scripts/validate.sh --full` for release validation, test infrastructure changes, deleted or renamed tests, or when a task explicitly requires the full regression suite. The full command runs all tests under `tests/` with `--all`; it records a full-suite result only when the checked tree remains unchanged.
 
+Office runs the full suite (bare `scripts/validate.sh` or `--full`) under `verification.full_suite_timeout_seconds` (default 7200) or `check_timeout_seconds`, whichever is larger. A `--pr` check keeps `check_timeout_seconds` (default 1800). A timed-out check names the limit it hit and the setting to raise. Office does not re-run it automatically: a timeout under host load blocks the task until `office resume`.
+
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
 
 ## Default pytest measurement

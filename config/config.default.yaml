@@ -338,6 +338,9 @@ verification:
   no_progress_repeats: 2
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
+  # Full suite (bare scripts/validate.sh or --full) runs under this limit or
+  # check_timeout_seconds, whichever is larger. --pr keeps check_timeout_seconds.
+  full_suite_timeout_seconds: 7200
   # Host-wide cap on check suites running at once (task, run, and integration
   # checks across every run). 0 = max(1, CPUs // 4). Parallel full suites push
   # load past the CPU count and turn per-test timeouts into flakes.
