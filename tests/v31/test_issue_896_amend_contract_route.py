@@ -45,6 +45,7 @@ def _state(con):
 @pytest.mark.parametrize("route_args", [
     ("--as", ROUTE, "--quote", QUOTE),
     ("--as", ROUTE),
+    ("--restart",),
 ])
 def test_contract_amendment_with_route_is_refused_and_records_nothing(live, route_args):
     # A valid contract edit, so the only thing wrong with the amendment is its route.
@@ -110,10 +111,25 @@ def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
 
 
 @pytest.mark.approved
-def test_ordinary_amendment_with_route_is_refused(live):
+@pytest.mark.parametrize("route_args,needle", [
+    (("--as", ROUTE, "--quote", QUOTE), "--as"),
+    (("--restart",), "--restart"),
+])
+def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
     con = live.con()
     before = _state(con)
-    code, out = live.office("amend", "T1", "--as", ROUTE, "--quote", QUOTE, "--", "tweak T1", env=EXTERNAL)
+    code, out = live.office("amend", "T1", *route_args, "--", "tweak T1", env=EXTERNAL)
     assert code == 4, out
-    assert "amend route" in out, out
+    assert needle in out and "amend route" in out, out
     assert _state(con) == before
+
+
+@pytest.mark.approved
+def test_amend_route_with_as_relaunches_on_the_named_route(live):
+    # The positive counterpart: `amend route` keeps working and records the named route.
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, env=EXTERNAL)
+    assert code == 0, out
+    con = live.con()
+    (row,) = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at")]
+    assert row["triple"] == "claude@1/sonnet@high" and row["effort"] == "high", row
+    assert json.loads(row["route_json"])["route_change"]["quote"] == QUOTE

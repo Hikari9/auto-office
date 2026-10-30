@@ -92,7 +92,7 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
           drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
           drop_non_goals: list[str] | None = None, add_non_goals: list[str] | None = None,
           no_review: bool = False, reason: str | None = None, edits: dict | None = None,
-          route_as: str | None = None) -> Result:
+          route_as: str | None = None, restart: bool = False) -> Result:
     """`edits` ({add_accept, drop_accept, add_checks, drop_checks, set_fields}) change the named tasks' structured
     contract in the plan itself (`planfile.edit_task`), so the amendment is enforced, not only delivered as prose.
     `redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
@@ -102,14 +102,15 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     (`office amend T1,T2 --requirements ...`) forces delivery to those.
     `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment. It
     matters only while a plan-review cycle is open: once it closes, no amendment is reviewed (#418).
-    `route_as` is refused here: a route changes only through `office amend route` (#896)."""
+    `route_as` and `restart` are refused here: a route changes only through `office amend route` (#896)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
-    if route_as is not None:
+    if route_as is not None or restart:
         from office import routechange
-        raise Refused("route-not-amendment", f"--as {route_as!r} changes a task's route, and no contract or ordinary "
-                      "amendment changes a route; nothing was recorded", scope=scope,
+        flag = f"--as {route_as!r}" if route_as is not None else "--restart"
+        raise Refused("route-not-amendment", f"{flag} belongs to a route change, and no contract or ordinary amendment "
+                      "makes one; nothing was recorded", scope=scope,
                       preserved="plan, contracts, and route unchanged", next_step=routechange.USAGE)
     if not delta or not delta.strip():
         raise Usage("missing-delta", "an amendment needs a delta", next_step='office amend <scope> -- "<delta>"')
