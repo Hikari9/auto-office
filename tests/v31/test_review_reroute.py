@@ -726,7 +726,7 @@ def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1
     monkeypatch.setattr(gates, "_agent_alive", lambda name: True)
     sent = []
     monkeypatch.setattr(dispatch, "submit_prompt",
-                        lambda name, text, pane=None: sent.append((name, text, pane, bool(in_fence))) or landed)
+                        lambda name, text, pane=None, guard=None, max_enter_tries=None, **kw: sent.append((name, text, pane, bool(in_fence))) or landed)
     monkeypatch.setattr(dispatch, "fenced_pane", fence)
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
