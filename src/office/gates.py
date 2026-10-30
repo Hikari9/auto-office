@@ -556,8 +556,9 @@ def check_timeout(cfgv: dict, command: str) -> tuple[int, str]:
     larger. The setting is the one that binds, so a timeout names what to raise."""
     check = int(cfgv.get("check_timeout_seconds", 1800))
     if verification_coverage.is_full_suite(command):
-        full = cfgv.get("full_suite_timeout_seconds")
-        full = 7200 if full is None else int(full)
+        full = int(cfgv.get("full_suite_timeout_seconds") or 0)
+        if full <= 0:  # unset, blank, or non-positive: the default
+            full = 7200
         if full >= check:
             return full, "full_suite_timeout_seconds"
     return check, "check_timeout_seconds"
@@ -671,10 +672,10 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)
         try:
-            stdout, _ = proc.communicate(timeout=10)
+            stdout, stderr = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
-            stdout = ""
-        return 124, _TimedOut(f"timed out after {timeout}s\n{stdout or ''}")
+            stdout, stderr = "", ""
+        return 124, _TimedOut(f"timed out after {timeout}s\n{(stdout or '') + (stderr or '')}")
 
 
 def host_overloaded() -> str | None:

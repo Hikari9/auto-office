@@ -3,6 +3,7 @@ keeps check_timeout_seconds, and a timed-out check names the setting to raise.""
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -104,9 +105,10 @@ def test_null_full_suite_setting_falls_back_to_the_default():
     assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
 
 
-def test_explicit_zero_full_suite_setting_does_not_replace_the_check_timeout():
-    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 0}
-    assert gates.check_timeout(cfg, "scripts/validate.sh") == (1800, "check_timeout_seconds")
+@pytest.mark.parametrize("setting", [0, "", -5])
+def test_non_positive_or_blank_full_suite_setting_means_the_default(setting):
+    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": setting}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
 
 
 def test_no_src_module_reads_job_timeout_seconds():
@@ -194,6 +196,14 @@ def test_real_check_exit_124_is_a_plain_result_not_a_kill():
 def test_real_kill_returns_a_timed_out_result():
     code, out = gates._run_check("sleep 5", Path("."), 1, {"PATH": "/usr/bin:/bin"})
     assert code == 124 and isinstance(out, gates._TimedOut) and out.startswith("timed out after 1s"), out
+
+
+def test_kill_takes_the_whole_process_group():
+    # A grandchild holds the pipe; killing only the shell leaves communicate waiting out its 10s grace.
+    started = time.monotonic()
+    code, out = gates._run_check("sh -c 'sleep 5 & sleep 5'", Path("."), 1, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and isinstance(out, gates._TimedOut)
+    assert time.monotonic() - started < 4, "the kill did not reach the grandchild"
 
 
 def _commit(repo, name, text):
