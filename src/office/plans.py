@@ -644,14 +644,16 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
                                                  "verdict": outcome.get("verdict"), "status": outcome.get("status")})
         if not contract.is_convergence(current) and review_required(current) and not _pr(current).get("ended"):
             # v3.1 (Q14, S3): a PASS on an older revision ends plan review and the current revision's deltas
-            # continue with no review job. Any other verdict leaves the review open, so the current revision
-            # gets its round.
-            if outcome.get("verdict") == "PASS":
+            # continue with no review job, unless a plan defect is still open: defects on older revisions stay
+            # blocking until a round clears them. Any other verdict gives the current revision its round, except
+            # ATTENTION, which the orchestrator decides (R11).
+            verdict = outcome.get("verdict")
+            if verdict == "PASS" and not open_defects(con, run["id"]):
                 state.update_run(con, run["id"], plan_review={**_pr(current), "ended": True,
                                  "ended_reason": f"PASS on p{gate['plan_version']} (superseded by p{current['plan_version']})"})
                 state.emit(con, current, "plan.pass", f"PLAN PASS p{gate['plan_version']} (superseded by "
                            f"p{current['plan_version']}): plan review ends")
-            else:
+            elif verdict != "ATTENTION":
                 queue_plan_review(con, current, current["plan_version"])
         return
     if contract.is_convergence(run) and gate["status"] == "cancelled":

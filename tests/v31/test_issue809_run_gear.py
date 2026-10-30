@@ -433,9 +433,13 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
     # The M slate leads with the effective policy's seed routes the pool holds (#871), not a frozen tuple.
-    seed = [e["model_id"] for e in executor_slates.ideal_seed("M") if e["model_id"] in {c["model_id"] for c in pool}]
+    pooled = {(c["model_id"], c["harness"]) for c in pool}
+    seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
+            if (e["model_id"], e["harness"]) in pooled]
+    assert seed, "the M seed must name at least one pooled route"
     m_slate = decide("M", pool, gear="M")["selection_disclosure"]["slate"]
-    assert {e["route"].split("/", 1)[1].split("@")[0] for e in m_slate[:len(seed)]} == set(seed), m_slate
+    assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed)]} == \
+        {(harness, model) for model, harness in seed}, m_slate
     # On XS the Sonnet pair leads, and the same-model agy route is recorded as the self-fallback.
     xs = decide("XS", pool, gear="XS")
     assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
