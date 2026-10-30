@@ -120,7 +120,7 @@ def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
     before = _state(con)
     code, out = live.office("amend", "T1", *route_args, "--", "tweak T1", env=EXTERNAL)
     assert code == 4, out
-    assert "route-not-amendment" in out and needle in out, out
+    assert "route-not-amendment" in out and needle in out and "amend route" in out, out
     assert _state(con) == before
 
 
@@ -140,12 +140,18 @@ def test_amend_route_with_as_relaunches_on_the_named_route(live):
     ("--as", ROUTE, "--quote", QUOTE),
     ("--restart", "--as", ROUTE, "--quote", QUOTE),
 ])
-def test_a_worker_cannot_change_its_own_route(live, route_args):
-    # The worker env is the one a dispatch launches with; `amend route` must refuse it, not record a user route change.
+@pytest.mark.parametrize("identity", [
+    ("OFFICE_DISPATCH_ID", "OFFICE_ROLE"),
+    ("OFFICE_ROLE",),
+])
+def test_a_worker_cannot_change_its_own_route(live, route_args, identity):
+    # The worker env is the one a dispatch launches with; `amend route` must refuse it when any worker
+    # marker is set, not record a user route change. A worker that lost OFFICE_DISPATCH_ID still has OFFICE_ROLE.
     con = live.con()
     d = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
-    worker = {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
-              "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
+    markers = {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
+               "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
+    worker = {k: markers[k] for k in (*identity, "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_JOBS")}
     before = _state(con)
     code, out = live.office("amend", "route", "T1", *route_args, env=worker)
     assert code == 4, out

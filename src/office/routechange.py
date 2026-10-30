@@ -25,7 +25,7 @@ DECLARABLE = (*PENDING, "accepted")
 
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
                  restart: bool = False) -> Result:
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-change-route", "a worker cannot change its own route; the orchestrator does, on the user's words",
                       next_step="office submit")
     if not target or not as_route:
