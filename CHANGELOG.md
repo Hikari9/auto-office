@@ -5,7 +5,7 @@ One line or short list per version, newest first. The version itself lives only 
 ## 3.15.0
 
 - fix(visual): refresh proven reviewers immediately, probe eligible fallbacks beyond four, preserve rejection reasons in status, and share lane-review helpers (#910).
-- fix(questions): prefer durable `office raise` and detect active Stalled workflow option menus in the orchestrator wait loop (#911).
+- fix(questions): worker brief prefers durable `office raise`; the real AskUserQuestion menu from rock-pages e789954a T6 is pinned as a wake fixture, since the footer parser already detects it (#911).
 
 ## 3.14.0
 
