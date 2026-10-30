@@ -649,8 +649,10 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
             # ATTENTION, which the orchestrator decides (R11).
             verdict = outcome.get("verdict")
             parsed: review_parse.Parsed | None = outcome.get("parsed")
-            for d in (parsed.defects if parsed is not None else []):
-                _record_plan_finding(con, current, gate, d, outcome.get("dispatch_id"), defect=True)
+            if parsed is not None:
+                _stable_plan_codes(con, current, parsed)
+                for d in parsed.defects:
+                    _record_plan_finding(con, current, gate, d, outcome.get("dispatch_id"), defect=True)
             if verdict == "ATTENTION":
                 state.emit(con, current, "plan.attention", f"PLAN REVIEW p{gate['plan_version']} answered ATTENTION on a "
                            f"superseded revision (p{current['plan_version']} is current): the orchestrator decides (R11)")
