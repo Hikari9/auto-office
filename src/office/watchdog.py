@@ -239,8 +239,8 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
         task = g["task_id"]
         # Revoke only a queue nothing will drain; a live or unknown job is inspected first.
         nxt = (f"office revoke {task}, then office review {task} to relaunch on the same revision" if owner == "queued"
-               else f"office status; if the review is confirmed stuck, office revoke {task}, then office review {task} "
-                    "on the same revision")
+               else f"office wait (review job is {owner}); revoke only once it is confirmed dead: "
+                    f"office revoke {task}, then office review {task} on the same revision")
         out.append({"kind": "review.queued_too_long", "episode": g["id"],
                     "text": f"{task} {g['kind']} review {g['id']} queued {int(age)}s past its bound ({detail})",
                     "next": nxt})
@@ -261,9 +261,13 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
         # until status has shown this episode (the per-gate read cursor); other events never clear it.
         cursor = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?",
                              (run["id"], f"{REVIEW_READ}:{g['id']}")).fetchone()
-        verdict = con.execute("SELECT seq FROM events WHERE run_id=? AND task_id IS ? AND created_at>=? AND seq>? AND "
-                              "(kind LIKE 'gate.%' OR kind LIKE 'plan.%' OR kind LIKE 'convergence.%') "
-                              "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"],
+        # Bounded by the next review of the same task (or plan) closing: its verdict is not this gate's.
+        nxt = con.execute(f"SELECT MIN(finished_at) FROM gates WHERE run_id=? AND task_id IS ? AND status='done' "
+                          f"AND finished_at>? AND kind IN ({marks})",
+                          (run["id"], g["task_id"], g["finished_at"], *REVIEW_GATE_KINDS)).fetchone()[0] or "9999-12-31"
+        verdict = con.execute("SELECT seq FROM events WHERE run_id=? AND task_id IS ? AND created_at>=? AND created_at<? "
+                              "AND seq>? AND (kind LIKE 'gate.%' OR kind LIKE 'plan.%' OR kind LIKE 'convergence.%') "
+                              "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"], nxt,
                                                        cursor[0] if cursor else 0)).fetchone()
         if verdict is None:
             continue

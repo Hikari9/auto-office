@@ -346,8 +346,8 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                 # Retries only a round of an open cycle; a closed one stays closed (plans.can_auto_queue).
                 if (current.get("plan_review") or {}).get("status") in ("unavailable", "attention") and current["plan_version"]:
                     plans.queue_plan_review(con, current, current["plan_version"])
-    notice = wake(con, state.get_run(con, run["id"])) if wake else None
     jobs.kick(con, run["id"])
+    notice = wake(con, state.get_run(con, run["id"])) if wake else None
     from office import guide
     res = guide.status(con, state.get_run(con, run["id"]), resumed=True)
     if notice:

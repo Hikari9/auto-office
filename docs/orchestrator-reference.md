@@ -74,7 +74,7 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   record each episode as an orchestrator event, which wakes an armed root:
   - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900). Task reviews only; plan
     reviews show on the plan review status line. A queue nothing drains (owner `queued`) gets `office revoke <task>`, then
-    `office review <task>` on the same revision. A live or unknown job gets `office status` first.
+    `office review <task>` on the same revision. A live or unknown job gets `office wait` first.
   - `review.stalled`: a running reviewer past `OFFICE_REVIEW_NO_PROGRESS_S` (default 900) or `OFFICE_REVIEW_WALL_S` (default 3600).
     Next: as the stall line says.
   - `review.closed_unread`: a review closed past `OFFICE_REVIEW_UNREAD_S` (default 900) whose verdict has not been shown to the

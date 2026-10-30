@@ -374,8 +374,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         with db.transaction(con):
             watchdog.record_review_episodes(con, run, episodes)
             watchdog.mark_review_episodes_read(con, run, episodes)
-    for ep in episodes:
-        res.add(f"blocker: {ep['text']}")
+    # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
+    res.lines[1:1] = [f"blocker: {ep['text']}" for ep in episodes]
     if probe_panes:
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.

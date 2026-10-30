@@ -186,9 +186,9 @@ def attach(con, run: dict, *, off: bool = False) -> str:
         raise Refused("wake-no-pane", "auto-wake pilot requires the active HERDR_PANE_ID; no detached root launch",
                       next_step="office resume without --auto-wake")
     if off:
+        _off_marker(run["id"]).touch()
         with _delivery_lock(run["id"]), db.transaction(con):
             con.execute("UPDATE root_wake_bindings SET enabled=0, generation=generation+1 WHERE run_id=?", (run["id"],))
-        _off_marker(run["id"]).touch()
         return "root auto-wake disabled (pending receipts preserved)"
     # Pane lock, then run lock, then reads: nothing that moves this pane or
     # delivers to it can interleave with verification and registration.

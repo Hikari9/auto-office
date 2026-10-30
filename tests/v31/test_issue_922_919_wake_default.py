@@ -259,7 +259,7 @@ def test_a_queued_review_with_a_live_job_is_not_routed_to_revoke(env, monkeypatc
     _review_gate(con, run, "GQ3", created_for=600)
     (ep,) = watchdog.review_episodes(con, run, probe=False)
     assert ep["kind"] == "review.queued_too_long" and "revoke" not in ep["next"].split(";")[0], ep
-    assert ep["next"].startswith("office status"), ep
+    assert ep["next"].startswith("office wait (review job is alive)"), ep
 
 
 def test_queued_and_closed_unread_episodes_are_news_not_a_stall(env, monkeypatch):
@@ -308,3 +308,46 @@ def test_resume_status_reports_the_wake_state_after_arming(env, monkeypatch):
     _verified_root(monkeypatch)
     code, out = env.office("resume", check=0, env={"HERDR_PANE_ID": PANE})
     assert "wake: armed" in out and "wake: unavailable" not in out, out
+
+
+def test_a_later_review_of_the_same_task_does_not_reflag_a_read_verdict(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    run = _run(con)
+    _closed_review(con, run, "GS1", finished_for=900)
+    _event(con, run, "gate.pass", "T1", 899)
+    env.office("status", check=0, env={"HERDR_PANE_ID": ""})  # shows and reads GS1's verdict
+    _closed_review(con, run, "GS2", finished_for=100)
+    _event(con, run, "gate.pass", "T1", 99)
+    assert [e["episode"] for e in watchdog.review_episodes(con, _run(con), probe=False)] == ["GS2"]
+
+
+def test_a_closed_unread_episode_is_the_first_status_line_after_the_header(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    _closed_review(con, _run(con), "GS3", finished_for=900)
+    _event(con, _run(con), "gate.pass", "T1", 899)
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
+    assert out.splitlines()[1].startswith("blocker: T1 lane review GS3"), out
+
+
+def test_a_reviewer_that_stalls_again_after_progress_is_a_new_episode(env, monkeypatch):
+    con, run, _, did = _reviewer_gate(env, monkeypatch, kind="lane", stale_for=7200.0)
+    with db.transaction(con):
+        watchdog.record_review_episodes(con, run, [e for e in watchdog.review_episodes(con, run, probe=True)
+                                                   if e["kind"] == "review.stalled"])
+    con.execute("UPDATE dispatches SET watchdog_progress_since=? WHERE id=?", (_ago(7300.0), did))
+    con.commit()
+    with db.transaction(con):
+        watchdog.record_review_episodes(con, run, [e for e in watchdog.review_episodes(con, run, probe=True)
+                                                   if e["kind"] == "review.stalled"])
+    rows = con.execute("SELECT summary FROM events WHERE run_id=? AND kind='review.stalled'", (run["id"],)).fetchall()
+    assert len(rows) == 2, [r[0] for r in rows]
+
+
+def test_a_stalled_reviewer_next_names_the_inspection_and_the_revoke(env, monkeypatch):
+    con, run, _, did = _reviewer_gate(env, monkeypatch, kind="lane", stale_for=7200.0)
+    (ep,) = [e for e in watchdog.review_episodes(con, run, probe=True) if e["kind"] == "review.stalled"]
+    assert ep["next"].startswith("inspect/stop the attempt, then office review"), ep
