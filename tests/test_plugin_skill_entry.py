@@ -175,6 +175,7 @@ def test_install_check_no_longer_stops_to_ask_approval():
 
     assert "stop and ask" not in section
     assert "approve installing" not in section
+    assert "only after the user picks **install the cli**, run `uv tool install auto-office`" in section
 
 
 def test_install_check_explains_resetting_the_saved_choice():
@@ -235,7 +236,10 @@ def test_ecosystem_check_rejects_absolute_and_file_entries(tmp_path):
     (tmp_path / "skills").mkdir()
     _write_manifest(tmp_path, ["./", "./skills/", str(tmp_path), "./SKILL.md"])
 
-    assert len(check_plugin_skills(tmp_path)) == 2
+    assert check_plugin_skills(tmp_path) == [
+        f".claude-plugin/plugin.json: skills entry {str(tmp_path)!r} must be a ./ directory inside the plugin",
+        ".claude-plugin/plugin.json: skills entry './SKILL.md' must be a ./ directory inside the plugin",
+    ]
 
 
 def test_ecosystem_check_reports_null_byte_entries_without_crashing(tmp_path):
