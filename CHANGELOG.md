@@ -10,6 +10,7 @@ One line or short list per version, newest first. The version itself lives only 
 - test(gates): run-check fixtures fail with the task's change, not on base, and the #809 M executor slate is read from effective policy instead of a frozen tuple (#892).
 - fix(amend): `--as` is refused on every amendment except `office amend route` with nothing recorded, and `amend route` refuses any plan-amendment flag given a value, empty or not, rather than dropping it, with the drift guard derived from the parser; an executor, including one in its task worktree without its dispatch env, cannot record a route change through `amend route` (#896).
 - fix(gates): full-suite checks run under `verification.full_suite_timeout_seconds` (default 7200) only when the command is exactly `scripts/validate.sh` or `./scripts/validate.sh`, alone or with `--full`; launchers, `env`, chains and redirections keep `check_timeout_seconds`. A check timeout names its limit and the setting to raise, and only Office's own kill records a timeout (#897).
+- feat(plugin): ship the root auto-office skill in the Claude Code plugin, with CLI-detect onboarding that gates the PyPI install on the user's choice (#914).
 
 ## 3.13.0
 
