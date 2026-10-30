@@ -1,0 +1,833 @@
+# Auto Office
+
+> **Intent:** make agentic software development behave like a disciplined engineering team, not a single coding agent with a long prompt.
+
+Auto Office is an **opinionated software-development lifecycle for AI agents**. One orchestrator owns strategy; specialist agents plan, implement, review, verify, and close out; the `office` runtime owns the mechanical state transitions that make those roles reliable.
+
+The goal is simple: take a human intent and turn it into a reviewable, resumable, evidence-backed engineering run with explicit authority boundaries.
+
+- **Distribution:** `auto-office`
+- **Python package:** `office`
+- **CLI:** `office`
+- **State authority:** SQLite `runs.db` (WAL)
+- **Core rule:** agents decide; the runtime records, isolates, routes, verifies, and resumes
+
+Auto Office is deliberately not a generic multi-agent chat framework. It has a lifecycle, hard invariants, role-specific routing, isolated worktrees, immutable submissions, independent review, integration gates, version-pinned runs, and explicit landing authority.
+
+**New XS–XL run gears:** [Funded behavior, subtask sizing, adaptive profiles, Goldfish and legacy compatibility](docs/xs-xl-run-gear.md).
+
+**Start here:** [Manifesto](MANIFESTO.md) · [Install](#install) · [Opinionated SDLC](#the-opinionated-sdlc) · [Routing](#routing-different-roles-can-use-different-agents) · [Benchmarks](#benchmarks-intelligence-floors-without-online-routing) · [State & resume](#state-durability-and-resume) · [Development](#development)
+
+## Auto Self Improve (issue-only)
+
+When an outcome looks like an Office defect, the runtime prints one non-blocking `bug?:` line (a refusal of the
+command `next:` names, a failed job or gate, a lost dispatch, an uncaught internal error). It is a hint: the
+runtime starts no investigator, makes no model or network call and files nothing.
+
+The orchestrator decides whether the hint is an Office defect, dedupes against open and closed issues,
+sanitizes the report and files it with `gh issue create --repo Hikari9/auto-office`, directly or through a cheap
+read-only subagent. Only Auto-Office-owned defects are candidates; target-application bugs and routine gate
+refusals are not. `office self-improve` is a read-only pointer: it prints these steps and the run's current
+`bug?:` signals. Issues only: nothing here fixes a bug or opens a PR, and filing never blocks landing. The
+workflow is in `skills/auto-self-improve/SKILL.md`.
+
+## The lifecycle at a glance
+
+```mermaid
+flowchart LR
+    A["Human intent"] --> B["Tracking issue + office start"]
+    B --> C["Discovery + plan"]
+    C --> D["Plan diagram<br/>Waves · routes · checkpoints"]
+    D --> E{"User approval"}
+    E -->|approved| F["Parallel / stacked execution"]
+    F --> G["Immutable submission<br/>checks + executor self-review"]
+    G --> H["Lane composed: one convergence review<br/>+ visual review when applicable"]
+    H -->|RECHECK| F
+    H -->|INTAKE_GAP| C
+    H -->|APPROVED| I["Integration + run-level verification"]
+    I --> J{"Landing policy"}
+    J -->|ask| K["Human decides"]
+    J -->|preview| L["Preview deploy + verify"]
+    J -->|merge| M["Merge reviewed PR stack"]
+    J -->|e2e| N["Merge + prod deploy + verify"]
+    K --> L
+    K --> M
+    K --> N
+    K --> O["Handoff without merge"]
+    L --> P["Close"]
+    M --> P
+    N --> P
+    O --> P
+```
+
+**Figure 1 — Auto Office's opinionated SDLC.** Planning is a real phase, approval is a real state transition, review cannot be self-approved, and unavailable/stale/skipped evidence never becomes a pass.
+
+## What Auto Office is trying to fix
+
+Coding agents are good at producing code. Engineering systems need more than code production:
+
+- a durable definition of what the user actually asked for;
+- a plan whose parallelism and interfaces are visible before work starts;
+- the right model/harness for each role instead of one model doing everything;
+- isolation between concurrent writers;
+- deterministic checks plus independent judgment;
+- a bounded fix/review loop instead of endless agent conversation;
+- integration verification after parallel work is composed;
+- explicit human authority for requirement changes, irreversible actions, and merge-to-main;
+- crash-safe state that survives a dead terminal, compacted context, or restarted agent.
+
+Auto Office turns those into runtime behavior rather than hoping every agent remembers them.
+
+---
+
+## Install
+
+### Install the skills as a plugin
+
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills only; you still need the CLI above.
+
+```bash
+# Claude Code
+claude plugin marketplace add Hikari9/auto-office
+claude plugin install auto-office@auto-office
+
+# Codex / ChatGPT desktop
+codex plugin marketplace add Hikari9/auto-office
+```
+
+Both marketplaces select the generated, self-contained `./plugin-dist` package, which exposes **exactly 16 public skills** including the unmodified-root-authority full `auto-office`. Claude's supported invocation is usually `/auto-office:auto-office`; a bare `/auto-office` alias is host-dependent. Verify the actual slash-command listing instead of assuming it. Codex/ChatGPT loads the same 16 names through its portable plugin manifest. Installation makes the skill discoverable **even before** the separate `office` CLI exists.
+
+Claude Code's native `disable-model-invocation: true` enforces manual-only activation for the full hub, Lean, Intake and Takeover. Standalone `auto-review` deliberately remains callable by an explicitly requesting agent (the role/README contract forbids reflexive activation); its model-invocation allowance is necessary to support orchestrator and executor callers. OpenAI/Codex portability may treat that Claude-only metadata as advisory; never claim a host guarantee without testing.
+
+The root skill retains the opt-in CLI-versus-Lean onboarding and saved choice from #924; it never switches to Lean without the user's explicit prior selection.
+
+The repo-root `SKILL.md` remains canonical; `scripts/build_plugin_distribution.py --sync` mirrors that file and the selected skills into `plugin-dist`. Eight retired source skills stay at their original paths for runtime compatibility but are not discoverable in the installed plugin. `--check` and `scripts/check_ecosystem.py` verify the exact mirror. Claude reads `.claude-plugin/marketplace.json`, Codex reads `.agents/plugins/marketplace.json`; the CLI version is sourced only from `src/office/_version.py`.
+
+Verify after install: check the host's plugin skill list for the 16 names; invoke `/auto-office:auto-office` explicitly on Claude Code where namespaced, confirm the loaded frontmatter identifies the full original (not Lean), then run `office doctor` separately if the CLI is installed. If the host has no suitable skill listing, report that check as unverified, not passed.
+
+### 1. Install the CLI
+
+For normal use:
+
+```bash
+uv tool install auto-office
+```
+
+For browser capture and visual gates:
+
+```bash
+uv tool install 'auto-office[visual]'
+```
+
+The visual extra installs Playwright support and uses the local Chrome. Without it, a visual gate that requires capture reports `CAPTURE_BLOCKED`; it does not quietly pass.
+
+### 2. Register the runtime and agent integrations
+
+```bash
+office install
+office doctor
+```
+
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The separately installed `/auto-office` skill offers `office install --no-hooks` during its explicit first-run onboarding. `office install` registers the CLI runtime and optional harness hooks, **not plugin skills**.
+
+| Agent / harness | After `office install` |
+|---|---|
+| **Claude Code** | Installs managed `SessionStart`, `UserPromptSubmit`, and write-guard `PreToolUse` hooks in `~/.claude/settings.json`. |
+| **Gemini CLI** | Installs managed `SessionStart`, `BeforeAgent`, and write-guard `BeforeTool` hooks in `~/.gemini/settings.json`. |
+| **Codex** | No config is written; explicit `office` commands are the contract. |
+| **agy / Antigravity** | No session-start hook is available; the agent uses explicit `office` commands/status. |
+| **Hermes** | No automatic hook installation; use explicit `office` commands. |
+| **Herdr** | When running inside Herdr, dispatches can open real agent panes and Office tracks/reclaims them. |
+
+### Minimal CLI runtime lookup (TSV)
+
+After installing Office, save a small, editable harness lookup index without touching
+hooks, permissions, or model preferences:
+
+```bash
+office harness sync            # save ~/.config/auto-office/cli-runtimes.tsv and derived model lists
+office harness manifest --json # see resolved paths and missing/stale/unconfigured entries
+office harness list            # existing adapter health + the same lookup index
+```
+
+The TSV has exactly three fields (tab-separated, one harness per row):
+
+```tsv
+key	skill_path	models_path
+claude	skills/claude-cli/SKILL.md	models/claude.json
+codex	skills/codex-cli/SKILL.md	models/codex.json
+agy	skills/agy-cli/SKILL.md	models/agy.json
+```
+
+The shipped template also includes `pi`, `hermes`, `kilo`, `opencode` and `gemini`.
+A `skills/...` path resolves against the packaged/source Office resources, while
+`models/...` resolves against the TSV's directory (normally `~/.config/auto-office`).
+Absolute and `~/...` paths are supported for user-managed files. `office harness
+sync` preserves edited rows and comments; it only generates the default
+`models/<key>.json` files, **never** custom paths. You can change the manifest
+location with `OFFICE_CLI_RUNTIMES` (for isolated testing or separate machines).
+
+These JSON files are **read-only projections** of Office's authoritative catalog
+(seed + user overlay + lineage resolution), not another list to maintain by hand.
+They contain model IDs, invocation slugs, effort, and technical availability,
+not user policy, quota, or adapter trust. After explicit `office model add|disable|enable`,
+Office refreshes the generated files; after external catalog changes, run `office
+harness sync` again (the manifest/doctor commands label stale lists). A missing skill,
+missing adapter, or stale models file is `unconfigured`, **not routable by decree**.
+The existing adapter profiles, user preferences, run pins, safety and capability
+checks remain authoritative. See `skills/auto-adapter/SKILL.md` for registration.
+
+`office doctor` verifies the installed runtime, hook state, pinned runtimes, visual prerequisites, and known harness defects. If it reports `install: STALE`, reinstall the checkout rather than trusting the version string alone. `office doctor --fix` repairs Office-managed integration drift while preserving and backing up unrelated configuration.
+
+`office update --check` checks PyPI and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from PyPI, then refreshes the runtime registration and runs `office doctor`.
+
+> **For coding agents:** do not silently install or rewrite global harness configuration. If `office` is missing, ask the human before running `uv tool install ...` or `office install`; once installed, use the CLI contract below.
+
+### 3. Give the agent one rule: follow `next:`
+
+Every normal CLI result ends with a `next:` line. That is the runtime's declaration of the next legal action.
+
+An agent operating Auto Office should:
+
+1. run `office --version` and `office doctor` when bootstrapping a machine/session;
+2. use `office start` or `office resume` rather than inventing lifecycle state;
+3. follow `next:` instead of editing Office state directly;
+4. never edit `runs.db`, generated run views, receipts, or telemetry by hand;
+5. submit plans and implementation through `office submit`;
+6. let the runtime dispatch reviewers and evaluate acceptance;
+7. use `office inspect ...` or `--verbose` when it needs more detail.
+
+`SKILL.md` is the orchestrator brief. Planner, executor, reviewer, and verifier briefs are generated by the runtime from the approved run state.
+
+### Install from a checkout
+
+For development:
+
+```bash
+uv tool install --editable .
+# or
+uv venv && uv pip install -e '.[visual,test]'
+```
+
+To put a checkout on your PATH as the installed runtime:
+
+```bash
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
+office install
+office doctor
+```
+
+Why `--reinstall-package auto-office`? `uv` can otherwise reuse a cached wheel from an older commit with the same release number. This rebuilds only the Auto Office package and keeps dependencies such as playwright cached. `--reinstall` or `--no-cache` would re-download every dependency. `office doctor` should report that the install matches its source checkout and commit.
+
+> **Cross-release note:** runs are pinned to their Auto Office MAJOR.MINOR line. A PATCH upgrade is served by the newest registered patch on that line. Crossing a MAJOR/MINOR is explicit with `office upgrade`; do not overwrite the runtime environment for active runs on an older line without pinning that runtime first.
+
+### 4. Make the repository worktree-safe
+
+Office creates fresh task, integration, and check worktrees. If your tests need dependencies, declare the setup command once in `.auto-office/config.yaml`; Office never guesses a package manager for you.
+
+```yaml
+worktree:
+  setup: "uv sync --frozen"
+  setup_inputs:
+    - pyproject.toml
+    - uv.lock
+  setup_timeout_s: 600
+  applies_to: [task, integration, check]
+```
+
+Use the equivalent command for your stack (`pnpm install --frozen-lockfile`, etc.). A new worktree runs the declared setup before agent/check work; reused worktrees rerun it when the setup command or watched inputs change.
+
+---
+
+## A 60-second run
+
+A typical orchestrator flow looks like this:
+
+```bash
+# Create a run. The orchestrator has already created/reused the tracking issue.
+office start "Add organization-scoped API tokens" \
+  --issue 412 \
+  --end-state ask
+
+# If Office queued a dedicated planner, wait for it.
+office wait
+
+# Planner (or inline orchestrator) submits PLAN.md.
+office submit
+
+# Office prints the plan diagram. The user approves what was shown.
+office approve plan --quote "Approved"
+
+# Dispatch a parallel wave. Omitting --parallel stacks tasks instead.
+office dispatch T1 T2 --parallel
+
+# Act when work, findings, stalls, or decisions arrive.
+office wait
+
+# Once all tasks are accepted, compose + verify the integrated result.
+office land
+
+# For end-state=ask, choose merge/preview/e2e or hand off the ready PRs.
+# Then close the run.
+office close
+```
+
+`office close` is a cleanup sweep, not just a state change. After a real merge it fast-forwards the local base branch to `origin/<base>` (a dirty checkout of it is left alone and the user is asked), removes only the worktrees and `office/<run>/` branches Office created for the run (`git branch -d`, never `-D`), and runs `git worktree prune`. A `--handoff` close marks a PR Office opened ready (a PR it did not open keeps its draft state) and keeps everything for after the user merges. It warns (non-blocking) when the diff changes code but no CHANGELOG/README the repo keeps, and every path ends with one `office close done — <summary>` line.
+
+### Safe worktree cleanup and recovery
+
+Closeout cleanup is independently recorded in `runs.db` as a `cleanup_runs` receipt. A crash after the run is marked **closed** does not strand cleanup: run `office close --run <id>` again to retry only the unfinished tail. A close that hands a PR to the user **retains** its checkouts until landing is verified; after an external merge use `office close --landed-externally <merged-PR-URL> --run <id>` (also supported for already-closed handoffs).
+
+Removal is conservative: Office checks its run-owned or recorded worktree, same Git repository identity, live Git worktree registration and locks, live agents/Herdr panes, local staged and unstaged edits, and a current **online origin** ref containing the actual worktree commit (not merely an identical tree). Before deletion it verifies an archive of all untracked and ignored files, including private environment files, outside the prunable run directory. Unproven commits, changes, pane attachments, missing archive proof, and pinned runtimes are **retained with a reason**. The close report gives removed/retained counts and approximate bytes reclaimed; a terminal run remains closed even when cleanup is incomplete.
+
+The separate opt-in path for older finished runs is:
+
+```bash
+office cleanup --older                  # preview old run/version, refs, dates, GB and blockers; no deletion
+office cleanup --run <id>                # inspect this recorded finished run
+office cleanup --run <id> --decline      # retain and suppress future offers
+office cleanup --run <id> --apply        # attempt safe cleanup for this one run
+office cleanup --run <id> --apply        # retry after resolving a blocker
+```
+
+Active and resumable runs are ineligible. Previews do not mutate local or remote Git refs, worktrees or run status. Apply revalidates eligibility and online recoverability under a per-run lock. `office prune` separately removes run detail and is **not** the safe worktree-cleanup interface.
+
+The important part is not the exact command sequence above; it is that the runtime keeps the legal sequence explicit. If the state changes, `next:` changes with it.
+
+## The opinionated SDLC
+
+### 1. Intent becomes a durable run
+
+The orchestrator starts from the human's outcome, creates or reuses one tracking GitHub issue, chooses the intended landing boundary (`ask`, `preview`, `merge`, or `e2e`), and runs `office start`.
+
+`office start` pins the base revision, policy/config snapshot, catalog, Office version, risk inputs, and authority envelope. Unknown risk is not silently treated as low risk.
+
+### 2. Planning happens before mutation
+
+Depending on gear and risk, Office either queues a dedicated planner or permits inline planning. The planner performs repository reconnaissance, resolves interfaces and dependencies, and writes `.office/plans/<run>/PLAN.md`.
+
+`office submit` turns that plan into a diagram containing:
+
+- tasks and write scopes;
+- parallel waves and stacked dependencies;
+- route previews (`harness/model@effort`) with a reason;
+- size classes and critical path;
+- verification checkpoints;
+- the landing chain.
+
+That diagram is the last cheap place to notice accidental serialization, an unsafe route, a missing interface, or an unexpectedly expensive plan.
+
+### 3. One approval authorizes one plan
+
+Approval is a recorded state transition:
+
+```bash
+office approve plan --quote "<the user's exact words>"
+```
+
+A requirements change requires the user's words again. Ordinary decomposition/test/ordering amendments can be made by the orchestrator. Contract changes that alter scope, interfaces, ownership, or authority get stronger treatment and may wake the planner.
+
+### 4. Execution is isolated
+
+Each parallel task gets its own worktree and fenced scope. One mutable holder owns a write scope at a time.
+
+```mermaid
+flowchart TB
+    PLAN["Approved plan"] --> W1
+
+    subgraph W1["Wave 1 — disjoint write scopes"]
+      T1["T1 · worktree A"]
+      T2["T2 · worktree B"]
+      T3["T3 · worktree C"]
+    end
+
+    T1 --> P1["Task PR T1"]
+    T2 --> P2["Task PR T2"]
+    T3 --> P3["Task PR T3"]
+
+    P1 --> INT["Compose each lane · convergence review per lane / shared scope"]
+    P2 --> INT
+    P3 --> INT
+    INT --> RUN["Compose everything + run-level checks"]
+    RUN --> LAND["Landing policy"]
+```
+
+**Figure 2 — Parallel work is isolated first, reviewed per lane, integrated once converged.** Task PRs may be stacked on their dependency's branch; the integrated tree is verified again because it is the first place all accepted work exists together.
+
+### 5. Submission captures an immutable revision
+
+`office submit` captures the executor's worktree exactly as it exists—including uncommitted edits—into an immutable revision. Replays are deduplicated. Files outside the task's declared scope are refused.
+
+The runtime then evaluates the current revision through the gates funded by the run:
+
+- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
+- dependency/current-amendment checks;
+- once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
+- later, run-level integration checks.
+
+There is no routine per-task independent code review under the current review contract.
+
+### 6. Review converges; it does not rubber-stamp
+
+New runs use the `convergence-v1` review contract ([`docs/review-convergence.md`](docs/review-convergence.md)). Plan, convergence, and visual reviews answer:
+
+```text
+APPROVED | RECHECK | INTAKE_GAP
+```
+
+- `APPROVED`: no blocking finding; the work advances now. Remaining findings must be fixed or dispositioned (`office disposition`) before landing, without another independent review.
+- `RECHECK`: blocking findings. All of them route at once to the tasks that own them; repairs run in parallel, the lane recomposes, and the same reviewer reviews again.
+- `INTAKE_GAP`: a missing or conflicting user-owned decision; the orchestrator asks the user at once.
+- Severity (`high | medium | low`) is separate from blocking, and runtime status (`COMPLETED | UNAVAILABLE | EVIDENCE_BLOCKED | INVALID_RESULT`) is separate from both. An unavailable reviewer walks the fallback chain and never counts as a pass or a round.
+- A repair that would move a hard seam (requirements, authority, ownership, dependency, interface, acceptance) is never APPROVED cleanup.
+- Plan review reviews the initial plan only (#418). RECHECK revisions iterate inside that initial review, capped at 3 substantive rounds unless the user sets `office start --plan-review-rounds N`. Once it closes (APPROVED, the cap, or a waiver), later amendments belong to the planner/orchestrator and are never reviewed again; at the cap the orchestrator owns the remaining findings and records a disposition for each. Only the user reopens it: `office review plan --quote "<words>"`.
+
+Review happens per ownership/composition **lane** (tasks joined by `depends` or a shared `lane:`), on the composed result, and once more per **shared scope** where lanes share a `converge:` name, an interface, a `shared:` registry, or changed files. Each lane RECHECK sequence stops after 3 substantive rounds; the user then chooses `escalate`, `continue`, `waive`, or `stop` (`office decide`). Required reviews are hard landing gates that only landing authority can waive, and the waiver keeps the underlying verdict on the receipt.
+
+Each run is pinned to the review contract it started with. Runs started before #337 stay on the `v3.1` contract (`PASS | CHANGES_REQUIRED | PLAN_DEFECT | BRIEF_DEFECT | UNAVAILABLE`, per-task review, rolling plan review); `review.contract` in config picks the default for future runs only, and `office start --from-run <run>` moves old work onto the current contract as a new run.
+
+### 7. Integration is a separate gate
+
+Once every task is accepted and every lane and shared scope has converged, Office composes the accepted revisions in dependency order and runs the plan's run-level checks. Under `convergence-v1` the lane and shared-scope reviews already cover cross-lane boundaries; a risk- or shared-outcome-triggered integrated review (#422) adds one review of the composed result when no earlier independent review covers it exactly, and `office inspect convergence` records why it ran or was skipped. (`v3.1` runs launch an integration reviewer at a real cross-task boundary, for example dependent/merging outputs or a shared interface.)
+
+The integrated tree is the artifact that lands—not a collection of individually-green branches assumed to compose.
+
+### 8. Landing follows explicit authority
+
+The run's `end_state` decides how far Office is allowed to go:
+
+| End state | Behavior |
+|---|---|
+| `ask` | Stop after accepted task PRs/integration and ask what to do. |
+| `preview` | Deploy/verify the integrated result to preview only. |
+| `merge` | Merge the reviewed PR stack after required checks. |
+| `e2e` | Merge, deploy production, and verify. |
+
+Merge-to-main remains a human authority boundary unless the user explicitly granted it for this run. External sends and unanticipated user-owned decisions also stop for the human.
+
+---
+
+## Routing: different roles can use different agents
+
+Auto Office routes a **role**, not an entire run. A planner, executor, code reviewer, visual reviewer, and closeout verifier can all use different harness/model/effort triples.
+
+Routing is constrained before it is optimized.
+
+```mermaid
+flowchart TD
+    A["Pinned model catalog<br/>model · effort · invocation · cost · benchmark"] --> D["Candidate construction<br/>dispatchable · installed · model-family floor"]
+    B["Installed harness adapters<br/>capabilities + harness versions"] --> D
+    C["Live provider quota probes"] --> D
+    R["Optional benchmark refresh"] --> S["Run-scoped benchmark snapshot"]
+    S --> D
+
+    D --> E{"1 · hard exclusions"}
+    E --> F{"2 · derived adapter trust<br/>for mutable/gate roles"}
+    F --> G{"3 · required capabilities"}
+    G --> H{"4 · role floor<br/>benchmark · effort · provenance"}
+    H --> I{"5 · task-shape support"}
+    I --> J{"6 · protected quota reserve"}
+    J --> K["7 · learned eligibility (executor/worker)<br/>or preferred seed anchor (planner/reviewers)"]
+    K --> L["8 · executor/worker: score cost to success, speed,<br/>quota, learned success, preference → slate of 3<br/>planner/reviewers: cost policy + local tie-break"]
+    L --> M["Primary + fallbacks (planner may reorder with a reason)"]
+    M --> N["Record slate, scores, seed, planner choice, dispatched route"]
+```
+
+**Figure 3 — Routing and benchmarks.** Cost is deliberately late. A cheap route cannot undercut hard exclusions, derived trust, required capabilities, the role/benchmark floor, task-shape compatibility, or the protected quota reserve. For executors and workers (#300), cost is one weighted term, measured as expected cost to a successful task rather than token price, so a cheap route that needs many retries does not win by default. A route with a `max_concurrent` cap (catalog row, or an adapter's `free_model_max_concurrent` default) counts as quota-exhausted while that many dispatches on it are live across all active runs, and a route that just hit a 429 or usage wall stays exhausted for a short cooldown (#770). Both are refused at stage 6, so a free route that is busy or rate-limited falls to the next candidate instead of being re-picked.
+
+### Default role policy examples
+
+The shipped config currently expresses preferences such as:
+
+| Role | Example preference / floor |
+|---|---|
+| Planner | Prefer `opus@medium`, then `astra@low`; requires planning capability and at least low effort. |
+| Plan reviewer | Prefer `luna@high`, then Claude `opus@low` (only fallback); requires review capability and benchmark index score >= 31. |
+| Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
+| Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@high`, then Claude `opus@low` (only fallback); independent from the producer's model family; benchmark score >= 31. |
+| Visual reviewer | Prefer agy `gemini-3.8-flash` routes, fallback Sonnet only; also requires a passing image-sensitive conformance proof for that exact route, unless you have allowed the route for the role. |
+| Closeout verifier | Requires verification capability and at least medium effort. |
+
+### The allow contract (3.9)
+
+An allow is the whole admission test. `office route allow <route>[,<route>...] --role <role>` (or an exact entry in `roles.<role>.preferred_seed`) makes a route dispatch immediately: no conformance probe, vision proof, trust act or benchmark floor, and it overrides a catalog or user-overlay `dispatchable: false`. Office stores the correct runtime command for each harness (claude, agy, codex, opencode, pi) at each model and effort. If a route fails at runtime (launch error, unsupported model or effort, auth, timeout, transport death) Office logs a `route.failed` event with the route, reason and stderr tail, demotes that route for 30 minutes, and dispatches the next eligible route; `office status` shows the fallback. A route you declared with `--as` is logged but never swapped silently. `office route policy --effective [--role <role>]` shows exactly what dispatches and why, including legacy `denied_models` and the catalog overlay.
+
+These are policy defaults, not promises that a particular route will always be selected. Installed harnesses, trust evidence, task shape, model-family floors, live quota, benchmark availability, and explicit user overrides can all change the result.
+
+### Example: automatic routing
+
+```bash
+office dispatch T2
+```
+
+At plan submit, the runtime builds candidates from the pinned catalog and installed adapters, applies the role gates, and ranks each task's qualifying executor routes into an Inline Slate in the plan diagram:
+
+```text
+T2  Implement mul                off base
+    ROUTING
+    PRIMARY     claude/claude-sonnet-5-5@high  best success/cost/speed fit
+                + strong local evidence (86% success, n=90)   - quota unknown
+    FALLBACK 1  codex/gpt-6-luna@high          cheaper to success than the primary (0.019 behind)
+                + lowest expected cost to success   - little local evidence (n=7)
+    FALLBACK 2  agy/gemini-3.8-flash@medium    faster than the primary (0.040 behind)
+                + fastest expected completion   - quota unknown
+```
+
+`office dispatch T2` probes quota again and runs the primary, or the first fallback that still qualifies, saying why. When none does, it stops and `office dispatch T2 --reroute` routes from current evidence. The full evidence matrix and the audit record:
+
+```bash
+office inspect route T2          # slate, scores, seed, fallbacks taken
+office inspect route T2 --json   # the complete audit record
+office inspect learner           # what the router has learned from past runs
+```
+
+### Example: force a producer and reviewer
+
+When the user names the route, that explicit choice outranks the automatic registry/trust/floor selection for the producer:
+
+```bash
+office dispatch T2 \
+  --as agy/gemini-3.8-flash@medium \
+  --review-as claude/sonnet@high
+```
+
+The runtime still records the override, resolves catalog aliases when possible, and enforces reviewer independence: the reviewer cannot share the producer's model family.
+
+### Example: prepare a task for an externally started agent
+
+```bash
+office dispatch T2 --as codex/luna@high --external
+```
+
+Office prepares the task worktree, lease, brief, and environment, but does not launch the agent. It prints the commands required to start the external/Herdr agent against that exact task contract.
+
+### Routing policy layers
+
+Normal config precedence is:
+
+```text
+prompt / CLI > repo config > user config > plugin defaults
+```
+
+The repo layer lives at `.auto-office/config.yaml`; user defaults live at `~/.config/auto-office/config.yaml`.
+
+### First-run onboarding: `office onboard`
+
+The first `/auto-office` invocation offers a short, skippable onboarding before intake, then continues the original request. The invoking agent asks through its own question tool; `office onboard` owns detection, validation and persistence:
+
+```bash
+office onboard --harness claude [--json]     # due or current, eligible routes, current-harness integration (never prompts)
+office onboard --planner office --executor keep --reviewer codex/gpt-6-luna@high
+office onboard --skip                         # keep every preference; mark onboarding complete
+```
+
+- Three questions, in order: default external planner, preferred executor, preferred reviewer. Each offers **Let Office decide** (recommended: clears your user-level preference so the shipped defaults apply), the eligible shipped seed routes, your current preference, or a custom `harness/model@effort`. No orchestrator question: the invoking agent is the orchestrator.
+- Only routes that are eligible here are accepted: the harness is installed and signed in, the catalog has the model and effort, and the role's capabilities, intelligence floor and derived trust allow it. A refused answer writes nothing.
+- Answers become ordinary `roles.<role>.preferred_seed` values in the user file (reviewer writes `plan_reviewer` and `code_reviewer`; visual review keeps its own routes). They keep the existing routing semantics: Office favors this route according to its routing policy, but may choose another model or effort when availability, quota, task fit, capability, evidence, or policy calls for it. Repo overrides and `--as` stay higher.
+- Completion is user-level state (`onboarding.schema_version`). Onboarding comes back only when its schema version changes, never on an ordinary release, and then prefills your current preferences. `office config onboarding.schema_version 0` shows it again.
+- Hook setup covers the current harness only: **Install recommended** (`office install --only <harness>`), **Review individually** (`--item`), or **Skip**. Codex, agy, Hermes and other harnesses without a verified hook mapping are reported, not installed.
+
+Details: [`docs/onboarding.md`](docs/onboarding.md).
+
+### Setting preferences: `office config` and `office setup`
+
+`office config` edits those files like `git config`; `office setup` is the interactive version.
+
+```bash
+office setup                                   # prompts per role, then cost policy; --repo for this repository
+office config roles.code_reviewer.preferred_seed claude/sonnet@high,codex/luna@high
+office config roles.code_reviewer.preferred_seed   # read the effective value
+office config cost_policy.default quota_saver --repo
+office config --list [--all] [--show-origin]   # what the files set (--all: every effective value)
+office config --unset roles.code_reviewer.preferred_seed
+office config --edit | --path                  # open in $EDITOR (validated afterwards) | print file paths
+```
+
+- Writes go to the user file by default and to `.auto-office/config.yaml` with `--repo`. Only the keys you set are written, never the shipped defaults.
+- A `preferred_seed` takes the same `[harness/]model[@effort]` form as `office dispatch --as`, most preferred first. Any role can carry one, including `executor`, where it is one soft term in routing.
+- Every edit is resolved and validated before it is written: unknown keys and models (with suggestions), efforts the model lacks, and invalid policy values are refused. `--force` sets a key the shipped config does not define.
+- Rewriting drops YAML comments; a file that had any is copied to `<file>.bak` first.
+- New runs pick the change up. A running run keeps the policy it pinned at `office start`.
+- Preferences are soft: floors, trust, quota, and task shape still apply. To force a route for one task, use `office dispatch --as` / `--review-as`.
+
+The shipped cost policies are `money_saver`, `quota_saver`, and `balanced`. The default is `balanced`, with a protected provider quota reserve. Cost only influences candidates that have already cleared the required gates. For executors and workers each policy is a weight set under `routing.adaptive.weights`, and `routing.adaptive.budget_ceiling_usd` is the one cost-based cut-off; `cost_policy.balanced_money_band_percent` now applies only to planner and reviewer routing.
+
+---
+
+## Benchmarks: intelligence floors without online routing
+
+Some roles have an **intelligence floor**, not merely an effort floor. The shipped catalog carries version-pinned scores from the **Artificial Analysis Intelligence Index**. The current catalog index is:
+
+```text
+Artificial Analysis Intelligence Index v4.3.2
+```
+
+Raw scores from different index versions are not treated as comparable.
+
+For example, executor and code-review routes currently require a score of at least 31 on that exact index version. A candidate with no score for the required index fails closed for that floor; Office does not invent or interpolate one.
+
+### The shipped catalog is the normal path
+
+Routing itself stays offline. The shipped catalog uses `catalog/routes.tsv`, `catalog/benchmarks.tsv`, `catalog/manifest.yaml` and `catalog/provenance.yaml` for exact model/harness/effort routes, scores and evidence (see `docs/catalog-tables-migration.md`). Every run pins the catalog it started with.
+
+Legacy inactive benchmarks are kept in [`catalog/archive/legacy-nonrouting-2026-10-08.yaml`](catalog/archive/legacy-nonrouting-2026-10-08.yaml), outside the active routing catalog. Their historical scores and trust-grant evidence remain inspectable without granting route eligibility. Official model IDs and maintainer-reported model availability alone do not prove that every local harness/effort setting pins the intended model. Disabled concrete rows also disable any dynamic family alias resolving to them.
+
+### Optional one-shot refresh
+
+Intake does not ask about this. The user opts in to filling **missing** benchmark scores for the current run by explicitly invoking the `auto-update-benchmarks` skill, which runs:
+
+```bash
+office benchmarks brief
+```
+
+Calling `brief` is the opt-in. `office start --benchmark-refresh` still records it up front.
+
+`office benchmarks brief` writes a bounded brief for **one** low-cost background subagent. Office itself does not perform the web fetch; the refresher agent does, so route selection remains offline. That subagent fetches Artificial Analysis data and submits a delta:
+
+```bash
+office benchmarks submit <delta.yaml>
+```
+
+The refresh contract is intentionally strict:
+
+- opt-in; off by default;
+- at most one refresh per run;
+- only the catalog's exact benchmark index version is accepted;
+- only existing dispatchable catalog rows with a missing score are eligible;
+- existing trusted scores are never replaced;
+- scores must be copied from Artificial Analysis source pages, not inferred;
+- the delta is accepted atomically or rejected atomically;
+- an accepted delta becomes a **run-scoped snapshot** identified by its hash;
+- routes decided after the refresh record that snapshot hash;
+- routes already decided keep the snapshot/catalog they used.
+
+This lets a long run learn that a newly cataloged route now satisfies an intelligence floor without turning routing into a live web dependency or mutating global truth mid-run.
+
+---
+
+## State, durability, and resume
+
+`runs.db` is the lifecycle authority. JSON under a run directory is a generated view/evidence surface, not writable state.
+
+A semantic transition and the outside work it requires are coupled transactionally: the transition writes an **outbox** row in the same SQLite transaction; short-lived `office _job` processes claim those rows and record their result. If the process dies after the state transition, the work is delayed—not forgotten.
+
+That design enables:
+
+- `office resume` after a terminal or agent restart;
+- deduplicated submission/replay;
+- durable review findings and waivers;
+- versioned plan/requirements/routing amendments;
+- recovery of queued jobs;
+- exact auditability of which revision, route, and benchmark/catalog snapshot produced a verdict.
+
+### Version-pinned runs
+
+Every run is pinned to the Office release line that created it. The front door re-executes commands through the registered runtime for that line. A run never silently migrates because a different version of `office` appeared on PATH.
+
+Use:
+
+```bash
+office list
+office resume [run]
+office upgrade [run] [--to X.Y]
+office doctor
+```
+
+A cross-line upgrade is explicit and dry-runs by default.
+
+Codex reviews keep the agent-written `reply.txt` separate from the CLI's final
+chat message in `last-message.txt`. Headless reviews read the reply first and
+use the final message only when the reply is absent or empty.
+
+If a Codex Herdr launch fails, Office checks the pane for hook review, folder
+trust, and update screens and names the blocking screen in its fallback notice.
+Review or skip it in the named pane before the next launch. `office doctor`
+warns when user, project, or enabled plugin hooks need a manual trust check;
+it cannot verify Codex's hook hashes, and `--fix` never grants hook trust.
+
+---
+
+## Visual verification
+
+Visual acceptance is separate from code review.
+
+When acceptance names user-visible behavior, Office can capture deterministic browser evidence using the local Chrome: requested viewports/states, settled fonts, DOM measurements, and screenshots. Evidence is classified independently of judgment:
+
+```text
+COMPARABLE | INVALID_COMPARISON | NOT_APPLICABLE | CAPTURE_BLOCKED
+```
+
+A visual reviewer is eligible only after its exact harness/model/effort path passes an image-sensitive conformance probe. Code review and visual judgment are different dispatches. Under `convergence-v1` the visual review runs once per lane, on the same composed commit as the lane's convergence review.
+
+A `visual:` contract can use `states: default; chosen = select #room vip ;; click #continue -> expect main`.
+Within one state, `;;` separates interaction steps without splitting CSS selectors (including `:is(a, b)` or selector
+lists). Legacy commas before another action verb still work. Native `<select>` controls use
+`select <CSS-selector> <option-value>`; use `label:<visible label>` for a label containing spaces, for example
+`select #room label:Big Heroes`. A bare option tries matching the value first, then the visible label.
+The selector itself may contain spaces when you use an explicit `label:` or `value:` choice. These state-step selectors may use Playwright selectors; `visual.selectors:` for DOM measurements
+accepts plain CSS only.
+
+For a self-started visual preview, Office waits for its URL to return HTTP 2xx/3xx
+before taking screenshots. A port returning boot-time 502 or 404 is not ready.
+When every captured route fails with HTTP errors and any is 5xx, evidence is
+CAPTURE_BLOCKED rather than consuming a review round. Healthy routes with
+failing subroutes still produce application findings.
+
+Install the visual extra when you expect browser/UI work:
+
+```bash
+uv tool install 'auto-office[visual]'
+office doctor --probe-vision
+```
+
+---
+
+## Web UI
+
+A local workstation over every Auto Office run on this machine: Issues, Agents, Allocation and Settings.
+
+```bash
+office web serve                  # foreground, http://127.0.0.1:8765/
+office web start                  # background daemon; pid file under <state home>/web/
+office web status                 # running?, URL and pid
+office web stop
+office web serve --fixture small  # demo on a synthetic workspace (or --fixture large)
+```
+
+`--port` changes the port. `--host` accepts loopback only (`127.0.0.1`, `localhost`, `::1`). The fixture demo uses a temp Office home with fake GitHub, launcher and executor, shows a `FIXTURE MODE` marker, and never touches your runs.db or GitHub.
+
+What it can do:
+
+- Show GitHub issues joined to Office runs, PRs, phase, weighted task progress, gates and freshness, with filter chips (Open + running, Incoming, Needs attention, Done).
+- Start, Auto Queue, Resume or Attach an issue's orchestrator in a Herdr pane. Every issue without a run also shows its copyable `office start ...` command.
+- Pause, resume, reprioritize and demote scheduler work, toggle auto mode, change a running agent's model and effort (same harness), and chat with an orchestrator.
+- Edit machine and repository settings through `office config`, with the source of every effective value.
+
+What it cannot do:
+
+- Merge, land, deploy, or open a shell. There is no such command kind.
+- Authorize a plan. When Office waits for plan authorization, the UI shows the copyable `office approve plan --quote "<words>"` command for you to run in a terminal.
+- Show CPU, RAM, quota or progress it did not measure. Unknown values are shown as unavailable.
+
+Security model: the server binds loopback only, checks the `Host` header (DNS rebinding) and `Origin`, and requires a per-process random token on every POST. runs.db stays the lifecycle authority and GitHub stays the issue and PR authority. The browser holds no authoritative state, and every web mutation runs the `office` CLI and is recorded as a receipt in runs.db. See [docs/web-ui.md](docs/web-ui.md).
+
+---
+
+## Command map
+
+```text
+office start "<goal>"                 create a run; queues the planner when policy requires one
+office start --from-run <run>         new run carrying an old run's requirements + plan draft (old run unchanged)
+office resume [run]                   bind this session to a run and show where it stands
+office status                         what matters now, ending with the next legal action
+office wait                           wait until the run has something actionable
+office dispatch <task>... [--parallel]
+office answer <task|dispatch> <n> | -- "<text>"   answer the question a pane agent is waiting on (wait exits 5)
+office prompt <task|dispatch> -- "<message>"
+office raise [--kind question|blocker|scope-request] [--path P] -- "<text>"   executor: stop for a decision without submitting
+office submit                         planner/executor: submit a plan or work
+office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
+office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
+office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
+office ack <amendment-id>             worker: confirm delivered amendment is applied
+office land                           compose/verify and follow the run's landing policy
+office close                          finish after acceptance + landing/handoff
+
+office inspect run|plan|task|gate|evidence|events|route|convergence [id]
+office approve plan|merge|trust|waive|visual ... --quote "<user words>"
+office decide <scope> escalate|continue|waive|stop|review --quote "<user words>"
+office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
+office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"   dismissed of a blocking finding: --quote "<user words>"
+office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles and routing from config
+office review <scope>:convergence|visual --report <file>   degraded fallback review
+office benchmarks brief|submit ...
+office list
+office doctor [--fix]
+office prune [-f]
+office cleanup --older|--run <id> [--apply|--decline]
+```
+
+Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
+
+---
+
+## Development
+
+```bash
+uv venv
+uv pip install -e '.[visual,test]'
+
+# Fast unit smoke run
+.venv/bin/python -m pytest -n 2
+
+# Everything: unit + integration + legacy + slow
+.venv/bin/python -m pytest -n 2 --all
+
+# Focused groups
+.venv/bin/python -m pytest -n 2 -m integration
+.venv/bin/python -m pytest -n 2 -m legacy
+
+# Ecosystem/static contract check
+python3 scripts/check_ecosystem.py
+```
+
+Tests are tiered. The default `pytest -n 2` is intentionally the in-process smoke suite; repo/subprocess/browser/fake-harness tests live under `integration`, retained v3.0 coverage under `legacy`, and dogfood/real-gate tests under `slow`.
+
+There is no remote CI. Validation runs locally through the repository pre-push hook:
+
+```bash
+git config core.hooksPath .githooks
+scripts/validate.sh
+
+# Also build the wheel:
+VALIDATE_BUILD=1 scripts/validate.sh
+```
+
+Tests use isolated homes and scripted fake harness binaries; they do not touch a real model or the developer's normal `~/.local` state.
+
+## Deploy this repository checkout
+
+When changing Auto Office itself, reinstall the checkout before dogfooding it:
+
+```bash
+uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"
+office install
+office doctor
+```
+
+`office doctor` should report `install: matches its source <checkout> @ <commit>`. If it reports `install: STALE`, the wheel on PATH is not the code you think you are testing.
+
+For a MAJOR/MINOR cross-release install with active older runs, first pin the old release in its own environment:
+
+```bash
+uv venv ~/.local/share/auto-office/pinned/<old-version>
+uv pip install \
+  --python ~/.local/share/auto-office/pinned/<old-version>/bin/python \
+  "auto-office[visual] @ <checkout-at-old-release>"
+
+~/.local/share/auto-office/pinned/<old-version>/bin/python \
+  -c "from office import frontdoor; frontdoor.register_current()"
+```
+
+Then install the new checkout normally. `office doctor` reports whether every active release line still has a registered runtime.
+
+---
+
+## Design references
+
+The README is the developer entrypoint; the detailed contracts live here:
+
+- [`SKILL.md`](SKILL.md) — current orchestrator operating contract.
+- [`docs/v31-implementation.md`](docs/v31-implementation.md) — implementation architecture and module map.
+- [`docs/review-convergence.md`](docs/review-convergence.md) — the `convergence-v1` review contract (#337): verdicts, lanes, rounds, waivers, compatibility.
+- [`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md) — review and amendment semantics of runs pinned to the `v3.1` review contract.
+- [`references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md`](references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md) — lifecycle rationale and invariants.
+- [`references/OFFICE-SKILLS-V3-SPEC.md`](references/OFFICE-SKILLS-V3-SPEC.md) — routing policy and role contracts.
+- [`CONTEXT.md`](CONTEXT.md) — project terminology and design context.
+
+## Migrating from 3.0
+
+Runs started by 3.0 stay on 3.0. `office list` marks them as legacy and `office resume <id>` routes them through the exact retained runtime. The `scripts/` helper surface remains available through `office raw <subcommand>` with deprecation tracking; it cannot write a 3.1+ run.
+
+New runs use the installed current runtime by default. A configured rollback changes **future** runs; it does not rewrite runs that already exist.

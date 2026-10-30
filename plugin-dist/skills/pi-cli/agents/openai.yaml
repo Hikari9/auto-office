@@ -1,0 +1,3 @@
+interface:
+  display_name: "pi-cli"
+  short_description: "Explicit pi-cli harness primitive"

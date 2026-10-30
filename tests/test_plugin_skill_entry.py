@@ -1,4 +1,4 @@
-"""The Claude plugin ships the root auto-office skill, and its install check detects the CLI without blocking."""
+"""The curated Claude plugin ships the full root skill, with opt-in missing-CLI onboarding."""
 import json
 import os
 import re
@@ -28,10 +28,12 @@ def _saved_choice_read_command():
     return f'{set_cfg}; cat "$CFG"'
 
 
-def test_claude_manifest_exposes_root_skill_and_skills_dir():
+def test_claude_marketplace_exposes_curated_root_skill_only():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-
-    assert manifest["skills"] == ["./", "./skills/"]
+    marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert "skills" not in manifest  # legacy paths would leak eight retired skills
+    assert marketplace["plugins"][0]["source"] == "./plugin-dist"
+    assert (ROOT / "plugin-dist/skills/auto-office/SKILL.md").read_bytes() == (ROOT / "SKILL.md").read_bytes()
 
 
 def test_root_skill_frontmatter_is_named_auto_office():
@@ -86,7 +88,7 @@ def test_install_check_hands_off_to_the_lean_skill():
     section = _install_check()
 
     assert "auto-office:auto-office-lean" in section
-    assert "skills/auto-office-lean/SKILL.md" in section
+    assert "../auto-office-lean/SKILL.md" in section
     assert "Either Lean choice: hand off" in section
 
 
@@ -199,59 +201,12 @@ def test_install_check_keeps_stale_upgrade_guidance():
     assert "--force --reinstall" in section
 
 
-def test_repository_plugin_skills_field_passes_ecosystem_check():
+def test_curated_marketplace_passes_ecosystem_check():
     assert check_plugin_skills(ROOT) == []
 
 
-def _write_manifest(root, skills):
-    (root / ".claude-plugin").mkdir(parents=True)
-    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "x", "skills": skills}), encoding="utf-8")
-
-
-def test_ecosystem_check_accepts_relative_skill_directories(tmp_path):
-    (tmp_path / "skills").mkdir()
-    _write_manifest(tmp_path, ["./", "./skills/"])
-
-    assert check_plugin_skills(tmp_path) == []
-
-
-def test_ecosystem_check_rejects_paths_outside_the_plugin(tmp_path):
-    (tmp_path / "plugin").mkdir()
-    (tmp_path / "outside").mkdir()
-    (tmp_path / "plugin" / "skills").mkdir()
-    (tmp_path / "plugin" / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
-    _write_manifest(tmp_path / "plugin", ["./", "./skills/", "../outside", "./../outside", "./linked"])
-
-    errors = check_plugin_skills(tmp_path / "plugin")
-
-    assert errors == [
-        ".claude-plugin/plugin.json: skills entry '../outside' must be a ./ directory inside the plugin",
-        ".claude-plugin/plugin.json: skills entry './../outside' must be a ./ directory inside the plugin",
-        ".claude-plugin/plugin.json: skills entry './linked' must be a ./ directory inside the plugin",
-    ]
-
-
-def test_ecosystem_check_rejects_absolute_and_file_entries(tmp_path):
-    (tmp_path / "SKILL.md").write_text("---\n", encoding="utf-8")
-    (tmp_path / "skills").mkdir()
-    _write_manifest(tmp_path, ["./", "./skills/", str(tmp_path), "./SKILL.md"])
-
-    assert check_plugin_skills(tmp_path) == [
-        f".claude-plugin/plugin.json: skills entry {str(tmp_path)!r} must be a ./ directory inside the plugin",
-        ".claude-plugin/plugin.json: skills entry './SKILL.md' must be a ./ directory inside the plugin",
-    ]
-
-
-def test_ecosystem_check_reports_null_byte_entries_without_crashing(tmp_path):
-    (tmp_path / "skills").mkdir()
-    _write_manifest(tmp_path, ["./", "./skills/", "./\x00"])
-
-    assert check_plugin_skills(tmp_path) == [
-        ".claude-plugin/plugin.json: skills entry './\\x00' must be a ./ directory inside the plugin",
-    ]
-
-
-def test_ecosystem_check_rejects_non_list_skills(tmp_path):
-    _write_manifest(tmp_path, "./")
-
-    assert check_plugin_skills(tmp_path) == [".claude-plugin/plugin.json: skills must be a list of paths"]
+def test_plugin_visible_set_is_exactly_16():
+    catalog = json.loads((ROOT / "plugin-distribution.json").read_text())
+    names = {p.parent.name for p in (ROOT / "plugin-dist/skills").glob("*/SKILL.md")}
+    assert names == set(catalog["public_skills"]) and len(names) == 16
+    assert names.isdisjoint(catalog["retired_skills"])

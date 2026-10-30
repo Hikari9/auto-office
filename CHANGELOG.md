@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.14.0
+
+- feat(skills): distribute exactly 16 curated plugin-visible skills while keeping historical runtime resources; restore explicit full /auto-office, standalone independent /auto-review and OpenCode/Pi CLI primitives (#926, #914).
+
 ## 3.13.0
 
 - refactor(policy): externalize executor/planner size slates, benchmark floors, restrictions and authorized exceptions into one validated catalog policy (#871 PR A).

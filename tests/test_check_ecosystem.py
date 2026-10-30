@@ -1,43 +1,57 @@
-"""Plugin manifest skills check in scripts/check_ecosystem.py."""
+"""Curated plugin discovery must not leak retired runtime skills."""
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
 from scripts.check_ecosystem import check_plugin_skills
 
-
 class TestPluginSkillsField(unittest.TestCase):
-    def test_repository_manifest_exposes_root_and_skills_dir(self):
+    def test_actual_repo_passes(self):
         self.assertEqual(check_plugin_skills(), [])
 
-    def test_dropping_root_skill_fails(self):
-        errors = self._check_manifest(['./skills/'])
+    def fixture(self):
+        ctx = TemporaryDirectory()
+        root = Path(ctx.name)
+        (root / '.claude-plugin').mkdir()
+        (root / '.agents/plugins').mkdir(parents=True)
+        (root / 'plugin-dist/skills/auto-office').mkdir(parents=True)
+        (root / 'plugin-dist/skills/auto-office/SKILL.md').write_text('---\n')
+        (root / 'plugin-distribution.json').write_text(json.dumps(
+            {'public_skills':['auto-office'], 'retired_skills':['office-submit']}))
+        (root / '.claude-plugin/plugin.json').write_text(json.dumps({'name':'auto-office'}))
+        (root / '.claude-plugin/marketplace.json').write_text(json.dumps(
+            {'plugins':[{'source':'./plugin-dist'}]}))
+        (root / '.agents/plugins/marketplace.json').write_text(json.dumps(
+            {'plugins':[{'source':{'path':'./plugin-dist'}}]}))
+        return ctx, root
 
-        self.assertEqual(errors, [
-            ".claude-plugin/plugin.json: skills must expose './'",
-        ])
+    def test_missing_root_is_rejected(self):
+        ctx, root = self.fixture()
+        with ctx:
+            (root / 'plugin-dist/skills/auto-office/SKILL.md').unlink()
+            self.assertTrue(any('catalog mismatch' in err for err in check_plugin_skills(root)))
 
-    def test_dropping_skills_dir_fails(self):
-        errors = self._check_manifest(['./'])
+    def test_retired_skill_leak_is_rejected(self):
+        ctx, root = self.fixture()
+        with ctx:
+            skill = root / 'plugin-dist/skills/office-submit'
+            skill.mkdir()
+            (skill / 'SKILL.md').write_text('---\n')
+            self.assertTrue(any('retired visible' in err for err in check_plugin_skills(root)))
 
-        self.assertEqual(errors, [
-            ".claude-plugin/plugin.json: skills must expose './skills/'",
-        ])
+    def test_old_root_manifest_is_rejected(self):
+        ctx, root = self.fixture()
+        with ctx:
+            (root / '.claude-plugin/plugin.json').write_text(json.dumps(
+                {'name':'auto-office','skills':['./','./skills/']}))
+            self.assertTrue(any('legacy root skills' in err for err in check_plugin_skills(root)))
 
-    def test_equivalent_spelling_of_required_entries_passes(self):
-        self.assertEqual(self._check_manifest(['./', './skills']), [])
-
-    def _check_manifest(self, skills):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'skills').mkdir()
-            (root / '.claude-plugin').mkdir()
-            (root / '.claude-plugin' / 'plugin.json').write_text(
-                json.dumps({'name': 'auto-office', 'skills': skills}), encoding='utf-8')
-
-            return check_plugin_skills(root)
-
+    def test_wrong_codex_source_is_rejected(self):
+        ctx, root = self.fixture()
+        with ctx:
+            (root / '.agents/plugins/marketplace.json').write_text(json.dumps(
+                {'plugins':[{'source':{'path':'./'}}]}))
+            self.assertTrue(any('expected ./plugin-dist' in err for err in check_plugin_skills(root)))
 
 if __name__ == '__main__':
     unittest.main()

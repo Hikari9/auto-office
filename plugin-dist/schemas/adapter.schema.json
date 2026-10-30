@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 harness adapter",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "verified_state",
+    "version_fingerprint",
+    "model_source",
+    "effort_mapping",
+    "benchmark_slug_mapping",
+    "invocation",
+    "safe_prompt_passing",
+    "dispatch_forms",
+    "trusted_for",
+    "quota_probe",
+    "shallow_review",
+    "agentic_capability",
+    "failure_signatures",
+    "conformance"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "verified_state": {
+      "enum": [
+        "invalid",
+        "valid-unverified",
+        "proven"
+      ]
+    },
+    "version_fingerprint": {
+      "type": "object"
+    },
+    "model_source": {
+      "type": "object"
+    },
+    "preflight": {
+      "type": "object",
+      "properties": {
+        "model_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "auth_check": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "effort_mapping": {
+      "type": "object"
+    },
+    "benchmark_slug_mapping": {
+      "type": "object"
+    },
+    "invocation": {
+      "type": "object"
+    },
+    "safe_prompt_passing": {
+      "type": "object"
+    },
+    "dispatch_forms": {
+      "type": "array"
+    },
+    "trusted_for": {
+      "type": "array"
+    },
+    "quota_probe": {
+      "type": "object"
+    },
+    "shallow_review": {
+      "type": "object"
+    },
+    "agentic_capability": {
+      "type": "object"
+    },
+    "failure_signatures": {
+      "type": "array"
+    },
+    "conformance": {
+      "type": "object"
+    },
+    "source_notes": {
+      "type": "string"
+    },
+    "trust_justifications": {
+      "type": "object",
+      "description": "Permission or trust flag in a launch argv -> why this harness needs it and what it grants. `office harness validate` refuses an unsafe flag without one.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "override_seed": {
+      "type": "boolean",
+      "description": "A user-level adapter whose id names a seed adapter replaces it only when this is true."
+    },
+    "free_model_max_concurrent": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default simultaneous dispatch cap for free catalog rows without a row-level max_concurrent."
+    },
+    "session": {
+      "type": "object",
+      "description": "How Office learns the harness's session id for resume: assigned at launch, or detected from hooks, herdr, or CLI output.",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "assigned",
+            "detected",
+            "none"
+          ]
+        },
+        "assign_arg": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "hook",
+              "herdr",
+              "output",
+              "transcript"
+            ]
+          }
+        },
+        "output_pattern": {
+          "type": "string"
+        }
+      }
+    },
+    "office_profiles": {
+      "type": "object",
+      "description": "v3.1 launch forms: worker, reviewer, vision. A profile is not proof the route works; visual capability needs a passing conformance probe.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "argv",
+          "prompt"
+        ],
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompt": {
+            "enum": [
+              "stdin",
+              "argv",
+              "argv-bound"
+            ]
+          },
+          "output": {
+            "enum": [
+              "stdout",
+              "file"
+            ]
+          },
+          "image_arg": {
+            "type": "array"
+          },
+          "image_transport": {
+            "enum": [
+              "argv",
+              "prompt-path",
+              "prompt-at"
+            ]
+          },
+          "include_arg": {
+            "type": "array"
+          },
+          "herdr_kind": {
+            "type": "string"
+          },
+          "prompt_flag": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Capabilities the adapter asserts for routing. 'vision' is never asserted here; it is granted only by a passing conformance probe."
+    }
+  }
+}

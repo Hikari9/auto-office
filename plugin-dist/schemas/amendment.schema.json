@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 amendment operation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "amendment_id",
+    "family_id",
+    "kind",
+    "affected_scopes",
+    "expected_prior_versions",
+    "resulting_versions",
+    "reason",
+    "evidence",
+    "evidence_hash"
+  ],
+  "properties": {
+    "amendment_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "routing",
+        "requirements",
+        "plan_contract"
+      ]
+    },
+    "affected_scopes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "expected_prior_versions": {
+      "type": "object",
+      "required": [
+        "requirements_version",
+        "plan_version",
+        "routing_version"
+      ],
+      "properties": {
+        "requirements_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "routing_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "resulting_versions": {
+      "type": "object",
+      "required": [
+        "requirements_version",
+        "plan_version",
+        "routing_version"
+      ],
+      "properties": {
+        "requirements_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "routing_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "applied_at": {
+      "type": "string"
+    }
+  }
+}

@@ -34,7 +34,7 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-loop/SKILL.md': 30,
     'skills/auto-maintenance/SKILL.md': 21,
     'skills/auto-planning/SKILL.md': 24,
-    'skills/auto-review/SKILL.md': 36,
+    'skills/auto-review/SKILL.md': 90,
     'skills/auto-routing/SKILL.md': 54,
     'skills/auto-self-improve/SKILL.md': 52,
     # #270: when-entry-strategy-invariants-exit plus the worker and review brief templates.
@@ -46,6 +46,8 @@ SKILL_LINE_BUDGETS = {
     # failure mode with a reproduction, compressed to 28 lines before raising.
     'skills/codex-cli/SKILL.md': 92,
     'skills/hermes-cli/SKILL.md': 20,
+    'skills/opencode-cli/SKILL.md': 45,
+    'skills/pi-cli/SKILL.md': 45,
     # Vendored from external sources in 9a59305, not authored to this repo's
     # context-load convention: every skill above fits in 64 lines, these two do not.
     # Budgeted at their actual size so the gate registers rather than ignores them.
@@ -63,7 +65,12 @@ def frontmatter(path):
     if not m: return False,'missing YAML frontmatter', None, text
     try: fm=yaml.safe_load(m.group(1))
     except Exception as e: return False,f'bad YAML frontmatter: {e}', None, text
-    if set(fm or {}) != {'name','description'}: return False,f'frontmatter keys must be exactly name+description, got {set(fm or {})}', fm, text
+    required = {'name', 'description'}
+    allowed = required | {'disable-model-invocation'}
+    keys = set(fm or {})
+    if not required <= keys or keys - allowed: return False,f'frontmatter requires name+description and only optional invocation control, got {keys}', fm, text
+    if 'disable-model-invocation' in fm and not isinstance(fm['disable-model-invocation'], bool):
+        return False,'disable-model-invocation must be a boolean', fm, text
     if not re.match(r'^[a-z0-9-]+$', fm['name']): return False,'bad name', fm, text
     if not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
@@ -71,7 +78,7 @@ def frontmatter(path):
 def discovered_skills(root):
     return sorted(
         path for path in root.rglob('SKILL.md')
-        if not any(part.startswith('.') or part == 'mutants' for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
+        if not any(part.startswith('.') or part in ('mutants', 'plugin-dist') for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
     )
 
 def check_skill_budgets(root=ROOT):
@@ -126,26 +133,45 @@ def check_versions(root=ROOT):
 
 
 def check_plugin_skills(root=ROOT):
-    """The Claude plugin must expose the root SKILL.md and skills/. Each entry is a ./ directory inside the plugin."""
-    manifest = root / '.claude-plugin' / 'plugin.json'
-    if not manifest.exists():
-        return []
-    skills = json.loads(manifest.read_text()).get('skills')
-    if not isinstance(skills, list) or not all(isinstance(entry, str) for entry in skills):
-        return ['.claude-plugin/plugin.json: skills must be a list of paths']
+    """Validate curated marketplace discovery, not source-folder counts."""
     errors = []
-    plugin_root = root.resolve()
-    exposed = set()
-    for entry in skills:
-        valid = entry.startswith('./') and '\x00' not in entry
-        target = (root / entry).resolve() if valid else None
-        if not valid or not target.is_dir() or not target.is_relative_to(plugin_root):
-            errors.append(f'.claude-plugin/plugin.json: skills entry {entry!r} must be a ./ directory inside the plugin')
-        else:
-            exposed.add(target)
-    for required in ('./', './skills/'):
-        if (root / required).resolve() not in exposed:
-            errors.append(f'.claude-plugin/plugin.json: skills must expose {required!r}')
+    manifest = root / '.claude-plugin/plugin.json'
+    if manifest.is_file():
+        try:
+            if 'skills' in json.loads(manifest.read_text()):
+                errors.append('.claude-plugin/plugin.json: legacy root skills paths expose retired skills')
+        except ValueError as exc:
+            errors.append(f'.claude-plugin/plugin.json: invalid JSON ({exc})')
+    for name, getter in (
+        ('.claude-plugin/marketplace.json', lambda obj: obj['plugins'][0]['source']),
+        ('.agents/plugins/marketplace.json', lambda obj: obj['plugins'][0]['source']['path']),
+    ):
+        path = root / name
+        if not path.is_file():
+            errors.append(f'{name}: marketplace missing')
+            continue
+        try:
+            source = getter(json.loads(path.read_text()))
+            if source != './plugin-dist':
+                errors.append(f'{name}: expected ./plugin-dist, got {source!r}')
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            errors.append(f'{name}: malformed marketplace ({exc})')
+    catalog = root / 'plugin-distribution.json'
+    if not catalog.is_file():
+        errors.append('plugin-distribution.json: missing catalog')
+        return errors
+    try:
+        data = json.loads(catalog.read_text())
+        wanted = set(data['public_skills'])
+        retired = set(data['retired_skills'])
+    except (ValueError, KeyError, TypeError) as exc:
+        errors.append(f'plugin-distribution.json: malformed catalog ({exc})')
+        return errors
+    visible = {p.parent.name for p in (root / 'plugin-dist/skills').glob('*/SKILL.md')}
+    if visible != wanted:
+        errors.append(f'plugin-dist/skills: catalog mismatch missing={sorted(wanted-visible)} extra={sorted(visible-wanted)}')
+    if visible & retired:
+        errors.append(f'plugin-dist/skills: retired visible {sorted(visible & retired)}')
     return errors
 
 
@@ -229,12 +255,17 @@ def main():
     errors.extend(check_versions())
     errors.extend(check_plugin_skills())
     errors.extend(check_skill_metadata())
+    # The public plugin is isolated because host discovery paths supplement defaults.
+    distribution_check = subprocess.run([sys.executable, str(ROOT / 'scripts/build_plugin_distribution.py'), '--check'],
+                                        capture_output=True, text=True, cwd=ROOT)
+    if distribution_check.returncode:
+        errors.extend((distribution_check.stdout + distribution_check.stderr).splitlines())
         
     if errors:
         print('FAIL')
         for e in errors: print('-',e)
         return 1
-    print(f'PASS: {len(skills)} skills, {len(list(ROOT.glob("schemas/*.json")))} schemas, {len(list(ROOT.glob("evals/*.yaml")))} evals; budget check: {len(SKILL_LINE_BUDGETS) + 1} files within line budgets')
+    print(f'PASS: {len(skills)} canonical skill files (16 plugin-visible), {len(list(ROOT.glob("schemas/*.json")))} schemas, {len(list(ROOT.glob("evals/*.yaml")))} evals; budget check: {len(SKILL_LINE_BUDGETS) + 1} files within line budgets')
     return 0
 
 if __name__=='__main__': sys.exit(main())

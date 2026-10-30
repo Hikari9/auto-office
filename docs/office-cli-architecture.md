@@ -294,7 +294,7 @@ Runtime resources (schemas, catalog seeds, protocol documentation) and skills sh
 - **Developer / Editable Installation**:
   `uv tool install --editable <path/to/auto-office checkout>`
 - **Skill Delivery (D142-3)**:
-  The Claude and Codex plugins ship the skills from the checkout (`.claude-plugin/plugin.json` lists `./` and `./skills/`). `office install` configures harness hooks and creates no skill symlinks.
+  The Claude and Codex marketplaces install the isolated `./plugin-dist` package with exactly 16 public skills, including the canonical full `auto-office` mirror. The eight historical skills remain in original `skills/` paths for pinned Office runtimes, but never enter plugin discovery. `office install` registers the CLI runtime and optionally installs harness hooks: it does not install plugin skills or create skill symlinks.
 - **Upgrade Workflow (D142-4)**:
   Upgrade the package with `uv tool upgrade auto-office`, then run `office install` and `office doctor`.
 - **Uninstallation (D142-5)**:

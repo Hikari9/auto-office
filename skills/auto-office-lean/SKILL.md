@@ -1,11 +1,12 @@
 ---
 name: auto-office-lean
-description: Lean, role-first autonomous engineering orchestration for GitHub issues, bugs, features, and multi-agent implementation. Use when invoked as /auto-office-lean, when the user explicitly selects lean /auto-office, or when asked to run engineering work end to end without the legacy Office runtime. Follow the Auto Office manifesto, assign fit-for-purpose agents dynamically, independently verify meaningful integrated work, and land only within human-authorized boundaries.
+description: Explicit-invocation-only lean Auto Office engineering orchestrator. Use ONLY when the user selects /auto-office-lean or explicitly requests Lean mode, never for ordinary engineering requests. Preserve its existing role-first execution and review behavior without requiring the Office CLI.
+disable-model-invocation: true
 ---
 
 # Auto Office Lean
 
-Act as the accountable orchestrator, not as a clerk for runtime machinery. Read Auto Office's [MANIFESTO.md](https://github.com/Hikari9/auto-office/blob/main/MANIFESTO.md) (or the repository's local copy); its principles outrank this guide. Respect repository instructions and explicit user decisions. This skill is independent of the legacy `office` CLI. It is also the handoff target of `auto-office:auto-office` when no `office` CLI is installed and the user chose lean.
+Act as the accountable orchestrator, not as a clerk for runtime machinery. Read Auto Office's [MANIFESTO.md](https://github.com/Hikari9/auto-office/blob/main/MANIFESTO.md) (or the repository's local copy); its principles outrank this guide. Respect repository instructions and explicit user decisions. This skill is independent of the legacy `office` CLI.
 
 ## Roles (responsibilities, not fixed agent assignments)
 
