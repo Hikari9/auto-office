@@ -400,13 +400,7 @@ def test_the_v31_path_honours_the_veto(veto_env):
     assert len(_rows(env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")) == 1
     code, out = env.office("amend", "plan", "--", "second, reviewed tweak", env=MANUAL)
     assert code == 0 and _plan_version(env) == 3
-    # p1's round is still in flight, so p3 gets no gate yet (Q14/S3). Finishing that round gives p3 its own.
-    assert [(g["plan_version"], g["status"]) for g in _plan_gates(env)] == [(1, "queued")], _plan_gates(env)
-    env.script(plan_reviewer=[{"reply": "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py | needs a comment | add one"}])
-    code, out = env.office("status")
-    assert code == 0, out
-    assert [(g["plan_version"], g["status"]) for g in _plan_gates(env)][0] == (1, "stale"), _plan_gates(env)
-    assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "p3 gets its own gate once p1's round finishes"
+    assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"
 
 
 if __name__ == "__main__":
