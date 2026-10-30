@@ -336,6 +336,7 @@ verification:
   recapture_max: 1
   visual_review_max_rounds: 2   # v3.1 contract only; convergence-v1 caps every RECHECK sequence at 3
   no_progress_repeats: 2
+  # unused: no job timeout is enforced
   job_timeout_seconds: 3600
   check_timeout_seconds: 1800
   # Full suite (bare scripts/validate.sh or --full) runs under this limit or
