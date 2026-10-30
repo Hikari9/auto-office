@@ -99,6 +99,8 @@ Both marketplaces select the generated, self-contained `./plugin-dist` package, 
 
 Claude Code's native `disable-model-invocation: true` enforces manual-only activation for the full hub, Lean, Intake and Takeover. Standalone `auto-review` deliberately remains callable by an explicitly requesting agent (the role/README contract forbids reflexive activation); its model-invocation allowance is necessary to support orchestrator and executor callers. OpenAI/Codex portability may treat that Claude-only metadata as advisory; never claim a host guarantee without testing.
 
+The root skill retains the opt-in CLI-versus-Lean onboarding and saved choice from #924; it never switches to Lean without the user's explicit prior selection.
+
 The repo-root `SKILL.md` remains canonical; `scripts/build_plugin_distribution.py --sync` mirrors that file and the selected skills into `plugin-dist`. Eight retired source skills stay at their original paths for runtime compatibility but are not discoverable in the installed plugin. `--check` and `scripts/check_ecosystem.py` verify the exact mirror. Claude reads `.claude-plugin/marketplace.json`, Codex reads `.agents/plugins/marketplace.json`; the CLI version is sourced only from `src/office/_version.py`.
 
 Verify after install: check the host's plugin skill list for the 16 names; invoke `/auto-office:auto-office` explicitly on Claude Code where namespaced, confirm the loaded frontmatter identifies the full original (not Lean), then run `office doctor` separately if the CLI is installed. If the host has no suitable skill listing, report that check as unverified, not passed.

@@ -28,7 +28,8 @@ def test_original_full_skill_is_the_only_canonical_root():
     assert "Original full Auto Office" in text
     assert "## Start" in text and "## Execute" in text
     assert "auto-office-lean" in (ROOT / "plugin-dist/skills/auto-office-lean/SKILL.md").read_text()
-    assert "auto-switch to auto-office-lean" in text
+    assert "Lean, don\'t ask again" in text
+    assert "only after the user picks **Install the CLI**" in text
 
 
 def test_all_retired_skills_and_primitive_manifest_paths_remain():

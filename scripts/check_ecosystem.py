@@ -132,6 +132,49 @@ def check_versions(root=ROOT):
 
 
 
+def check_plugin_skills(root=ROOT):
+    """Validate curated marketplace discovery, not source-folder counts."""
+    errors = []
+    manifest = root / '.claude-plugin/plugin.json'
+    if manifest.is_file():
+        try:
+            if 'skills' in json.loads(manifest.read_text()):
+                errors.append('.claude-plugin/plugin.json: legacy root skills paths expose retired skills')
+        except ValueError as exc:
+            errors.append(f'.claude-plugin/plugin.json: invalid JSON ({exc})')
+    for name, getter in (
+        ('.claude-plugin/marketplace.json', lambda obj: obj['plugins'][0]['source']),
+        ('.agents/plugins/marketplace.json', lambda obj: obj['plugins'][0]['source']['path']),
+    ):
+        path = root / name
+        if not path.is_file():
+            errors.append(f'{name}: marketplace missing')
+            continue
+        try:
+            source = getter(json.loads(path.read_text()))
+            if source != './plugin-dist':
+                errors.append(f'{name}: expected ./plugin-dist, got {source!r}')
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            errors.append(f'{name}: malformed marketplace ({exc})')
+    catalog = root / 'plugin-distribution.json'
+    if not catalog.is_file():
+        errors.append('plugin-distribution.json: missing catalog')
+        return errors
+    try:
+        data = json.loads(catalog.read_text())
+        wanted = set(data['public_skills'])
+        retired = set(data['retired_skills'])
+    except (ValueError, KeyError, TypeError) as exc:
+        errors.append(f'plugin-distribution.json: malformed catalog ({exc})')
+        return errors
+    visible = {p.parent.name for p in (root / 'plugin-dist/skills').glob('*/SKILL.md')}
+    if visible != wanted:
+        errors.append(f'plugin-dist/skills: catalog mismatch missing={sorted(wanted-visible)} extra={sorted(visible-wanted)}')
+    if visible & retired:
+        errors.append(f'plugin-dist/skills: retired visible {sorted(visible & retired)}')
+    return errors
+
+
 def check_skill_metadata(root=ROOT):
     """Require each skill's OpenAI display name to equal its canonical skill name."""
     errors=[]
@@ -210,6 +253,7 @@ def main():
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
     errors.extend(check_versions())
+    errors.extend(check_plugin_skills())
     errors.extend(check_skill_metadata())
     # The public plugin is isolated because host discovery paths supplement defaults.
     distribution_check = subprocess.run([sys.executable, str(ROOT / 'scripts/build_plugin_distribution.py'), '--check'],
