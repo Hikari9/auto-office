@@ -61,12 +61,23 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
 @pytest.mark.parametrize("flags,needle", [
     (("--contract",), "--contract"),
     (("--requirements",), "--requirements"),
+    (("--no-review",), "--no-review"),
+    (("--reason", "why"), "--reason"),
+    (("--reason", ""), "--reason"),
+    (("--add-criterion", "x"), "--add-criterion"),
+    (("--drop-criterion", "x"), "--drop-criterion"),
+    (("--add-non-goal", "x"), "--add-non-goal"),
+    (("--drop-non-goal", "x"), "--drop-non-goal"),
     (("--add-accept", "calc.add(0, 0) == 0"), "--add-accept"),
     (("--drop-accept", "calc.add(2, 3) == 5"), "--drop-accept"),
     (("--add-check", "true"), "--add-check"),
     (("--drop-check", "true"), "--drop-check"),
     (("--set", "depends=none"), "--set"),
-    (("--reason", "why"), "--reason"),
+    (("--redirect", "P1"), "--redirect"),
+    (("--redirect", ""), "--redirect"),
+    (("--root-cause", ""), "--root-cause"),
+    (("--requirement", ""), "--requirement"),
+    (("--reviewer", "same"), "--reviewer"),
 ])
 def test_amend_route_refuses_amendment_flags_it_would_drop(live, flags, needle):
     # A1: `amend route` must not drop an amendment-only flag and exit 0.
@@ -76,6 +87,19 @@ def test_amend_route_refuses_amendment_flags_it_would_drop(live, flags, needle):
     assert code == 4, out
     assert needle in out and "nothing was recorded" in out, out
     assert _state(con) == before
+
+
+def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
+    """A flag added to `office amend` must be classified here, or it would be dropped by `amend route`."""
+    import argparse
+
+    from office import cli
+
+    (sub,) = [a for a in cli._parser()._actions if isinstance(a, argparse._SubParsersAction)]
+    amend_flags = {opt for a in sub.choices["amend"]._actions for opt in a.option_strings if opt.startswith("--")}
+    kept_by_route = {"--as", "--quote", "--restart", "--run", "--state-dir", "--harness", "--session", "--json",
+                     "--verbose", "--help"}
+    assert amend_flags - kept_by_route == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
 
 
 @pytest.mark.approved

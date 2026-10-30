@@ -1037,7 +1037,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     if cmd == "amend" and args.scope == "route":
         from office import routechange
         from office.state import Refused
-        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name)]
+        # An empty string is a given value (`--reason ""`), so only the unset defaults are skipped.
+        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name) not in (None, False, [])]
         if given:
             raise Refused("route-with-amendment-flags", f"{' '.join(given)} amend the plan, not a route; nothing was recorded",
                           scope=args.delta[0] if args.delta else None, preserved="plan, contracts, and route unchanged",
