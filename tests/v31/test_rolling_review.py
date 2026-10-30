@@ -90,6 +90,8 @@ def test_stale_changes_required_gives_the_current_revision_its_round(env):
     env.write_plan(PLAN_ONE + "\n")
     env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
     env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    # p2's round is in flight, so p3 queues no gate of its own; the round's result gives p3 its round.
+    assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "queued", None)]
     code, data = env.ojson("status")
     assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "stale", "CHANGES_REQUIRED"),
                                 (3, "done", "PASS")], data
@@ -103,6 +105,7 @@ def test_stale_pass_with_an_open_defect_does_not_end_review(env):
     env.write_plan(PLAN_TWO + "\n")
     env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
     env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    assert _plan_gates(env) == [(1, "done", "PLAN_DEFECT"), (2, "queued", None)]
     code, data = env.ojson("status")
     # The stale PASS on p2 cannot end review while P2 is open; p3 is the round that clears it.
     assert _plan_gates(env) == [(1, "done", "PLAN_DEFECT"), (2, "stale", "PASS"), (3, "done", "PASS")], data
@@ -112,6 +115,24 @@ def test_stale_pass_with_an_open_defect_does_not_end_review(env):
     finally:
         con.close()
     assert data["data"]["plan_review"]["ended"] is True, data
+
+
+def test_stale_plan_defect_stays_open_and_gives_the_current_revision_its_round(env):
+    _start(env, plan_reviewer=[{"reply": CR}, {"reply": DEFECT}, {"reply": "VERDICT: PASS"}])
+    env.office("approve", "plan", "--quote", "go", check=0)
+    env.write_plan(PLAN_ONE + "\n")
+    env.office("amend", "plan", "--", "tighten acceptance", env={"OFFICE_JOBS": "manual"}, check=0)
+    env.office("amend", "plan", "--", "another ordinary tweak", env={"OFFICE_JOBS": "manual"}, check=0)
+    code, data = env.ojson("status")
+    assert _plan_gates(env) == [(1, "done", "CHANGES_REQUIRED"), (2, "stale", "PLAN_DEFECT"),
+                                (3, "done", "PASS")], data
+    con = env.con()
+    try:
+        open_p2 = con.execute("SELECT COUNT(*) FROM findings WHERE gate_kind='plan_review' AND code='P2' "
+                              "AND state='open'").fetchone()[0]
+    finally:
+        con.close()
+    assert open_p2 == 1, "a superseded round's defect is recorded and stays open until a round clears it"
 
 
 def test_stale_attention_does_not_requeue_the_current_revision(env):
