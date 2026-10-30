@@ -405,7 +405,8 @@ def test_the_v31_path_honours_the_veto(veto_env):
     env.script(plan_reviewer=[{"reply": "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py | needs a comment | add one"}])
     code, out = env.office("status")
     assert code == 0, out
-    assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"
+    assert [(g["plan_version"], g["status"]) for g in _plan_gates(env)][0] == (1, "stale"), _plan_gates(env)
+    assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "p3 gets its own gate once p1's round finishes"
 
 
 if __name__ == "__main__":
