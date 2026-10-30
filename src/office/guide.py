@@ -555,7 +555,7 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
-    from office import db, dispatch, rerun
+    from office import db, dispatch, rerun, watchdog
     from office.util import now_iso, parse_iso
     threshold = idle_stall_s()
     out = []
@@ -602,7 +602,6 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                        f"pane tail in {tail}; next: {actions}")
             continue
         if act["busy"] or changed:
-            from office import watchdog
             # A spinner, even a ticking spinner, is not progress by itself (#701).
             # Watchdog reports only after unchanged pane, worktree and log evidence.
             if act["busy"]:
@@ -620,6 +619,11 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
             continue
         idle = (parse_iso(now_iso()) - parse_iso(idle_since)).total_seconds()
         if idle < threshold:
+            continue
+        if watchdog.child_state(d) is not False:
+            # A live child (a background monitor, `office wait`) is work in flight: restart the idle clock (#895).
+            with db.transaction(con):
+                con.execute("UPDATE dispatches SET idle_since=? WHERE id=?", (now_iso(), d["id"]))
             continue
         tail = _write_pane_tail(run, d, act)
         prompt = f'office prompt {d["id"]} -- "<message>", ' if d["launcher"] == "herdr" else ""

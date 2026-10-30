@@ -79,6 +79,29 @@ def progress(d: dict, activity: dict | None = None) -> str | None:
     return sha256_obj((pane, wt, logsig))
 
 
+def child_state(d: dict) -> bool | None:
+    """Whether the executor's agent process has a live child or group member, such as a background monitor or
+    `office wait`: True or False, or None when the process table cannot be read. Unknown is never a stall (#895).
+    A pane agent is verified by its recorded start time, so a reused pid never counts as the agent."""
+    if d.get("launcher") == "herdr":
+        rec = dispatch._recorded_identity({"id": d["run_id"]}, d["id"], "agent") or {}
+        root, started = rec.get("pid"), rec.get("c_start")
+        if not started:
+            return False  # no verifiable agent, so no child to wait on
+    else:
+        root, started = d.get("pid"), None
+    if not root:
+        return False
+    table = dispatch._process_table()
+    if table is None:
+        return None
+    # A zombie has exited and cannot be waiting on anything.
+    live = {pid: (ppid, pgid, began) for pid, ppid, pgid, state_, began, _ in table if not state_.startswith("Z")}
+    if root not in live or (started and live[root][2] != started):
+        return False
+    return any(pid != root and (ppid == root or pgid == root) for pid, (ppid, pgid, _) in live.items())
+
+
 def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -> str | None:
     """Inspect and sample progress; return a reason if the hard threshold passed.
 
@@ -106,6 +129,12 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -
                 f"{int(threshold('review_wall'))}s; preserve the attempt, inspect its output and retry through Office review policy")
     if seconds < threshold(role):
         return None
+    if role == "executor" and child_state(d) is not False:
+        # A live child (a background monitor, `office wait`) is work in flight: restart the clock.
+        with db.transaction(con):
+            con.execute("UPDATE dispatches SET watchdog_progress_since=? WHERE id=? AND status='running' "
+                        "AND ended_at IS NULL", (now, d["id"]))
+        return None
     if role == "executor":
         return (f"{d['task_id']} executor {d['id']}: no pane, worktree or log progress for {int(seconds)}s "
                 f"despite a busy agent; next: inspect the pane and worktree, then office revoke {d['task_id']} "
@@ -116,13 +145,17 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -
 
 
 def reviewer_stalls(con, run: dict) -> list[str]:
-    """Reviewers have an independent watchdog: executor state is irrelevant."""
-    from office import rerun
+    """Reviewers have an independent watchdog: executor state is irrelevant. A running self-review subagent
+    owns its gate, so it is never reported here (#895)."""
+    from office import rerun, self_review_subagents
+    owned = self_review_subagents.running_dispatch_ids(con, run["id"])
     out = []
     for row in con.execute("SELECT * FROM dispatches WHERE run_id=? AND role IN "
                            "('code_reviewer','plan_reviewer','integration_reviewer','visual_reviewer','convergence_reviewer','visual_verifier','browser_verifier','closeout_verifier') "
                            "AND status='running' AND ended_at IS NULL", (run["id"],)).fetchall():
         d = dict(row)
+        if d["id"] in owned:
+            continue
         act = rerun.agent_activity(d) if d.get("launcher") == "herdr" else None
         note = check(con, run, d, role="reviewer", activity=act)
         if note:
