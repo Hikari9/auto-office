@@ -325,7 +325,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
                    help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
-                   help="amend route: interrupt the agent and relaunch it on the new route")
+                   help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -1045,7 +1045,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                           next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart)
+                                        restart=args.restart, cwd=cwd)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
@@ -1058,7 +1058,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
                            drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
-                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as)
+                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as,
+                           restart=args.restart)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)

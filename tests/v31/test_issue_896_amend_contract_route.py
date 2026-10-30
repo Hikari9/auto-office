@@ -9,6 +9,7 @@ Agents never run here: the dispatch is launched external, so its row stays live.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +46,7 @@ def _state(con):
 @pytest.mark.parametrize("route_args", [
     ("--as", ROUTE, "--quote", QUOTE),
     ("--as", ROUTE),
+    ("--restart",),
 ])
 def test_contract_amendment_with_route_is_refused_and_records_nothing(live, route_args):
     # A valid contract edit, so the only thing wrong with the amendment is its route.
@@ -53,7 +55,7 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
     before = _state(con)
     code, out = live.office("amend", "T1", "--contract", *route_args, "--", "change the T1 contract", env=EXTERNAL)
     assert code == 4, out
-    assert "amend route" in out, out
+    assert "route-not-amendment" in out and "amend route" in out, out
     assert _state(con) == before, "a refused amendment records no contract version, amendment, or route"
 
 
@@ -110,10 +112,63 @@ def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
 
 
 @pytest.mark.approved
-def test_ordinary_amendment_with_route_is_refused(live):
+@pytest.mark.parametrize("route_args,needle", [
+    (("--as", ROUTE, "--quote", QUOTE), "--as"),
+    (("--restart",), "--restart"),
+])
+def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
     con = live.con()
     before = _state(con)
-    code, out = live.office("amend", "T1", "--as", ROUTE, "--quote", QUOTE, "--", "tweak T1", env=EXTERNAL)
+    code, out = live.office("amend", "T1", *route_args, "--", "tweak T1", env=EXTERNAL)
     assert code == 4, out
-    assert "amend route" in out, out
+    assert "route-not-amendment" in out and needle in out and "amend route" in out, out
+    assert _state(con) == before
+
+
+@pytest.mark.approved
+def test_amend_route_with_as_relaunches_on_the_named_route(live):
+    # The positive counterpart: `amend route` keeps working and records the named route.
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, env=EXTERNAL)
+    assert code == 0, out
+    con = live.con()
+    (row,) = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at")]
+    assert row["triple"] == "claude@1/sonnet@high" and row["effort"] == "high", row
+    assert json.loads(row["route_json"])["route_change"]["quote"] == QUOTE
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("route_args", [
+    ("--as", ROUTE, "--quote", QUOTE),
+    ("--restart", "--as", ROUTE, "--quote", QUOTE),
+])
+@pytest.mark.parametrize("identity", [
+    ("OFFICE_DISPATCH_ID", "OFFICE_ROLE"),
+    ("OFFICE_DISPATCH_ID",),
+    ("OFFICE_ROLE",),
+])
+def test_a_worker_cannot_change_its_own_route(live, route_args, identity):
+    # The worker env is the one a dispatch launches with; `amend route` must refuse it when any worker
+    # marker is set, not record a user route change. A worker that lost OFFICE_DISPATCH_ID still has OFFICE_ROLE.
+    con = live.con()
+    d = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
+    markers = {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": "T1",
+               "OFFICE_ROLE": "executor", "OFFICE_JOBS": "manual"}
+    worker = {k: markers[k] for k in (*identity, "OFFICE_RUN_ID", "OFFICE_TASK_ID", "OFFICE_JOBS")}
+    before = _state(con)
+    code, out = live.office("amend", "route", "T1", *route_args, env=worker)
+    assert code == 4, out
+    assert "worker-cannot-change-route" in out, out
+    assert _state(con) == before
+
+
+@pytest.mark.approved
+def test_a_restarted_executor_in_its_task_worktree_cannot_change_its_route(live):
+    # A restarted executor can lose its dispatch env and still run in its task worktree; submit resolves it from cwd.
+    con = live.con()
+    d = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1'").fetchone())
+    before = _state(con)
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, cwd=Path(d["worktree"]),
+                            env={"OFFICE_RUN_ID": d["run_id"], "OFFICE_TASK_ID": "T1", "OFFICE_JOBS": "manual"})
+    assert code == 4, out
+    assert "worker-cannot-change-route" in out, out
     assert _state(con) == before

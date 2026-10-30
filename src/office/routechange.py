@@ -9,6 +9,7 @@ the new model/effort, resuming its session where the harness can.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from office import adapters, candidates, db, dispatch, jobs, routing, scoring, state
@@ -22,8 +23,19 @@ PENDING = ("planned", "queued", "changes_required")  # no live agent: a route ch
 DECLARABLE = (*PENDING, "accepted")
 
 
+def _is_worker(con, run: dict, cwd: Path | None) -> bool:
+    """A dispatched session, by its env or by standing in an executor's task worktree: a restarted executor
+    can lose the env but still runs in its worktree (submit resolves it the same way)."""
+    from office import submit
+    return bool(os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE")
+                or (cwd is not None and submit._worktree_dispatch(con, run, cwd) is not None))
+
+
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
-                 restart: bool = False) -> Result:
+                 restart: bool = False, cwd: Path | None = None) -> Result:
+    if _is_worker(con, run, cwd):
+        raise Refused("worker-cannot-change-route", "a worker cannot change its own route; the orchestrator does, on the user's words",
+                      next_step="office submit")
     if not target or not as_route:
         raise Usage("usage", "name the live dispatch and its new route", next_step=USAGE, exit_code=2)
     if not (quote or "").strip():
