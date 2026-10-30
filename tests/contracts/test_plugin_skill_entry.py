@@ -69,6 +69,7 @@ def test_install_check_asks_once_before_installing():
     not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
 
     assert "ask once per session" in not_found
+    assert not_found.index('cat "$CFG"') < not_found.index("ask once per session")
     assert "uv tool install auto-office" not in not_found
 
 
@@ -176,10 +177,8 @@ def test_install_check_no_longer_stops_to_ask_approval():
     assert "approve installing" not in section
 
 
-def test_onboarding_doc_explains_resetting_the_saved_choice():
-    doc = (ROOT / "docs" / "onboarding.md").read_text(encoding="utf-8")
-
-    assert "to ask again, delete that file" in doc
+def test_install_check_explains_resetting_the_saved_choice():
+    assert 'rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"' in _install_check()
 
 
 def test_install_check_keeps_stale_upgrade_guidance():
