@@ -22,7 +22,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-from office import db, paths, route_policy
+from office import db, paths, portable, route_policy
 from office.state import Refused, Usage
 from office.util import now_iso
 
@@ -50,7 +50,7 @@ def _key() -> bytes:
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | portable.O_BINARY, 0o600)
         except FileExistsError:
             pass
         else:

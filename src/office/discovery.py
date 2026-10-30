@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from office import legacy, paths
+from office import legacy, paths, portable
 from office.state import NoRun, Refused, Usage, find_run, get_dispatch, get_run, get_task, TERMINAL_PHASES
 from office.util import now_iso, short
 
@@ -63,7 +63,9 @@ def fast_session_keys() -> list[tuple[str, str]]:
 
 
 def process_key() -> str | None:
-    """'<harness>:<pid>:<start>' for the nearest ancestor harness process."""
+    """'<harness>:<pid>:<start>' for the nearest ancestor harness process (None on Windows: no `ps`)."""
+    if portable.IS_WINDOWS:
+        return None
     try:
         out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,lstart=,comm="], capture_output=True, text=True,
                              timeout=5).stdout

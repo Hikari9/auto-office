@@ -6,7 +6,6 @@ are durable notification receipts. No agent is started or user authority minted.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import subprocess
@@ -18,7 +17,7 @@ import threading
 from datetime import timedelta
 from pathlib import Path
 
-from office import db, discovery, paths, state
+from office import db, discovery, paths, portable, state
 from office.util import now_iso, parse_iso, pid_alive, sha256_obj
 
 # Event families with an actual lifecycle outcome or a possible next step.
@@ -70,13 +69,13 @@ def _flock(key: str, path: Path):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        portable.lock_exclusive(fh)
         held[key] = 1
         try:
             yield
         finally:
             del held[key]
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def _pane_lock(pane: str):
@@ -602,7 +601,7 @@ def ensure(run: dict) -> None:
         with log_path.open("a") as log:
             proc = subprocess.Popen([sys.executable, "-m", "office", "_wake_supervise", run["id"]],
                                     cwd=run["repo_root"], env=env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=log, start_new_session=True, close_fds=True)
+                                    stdout=log, stderr=log, **portable.session_kwargs(), close_fds=True)
         with db.transaction(con):
             con.execute("UPDATE root_wake_bindings SET supervisor_pid=? WHERE run_id=? AND generation=?",
                         (proc.pid, run["id"], binding["generation"]))
@@ -617,7 +616,7 @@ def supervise(run_id: str, *, once: bool = False) -> int:
     lock = (run_dir / "root-wake.lock").open("a+")
     try:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(lock, blocking=False)
         except BlockingIOError:
             return 0
         # Pane/worktree stall probes can be slow or unavailable. Run them off

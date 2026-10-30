@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, model_lineages, paths, portable, route_policy, routing, shipped_catalog, state, task_sizing
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -390,12 +390,11 @@ def _shared_cache_get(harness: str) -> dict | None:
 def _shared_cache_put(harness: str, result: dict) -> None:
     """Read-modify-write under an flock so concurrent office processes do not
     drop each other's harness entries; the file itself is replaced atomically."""
-    import fcntl
     path = _shared_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path.with_suffix(".lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            portable.lock_exclusive(lock)
             try:
                 data = json.loads(path.read_text()) if path.exists() else {}
                 if not isinstance(data, dict):

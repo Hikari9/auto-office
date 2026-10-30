@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from host_tools import host_tool_dirs
 import yaml
 
 from office import cli, configcmd, discovery, onboarding, version
@@ -78,7 +79,7 @@ def h(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(t.user))
     monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
     monkeypatch.setenv("OFFICE_AUTH_FIXTURE", json.dumps(ALL_SIGNED_IN))
-    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_), "/usr/bin", "/bin"]))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setattr(discovery, "process_key", lambda: None)
     t.repo.mkdir()
     subprocess.run(["git", "init", "-q", str(t.repo)], check=True)

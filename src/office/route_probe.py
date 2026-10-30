@@ -34,7 +34,6 @@ immutable `route_discovery_events` in the transaction that changes state.
 from __future__ import annotations
 
 import errno
-import fcntl
 import functools
 import json
 import math
@@ -54,7 +53,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, db, paths, route_policy
+from office import adapters, db, paths, portable, route_policy
 from office.util import (ALIVE, DEAD, UNKNOWN, atomic_write_json, now_iso, parse_iso, process_is, process_start,
                          sha256_file)
 
@@ -395,7 +394,7 @@ def _acquire(attempt_id: str) -> None:
     _lock_dir().mkdir(parents=True, exist_ok=True)
     fd = os.open(_lock_path(attempt_id), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(fd, blocking=False)
     except OSError:
         os.close(fd)
         raise
@@ -406,7 +405,7 @@ def _release(attempt_id: str, *, forget: bool = True) -> None:
     fd = _HELD.pop(attempt_id, None)
     if fd is not None:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            portable.unlock(fd)
         finally:
             os.close(fd)
     if forget:
@@ -428,13 +427,13 @@ def _owner_state(attempt_id: str, reserved_at: datetime | None, timeout_s: float
     except OSError as exc:
         return UNKNOWN, f"its probe lock cannot be opened ({exc.strerror})"
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(fd, blocking=False)
     except OSError as exc:
         if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
             return ALIVE, "a live process holds its probe lock"
         return UNKNOWN, f"its probe lock cannot be probed ({exc.strerror})"
     else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        portable.unlock(fd)
         return DEAD, "no process holds its probe lock"
     finally:
         os.close(fd)
@@ -444,7 +443,7 @@ def _group_alive(pgid: int) -> bool:
     if pgid <= 1:  # 0 would address this process's own group
         return False
     try:
-        os.killpg(pgid, 0)
+        portable.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -464,7 +463,10 @@ def _tool(name: str, *system: str) -> str:
 
 def _process_table() -> list[tuple[int, int, str, str]] | None:
     """(pid, ppid, start time, command and, where the OS shows it, environment) for
-    every process, or None when it cannot be read."""
+    every process, or None when it cannot be read (always, on Windows: no `ps`, and no way to read
+    another process's environment)."""
+    if portable.IS_WINDOWS:
+        return None
     try:
         listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), _PS_ENV_FLAGS, "-o", "pid=,ppid=,lstart=,command="], capture_output=True,
                                  text=True, timeout=10, check=True).stdout
@@ -477,7 +479,9 @@ def _process_table() -> list[tuple[int, int, str, str]] | None:
 def _workspace_pids(base: Path) -> set[int] | None:
     """Processes holding any file or directory (including their cwd) under the
     probe's disposable base. Nothing else knows that random path, so a holder is
-    the probe's. None when the holders cannot be listed."""
+    the probe's. None when the holders cannot be listed (always, on Windows: no `lsof`)."""
+    if portable.IS_WINDOWS:
+        return None
     try:
         proc = subprocess.run([_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-F", "p", "+D", str(base)], capture_output=True, text=True,
                               timeout=30)
@@ -550,7 +554,7 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
         return tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
 
-    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+    for sig, wait in ((signal.SIGTERM, term_wait), (portable.SIGKILL, kill_wait)):
         pids = left()
         if pids is None:
             return False
@@ -558,12 +562,12 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
             return True
         if pgid > 1:
             try:
-                os.killpg(pgid, sig)
+                portable.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):
                 pass
         for pid in pids:
             try:
-                os.kill(pid, sig)
+                portable.kill(pid, sig)
             except (ProcessLookupError, PermissionError):
                 pass
         deadline = time.time() + wait
@@ -1139,7 +1143,7 @@ def _boundary_argv(ws: _Workspace) -> list[str]:
 def _spawn(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
     """The one place a probe child is created: its own session, output piped back."""
     return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-                            start_new_session=True)
+                            **portable.session_kwargs())
 
 
 def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, nonce: str) -> dict:

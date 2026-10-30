@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, contract, db, gates, jobs, paths, planfile, review_parse, state, verification_coverage, worktree_setup
+from office import briefs, contract, db, gates, jobs, paths, planfile, portable, review_parse, state, verification_coverage, worktree_setup
 from office.util import dumps, now_iso, sha256_obj
 
 
@@ -113,14 +113,13 @@ def worktree_lock(run: dict, *, wait: float = 0.0):
     its whole run and by `office land --rebase` while it queues the next one, so
     no second compose can remove the worktree under a running check. A flock
     dies with its process, so a crashed job never leaves it held."""
-    import fcntl
     path = paths.worktrees_dir() / run["id"][:8] / "_integration.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a")
     deadline = time.time() + wait
     while True:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fh, blocking=False)
             break
         except OSError:
             if time.time() >= deadline:
@@ -132,7 +131,7 @@ def worktree_lock(run: dict, *, wait: float = 0.0):
     try:
         yield
     finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
+        portable.unlock(fh)
         fh.close()
 
 
@@ -635,7 +634,10 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
         target = wt / path
         if target.is_symlink() or not target.is_file():
             raise SharedAppendUnsafe(f"{path}: worktree shared path is not a regular file")
-        if target.read_bytes() != merged:
+        on_disk = target.read_bytes()
+        if b"\r" not in merged:
+            on_disk = on_disk.replace(b"\r\n", b"\n")  # git core.autocrlf (the Windows default) checks out CRLF
+        if on_disk != merged:
             raise SharedAppendUnsafe(f"{path}: worktree contents differ from composition HEAD")
         expected = base + a + b
         if merged != expected:
@@ -645,7 +647,7 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
     try:
         for path, content in changes.items():
             target = wt / path
-            fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(target, os.O_WRONLY | os.O_TRUNC | portable.O_NOFOLLOW | portable.O_BINARY)
             with os.fdopen(fd, "wb") as handle:
                 handle.write(content)
             paths.git(wt, "add", "--", path)
@@ -719,7 +721,7 @@ def finish_shared_append_merge(wt: Path, task: dict, previous: list[dict], *, en
         target = wt / path
         if target.is_symlink() or not target.is_file():
             return False
-        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | portable.O_NOFOLLOW | portable.O_BINARY)
         with os.fdopen(fd, "wb") as f:
             f.write(content)
         if subprocess.run(["git", "-C", str(wt), "add", "--", path], capture_output=True).returncode:

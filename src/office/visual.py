@@ -30,7 +30,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from office import briefs, db, gates, paths, review_parse, state
+from office import briefs, db, gates, paths, portable, review_parse, state
 from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj
 
 VIEWPORTS = {"desktop": (1440, 900), "mobile": (390, 844), "mobile-portrait": (390, 844), "tablet": (768, 1024),
@@ -443,11 +443,11 @@ def _office_leftover(con, run: dict, pid: int) -> dict | None:
     """
     from office.util import process_start
     try:
-        pgid = os.getpgid(pid)
+        pgid = portable.getpgid(pid)
     except OSError:
         return None
     started = _epoch(process_start(pid))
-    if started is None or pgid <= 1 or pgid in (os.getpgrp(), os.getpid()):
+    if started is None or pgid <= 1 or pgid in (portable.getpgrp(), os.getpid()):
         return None
     for d in con.execute("SELECT id, worktree, started_at, ended_at, launcher, pane_closed_at FROM dispatches "
                          "WHERE run_id=? AND role='executor' AND ended_at IS NOT NULL ORDER BY started_at DESC",
@@ -495,9 +495,9 @@ def _port_bound(host: str, port: int) -> bool:
 def _reclaim_leftover(owner: dict, host: str, port: int, wait: float = 5.0) -> bool:
     """Stop a proven leftover agent process group; True once the port is free."""
     pgid = owner["pgid"]
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for sig in (signal.SIGTERM, portable.SIGKILL):
         try:
-            os.killpg(pgid, sig)
+            portable.killpg(pgid, sig)
         except OSError:
             break  # the group is gone
         deadline = time.time() + wait
@@ -555,7 +555,7 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
         if spec.get("start"):
             server_log = open(evdir / "server.log", "ab")
             server = subprocess.Popen(spec["start"], shell=True, cwd=str(worktree), stdout=server_log, stderr=server_log,
-                                      start_new_session=True, env=gates._check_env(run))
+                                      **portable.session_kwargs(), env=gates._check_env(run))
             server_started = True
         problem = _wait_url(url, 90 if spec.get("start") else 10,
                             require_success=bool(spec.get("start")))
@@ -582,14 +582,14 @@ def capture_all(con, run: dict, task: dict, rev: dict, gate: dict, worktree: Pat
     finally:
         if server is not None:
             try:
-                os.killpg(server.pid, signal.SIGTERM)
+                portable.killpg(server.pid, signal.SIGTERM)
             except OSError:
                 pass
             try:
                 server.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(server.pid, signal.SIGKILL)
+                    portable.killpg(server.pid, portable.SIGKILL)
                 except OSError:
                     pass
                 server.wait()

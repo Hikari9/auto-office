@@ -27,7 +27,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from office import paths
+from office import paths, portable
 from office.result import Result
 from office.state import OfficeError
 from office.web import api, launcher as launch_mod
@@ -236,7 +236,9 @@ def pid_file() -> Path:
 
 
 def _started(pid: int) -> str | None:
-    """The process start time `ps` reports (macOS and Linux), to tell a reused pid apart."""
+    """The process start time `ps` reports (macOS and Linux; the creation time on Windows), to tell a reused pid apart."""
+    if portable.IS_WINDOWS:
+        return portable.windows_process_start(pid)
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
                              env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})  # same text from any shell
@@ -253,13 +255,14 @@ def _ours(info: dict | None) -> bool:
 
 
 def _alive(pid: int) -> bool:
+    if not portable.IS_WINDOWS:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return False  # our own child, now reaped
+        except ChildProcessError:
+            pass
     try:
-        if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False  # our own child, now reaped
-    except ChildProcessError:
-        pass
-    try:
-        os.kill(pid, 0)
+        portable.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -329,7 +332,7 @@ def start(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     env = {**os.environ, **extra}
     with open(web_dir() / "web.log", "ab") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
-                                start_new_session=True, close_fds=True)
+                                **portable.session_kwargs(), close_fds=True)
     deadline = time.time() + wait
     while time.time() < deadline:
         info = read_pid()
@@ -349,7 +352,7 @@ def stop(wait: float = 10.0) -> Result:
     if not _ours(info):
         pid_file().unlink(missing_ok=True)
         return Result(lines=["office web is not running"])
-    os.kill(info["pid"], signal.SIGTERM)
+    portable.kill(info["pid"], signal.SIGTERM)
     deadline = time.time() + wait
     while time.time() < deadline and _alive(info["pid"]):
         time.sleep(0.1)

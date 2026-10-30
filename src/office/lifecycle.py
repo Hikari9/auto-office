@@ -10,7 +10,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from office import config as cfg
+from office import config as cfg, portable
 from office import db, discovery, jobs, legacy, paths, planpath, root_wake, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
@@ -655,7 +655,7 @@ def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> 
     for row in live:
         if row["pid"] and pid_alive(row["pid"]):
             try:
-                os.killpg(os.getpgid(row["pid"]), signal.SIGTERM)
+                portable.killpg(portable.getpgid(row["pid"]), signal.SIGTERM)
             except OSError:
                 pass
     state.write_projection(con, run["id"])

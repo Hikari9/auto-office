@@ -8,7 +8,6 @@ injects the environment, and launches through a durable outbox job.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -31,7 +30,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, portable, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -1784,10 +1783,10 @@ def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | No
             break
         time.sleep(0.2)
     if not isinstance(pgid, int) or pgid <= 1 or pgid == info.get("shell_pid") \
-            or pgid in (os.getpid(), os.getpgrp()) or not process_start(pgid):
+            or pgid in (os.getpid(), portable.getpgrp()) or not process_start(pgid):
         return None
     try:
-        if os.getpgid(pgid) != pgid:
+        if portable.getpgid(pgid) != pgid:
             return None  # not a group leader: not the agent's own job
     except OSError:
         return None
@@ -1808,6 +1807,8 @@ def _c_start(pid: int | None) -> str | None:
     when it is checked under another."""
     if not pid or pid <= 0:
         return None
+    if portable.IS_WINDOWS:
+        return portable.windows_process_start(pid)
     try:
         out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
@@ -1835,13 +1836,13 @@ def _verified(run: dict, dispatch_id: str, which: str, pid: int | None) -> bool:
 
 
 def _killpg(pid, sig=signal.SIGTERM) -> bool:
-    if not pid or pid <= 0 or pid == os.getpid() or pid == os.getpgrp():
+    if not pid or pid <= 0 or pid == os.getpid() or pid == portable.getpgrp():
         return False
     try:
-        os.killpg(pid, sig)
+        portable.killpg(pid, sig)
     except OSError:
         try:
-            os.kill(pid, sig)
+            portable.kill(pid, sig)
         except OSError:
             return False
     return True
@@ -2118,7 +2119,7 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
     argv, extra = frontdoor.current_argv()
     env.update(extra)
     shim = paths.data_home() / "bin"
-    if (shim / "office").exists():
+    if (shim / portable.SHIM_NAME).exists():
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
     return env
 
@@ -2222,7 +2223,7 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
     log = open(ddir / "supervisor.log", "ab")
     try:
         proc = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
-                                start_new_session=True, close_fds=True)
+                                **portable.session_kwargs(), close_fds=True)
     finally:
         log.close()
     _record_launch(run, dispatch["id"], launcher=headless, pid=proc.pid)
@@ -2270,7 +2271,7 @@ def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess
     # Popen's cwd leaves $PWD at the supervisor's directory; opencode takes its working
     # directory from $PWD, so the checkout would count as external and be denied.
     return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env={**env, "PWD": str(cwd)}, start_new_session=True)
+                            env={**env, "PWD": str(cwd)}, **portable.session_kwargs())
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
@@ -2289,7 +2290,7 @@ def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Pat
     log = open(ddir / "supervisor.log", "ab")
     try:
         watcher = subprocess.Popen(sup, cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
-                                   start_new_session=True, close_fds=True)
+                                   **portable.session_kwargs(), close_fds=True)
     finally:
         log.close()
     if wait:
@@ -2884,7 +2885,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     try:
         watcher = subprocess.Popen(frontdoor.current_argv()[0] + ["_supervise", dispatch["id"]],
                                    cwd=str(paths.run_dir(run["id"])), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
-                                   start_new_session=True, close_fds=True)
+                                   **portable.session_kwargs(), close_fds=True)
     finally:
         log.close()
     return {"launcher": "herdr", "pane": pane, "agent": name, "watcher_pid": watcher.pid, "prompt_landed": landed}
@@ -3776,11 +3777,11 @@ def _pane_lock(run: dict):
     run_dir = paths.run_dir(run["id"])
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "herdr-tab.lock", "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        portable.lock_exclusive(lock)
         try:
             yield
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            portable.unlock(lock)
 
 
 def _reserve_pane(run: dict, pane: str, dispatch_id: str) -> None:
@@ -4581,12 +4582,12 @@ def supervise(dispatch_id: str) -> int:
             raise _Stopped(signum)
         if child and child.poll() is None:
             try:
-                os.killpg(child.pid, signum)
+                portable.killpg(child.pid, signum)
             except OSError:
                 pass
 
     # An in-process supervisor hands its caller's handlers back when the dispatch ends.
-    previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGINT, *([portable.SIGHUP] if portable.SIGHUP else []))}
     timer = None
     log_path = None
     try:
@@ -4681,7 +4682,7 @@ def supervise(dispatch_id: str) -> int:
                     _note(log_path, f"office: wall-clock cap of {cap / 60:g} min reached; stopping the agent")
                     _killpg(pid, signal.SIGTERM)
                     time.sleep(10)
-                    _killpg(pid, signal.SIGKILL)
+                    _killpg(pid, portable.SIGKILL)
                 timer = threading.Timer(cap, expire)
                 timer.daemon = True
                 timer.start()
@@ -5093,7 +5094,11 @@ _PS_ROW = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\
 def _process_table() -> list[tuple[int, int, int, str, str, str]] | None:
     """(pid, ppid, pgid, state, start, command-and-environment) for every process, or None when the table cannot be
     trusted. `ps` runs in the C locale, so the start time parses (and matches a recorded identity) whatever the
-    user's locale is; a table that does not contain this very process was misread, and says nothing."""
+    user's locale is; a table that does not contain this very process was misread, and says nothing.
+    Windows cannot read another process's environment, so it has no table: callers treat None as "cannot
+    confirm the tree is gone"."""
+    if portable.IS_WINDOWS:
+        return None
     try:
         listing = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
                                  capture_output=True,
@@ -5109,7 +5114,7 @@ def _terminate_worker(pgid: int, tree: "_WorkerTree", *, term_wait: float = 3.0,
     """SIGTERM, then SIGKILL, the verified agent group (`pgid`, 0 for none) and every process the tree
     attributes to the worker; True once a scan finds none. A zombie is not a process that can write, and the
     scan does not count it."""
-    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
+    for sig, wait in ((signal.SIGTERM, term_wait), (portable.SIGKILL, kill_wait)):
         pids = tree.scan()
         if pids is None:
             return False
@@ -5117,10 +5122,10 @@ def _terminate_worker(pgid: int, tree: "_WorkerTree", *, term_wait: float = 3.0,
             return True
         if pgid > 1:
             with contextlib.suppress(OSError):
-                os.killpg(pgid, sig)
+                portable.killpg(pgid, sig)
         for pid in pids:
             with contextlib.suppress(OSError):
-                os.kill(pid, sig)
+                portable.kill(pid, sig)
         deadline = time.time() + wait
         while time.time() < deadline:
             time.sleep(0.1)

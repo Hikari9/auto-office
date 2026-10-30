@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import briefs, contract, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, contract, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, portable, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
@@ -771,7 +771,7 @@ def _stage_self_review(run: dict, d: dict, rev_id: str, wt: Path, receipt: dict 
     source = wt / briefs.LEDGER_FILE
     dest = briefs.self_review_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | portable.O_NOFOLLOW | portable.O_BINARY
     try:
         fd = os.open(dest, flags, 0o600)
     except FileExistsError as exc:
@@ -827,7 +827,7 @@ def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
     if paths.git(wt, "ls-files", "--", name).strip():
         return None
     try:
-        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(src, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_NONBLOCK | portable.O_BINARY)
         with os.fdopen(fd, "rb") as fh:
             st = os.fstat(fh.fileno())
             # A hard link to another file (a credential) shares its inode: ordinary files have one link.

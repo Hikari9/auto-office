@@ -1,7 +1,6 @@
 """Small shared helpers: time, hashing, atomic files, process liveness."""
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import os
@@ -9,6 +8,8 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from office import portable
 
 
 def now_iso() -> str:
@@ -73,18 +74,16 @@ ALIVE, DEAD, UNKNOWN = "alive", "dead", "unknown"
 def pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except OSError as exc:
-        return exc.errno == errno.EPERM
-    return True
+    return portable.pid_exists(pid) is True
 
 
 def pid_gone(pid: int | None) -> bool:
     """Whether `pid` has exited: no such process, or a zombie (exited, not yet reaped by its parent, so
-    `os.kill(pid, 0)` still succeeds). A pid that cannot be read is never gone."""
+    `kill(pid, 0)` still succeeds). A pid that cannot be read is never gone."""
     if not pid_alive(pid):
         return True
+    if portable.IS_WINDOWS:
+        return False  # no zombies: an exited process stops existing once its handles close
     import subprocess
     try:
         proc = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
@@ -97,13 +96,8 @@ def pid_state(pid: int | None) -> str:
     """ALIVE, DEAD (no such process) or UNKNOWN (the probe itself failed)."""
     if not pid or pid <= 0:
         return DEAD
-    try:
-        os.kill(pid, 0)
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return DEAD
-        return ALIVE if exc.errno == errno.EPERM else UNKNOWN
-    return ALIVE
+    exists = portable.pid_exists(pid)
+    return UNKNOWN if exists is None else ALIVE if exists else DEAD
 
 
 def process_start(pid: int | None) -> str | None:
@@ -113,6 +107,8 @@ def process_start(pid: int | None) -> str | None:
     failed or is not allowed here), never which of those."""
     if not pid or pid <= 0:
         return None
+    if portable.IS_WINDOWS:
+        return portable.windows_process_start(pid)
     import subprocess
     try:
         proc = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
@@ -123,7 +119,7 @@ def process_start(pid: int | None) -> str | None:
 
 def claim_identity(pid: int) -> str:
     """`claimed_by` for a job claim: host, pid and the process start time."""
-    return f"{os.uname().nodename}:{pid}@{process_start(pid) or ''}"
+    return f"{portable.node_name()}:{pid}@{process_start(pid) or ''}"
 
 
 def _claim_start(claimed_by: str | None) -> str | None:

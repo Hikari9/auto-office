@@ -13,6 +13,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from office import portable
+
 
 FULL = "full"
 SCOPED = "scoped"  # verified change-relevant tests; NEVER a full-suite claim
@@ -237,7 +239,7 @@ def attested_checks(con, run: dict, commit: str) -> list[str]:
                     or resolved.parent != anchor or not resolved.is_file()):
                 continue
             # A race-safe digest over one file descriptor, not metadata alone.
-            fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(resolved, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_BINARY)
             with os.fdopen(fd, "rb") as artifact:
                 before = os.fstat(artifact.fileno())
                 digest = hashlib.sha256()

@@ -30,7 +30,7 @@ This document specifies the architecture for a single unified global CLI binary 
 ### 1.3 Non-Goals
 - Implementing the CLI binary, hook handlers, or migration scripts is not part of this document's delivery; this document is the specification.
 - Userland daemon processes, long-running background pollers, or inter-process sockets.
-- Native Windows OS runtime support (POSIX `fcntl` locks and bash helper scripts require macOS, Linux, or WSL).
+- Windows support for the retained 3.0 bash helper scripts under `scripts/` (reachable via `office raw`); they need Git Bash or WSL. The 3.1+ runtime itself runs natively on Windows (#915, §5.4).
 - Pre-deciding tool sets, authority levels, or token budgets for future MCP adapters.
 
 ---
@@ -313,8 +313,10 @@ Runtime resources (schemas, catalog seeds, protocol documentation) and skills sh
   `office amend --adopt-version`
 
 ### 5.4 Platform Support (D142-7)
-- Supported platforms: **macOS** and **Linux** (including Windows Subsystem for Linux - WSL).
-- Native Windows (PowerShell/cmd.exe without WSL) is **unsupported** due to strict dependencies on POSIX `fcntl` file locking and bash helper scripts.
+- Supported platforms: **macOS**, **Linux** (including WSL) and **native Windows** (PowerShell/cmd.exe). This supersedes the original D142-7 decision that declared native Windows unsupported (#915).
+- Everything OS-specific lives in `office.portable`: file locks (`fcntl.flock` on POSIX, `LockFileEx` on Windows), process groups (`start_new_session` / `killpg` on POSIX, `CREATE_NEW_PROCESS_GROUP` / `taskkill /T` on Windows), pid probes, process start identity and `os.open` flags. Runtime code must not import `fcntl`, call `os.killpg`, or call `os.kill(pid, 0)` directly: on Windows that last call terminates the process.
+- Windows degradations, all fail-safe: there is no process table (no `ps`, no readable foreign environment), so a worker's process tree cannot be proven gone and the discovery-trial recovery (`stop_worker_tree`) blocks with a rerun hint instead of falling back; the supervisor keeps a job's execution lock itself because a descriptor cannot be passed to the worker; there is no load average, so host-overload and CPU pressure report unavailable.
+- The retained 3.0 bash helpers (`scripts/*.sh`) still need Git Bash or WSL.
 
 ---
 

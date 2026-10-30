@@ -1,7 +1,6 @@
 """Best-effort, once-per-episode notice for a bound orchestrator's context."""
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -10,7 +9,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import db, discovery, paths, state as office_state
+from office import db, discovery, paths, portable, state as office_state
 from office.util import atomic_write_text
 
 DEFAULT_THRESHOLD = 272_000
@@ -88,11 +87,11 @@ def _state_lock(run_id: str):
     lock_path = paths.run_dir(run_id) / "ctx-alert.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        portable.lock_exclusive(stream)
         try:
             yield
         finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+            portable.unlock(stream)
 
 
 def _load_state(path: Path, session_id: str) -> dict:

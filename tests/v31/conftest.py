@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 import fake_agent
+from host_tools import host_tool_dirs
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -206,7 +207,7 @@ class Env:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.home / ".claude"))
         monkeypatch.setenv("CODEX_HOME", str(self.home / ".codex"))
         # Only fake harnesses and system tools: a real harness on PATH must never run in tests.
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", *host_tool_dirs()]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         pythonpath = [str(SRC)]
         import site
