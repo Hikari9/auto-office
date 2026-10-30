@@ -90,10 +90,15 @@ def test_install_check_asks_before_repairing_a_failed_doctor():
     assert "If doctor fails, ask once, natively" in found
     assert "**Repair the install**" in found
     assert "repair only on yes" in found
+    assert found.index("ask once, natively") < found.index("office install --no-hooks")
 
 
-def test_install_check_tells_the_user_how_to_fix_path_after_install():
-    assert "uv tool update-shell" in _install_check()
+def test_install_check_checks_path_before_running_office_install():
+    section = _install_check()
+    install = section[section.index("- **Install:**"):section.index("- **Hand off:**")]
+
+    assert "uv tool update-shell" in install
+    assert install.index("command -v office") < install.index("`office install --no-hooks`")
 
 
 def test_saved_choice_write_command_saves_lean_under_xdg_config(tmp_path):
