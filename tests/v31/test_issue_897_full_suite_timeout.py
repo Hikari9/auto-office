@@ -121,6 +121,7 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
                             loaded="host load 90 exceeds 16 (8 CPUs)")
     assert outcome["verdict"] == "UNAVAILABLE", outcome
     assert "timed out after 7200s; raise verification.full_suite_timeout_seconds" in outcome["summary"], outcome
+    assert outcome["summary"].count("raise verification.") == 1, outcome
     assert "office resume" in outcome["summary"], outcome
     assert started == [7200]  # no automatic re-run of the full suite
 
