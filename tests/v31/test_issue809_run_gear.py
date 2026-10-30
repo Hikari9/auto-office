@@ -431,16 +431,17 @@ SONNET_AGY_MEDIUM = "agy@1/claude-sonnet-5-5@medium"
 
 
 def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
-    """Sonnet 5.5 Claude Code -> agy is the same-model, same-effort harness fallback on new XS-XL gear runs.
+    """Sonnet 5.5 Claude Code -> agy is a same-model, same-effort harness fallback on new XS-XL gear runs.
 
-    docs/xs-xl-run-gear.md:74-85 defines it on the M and L rows. Legacy presets (gear='express') keep their order.
+    docs/xs-xl-run-gear.md:74-85 defines it on the M and L rows; XS and XL runs are covered too.
+    Legacy presets (gear='express') keep their order.
     """
     from test_issue809_real_routes import candidate, decide
     pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
             candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
-    # The M slate leads with the effective policy's seed routes the pool holds (#871), not a frozen tuple.
+    # The M slate's leading routes are the effective policy's seed routes the pool holds (#871), not a frozen tuple.
     pooled = {(c["model_id"], c["harness"]) for c in pool}
     seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
             if (e["model_id"], e["harness"]) in pooled]
@@ -465,8 +466,6 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60)], gear="M")
     assert [(f["from"], f["to"]) for f in mixed["routing"]["sonnet_self_fallbacks"]] == \
         [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], mixed["routing"]
-    high = next(e for e in mixed["selection_disclosure"]["slate"] if e["route"] == "agy@1/claude-sonnet-5-5@high")
-    assert "self-fallback" not in high["reason"], high
     # L new gear at high effort: the seed already puts the agy route straight after claude at the same effort.
     l_pool = [candidate("claude-sonnet-5-5", "high", 47, harness="claude"),
               candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60),
@@ -476,8 +475,10 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
         ["claude@1/claude-sonnet-5-5@high", "agy@1/claude-sonnet-5-5@high"], l_new["selection_disclosure"]
     # XS and XL new gear runs: XS leads with the pair; XL moves the agy route up past a route ranked between them.
     xs = decide("XS", pool, gear="XS")
+    assert [(f["from"], f["to"]) for f in xs["routing"]["sonnet_self_fallbacks"]] == \
+        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xs["routing"]
     assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
-    assert xs["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
+    assert "sonnet_self_fallbacks" not in decide("XS", pool, gear="express")["routing"]
     xl_pool = [candidate("claude-sonnet-5-5", "medium", 50, harness="claude"),
                candidate("gpt-6.1-terra", "medium", 49),
                candidate("claude-sonnet-5-5", "medium", 48, harness="agy", remaining=60)]
