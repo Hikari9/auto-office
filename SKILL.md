@@ -1,6 +1,7 @@
 ---
 name: auto-office
 description: Original full Auto Office lifecycle orchestrator. Invoke ONLY when the user explicitly requests /auto-office (or host-supported namespaced /auto-office:auto-office). Do not auto-activate for ordinary engineering tasks. Uses the installed office CLI to plan, route, review, verify and close with pinned authority.
+disable-model-invocation: true
 ---
 
 # Auto Office

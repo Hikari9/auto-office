@@ -99,6 +99,10 @@ def test_opt_in_only_skill_descriptions():
         description = text.split("\n---\n", 1)[0].lower()
         if name == "auto-takeover":
             assert "only an explicit user request" in description
+        if name != "auto-review":
+            assert "disable-model-invocation: true" in description
+        else:
+            assert "disable-model-invocation" not in description  # Agents must invoke /auto-review explicitly
         else:
             assert "explicit" in description
         if name == "auto-office-lean":
