@@ -12,8 +12,9 @@ RUN = {"id": "r1"}
 REV = {"id": "R1", "commit_sha": "0" * 40, "dispatch_id": "D1"}
 GATE = {"id": "G1", "task_id": "T1"}
 CFG = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 7200}
-FULL = ["scripts/validate.sh", "./scripts/validate.sh", "bash scripts/validate.sh", "scripts/validate.sh --full",
-        "./scripts/validate.sh --full"]
+FULL = ["scripts/validate.sh", "./scripts/validate.sh", "scripts/validate.sh --full", "./scripts/validate.sh --full"]
+WRAPPED = ["bash scripts/validate.sh", "sh ./scripts/validate.sh --full", "bash scripts/validate.sh --full",
+           "env scripts/validate.sh --full", "PYTHONUNBUFFERED=1 scripts/validate.sh"]
 
 
 @pytest.fixture
@@ -98,6 +99,23 @@ def test_timeout_names_the_limit_and_the_setting_to_raise(con, tmp_path, monkeyp
     assert summary.startswith(f"check timed out after {limit}s; raise verification.{setting}"), summary
 
 
+def test_real_kill_timeout_names_the_setting(con, tmp_path, monkeypatch):
+    # No _run_check fake: the timeout text must be the one the real kill writes.
+    monkeypatch.setattr(gates, "host_overloaded", lambda: None)
+    outcome = gates._run_commands(con, RUN, ["sleep 5"], tmp_path, REV, GATE, {"check_timeout_seconds": 1},
+                                  check_tree=False)
+    summary = outcome["parsed"].findings[0]["summary"]
+    assert summary.startswith("check timed out after 1s; raise verification.check_timeout_seconds"), summary
+
+
+@pytest.mark.parametrize("command", WRAPPED)
+def test_wrapper_timeout_keeps_the_check_limit_and_names_its_setting(con, tmp_path, monkeypatch, command):
+    outcome, started = _run(con, tmp_path, monkeypatch, command, code=124, out="partial output\n")
+    assert started == [1800]
+    summary = outcome["parsed"].findings[0]["summary"]
+    assert summary.startswith("check timed out after 1800s; raise verification.check_timeout_seconds"), summary
+
+
 def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path, monkeypatch):
     outcome, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124,
                             loaded="host load 90 exceeds 16 (8 CPUs)")
@@ -108,7 +126,7 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
 
 
 # AMENDMENT A2: only the canonical argv is full suite. Other shell forms keep check_timeout_seconds.
-@pytest.mark.parametrize("command", ["scripts/validate.sh --pr", "scripts/validate.sh --pr > out.log 2>&1",
+@pytest.mark.parametrize("command", WRAPPED + ["scripts/validate.sh --pr", "scripts/validate.sh --pr > out.log 2>&1",
                                      "scripts/validate.sh --full > out.log 2>&1", "scripts/validate.sh --full 2>&1",
                                      "scripts/validate.sh --full | tail -5", "scripts/validate.sh --full &",
                                      "scripts/validate.sh --full # note", "bash -e scripts/validate.sh",
@@ -116,7 +134,8 @@ def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path,
                                      "scripts/validate.sh --pr; scripts/validate.sh --full", "(scripts/validate.sh --full)",
                                      "echo scripts/validate.sh", "pytest -q tests/x.py", "scripts/validate.sh --pr --full",
                                      "cd x && scripts/validate.sh --pr", "echo 'scripts/validate.sh --full'",
-                                     "pytest -q tests/x.py ; echo done"])
+                                     "pytest -q tests/x.py ; echo done", "scripts/validate.sh\n--full",
+                                     "scripts/validate.sh --full\n", "scripts/validate.sh --full\r"])
 def test_non_full_suite_commands_keep_the_check_timeout(command):
     assert not verification_coverage.is_full_suite(command)
     assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
