@@ -104,7 +104,6 @@ def test_opt_in_only_skill_descriptions():
             assert "disable-model-invocation: true" in description
         else:
             assert "disable-model-invocation" not in description  # Agents must invoke /auto-review explicitly
-        else:
-            assert "explicit" in description
+        assert "explicit" in description
         if name == "auto-office-lean":
             assert "never for ordinary engineering requests" in description
