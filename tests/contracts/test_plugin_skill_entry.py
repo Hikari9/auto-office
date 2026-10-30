@@ -81,6 +81,7 @@ def test_install_check_hands_off_to_the_lean_skill():
 
     assert "auto-office:auto-office-lean" in section
     assert "skills/auto-office-lean/SKILL.md" in section
+    assert "Either Lean choice: hand off" in section
 
 
 def test_install_check_asks_before_repairing_a_failed_doctor():
@@ -142,6 +143,7 @@ def test_install_check_keeps_stale_upgrade_guidance():
     section = _install_check()
 
     assert "install: STALE" in section
+    assert "uv tool upgrade auto-office" in section
     assert "--force --reinstall" in section
 
 
