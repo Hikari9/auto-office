@@ -44,15 +44,19 @@ def test_install_check_names_the_saved_choice_path_and_reads_and_writes_it():
 
     assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"' in section
     assert 'cat "$CFG"' in section
-    assert "mkdir -p" in section
-    assert "exactly `lean`" in section
+    assert "in one shell command, set `CFG=" in section
+    assert "prints `lean`" in section
+    write = section.index('printf lean > "$CFG"')
+    assert section.index("mkdir -p") < write
+    assert "the choice was not saved" in section
 
 
 def test_install_check_asks_once_before_installing():
     section = _install_check()
+    not_found = section[section.index("- **Not found:**"):section.index("- **Install:**")]
 
-    assert "ask once" in section
-    assert section.index("Install the CLI (Recommended)") < section.index("`uv tool install auto-office`")
+    assert "ask once" in not_found
+    assert not_found.index("Install the CLI (Recommended)") < section.index("`uv tool install auto-office`")
 
 
 def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
@@ -65,7 +69,16 @@ def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
 
 
 def test_install_check_hands_off_to_the_lean_skill():
-    assert "auto-office:auto-office-lean" in _install_check()
+    section = _install_check()
+
+    assert "auto-office:auto-office-lean" in section
+    assert "skills/auto-office-lean/SKILL.md" in section
+
+
+def test_install_check_finishes_an_incomplete_install_on_later_sessions():
+    section = _install_check()
+
+    assert "If doctor fails or the install is incomplete, finish it (`office install --no-hooks`, `office doctor`)." in section
 
 
 def test_install_check_no_longer_stops_to_ask_approval():
@@ -102,11 +115,12 @@ def test_ecosystem_check_rejects_paths_outside_the_plugin(tmp_path):
     (tmp_path / "plugin").mkdir()
     (tmp_path / "outside").mkdir()
     (tmp_path / "plugin" / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
-    _write_manifest(tmp_path / "plugin", ["./../outside", "./linked"])
+    _write_manifest(tmp_path / "plugin", ["../outside", "./../outside", "./linked"])
 
     errors = check_plugin_skills(tmp_path / "plugin")
 
     assert errors == [
+        ".claude-plugin/plugin.json: skills entry '../outside' must be a ./ directory inside the plugin",
         ".claude-plugin/plugin.json: skills entry './../outside' must be a ./ directory inside the plugin",
         ".claude-plugin/plugin.json: skills entry './linked' must be a ./ directory inside the plugin",
     ]
