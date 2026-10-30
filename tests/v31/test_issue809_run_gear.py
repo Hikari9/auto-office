@@ -444,9 +444,21 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
     xs = decide("XS", pool, gear="XS")
     assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
     assert xs["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
+    # On XL a route ranked between the pair pushes the agy route down, so the fallback must move it back up.
+    xl_pool = [candidate("claude-sonnet-5-5", "medium", 50, harness="claude"),
+               candidate("gpt-6.1-terra", "medium", 49),
+               candidate("claude-sonnet-5-5", "medium", 48, harness="agy", remaining=60)]
+    xl = decide("XL", xl_pool, gear="XL")
+    assert [(f["from"], f["to"]) for f in xl["routing"]["sonnet_self_fallbacks"]] == \
+        [("claude@1/claude-sonnet-5-5@medium", "agy@1/claude-sonnet-5-5@medium")], xl["routing"]
+    assert [e["route"].split("@")[0] for e in xl["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
     legacy = decide("M", pool, gear="express")
     assert "sonnet_self_fallbacks" not in legacy["routing"]
     assert len(legacy["selection_disclosure"]["slate"]) == 3
+    legacy_xl = decide("XL", xl_pool, gear="express")
+    assert "sonnet_self_fallbacks" not in legacy_xl["routing"]
+    assert [e["route"] for e in legacy_xl["selection_disclosure"]["slate"]][:2] == \
+        ["claude@1/claude-sonnet-5-5@medium", "codex@1/gpt-6.1-terra@medium"]
 
 
 def test_planner_free_text_rejects_control_characters():
