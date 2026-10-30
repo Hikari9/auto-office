@@ -435,6 +435,11 @@ def plan_gates(con, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def review_in_flight(con, run: dict) -> bool:
+    """A plan-review round is queued or running for any revision of the run."""
+    return any(g["status"] in ("queued", "running") for g in plan_gates(con, run["id"]))
+
+
 def open_defects(con, run_id: str) -> list[dict]:
     """v3.1 plan defects. Convergence-contract findings carry no defect class."""
     rows = con.execute("SELECT * FROM findings WHERE run_id=? AND gate_kind='plan_review' AND state='open' "
@@ -637,6 +642,17 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
                    audience="runtime", payload={"gate": gate_id, "old_version": gate["plan_version"],
                                                  "current_version": current["plan_version"],
                                                  "verdict": outcome.get("verdict"), "status": outcome.get("status")})
+        if not contract.is_convergence(current) and review_required(current) and not _pr(current).get("ended"):
+            # v3.1 (Q14, S3): a PASS on an older revision ends plan review and the current revision's deltas
+            # continue with no review job. Any other verdict leaves the review open, so the current revision
+            # gets its round.
+            if outcome.get("verdict") == "PASS":
+                state.update_run(con, run["id"], plan_review={**_pr(current), "ended": True,
+                                 "ended_reason": f"PASS on p{gate['plan_version']} (superseded by p{current['plan_version']})"})
+                state.emit(con, current, "plan.pass", f"PLAN PASS p{gate['plan_version']} (superseded by "
+                           f"p{current['plan_version']}): plan review ends")
+            else:
+                queue_plan_review(con, current, current["plan_version"])
         return
     if contract.is_convergence(run) and gate["status"] == "cancelled":
         # The cycle closed (or was waived) while this round ran: its result is
