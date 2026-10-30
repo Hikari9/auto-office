@@ -56,7 +56,7 @@ def test_standalone_review_independence_delegation_and_bounded_rounds():
         "fresh", "read-only", "Herdr", "CLI session", "immutable",
         "APPROVED", "RECHECK", "INTAKE_GAP", "initial", "round 3",
         "need NOT personally fix", "delegate", "other owner", "UNAVAILABLE",
-        "no hidden waiver", "not an Office lifecycle",
+        "no hidden waiver", "NOT another Office lifecycle",
     ]:
         assert phrase.lower() in text.lower(), phrase
 
@@ -66,3 +66,28 @@ def test_installed_resources_byte_match_source():
     assert desired
     for name in ("scripts/build_plugin_distribution.py", "MANIFESTO.md", "adapters/seed/pi.yaml"):
         assert (ROOT / "plugin-dist" / name).read_bytes() == desired[name]
+
+
+def test_generated_distribution_preserves_executable_support_scripts():
+    for path in ("scripts/validate.sh", "scripts/office_spawn.sh", "scripts/office_runtime.py"):
+        source = ROOT / path
+        shipped = ROOT / "plugin-dist" / path
+        assert bool(source.stat().st_mode & 0o100) == bool(shipped.stat().st_mode & 0o100)
+
+
+def test_review_rounds_account_for_unavailable_and_owner_delegation():
+    """Contract scenarios: reviewer unavailability never uses a round; any fixer is allowed."""
+    skill = (ROOT / "skills/auto-review/SKILL.md").read_text().lower()
+    scenarios = [
+        ("orchestrator invoker", "separate executor", 3),
+        ("executor invoker", "same executor", 3),
+        ("orchestrator invoker", "specifically assigned other owner", 3),
+    ]
+    for invoker, fixer, max_rounds in scenarios:
+        assert invoker and fixer
+        assert "delegate" in skill and "fix inline" in skill and "other owner" in skill
+        assert "changing fixer, caller or review surface never resets the cap" in skill
+        assert "initial review is round 1" in skill
+        assert "never round 4" in skill
+        assert "consumes no substantive round" in skill
+        assert max_rounds == 3

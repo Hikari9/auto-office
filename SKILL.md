@@ -37,9 +37,9 @@ Take every decision to the user through the harness's native question tool when 
 
 ## Install check (every session, before anything else)
 
-Run \`command -v office || echo "office: not found"\`, then \`office --version\` only when present. Plugin skill discovery does not require the CLI; do not claim that plugin installation registers a runtime or hooks.
-- **Not found:** hold the original request and offer native choices: **Install CLI** (only after explicit approval: \`uv tool install auto-office\`, \`office install --no-hooks\`, \`office doctor\`); **Use skill-only guidance without running Office**; **Skip for now**. Never silently install software, write harness configuration or auto-switch to auto-office-lean. A saved explicit onboarding choice under \`\${XDG_CONFIG_HOME:-~/.config}/auto-office/\` may be reused; absence is not consent.
-- **Outdated or doctor reports install: STALE:** explain the installed/pinned mismatch and offer \`uv tool install --force --reinstall auto-office\`, then \`office install --no-hooks\` and \`office doctor\`; only after permission. Do not change a pinned run's runtime.
+Run `command -v office || echo "office: not found"`, then `office --version` only when present. Plugin skill discovery does not require the CLI; do not claim that plugin installation registers a runtime or hooks.
+- **Not found:** hold the original request and offer native choices: **Install CLI** (only after explicit approval: `uv tool install auto-office`, `office install --no-hooks`, `office doctor`); **Use skill-only guidance without running Office**; **Skip for now**. Never silently install software, write harness configuration or auto-switch to auto-office-lean. A saved explicit onboarding choice under `${XDG_CONFIG_HOME:-~/.config}/auto-office/` may be reused; absence is not consent.
+- **Outdated or doctor reports install: STALE:** explain the installed/pinned mismatch and offer `uv tool install --force --reinstall auto-office`, then `office install --no-hooks` and `office doctor`; only after permission. Do not change a pinned run's runtime.
 - **Available and current:** continue with first-run onboarding below and the original full Office lifecycle, not Lean.
 
 ## First-run onboarding (after the install check, before intake)
