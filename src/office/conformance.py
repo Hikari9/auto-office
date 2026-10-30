@@ -144,8 +144,8 @@ def ensure_vision_route(con, run: dict, config: dict, *, exclude: set[str] | Non
                                      exclude=excluded or None, observe=True)
 
     decision = select()
-    if decision.get("status") == "selected":
-        return
+    # Even a route admitted by a role allow is probed for concrete visual evidence;
+    # it may be routable before proof under #845, but that is not proof it sees images.
     request = decision.get("request") or {}
     seed = candidates.role_policy(config, "visual_reviewer").get("preferred_seed") or []
     ordered = sorted(request.get("candidates") or [],

@@ -73,3 +73,17 @@ def test_actual_routing_rejection_reasons_are_displayed_not_a_generic_failure():
     assert "missing capabilities" in reason
     assert "no vision launch profile" in reason
     assert reason.index(primary_id) < reason.index(fallback_id)
+
+def test_allowed_primary_still_gets_real_image_proof_even_when_route_is_selectable(monkeypatch):
+    primary = _candidate(0)
+    probed = []
+    monkeypatch.setattr(candidates, "route_role", lambda *_args, **_kwargs: {
+        "status": "selected", "candidate": primary,
+        "request": {"candidates": [primary], "policy": {"quota_reserve_percent": 5}}})
+    monkeypatch.setattr(candidates, "role_policy", lambda *_: {"preferred_seed": []})
+    monkeypatch.setattr(adapters, "load_all", lambda: {"agy": {}})
+    monkeypatch.setattr(conformance, "proof_status", lambda *_: None)
+    monkeypatch.setattr(conformance, "probe_vision",
+                        lambda *_args: probed.append("image checked") or {"result": "pass"})
+    conformance.ensure_vision_route(object(), {"id": "run"}, {})
+    assert probed == ["image checked"]
