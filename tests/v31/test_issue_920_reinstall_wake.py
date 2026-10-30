@@ -79,6 +79,55 @@ def test_console_script_entry_fails_fast_when_the_cli_import_is_mid_rebuild(monk
     assert "Traceback" not in captured.err
 
 
+def test_a_replacement_during_a_command_exits_with_the_retry_code(monkeypatch, capsys):
+    """The install is replaced after startup: a command's lazy import fails and the fresh probe sees it."""
+    from office import __main__ as entrypoint
+
+    def lazy_import_fails():
+        raise ImportError("partially written module")
+    monkeypatch.setattr(cli, "main", lazy_import_fails)
+    monkeypatch.setattr(version, "current", _broken)
+
+    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
+    assert capsys.readouterr().err.strip() == RETRY_LINE
+
+
+def test_a_cached_identity_does_not_hide_a_replacement_that_started_after_startup(monkeypatch, capsys):
+    """`current` is cached per process. The first call succeeds at startup; the replacement comes later."""
+    import functools
+    from office import __main__ as entrypoint
+
+    calls = []
+
+    def identity():
+        calls.append(1)
+        if len(calls) > 1:
+            raise ImportError("partially written module")
+        return "3.2.0"
+    monkeypatch.setattr(version, "current", functools.lru_cache(maxsize=1)(identity))
+    version.current()  # startup caches the healthy identity
+
+    def lazy_import_fails():
+        raise ImportError("partially written module")
+    monkeypatch.setattr(cli, "main", lazy_import_fails)
+
+    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
+    assert capsys.readouterr().err.strip() == RETRY_LINE
+
+
+def test_an_import_failure_with_a_healthy_install_keeps_its_traceback(monkeypatch):
+    """A broken dependency with a healthy install is not a rebuild: the original error propagates."""
+    from office import __main__ as entrypoint
+
+    def missing_dependency():
+        raise ModuleNotFoundError("No module named 'jsonschema'")
+    monkeypatch.setattr(cli, "main", missing_dependency)
+    monkeypatch.setattr(version, "current", lambda: "3.2.0")
+
+    with pytest.raises(ModuleNotFoundError, match="jsonschema"):
+        entrypoint.entry()
+
+
 def test_console_script_points_at_the_guarded_entry():
     import tomllib
 
@@ -115,18 +164,20 @@ def test_python_dash_m_office_fails_fast_when_the_cli_import_is_mid_rebuild(tmp_
 # --- the supervisor keeps running through a rebuild and records one recovery ------------------------------------
 
 
-def test_supervisor_survives_a_rebuild_and_records_one_office_reinstalled_per_recovery(env, monkeypatch):
+@pytest.mark.parametrize("failure", [ImportError("partially written module"), OSError("No such file or directory")])
+def test_supervisor_survives_a_rebuild_and_records_one_office_reinstalled_per_recovery(env, monkeypatch, failure, capsys):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
     monkeypatch.setattr(root_wake, "ensure", lambda run: None)
     mark = root_wake._reinstall_mark(run["id"])
 
     def broken_poll(con, run):
-        raise ImportError("partially written module")
+        raise failure
     monkeypatch.setattr(root_wake, "poll", broken_poll)
     assert root_wake.supervise(run["id"], once=True) == 0  # no traceback, the loop keeps going
     assert mark.exists()
     assert _reinstalled(con, run) == []  # unhealthy ticks record nothing
+    assert type(failure).__name__ in capsys.readouterr().err
 
     monkeypatch.setattr(root_wake, "poll", lambda con, run: "no-action")
     assert root_wake.supervise(run["id"], once=True) == 0
@@ -134,21 +185,38 @@ def test_supervisor_survives_a_rebuild_and_records_one_office_reinstalled_per_re
     assert len(rows) == 1
     assert not mark.exists()
 
-    # A later healthy tick with no rebuild in between records nothing more.
+    # A later healthy tick with no failure in between records nothing more.
     assert root_wake.supervise(run["id"], once=True) == 0
     assert len(_reinstalled(con, run)) == 1
 
 
-def test_watchdog_thread_marks_the_rebuild_and_records_the_recovery(env, monkeypatch):
+def test_a_permanent_import_failure_is_logged_with_its_cause_and_not_called_a_rebuild(env, monkeypatch, capsys):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
-    ticks = iter([_broken, lambda con, run: "cleared"])
+    monkeypatch.setattr(root_wake, "ensure", lambda run: None)
+
+    def missing_dependency(con, run):
+        raise ModuleNotFoundError("No module named 'jsonschema'")
+    monkeypatch.setattr(root_wake, "poll", missing_dependency)
+    assert root_wake.supervise(run["id"], once=True) == 0
+
+    err = capsys.readouterr().err
+    assert "ModuleNotFoundError" in err and "jsonschema" in err
+    assert "rebuilt" not in err
+
+
+def test_watchdog_thread_marks_the_failure_and_records_the_recovery(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    ticks = iter([ImportError("partially written module"), None])
 
     def tick(con, run):
-        step = next(ticks, None)
-        if step is None:
+        step = next(ticks, "stop")
+        if step == "stop":
             raise _Stop()
-        return step(con, run)
+        if step is not None:
+            raise step
+        return "cleared"
 
     sleeps = []
     monkeypatch.setattr(root_wake, "watchdog_tick", tick)
@@ -161,6 +229,27 @@ def test_watchdog_thread_marks_the_rebuild_and_records_the_recovery(env, monkeyp
     assert not root_wake._reinstall_mark(run["id"]).exists()
 
 
+def test_watchdog_thread_treats_an_os_error_as_a_failed_tick(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    ticks = iter([OSError("resource replaced"), None])
+
+    def tick(con, run):
+        step = next(ticks, "stop")
+        if step == "stop":
+            raise _Stop()
+        if step is not None:
+            raise step
+        return "cleared"
+
+    monkeypatch.setattr(root_wake, "watchdog_tick", tick)
+    monkeypatch.setattr(root_wake.time, "sleep", lambda s: None)
+    with pytest.raises(_Stop):
+        root_wake._watchdog_loop(run["id"])
+
+    assert len(_reinstalled(con, run)) == 1
+
+
 def test_repeat_recovery_calls_record_one_event(env, monkeypatch):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
@@ -171,7 +260,41 @@ def test_repeat_recovery_calls_record_one_event(env, monkeypatch):
     assert len(_reinstalled(con, run)) == 1
 
 
-def test_mark_is_set_once_per_rebuild(env, monkeypatch):
+def test_a_crash_between_commit_and_unlink_does_not_record_twice(env, monkeypatch):
+    """The event committed and the process died before the mark was removed: the next recovery only unlinks."""
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    root_wake._mark_reinstall(run["id"])
+    token = root_wake._reinstall_mark(run["id"]).read_text().strip()
+    state.emit(con, run, "office.reinstalled", "already recorded", payload={"mark": token})
+    con.commit()
+
+    assert root_wake._recover_reinstall(con, run) is True
+    assert not root_wake._reinstall_mark(run["id"]).exists()
+    assert len(_reinstalled(con, run)) == 1
+
+
+def test_a_failed_record_keeps_the_mark_for_the_next_healthy_tick(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    root_wake._mark_reinstall(run["id"])
+
+    real_emit = root_wake.state.emit
+
+    def failing_emit(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(root_wake.state, "emit", failing_emit)
+    with pytest.raises(RuntimeError, match="disk full"):
+        root_wake._recover_reinstall(con, run)
+    assert root_wake._reinstall_mark(run["id"]).exists()
+    assert _reinstalled(con, run) == []
+
+    monkeypatch.setattr(root_wake.state, "emit", real_emit)
+    assert root_wake._recover_reinstall(con, run) is True
+    assert len(_reinstalled(con, run)) == 1
+
+
+def test_mark_is_set_once_per_episode(env, monkeypatch):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
 
@@ -195,3 +318,18 @@ def test_office_reinstalled_is_actionable_and_its_wake_text_says_to_resume(env, 
     assert "resume" in text
     assert f"office --run {run['id']} context" in text
     assert signature
+
+
+def test_each_recovery_has_its_own_actionable_signature(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    signatures = []
+    for _ in range(2):
+        root_wake._mark_reinstall(run["id"])
+        root_wake._recover_reinstall(con, run)
+    seqs = [row["seq"] for row in _reinstalled(con, run)]
+    assert len(seqs) == 2
+    for seq in seqs:
+        signatures.append(root_wake._actionable_now(con, _run(con), [seq])[0])
+
+    assert signatures[0] != signatures[1]

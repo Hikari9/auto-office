@@ -88,28 +88,48 @@ def _reinstall_mark(run_id: str) -> Path:
 
 
 def _mark_reinstall(run_id: str) -> bool:
-    """Note that this run's supervisor saw the install mid-rebuild. True only for the first mark of a rebuild."""
+    """Open a recovery episode for this run. True only for the first mark; the exclusive create makes that atomic."""
     mark = _reinstall_mark(run_id)
-    if mark.exists():
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
         return False
-    mark.parent.mkdir(parents=True, exist_ok=True)
-    mark.touch()
+    except OSError:
+        return False  # the episode cannot be recorded; the supervisor keeps running regardless
+    with os.fdopen(fd, "w") as fh:
+        fh.write(uuid.uuid4().hex)
     return True
 
 
-def _recover_reinstall(con, run: dict) -> bool:
-    """Record one `office.reinstalled` event after a healthy tick ends a rebuild the supervisor saw (#920).
+def _tick_failed(run_id: str, exc: Exception) -> None:
+    """A tick raised ImportError or OSError: the signature of an install replaced under this process (#833, #920).
 
-    The mark is removed in the same transaction that appends the event, under the run lock, so
-    the supervisor and the watchdog thread cannot both record the same recovery."""
+    Only the first failure of an episode prints. A later healthy tick records the recovery."""
+    if _mark_reinstall(run_id):
+        print(f"root wake: tick failed ({type(exc).__name__}: {exc}); retrying", file=sys.stderr)
+
+
+def _recover_reinstall(con, run: dict) -> bool:
+    """Record one `office.reinstalled` event after a healthy tick ends an episode opened by `_tick_failed` (#920).
+
+    The event carries the mark's token and the mark is removed only after the event commits. A crash between
+    commit and unlink finds the token already recorded, so it removes the mark without recording again. The
+    run lock serializes the supervisor and the watchdog thread."""
     mark = _reinstall_mark(run["id"])
     if not mark.exists():
         return False
-    with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"), db.transaction(con):
+    with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"):
         if not mark.exists():
             return False
-        state.emit(con, run, "office.reinstalled",
-                   "Office install was rebuilt and is healthy again; resume this run from its current state")
+        token = mark.read_text().strip()
+        recorded = con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='office.reinstalled' "
+                               "AND payload_json LIKE ?", (run["id"], f'%"{token}"%')).fetchone()
+        if not recorded:
+            with db.transaction(con):
+                state.emit(con, run, "office.reinstalled",
+                           "Office install was rebuilt and is healthy again; resume this run from its current state",
+                           payload={"mark": token})
         mark.unlink()
     return True
 
@@ -656,8 +676,8 @@ def _watchdog_loop(run_id: str) -> None:
             watchdog_tick(con, run)
             _recover_reinstall(con, run)
         except Exception as exc:
-            if isinstance(exc, ImportError) and _mark_reinstall(run_id):
-                print("root wake: install is being rebuilt; retrying", file=sys.stderr)
+            if isinstance(exc, (ImportError, OSError)):
+                _tick_failed(run_id, exc)
             # Monitoring failures never mean a worker is stalled. Keep normal
             # completion notification healthy and retry on the next slow tick.
             print(f"root wake watchdog probe unavailable: {type(exc).__name__}", file=sys.stderr)
@@ -692,6 +712,27 @@ def ensure(run: dict) -> None:
         con.close()
 
 
+def _supervise_tick(run_id: str) -> bool:
+    """One supervisor pass on its own connection. False when the run no longer needs a supervisor."""
+    con = db.connect()
+    try:
+        run = state.get_run(con, run_id)
+        if not run or state.is_terminal(run) or not _binding(con, run_id):
+            return False
+        # A lost process might have delivered the prompt right before its
+        # crash; NEVER automatically replay the ambiguous model turn.
+        with db.transaction(con):
+            con.execute("UPDATE root_wake_intents SET state='awaiting_attachment', token=NULL, "
+                        "lease_until=NULL, last_error='claim lease expired; inspect pane before re-attach' "
+                        "WHERE run_id=? AND state='claimed' AND lease_until<=?",
+                        (run_id, now_iso()))
+        poll(con, run)
+        _recover_reinstall(con, run)
+        return True
+    finally:
+        con.close()
+
+
 def supervise(run_id: str, *, once: bool = False) -> int:
     """Short, single-owner DB watcher. No model polling or fabricated prompts."""
     run_dir = paths.run_dir(run_id)
@@ -707,27 +748,12 @@ def supervise(run_id: str, *, once: bool = False) -> int:
         threading.Thread(target=_watchdog_loop, args=(run_id,), daemon=True,
                          name=f"office-stall-{run_id[:8]}").start()
         while True:
-            con = db.connect()
             try:
-                run = state.get_run(con, run_id)
-                if not run or state.is_terminal(run) or not _binding(con, run_id):
+                if not _supervise_tick(run_id):
                     return 0
-                # A lost process might have delivered the prompt right before its
-                # crash; NEVER automatically replay the ambiguous model turn.
-                with db.transaction(con):
-                    con.execute("UPDATE root_wake_intents SET state='awaiting_attachment', token=NULL, "
-                                "lease_until=NULL, last_error='claim lease expired; inspect pane before re-attach' "
-                                "WHERE run_id=? AND state='claimed' AND lease_until<=?",
-                                (run_id, now_iso()))
-                try:
-                    poll(con, run)
-                    _recover_reinstall(con, run)
-                except ImportError as exc:
-                    # The install is being replaced under this process (#833, #920): keep supervising.
-                    if _mark_reinstall(run_id):
-                        print(f"root wake: install is being rebuilt ({exc}); retrying", file=sys.stderr)
-            finally:
-                con.close()
+            except (ImportError, OSError) as exc:
+                # The install is being replaced under this process (#833, #920): keep supervising.
+                _tick_failed(run_id, exc)
             if once:
                 return 0
             time.sleep(MIN_POLL)
