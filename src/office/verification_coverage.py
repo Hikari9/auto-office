@@ -41,7 +41,7 @@ _SAFE_EQUALS = ("--tb=", "--maxfail=", "--durations=", "--dist=", "--color=", "-
 
 def _simple_words(command: str) -> list[str]:
     """Split a single simple shell invocation; refuse chains and substitutions."""
-    if any(ch in command for ch in ";&|<>`\n\r") or "$(" in command:
+    if any(ch in command for ch in ";&|<>`\n") or "$(" in command:
         return []
     try:
         return shlex.split(command)
@@ -120,8 +120,9 @@ def is_full_suite(command: str) -> bool:
     `./scripts/validate.sh`, alone or with `--full`.
 
     Shell launchers (`bash`, `sh`), `env`, variable prefixes, redirections, chaining and
-    comments are not classified, so they keep check_timeout_seconds (AMENDMENT A2)."""
-    return _simple_words(command) in _FULL_SUITE_ARGV
+    comments are not classified, so they keep check_timeout_seconds (AMENDMENT A2). A carriage return
+    is refused here: shlex reads it as whitespace, so it would otherwise hide a second line."""
+    return "\r" not in command and _simple_words(command) in _FULL_SUITE_ARGV
 
 
 _SCOPED_GATE_SHA256 = {

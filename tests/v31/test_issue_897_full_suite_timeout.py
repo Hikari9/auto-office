@@ -35,8 +35,8 @@ def _run(con, tmp_path, monkeypatch, command, *, cfg=CFG, code=0, out="", loaded
     def fake_run_check(cmd, cwd, timeout, env):
         started.append(timeout)
         if code == 124 and killed:
-            return code, f"timed out after {timeout}s\n{out}"
-        return code, out
+            return code, f"timed out after {timeout}s\n{out}", True
+        return code, out, False
 
     monkeypatch.setattr(gates, "_run_check", fake_run_check)
     monkeypatch.setattr(gates, "host_overloaded", lambda: loaded)
@@ -70,6 +70,16 @@ def test_exit_124_from_the_process_itself_is_not_named_as_a_timeout(con, tmp_pat
     assert summary.startswith("check failed (exit 124)") and "raise verification" not in summary, summary
 
 
+def test_exit_124_that_prints_the_kill_prefix_is_not_named_as_a_timeout(con, tmp_path, monkeypatch):
+    # The text of a kill is not evidence of one: only _run_check's TimeoutExpired branch marks a kill.
+    outcome, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124, killed=False,
+                            out="timed out after 7200s\nprinted by the check\n")
+    assert started == [7200]
+    finding = outcome["parsed"].findings[0]
+    assert finding["summary"].startswith("check failed (exit 124)") and "raise verification" not in finding["summary"]
+    assert finding["action"] == "make this check pass", finding
+
+
 def test_full_suite_timeout_is_the_configured_setting(con, tmp_path, monkeypatch):
     _, started = _run(con, tmp_path, monkeypatch, "scripts/validate.sh",
                       cfg={"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 10800})
@@ -86,6 +96,12 @@ def test_full_suite_never_gets_less_than_the_check_timeout(con, tmp_path, monkey
 def test_check_timeout_defaults_when_unset():
     assert gates.check_timeout({}, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
     assert gates.check_timeout({}, "pytest -q") == (1800, "check_timeout_seconds")
+
+
+def test_null_full_suite_setting_falls_back_to_the_default():
+    # A YAML key with no value reads as None; it must not raise inside the gate.
+    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": None}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
 
 
 def test_no_src_module_reads_job_timeout_seconds():
@@ -106,6 +122,7 @@ def test_timeout_names_the_limit_and_the_setting_to_raise(con, tmp_path, monkeyp
     assert outcome["verdict"] == "CHANGES_REQUIRED", outcome
     summary = outcome["parsed"].findings[0]["summary"]
     assert summary.startswith(f"check timed out after {limit}s; raise verification.{setting}"), summary
+    assert outcome["parsed"].findings[0]["action"] == f"raise verification.{setting} or shorten the check"
 
 
 def test_real_kill_timeout_names_the_setting(con, tmp_path, monkeypatch):
@@ -158,6 +175,12 @@ def test_non_full_suite_commands_keep_the_check_timeout(command):
     assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
 
 
+def test_carriage_return_leaves_the_pytest_attestation_unchanged():
+    # is_full_suite refuses a carriage return; _complete_pytest_command keeps its base answer.
+    assert not verification_coverage.is_full_suite("scripts/validate.sh\r")
+    assert verification_coverage._complete_pytest_command("pytest --all\r")
+
+
 def _commit(repo, name, text):
     (repo / name).write_text(text)
     subprocess.run(["git", "-C", str(repo), "add", name], check=True)
@@ -185,7 +208,7 @@ def test_preexisting_rerun_on_base_uses_the_same_timeout(con, tmp_path, monkeypa
     monkeypatch.setattr(gates.state, "pinned_config", lambda run: {"verification": CFG})
     monkeypatch.setattr(gates, "detached_checkout", lambda *a, **k: checkout)
     monkeypatch.setattr(gates, "remove_checkout", lambda *a, **k: None)
-    monkeypatch.setattr(gates, "_run_check", lambda cmd, cwd, timeout, env: (started.append(timeout) or (1, "boom\n")))
+    monkeypatch.setattr(gates, "_run_check", lambda cmd, cwd, timeout, env: (started.append(timeout) or (1, "boom\n", False)))
     outcome = {"results": [{"command": command, "exit": 1, "log": str(log), "cwd": str(repo)}]}
     rev = {"id": "R1", "commit_sha": head, "base_commit": base, "dispatch_id": "D1"}
     run = {"id": "r1", "repo_root": str(repo)}
