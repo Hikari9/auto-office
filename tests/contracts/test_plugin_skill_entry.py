@@ -46,8 +46,10 @@ def test_install_check_names_the_saved_choice_path_and_reads_and_writes_it():
     assert 'cat "$CFG"' in section
     assert "in one shell command, set `CFG=" in section
     assert "prints `lean`" in section
+    assert "(a trailing newline is fine)" in section
     assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"; mkdir -p "$(dirname "$CFG")" && printf lean >| "$CFG"' in section
     assert "the choice was not saved" in section
+    assert "continue this request as **Lean for this request**" in section
 
 
 def test_install_check_asks_once_before_installing():
