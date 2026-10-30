@@ -1,6 +1,6 @@
 ---
 name: auto-office
-description: Adaptive office engineering runtime for the complete lifecycle from intent through planning, routed execution, independent review, verification, and closeout, driven through one `office` CLI. Use when explicitly invoked as /auto-office or when the user directly asks to run an Auto Office lifecycle. Routes each role by harness, model, and effort under pinned policy, trust and capability floors, and live quota; the runtime owns state, receipts, evidence, and review mechanics. Preserves human merge-to-main unless the user chose merge or end-to-end at intake, no-self-approval, private evidence, and version-pinned runs.
+description: Original full Auto Office lifecycle orchestrator. Invoke ONLY when the user explicitly requests /auto-office (or host-supported namespaced /auto-office:auto-office). Do not auto-activate for ordinary engineering tasks. Uses the installed office CLI to plan, route, review, verify and close with pinned authority.
 ---
 
 # Auto Office
@@ -37,11 +37,10 @@ Take every decision to the user through the harness's native question tool when 
 
 ## Install check (every session, before anything else)
 
-Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
-- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
-- **Release differs from this directory's `src/office/_version.py`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
-
-At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
+Run \`command -v office || echo "office: not found"\`, then \`office --version\` only when present. Plugin skill discovery does not require the CLI; do not claim that plugin installation registers a runtime or hooks.
+- **Not found:** hold the original request and offer native choices: **Install CLI** (only after explicit approval: \`uv tool install auto-office\`, \`office install --no-hooks\`, \`office doctor\`); **Use skill-only guidance without running Office**; **Skip for now**. Never silently install software, write harness configuration or auto-switch to auto-office-lean. A saved explicit onboarding choice under \`\${XDG_CONFIG_HOME:-~/.config}/auto-office/\` may be reused; absence is not consent.
+- **Outdated or doctor reports install: STALE:** explain the installed/pinned mismatch and offer \`uv tool install --force --reinstall auto-office\`, then \`office install --no-hooks\` and \`office doctor\`; only after permission. Do not change a pinned run's runtime.
+- **Available and current:** continue with first-run onboarding below and the original full Office lifecycle, not Lean.
 
 ## First-run onboarding (after the install check, before intake)
 

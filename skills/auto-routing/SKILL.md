@@ -5,7 +5,7 @@ description: Auto Office routing reference. Use when selecting or explaining a r
 
 # Auto Routing
 
-The `office` runtime routes every role. Do not route by hand; read the decision it records. The normative
+The `office` runtime and current role/executor policies route every role; this skill explains, never reimplements, that decision. Inspect `office route policy --effective --role <role>` and `office inspect route <task>` for the actual eligibility, policy provenance, fallback and rejection reasons. Do not route by hand; read the decision it records. The normative
 scheme is `../../protocol/routing.md` (learning: `../../protocol/telemetry-learning.md`). Route
 `harness@major × model_id × effort`, not model brand alone.
 
@@ -17,8 +17,8 @@ Valid user `RecordedOverride` and declared routes retain explicit authority with
 
 **Executor and worker recommendation (#300):** after qualification, learned eligibility (stage 7) and an
 user-configured budget ceiling on expected cost to success (stage 8) apply. Without a genuine run/repo/user ceiling, cost ranks rather than excludes; disclose its source and retain old pinned policy. Every remaining model × effort route is
-scored on success probability (benchmark prior, overtaken by comparable local evidence), expected cost to
-success, expected time to success, quota headroom and weighted user preference. The result is a slate: a primary
+scored on evidence-calibrated success probability (benchmark Beta prior, overtaken by comparable local task outcomes), expected cost to
+success INCLUDING retries/rework, expected time to success, quota headroom, task-aware quality evidence and weighted user preference. The result is a slate: a primary
 and up to two fallbacks, each with a reason, one strength and one weakness.
 - Close calls (within 5% utility) are settled by a seeded, reproducible draw; a clearly weaker route never wins it.
 - Exploration of under-tested qualifying routes is small and capped.
@@ -27,7 +27,7 @@ and up to two fallbacks, each with a reason, one strength and one weakness.
 
 **Discovery (#494):** keep invocation support, learned quality and role policy separate. A fresh exact probe may qualify bounded reversible S/M executor/worker trials with local/repo blast radius, isolated worktrees and normal tests, independent review and verification. Caps: 2 probes/run, 1 trial/run, 15% of rolling 20 builder decisions, reserved atomically. Require a recorded known-working fallback, current safety gates and bounded allocation; manual pins skip discovery. An unreadable user or repo routing policy refuses with `policy-unreadable` (nothing offered, declared routes included). Planner/reviewer/verifier/final gate roles and production, irreversible or protected-write work never trial. See `../../docs/route-discovery.md` for fingerprints, failure classes, config, audit and rollback; only that shared policy governs trials. Discovery ships enabled for executor/worker; runs pinned earlier stay off, and `routing.discovery.enabled: false` at user or repo tier rolls it back. The first live trial ended `abandoned` (headless launch did not write `agent.env`; fixed); a second reached `trial-accepted` with no manual step.
 
-**Planner and reviewer routes** still use the advisory `preferred_seed` anchor and the `cost_policy` order (including `balanced_money_band_percent`) after qualification, until their routing is redesigned.
+**Planner and reviewer routes** use the separate advisory `preferred_seed` and cost-policy ranking after qualification (including `balanced_money_band_percent`), NOT executor adaptive expected-cost utility. A manual reviewer pin or one-off override is recorded subject to real capability/deny/quota/independence gates; unsupported invocation and stale model IDs are rejected with their actual reason.
 
 Quota-wall cooldowns block only the exact route that hit the wall, across runs and Office processes. A provider reset time sets the expiry; otherwise `quota.cooldown_minutes` applies (15 minutes by default). A successful dispatch on that route clears the cooldown early.
 

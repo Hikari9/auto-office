@@ -1,0 +1,68 @@
+"""#926 public plugin inventory and compatibility contract."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from scripts.build_plugin_distribution import check, file_map
+
+ROOT = Path(__file__).resolve().parents[2]
+CFG = json.loads((ROOT / "plugin-distribution.json").read_text())
+
+
+def test_curated_installed_package_has_exact_visible_skills():
+    assert check(ROOT) == []
+    dist = ROOT / "plugin-dist" / "skills"
+    visible = {p.parent.name for p in dist.glob("*/SKILL.md")}
+    assert visible == set(CFG["public_skills"])
+    assert len(visible) == 16
+    assert not visible.intersection(CFG["retired_skills"])
+
+
+def test_original_full_skill_is_the_only_canonical_root():
+    assert (ROOT / "SKILL.md").read_bytes() == (
+        ROOT / "plugin-dist/skills/auto-office/SKILL.md"
+    ).read_bytes()
+    text = (ROOT / "SKILL.md").read_text()
+    assert "name: auto-office" in text
+    assert "Original full Auto Office" in text
+    assert "## Start" in text and "## Execute" in text
+    assert "auto-office-lean" in (ROOT / "plugin-dist/skills/auto-office-lean/SKILL.md").read_text()
+    assert "auto-switch to auto-office-lean" in text
+
+
+def test_all_retired_skills_and_primitive_manifest_paths_remain():
+    for name in CFG["retired_skills"]:
+        assert (ROOT / "skills" / name / "SKILL.md").is_file()
+        assert not (ROOT / "plugin-dist/skills" / name).exists()
+    tsv = (ROOT / "config/cli-runtimes.tsv").read_text()
+    for name, slug in [("opencode", "opencode-cli"), ("pi", "pi-cli")]:
+        assert f"{name}\tskills/{slug}/SKILL.md\t" in tsv
+        assert (ROOT / "plugin-dist/skills" / slug / "agents/openai.yaml").is_file()
+
+
+def test_plugin_marketplaces_point_at_isolated_package():
+    claude = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+    codex = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
+    assert claude["plugins"][0]["source"] == "./plugin-dist"
+    assert codex["plugins"][0]["source"]["path"] == "./plugin-dist"
+    assert (ROOT / "plugin-dist/.claude-plugin/plugin.json").is_file()
+    assert (ROOT / "plugin-dist/plugin.json").is_file()
+
+
+def test_standalone_review_independence_delegation_and_bounded_rounds():
+    text = (ROOT / "skills/auto-review/SKILL.md").read_text()
+    for phrase in [
+        "fresh", "read-only", "Herdr", "CLI session", "immutable",
+        "APPROVED", "RECHECK", "INTAKE_GAP", "initial", "round 3",
+        "need NOT personally fix", "delegate", "other owner", "UNAVAILABLE",
+        "no hidden waiver", "not an Office lifecycle",
+    ]:
+        assert phrase.lower() in text.lower(), phrase
+
+
+def test_installed_resources_byte_match_source():
+    desired = file_map(ROOT)
+    assert desired
+    for name in ("scripts/build_plugin_distribution.py", "MANIFESTO.md", "adapters/seed/pi.yaml"):
+        assert (ROOT / "plugin-dist" / name).read_bytes() == desired[name]

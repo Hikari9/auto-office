@@ -95,7 +95,11 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it and the plugin manifests carry no version. `scripts/check_ecosystem.py` enforces it.
+Both marketplaces select the generated, self-contained `./plugin-dist` package, which exposes **exactly 16 public skills** including the unmodified-root-authority full `auto-office`. Claude's supported invocation is usually `/auto-office:auto-office`; a bare `/auto-office` alias is host-dependent. Verify the actual slash-command listing instead of assuming it. Codex/ChatGPT loads the same 16 names through its portable plugin manifest. Installation makes the skill discoverable **even before** the separate `office` CLI exists.
+
+The repo-root `SKILL.md` remains canonical; `scripts/build_plugin_distribution.py --sync` mirrors that file and the selected skills into `plugin-dist`. Eight retired source skills stay at their original paths for runtime compatibility but are not discoverable in the installed plugin. `--check` and `scripts/check_ecosystem.py` verify the exact mirror. Claude reads `.claude-plugin/marketplace.json`, Codex reads `.agents/plugins/marketplace.json`; the CLI version is sourced only from `src/office/_version.py`.
+
+Verify after install: check the host's plugin skill list for the 16 names; invoke `/auto-office:auto-office` explicitly on Claude Code where namespaced, confirm the loaded frontmatter identifies the full original (not Lean), then run `office doctor` separately if the CLI is installed. If the host has no suitable skill listing, report that check as unverified, not passed.
 
 ### 1. Install the CLI
 
@@ -120,7 +124,7 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The separately installed `/auto-office` skill offers `office install --no-hooks` during its explicit first-run onboarding. `office install` registers the CLI runtime and optional harness hooks, **not plugin skills**.
 
 | Agent / harness | After `office install` |
 |---|---|

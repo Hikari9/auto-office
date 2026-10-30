@@ -170,7 +170,7 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
         retained = legacy.retained_runtime(runtime_default.LEGACY_V3_FINAL)
         res.add("retained Auto Office 3.0 runtime for pinned runs and rollback: " + ("ok" if retained else "unavailable"))
     if not hooks:
-        res.add("hooks: none written (--no-hooks); /auto-office onboarding offers the current harness's integration")
+        res.add("hooks: none written (--no-hooks); plugin skill installation is separate (Claude/Codex marketplace); explicit /auto-office onboarding may offer harness integration")
         res.next = "office doctor"
         return res
     command = office_command()

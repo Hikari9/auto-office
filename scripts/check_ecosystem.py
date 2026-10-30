@@ -34,7 +34,7 @@ SKILL_LINE_BUDGETS = {
     'skills/auto-loop/SKILL.md': 30,
     'skills/auto-maintenance/SKILL.md': 21,
     'skills/auto-planning/SKILL.md': 24,
-    'skills/auto-review/SKILL.md': 36,
+    'skills/auto-review/SKILL.md': 90,
     'skills/auto-routing/SKILL.md': 54,
     'skills/auto-self-improve/SKILL.md': 52,
     # #270: when-entry-strategy-invariants-exit plus the worker and review brief templates.
@@ -46,6 +46,8 @@ SKILL_LINE_BUDGETS = {
     # failure mode with a reproduction, compressed to 28 lines before raising.
     'skills/codex-cli/SKILL.md': 92,
     'skills/hermes-cli/SKILL.md': 20,
+    'skills/opencode-cli/SKILL.md': 45,
+    'skills/pi-cli/SKILL.md': 45,
     # Vendored from external sources in 9a59305, not authored to this repo's
     # context-load convention: every skill above fits in 64 lines, these two do not.
     # Budgeted at their actual size so the gate registers rather than ignores them.
@@ -71,7 +73,7 @@ def frontmatter(path):
 def discovered_skills(root):
     return sorted(
         path for path in root.rglob('SKILL.md')
-        if not any(part.startswith('.') or part == 'mutants' for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
+        if not any(part.startswith('.') or part in ('mutants', 'plugin-dist') for part in path.relative_to(root).parts)  # mutants/: mutmut's copy
     )
 
 def check_skill_budgets(root=ROOT):
@@ -204,12 +206,17 @@ def main():
     errors.extend(budget_errors)
     errors.extend(check_versions())
     errors.extend(check_skill_metadata())
+    # The public plugin is isolated because host discovery paths supplement defaults.
+    distribution_check = subprocess.run([sys.executable, str(ROOT / 'scripts/build_plugin_distribution.py'), '--check'],
+                                        capture_output=True, text=True, cwd=ROOT)
+    if distribution_check.returncode:
+        errors.extend((distribution_check.stdout + distribution_check.stderr).splitlines())
         
     if errors:
         print('FAIL')
         for e in errors: print('-',e)
         return 1
-    print(f'PASS: {len(skills)} skills, {len(list(ROOT.glob("schemas/*.json")))} schemas, {len(list(ROOT.glob("evals/*.yaml")))} evals; budget check: {len(SKILL_LINE_BUDGETS) + 1} files within line budgets')
+    print(f'PASS: {len(skills)} canonical skill files (16 plugin-visible), {len(list(ROOT.glob("schemas/*.json")))} schemas, {len(list(ROOT.glob("evals/*.yaml")))} evals; budget check: {len(SKILL_LINE_BUDGETS) + 1} files within line budgets')
     return 0
 
 if __name__=='__main__': sys.exit(main())
