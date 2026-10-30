@@ -129,7 +129,7 @@ def _is_shell(command: str) -> bool:
     return first.rsplit("/", 1)[-1].lstrip("-") in _SHELLS
 
 
-def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -> str | None:
+def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, budget_only: bool = False) -> str | None:
     """Inspect and sample progress; return a reason if the hard threshold passed.
 
     Sampling can run in `office status` and a separate wait watchdog. There is
@@ -154,7 +154,7 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -
     if role == "reviewer" and age >= threshold("review_wall"):
         return (f"{d['role']} reviewer {d['id']}: {int(age)}s elapsed past review wall budget "
                 f"{int(threshold('review_wall'))}s; preserve the attempt, inspect its output and retry through Office review policy")
-    if seconds < threshold(role):
+    if budget_only or seconds < threshold(role):
         return None
     if role == "executor" and child_state(d) is not False:
         # A live child (a background monitor, `office wait`) is work in flight: restart the clock.
@@ -173,7 +173,7 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None) -
 
 def reviewer_stalls(con, run: dict) -> list[str]:
     """Reviewers have an independent watchdog: executor state is irrelevant. A running self-review subagent
-    owns its gate, so it is never reported here (#895)."""
+    owns its no-progress clock, so only its review_wall budget is reported (#895, A1)."""
     from office import rerun, self_review_subagents
     owned = self_review_subagents.running_dispatch_ids(con, run["id"])
     out = []
@@ -181,10 +181,8 @@ def reviewer_stalls(con, run: dict) -> list[str]:
                            "('code_reviewer','plan_reviewer','integration_reviewer','visual_reviewer','convergence_reviewer','visual_verifier','browser_verifier','closeout_verifier') "
                            "AND status='running' AND ended_at IS NULL", (run["id"],)).fetchall():
         d = dict(row)
-        if d["id"] in owned:
-            continue
         act = rerun.agent_activity(d) if d.get("launcher") == "herdr" else None
-        note = check(con, run, d, role="reviewer", activity=act)
+        note = check(con, run, d, role="reviewer", activity=act, budget_only=d["id"] in owned)
         if note:
             out.append(note)
     return out

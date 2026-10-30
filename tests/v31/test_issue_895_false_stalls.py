@@ -73,7 +73,7 @@ def _executor_row(con, did) -> dict:
 # --- Gate ownership: a running self-review subagent is a live owner -------------------------------------------------
 
 
-def _reviewer_gate(env, monkeypatch, *, kind, stale_for=7200.0):
+def _reviewer_gate(env, monkeypatch, *, kind, stale_for=7200.0, started_for=120.0):
     """A gate of `kind` whose reviewer dispatch runs in a herdr pane and has made no progress for `stale_for` seconds.
 
     The T1 executor is ended, so the only running dispatch is the reviewer. The reviewer's stored progress sample
@@ -89,7 +89,7 @@ def _reviewer_gate(env, monkeypatch, *, kind, stale_for=7200.0):
     did = con.execute("SELECT id FROM dispatches WHERE task_id='T1' AND role='executor'").fetchone()[0]
     con.execute("UPDATE dispatches SET role='code_reviewer', kind='reviewer', gate_id=?, launcher='herdr', pane_id='w1:p2', "
                 "status='running', ended_at=NULL, started_at=?, watchdog_progress_since=?, watchdog_progress_hash=NULL "
-                "WHERE id=?", (gate_id, _ago(120), _ago(stale_for), did))
+                "WHERE id=?", (gate_id, _ago(started_for), _ago(stale_for), did))
     con.commit()
     act = {"alive": True, "busy": False, "hash": "h-review", "text": "Reviewing the diff.\n", "status": "idle", "question": None}
     monkeypatch.setattr(rerun, "agent_activity", lambda d: act)
@@ -107,6 +107,14 @@ def test_running_self_review_subagent_owns_its_gate(env, monkeypatch):
     con, run, gate_id, did = _reviewer_gate(env, monkeypatch, kind="self_review_subagent")
     assert watchdog.reviewer_stalls(con, run) == []
     assert _gate_lines(con, run, gate_id, did) == []
+
+
+def test_a_running_self_review_subagent_past_its_wall_budget_is_still_a_stall(env, monkeypatch):
+    """A1: the owned exemption covers the no-progress clock only, never the review_wall hard budget."""
+    monkeypatch.setenv("OFFICE_REVIEW_WALL_S", "3600")
+    con, run, gate_id, did = _reviewer_gate(env, monkeypatch, kind="self_review_subagent", started_for=7200.0)
+    (line,) = watchdog.reviewer_stalls(con, run)
+    assert did in line and "review wall budget" in line, line
 
 
 def test_watchdog_tick_stays_quiet_for_a_running_self_review_subagent(env, monkeypatch):
