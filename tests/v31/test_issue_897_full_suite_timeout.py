@@ -35,8 +35,8 @@ def _run(con, tmp_path, monkeypatch, command, *, cfg=CFG, code=0, out="", loaded
     def fake_run_check(cmd, cwd, timeout, env):
         started.append(timeout)
         if code == 124 and killed:
-            return code, f"timed out after {timeout}s\n{out}", True
-        return code, out, False
+            return code, gates._TimedOut(f"timed out after {timeout}s\n{out}")
+        return code, out
 
     monkeypatch.setattr(gates, "_run_check", fake_run_check)
     monkeypatch.setattr(gates, "host_overloaded", lambda: loaded)
@@ -102,6 +102,11 @@ def test_null_full_suite_setting_falls_back_to_the_default():
     # A YAML key with no value reads as None; it must not raise inside the gate.
     cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": None}
     assert gates.check_timeout(cfg, "scripts/validate.sh") == (7200, "full_suite_timeout_seconds")
+
+
+def test_explicit_zero_full_suite_setting_does_not_replace_the_check_timeout():
+    cfg = {"check_timeout_seconds": 1800, "full_suite_timeout_seconds": 0}
+    assert gates.check_timeout(cfg, "scripts/validate.sh") == (1800, "check_timeout_seconds")
 
 
 def test_no_src_module_reads_job_timeout_seconds():
@@ -175,10 +180,20 @@ def test_non_full_suite_commands_keep_the_check_timeout(command):
     assert gates.check_timeout(CFG, command) == (1800, "check_timeout_seconds")
 
 
-def test_carriage_return_leaves_the_pytest_attestation_unchanged():
-    # is_full_suite refuses a carriage return; _complete_pytest_command keeps its base answer.
+def test_carriage_return_is_refused_by_both_classifiers():
+    # sh does not split on a carriage return, so "--all\r" is not the argv it looks like.
     assert not verification_coverage.is_full_suite("scripts/validate.sh\r")
-    assert verification_coverage._complete_pytest_command("pytest --all\r")
+    assert not verification_coverage._complete_pytest_command("pytest --all\r")
+
+
+def test_real_check_exit_124_is_a_plain_result_not_a_kill():
+    code, out = gates._run_check("sh -c 'echo timed out after 60s; exit 124'", Path("."), 60, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and not isinstance(out, gates._TimedOut), out
+
+
+def test_real_kill_returns_a_timed_out_result():
+    code, out = gates._run_check("sleep 5", Path("."), 1, {"PATH": "/usr/bin:/bin"})
+    assert code == 124 and isinstance(out, gates._TimedOut) and out.startswith("timed out after 1s"), out
 
 
 def _commit(repo, name, text):
@@ -208,7 +223,7 @@ def test_preexisting_rerun_on_base_uses_the_same_timeout(con, tmp_path, monkeypa
     monkeypatch.setattr(gates.state, "pinned_config", lambda run: {"verification": CFG})
     monkeypatch.setattr(gates, "detached_checkout", lambda *a, **k: checkout)
     monkeypatch.setattr(gates, "remove_checkout", lambda *a, **k: None)
-    monkeypatch.setattr(gates, "_run_check", lambda cmd, cwd, timeout, env: (started.append(timeout) or (1, "boom\n", False)))
+    monkeypatch.setattr(gates, "_run_check", lambda cmd, cwd, timeout, env: (started.append(timeout) or (1, "boom\n")))
     outcome = {"results": [{"command": command, "exit": 1, "log": str(log), "cwd": str(repo)}]}
     rev = {"id": "R1", "commit_sha": head, "base_commit": base, "dispatch_id": "D1"}
     run = {"id": "r1", "repo_root": str(repo)}

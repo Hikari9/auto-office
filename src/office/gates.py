@@ -454,7 +454,7 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
                 timeout, _ = check_timeout(cfgv, r["command"])
-                code, out, _ = _run_check(r["command"], checkout, timeout, _check_env(run))
+                code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
                 log = evdir / (Path(r["log"]).stem + ".base.log")
                 log.write_text(out, encoding="utf-8")
                 os.chmod(log, 0o600)
@@ -556,7 +556,8 @@ def check_timeout(cfgv: dict, command: str) -> tuple[int, str]:
     larger. The setting is the one that binds, so a timeout names what to raise."""
     check = int(cfgv.get("check_timeout_seconds", 1800))
     if verification_coverage.is_full_suite(command):
-        full = int(cfgv.get("full_suite_timeout_seconds") or 7200)
+        full = cfgv.get("full_suite_timeout_seconds")
+        full = 7200 if full is None else int(full)
         if full >= check:
             return full, "full_suite_timeout_seconds"
     return check, "check_timeout_seconds"
@@ -591,8 +592,9 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         before_stats = _tracked_stat_snapshot(cwd)
         timeout, setting = check_timeout(cfgv, command)
         timed_out = f"timed out after {timeout}s; raise verification.{setting} to allow a longer run"
+        code, out = _run_check(command, cwd, timeout, environment)
         # Only Office's own kill is a timeout: a process that exits 124 itself is not.
-        code, out, killed = _run_check(command, cwd, timeout, environment)
+        killed = isinstance(out, _TimedOut)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -648,8 +650,13 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
 
 
-def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str, bool]:
-    """(exit code, output, killed by Office) of one check command. It runs in its own process
+class _TimedOut(str):
+    """Output of a check Office killed at its limit. Only _run_check makes one, so a check that
+    prints the timeout text and exits 124 itself still reads as a plain str, not a kill."""
+
+
+def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
+    """(exit code, output) of one check command. It runs in its own process
     group, which inherits the job's execution lock (#403): no replacement
     attempt of this job can start its checks while any process of this one
     lives, and a timeout stops the whole group, not just the shell."""
@@ -659,7 +666,7 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
     jobs.register_child(proc.pid)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-        return proc.returncode, (stdout or "") + (stderr or ""), False
+        return proc.returncode, (stdout or "") + (stderr or "")
     except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)
@@ -667,7 +674,7 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
             stdout, _ = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
             stdout = ""
-        return 124, f"timed out after {timeout}s\n{stdout or ''}", True
+        return 124, _TimedOut(f"timed out after {timeout}s\n{stdout or ''}")
 
 
 def host_overloaded() -> str | None:
