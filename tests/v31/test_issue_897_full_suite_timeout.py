@@ -3,6 +3,7 @@ keeps check_timeout_seconds, and a timed-out check names the setting to raise.""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -87,6 +88,14 @@ def test_check_timeout_defaults_when_unset():
     assert gates.check_timeout({}, "pytest -q") == (1800, "check_timeout_seconds")
 
 
+def test_no_src_module_reads_job_timeout_seconds():
+    # The job timeout covers the full suite only because nothing enforces it. If a reader is added,
+    # it must be at least check_timeout for every check it runs, or it cuts the full suite short.
+    readers = [p.name for p in Path(gates.__file__).parent.rglob("*.py")
+               if "job_timeout_seconds" in p.read_text(encoding="utf-8")]
+    assert readers == [], f"job_timeout_seconds is read by {readers}; make it >= check_timeout for the full suite"
+
+
 @pytest.mark.parametrize("command, limit, setting", [
     ("scripts/validate.sh", 7200, "full_suite_timeout_seconds"),
     ("scripts/validate.sh --pr", 1800, "check_timeout_seconds"),
@@ -114,6 +123,13 @@ def test_wrapper_timeout_keeps_the_check_limit_and_names_its_setting(con, tmp_pa
     assert started == [1800]
     summary = outcome["parsed"].findings[0]["summary"]
     assert summary.startswith("check timed out after 1800s; raise verification.check_timeout_seconds"), summary
+
+
+def test_loaded_exit_124_from_the_process_is_not_named_a_timeout(con, tmp_path, monkeypatch):
+    outcome, _ = _run(con, tmp_path, monkeypatch, "scripts/validate.sh", code=124, killed=False,
+                      out="tool exited 124\n", loaded="host load 90 exceeds 16 (8 CPUs)")
+    assert outcome["verdict"] == "UNAVAILABLE", outcome
+    assert "exited 124" in outcome["summary"] and "timed out" not in outcome["summary"], outcome
 
 
 def test_loaded_timeout_is_unavailable_and_names_the_setting_once(con, tmp_path, monkeypatch):

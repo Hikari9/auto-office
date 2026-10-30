@@ -29,7 +29,7 @@ On 2026-10-29, `.venv/bin/python -m pytest -n 2` ran from the repository root wi
 
 The branch carries T1 base commits that `origin/main` lacks, so the +45 collected nodes include T1 tests and this PR's new test. This run does not separate the two.
 
-Both trees fail `tests/test_checks_stale.py::test_any_other_edit_while_checks_run_is_stale` and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. The branch also fails four tests in `tests/v31/test_notice_priority.py` and `tests/v31/test_quota_probe.py`. Those four fail at T1 base `60a46a5c` and do not fail on `origin/main`, so they come from T1 work, not this PR.
+Both trees fail `tests/test_checks_stale.py::test_any_other_edit_while_checks_run_is_stale` and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs`. The branch also fails four tests in `tests/v31/test_notice_priority.py` and `tests/v31/test_quota_probe.py`. Those four fail at T1 base `60a46a5c` and do not fail on `origin/main`, so they come from T1 work, not this PR.
 
 pytest's summary total is one higher than the collected count on both trees. The cause is not investigated.
 
