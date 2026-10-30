@@ -351,3 +351,39 @@ def test_a_stalled_reviewer_next_names_the_inspection_and_the_revoke(env, monkey
     con, run, _, did = _reviewer_gate(env, monkeypatch, kind="lane", stale_for=7200.0)
     (ep,) = [e for e in watchdog.review_episodes(con, run, probe=True) if e["kind"] == "review.stalled"]
     assert ep["next"].startswith("inspect/stop the attempt, then office review"), ep
+
+
+def test_resume_kicks_jobs_before_the_wake_callback(env, monkeypatch):
+    from office import jobs
+    _go(env)
+    order = []
+    monkeypatch.setattr(jobs, "kick", lambda con, run_id: order.append("kick"))
+    monkeypatch.setattr(root_wake, "arm_on_resume", lambda con, run, explicit=False: order.append("wake") or "armed")
+    env.office("resume", check=0, env={"HERDR_PANE_ID": PANE})
+    assert order == ["kick", "wake"], order
+
+
+def test_wake_off_writes_the_sticky_marker_before_disabling_the_binding(env, monkeypatch):
+    _go(env)
+    _verified_root(monkeypatch)
+    env.office("resume", check=0, env={"HERDR_PANE_ID": PANE})
+    con = env.con()
+    run = _run(con)
+
+    def no_marker(self, *args, **kwargs):
+        raise OSError("read-only run dir")
+
+    monkeypatch.setattr(Path, "touch", no_marker)
+    with pytest.raises(OSError):
+        root_wake.attach(con, run, off=True)
+    assert root_wake.armed(con, run), "binding disabled although the sticky marker was never written"
+
+
+def test_a_queued_live_job_next_is_office_wait_not_status(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_QUEUED_S", "60")
+    monkeypatch.setattr(gates_mod, "owner_state", lambda con, run, g: ("alive", "job J9 is running"))
+    con = env.con()
+    _review_gate(con, _run(con), "GQ9", created_for=600)
+    (ep,) = watchdog.review_episodes(con, _run(con), probe=False)
+    assert ep["next"].startswith("office wait (review job is alive)"), ep
