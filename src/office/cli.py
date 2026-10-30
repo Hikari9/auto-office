@@ -312,7 +312,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
     s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="amend route: the live dispatch's new model/effort (same harness)")
+                   help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
                    help="amend route: interrupt the agent and relaunch it on the new route")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
@@ -1040,7 +1040,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
                            drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
-                           no_review=args.no_review, reason=args.reason, edits=edits)
+                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
