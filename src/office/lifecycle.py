@@ -294,7 +294,9 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
 
 
 def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None,
-           cwd: Path | None = None) -> Result:
+           cwd: Path | None = None, wake=None) -> Result:
+    """`wake(con, run) -> str | None` runs after the session is bound, before the status is built, so the
+    status reports the wake state as it now is."""
     if target.legacy is not None:
         msg, nxt = legacy.guidance(target.legacy)
         return Result(lines=[msg], next=nxt, data={"legacy": True, "run_id": target.legacy.run_id,
@@ -344,9 +346,13 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                 # Retries only a round of an open cycle; a closed one stays closed (plans.can_auto_queue).
                 if (current.get("plan_review") or {}).get("status") in ("unavailable", "attention") and current["plan_version"]:
                     plans.queue_plan_review(con, current, current["plan_version"])
+    notice = wake(con, state.get_run(con, run["id"])) if wake else None
     jobs.kick(con, run["id"])
     from office import guide
-    return guide.status(con, state.get_run(con, run["id"]), resumed=True)
+    res = guide.status(con, state.get_run(con, run["id"]), resumed=True)
+    if notice:
+        res.notices.append(notice)
+    return res
 
 
 def reconcile(con, run: dict) -> list[str]:

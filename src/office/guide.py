@@ -373,6 +373,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         episodes = watchdog.review_episodes(con, run, probe=probe_panes)
         with db.transaction(con):
             watchdog.record_review_episodes(con, run, episodes)
+            watchdog.mark_review_episodes_read(con, run, episodes)
     for ep in episodes:
         res.add(f"blocker: {ep['text']}")
     if probe_panes:
@@ -501,7 +502,8 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: 
     from office import watchdog
     if episodes is None:
         episodes = watchdog.review_episodes(con, run, probe=True)
-    out.extend(ep["text"] for ep in episodes)
+    # Only a running reviewer is a stall (exit 3). Queued and closed-unread episodes are news (exit 0).
+    out.extend(ep["text"] for ep in episodes if ep["kind"] == "review.stalled")
     return out
 
 
@@ -853,7 +855,12 @@ def waiting(run_id: str):
     marker = _wait_marker(run_id)
     marker.parent.mkdir(parents=True, exist_ok=True)
     with marker.open("a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another root wait holds it: never block here, so this wait keeps its own --timeout.
+            yield
+            return
         try:
             yield
         finally:

@@ -156,13 +156,22 @@ def armed(con, run: dict) -> bool:
     return _binding(con, run["id"]) is not None
 
 
-def arm_on_resume(con, run: dict) -> str:
-    """Default wake for `office resume`. Never refuses: a root that cannot be verified resumes unarmed."""
+def _off_marker(run_id: str) -> Path:
+    """`--wake-off` is sticky: a plain resume must not re-arm wake until `office resume --auto-wake`."""
+    return paths.run_dir(run_id) / "root-wake.off"
+
+
+def arm_on_resume(con, run: dict, *, explicit: bool = False) -> str:
+    """Default wake for `office resume`. Never refuses: a root that cannot be verified resumes unarmed.
+    `explicit` is `--auto-wake`, the only way to re-arm after `--wake-off`."""
     from office.state import Refused
+    if _off_marker(run["id"]).exists() and not explicit:
+        return "root auto-wake is off (--wake-off); office resume --auto-wake re-arms it"
     try:
         text = attach(con, run)
     except Refused as exc:
         return f"root auto-wake not armed: {exc.message}"
+    _off_marker(run["id"]).unlink(missing_ok=True)
     ensure(run)
     return text
 
@@ -179,6 +188,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
     if off:
         with _delivery_lock(run["id"]), db.transaction(con):
             con.execute("UPDATE root_wake_bindings SET enabled=0, generation=generation+1 WHERE run_id=?", (run["id"],))
+        _off_marker(run["id"]).touch()
         return "root auto-wake disabled (pending receipts preserved)"
     # Pane lock, then run lock, then reads: nothing that moves this pane or
     # delivers to it can interleave with verification and registration.
@@ -535,8 +545,8 @@ def metrics(con, run: dict) -> dict:
 
 
 def _unarmed_line(con, run: dict) -> str:
-    if con.execute("SELECT 1 FROM root_wake_bindings WHERE run_id=? AND enabled=0", (run["id"],)).fetchone():
-        return "wake: off (--wake-off); office resume from the bound root pane re-arms it"
+    if _off_marker(run["id"]).exists():
+        return "wake: off (--wake-off); office resume --auto-wake re-arms it"
     if not os.environ.get("HERDR_PANE_ID"):
         return "wake: unavailable (not inside a Herdr pane); use office wait"
     return "wake: unavailable (this pane is not a verified bound Claude root); office resume from it arms wake"

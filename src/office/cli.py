@@ -981,12 +981,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
         from office import lifecycle, root_wake, state
-        res = lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
-        if args.wake_off:
-            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=True))
-        elif not os.environ.get("OFFICE_DISPATCH_ID"):
-            res.notices.append(root_wake.arm_on_resume(con, state.get_run(con, run["id"])))
-        return res
+        def wake(con, current):
+            if args.wake_off:
+                return root_wake.attach(con, current, off=True)
+            if os.environ.get("OFFICE_DISPATCH_ID"):
+                return None
+            return root_wake.arm_on_resume(con, current, explicit=args.auto_wake)
+        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd, wake=wake)
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):

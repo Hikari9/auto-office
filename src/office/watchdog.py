@@ -28,6 +28,8 @@ _KNOBS = {
 REVIEW_GATE_KINDS = ("lane", "plan_review", "convergence_review", "visual", "integration")
 # Review-gate episode kinds; each is an orchestrator event and a root-wake trigger.
 REVIEW_EVENT_KINDS = ("review.queued_too_long", "review.stalled", "review.closed_unread")
+# Per-gate cursor consumer `review-read:<gate id>`: the orchestrator was shown that gate's verdict up to this seq.
+REVIEW_READ = "review-read"
 
 
 def threshold(kind: str) -> float:
@@ -235,9 +237,13 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
         if age < threshold("queued_review") or owner not in ("queued", "alive", "unknown"):
             continue
         task = g["task_id"]
+        # Revoke only a queue nothing will drain; a live or unknown job is inspected first.
+        nxt = (f"office revoke {task}, then office review {task} to relaunch on the same revision" if owner == "queued"
+               else f"office status; if the review is confirmed stuck, office revoke {task}, then office review {task} "
+                    "on the same revision")
         out.append({"kind": "review.queued_too_long", "episode": g["id"],
                     "text": f"{task} {g['kind']} review {g['id']} queued {int(age)}s past its bound ({detail})",
-                    "next": f"office revoke {task}, then office review {task} to relaunch on the same revision"})
+                    "next": nxt})
     if probe:
         for dispatch_id, note in reviewer_stall_items(con, run):
             # A stall that recovered and stalled again is a new episode: key on the progress it restarted from.
@@ -246,26 +252,34 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
             _, sep, action = note.partition("; next: ")
             out.append({"kind": "review.stalled", "episode": f"{dispatch_id}:{since}", "text": note,
                         "next": action if sep else "office status"})
-    cursor = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer='orchestrator'",
-                         (run["id"],)).fetchone()
-    last = cursor[0] if cursor else 0
     for g in con.execute(f"SELECT * FROM gates WHERE run_id=? AND kind IN ({marks}) AND status='done' "
                          "AND finished_at IS NOT NULL ORDER BY finished_at", (run["id"], *REVIEW_GATE_KINDS)).fetchall():
         age = _age(g["finished_at"], now)
         if age < threshold("closed_unread"):
             continue
-        # The verdict is the first verdict-kind event for this gate's task after it closed. Another
-        # task's events never count, so a later review elsewhere cannot re-flag a verdict already read.
-        verdict = con.execute("SELECT seq FROM events WHERE run_id=? AND task_id IS ? AND created_at>=? AND "
+        # The verdict is the first verdict-kind event for this gate's task after it closed. It is unread
+        # until status has shown this episode (the per-gate read cursor); other events never clear it.
+        cursor = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?",
+                             (run["id"], f"{REVIEW_READ}:{g['id']}")).fetchone()
+        verdict = con.execute("SELECT seq FROM events WHERE run_id=? AND task_id IS ? AND created_at>=? AND seq>? AND "
                               "(kind LIKE 'gate.%' OR kind LIKE 'plan.%' OR kind LIKE 'convergence.%') "
-                              "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"])).fetchone()
-        if verdict is None or verdict[0] <= last:
+                              "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"],
+                                                       cursor[0] if cursor else 0)).fetchone()
+        if verdict is None:
             continue
         scope = g["task_id"] or "plan"
-        out.append({"kind": "review.closed_unread", "episode": g["id"],
+        out.append({"kind": "review.closed_unread", "episode": g["id"], "read_seq": verdict[0],
                     "text": f"{scope} {g['kind']} review {g['id']} closed {int(age)}s ago and its verdict is unread",
                     "next": f"office context to read the {scope} verdict, then act on it"})
     return out
+
+
+def mark_review_episodes_read(con, run: dict, episodes: list[dict]) -> None:
+    """Called once status has shown these episodes: their closed verdicts count as read. Caller holds the transaction."""
+    from office import state
+    for ep in episodes:
+        if ep["kind"] == "review.closed_unread":
+            state.advance_cursor(con, run["id"], f"{REVIEW_READ}:{ep['episode']}", ep["read_seq"])
 
 
 def record_review_episodes(con, run: dict, episodes: list[dict]) -> None:

@@ -66,18 +66,20 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 - `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane herdr reports `blocked` with no
   recorded question. `office wait` records it; status records nothing.
 - Root wake (#922) is on by default. `office resume` from a bound, verified Claude Herdr root pane arms it; `--wake-off` turns it
-  off for the run and `--auto-wake` is still accepted. Outside Herdr, or when Herdr cannot verify the pane, resume prints a notice
+  off for the run and it stays off across later plain resumes; `office resume --auto-wake` re-arms it. `--auto-wake` is still accepted. Outside Herdr, or when Herdr cannot verify the pane, resume prints a notice
   and arms nothing. `office status` prints `wake: armed`, `wake: off` or `wake: unavailable (<reason>)` on every non-terminal run.
   A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
 - Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
   record each episode as an orchestrator event, which wakes an armed root:
-  - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900) with a live or unknown owner.
-    Next: `office revoke <task>`, then `office review <task>` on the same revision.
+  - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900). Task reviews only; plan
+    reviews show on the plan review status line. A queue nothing drains (owner `queued`) gets `office revoke <task>`, then
+    `office review <task>` on the same revision. A live or unknown job gets `office status` first.
   - `review.stalled`: a running reviewer past `OFFICE_REVIEW_NO_PROGRESS_S` (default 900) or `OFFICE_REVIEW_WALL_S` (default 3600).
     Next: as the stall line says.
-  - `review.closed_unread`: a closed review whose verdict no orchestrator read has followed past `OFFICE_REVIEW_UNREAD_S`
-    (default 900). Next: `office context`, then act on the verdict. Reading it clears the episode.
+  - `review.closed_unread`: a review closed past `OFFICE_REVIEW_UNREAD_S` (default 900) whose verdict has not been shown to the
+    orchestrator. Next: `office context`, then act on the verdict. `office status` or `office wait` showing the episode marks
+    that verdict read; `office context` is read-only and does not.
   - A healthy running review emits nothing.
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3, and the stall line names the
   dispatch, any refused-submit reason, its `pane-tail.txt` and the next command. Fix the blocker, then
