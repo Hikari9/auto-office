@@ -21,7 +21,7 @@ def _ago(seconds: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(timespec="microseconds")
 
 
-MCP = "node /Users/rico/.claude/plugins/cache/context-mode/context-mode/start.mjs"
+MCP = "node /opt/mcp/context-mode/start.mjs"
 WAIT = "office wait --timeout 580"
 
 
@@ -42,7 +42,7 @@ def _table(*, in_flight=False, agent_start=START, extra=()):
 def _script_agent(monkeypatch, table, *, identity=True):
     """The agent is pid AGENT, verified by its start time, and the process table is `table`."""
     rec = {"pid": AGENT, "c_start": START} if identity else None
-    monkeypatch.setattr(dispatch, "_recorded_identity", lambda run, dispatch_id, which: rec)
+    monkeypatch.setattr(dispatch, "_recorded_identity", lambda run, dispatch_id, which: rec if which == "agent" else None)
     monkeypatch.setattr(dispatch, "_process_table", lambda: table)
 
 
@@ -172,6 +172,13 @@ def test_a_headless_executor_waiting_on_a_command_is_not_reported(env, monkeypat
     con.execute("UPDATE dispatches SET launcher='process', pid=9999 WHERE id=?", (did,))
     con.commit()
     _script_agent(monkeypatch, _table(in_flight=True))
+    assert guide._idle_executors(con, run, {did: _idle_act()}) == []
+
+
+def test_an_oversized_agent_tree_is_unknown_not_a_stall(env, monkeypatch):
+    con, run, did = _idle_executor(env, monkeypatch)
+    flood = [_row(6000 + i, AGENT, "sleep 1") for i in range(watchdog.MAX_TREE)]
+    _script_agent(monkeypatch, _table(extra=flood))
     assert guide._idle_executors(con, run, {did: _idle_act()}) == []
 
 

@@ -91,7 +91,9 @@ def child_state(d: dict) -> bool | None:
     that way, possibly beneath a harness wrapper. Other processes, such as MCP servers, live as long as the session
     and say nothing about the executor. A command that detaches (setsid, a double fork) leaves the agent's tree and is
     not seen. The agent is verified by its recorded start time, so a reused pid never counts; with no verifiable agent
-    there is nothing to wait on. The walk is bounded: a tree larger than MAX_TREE is unknown."""
+    there is nothing to wait on. The walk is bounded: a tree larger than MAX_TREE is unknown.
+    Limits: a shell that wraps a long-lived MCP server, or a command that never ends, keeps the executor exempt. The
+    process table does not tell these apart from a monitor."""
     rec = dispatch._recorded_identity({"id": d["run_id"]}, d["id"], "agent") or {}
     root, started = rec.get("pid"), rec.get("c_start")
     if not root or not started:
