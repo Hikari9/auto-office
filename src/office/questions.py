@@ -46,9 +46,10 @@ _ANSI = dispatch._CSI  # the one ANSI stripper (CSI, OSC, two-byte escapes)
 # to confirm or esc to cancel"; agy: "Waiting for user confirmation".
 _SELECT_FOOTER = re.compile(r"enter to (?:select|confirm)|arrow keys to navigate|↑/↓ to navigate"
                             r"|waiting for user confirmation", re.I)
-# agy's question widget has a header instead of a known footer: "Question 1/1", the question
-# text, then "1. (Recommended) ..." options (#432).
-_SELECT_HEADER = re.compile(r"^\s*[│┃|]?\s*Question\s+\d+\s*/\s*\d+\b", re.I)
+# Some agents show an option menu with a header but no known footer: agy's
+# "Question 1/1" (#432), or "Stalled workflow" (#911). Require a live/busy pane
+# and consecutive numbered options; ordinary output must not become a question.
+_SELECT_HEADER = re.compile(r"^\s*[│┃|]?\s*(?:Question\s+\d+\s*/\s*\d+\b|Stalled workflow\b)", re.I)
 _OPTION = re.compile(r"^\s*(?:[❯›>●○◯▶▸]\s*)?(\d{1,2})[.)]\s+(\S.*?)\s*$")
 _RULE = re.compile(r"^\s*[─━═—–-]{8,}\s*$")
 _BOX = "│┃|"
@@ -96,7 +97,8 @@ def _select_header(lines: list[str]) -> dict | None:
     tail = [ln for ln in lines[last + 1:] if ln.strip() and not _RULE.match(ln)]
     if len(tail) > 3 or any(_BULLET.match(ln) for ln in tail):
         return None
-    return {"kind": "select", "question": _line(" ".join(body[:8]), MAX_QUESTION) or "(question text not shown)",
+    title = "Stalled workflow" if "stalled workflow" in _unbox(lines[head]).lower() else "(question text not shown)"
+    return {"kind": "select", "question": _line(" ".join(body[:8]), MAX_QUESTION) or title,
             "options": options}
 
 

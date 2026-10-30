@@ -2,6 +2,11 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.0
+
+- fix(visual): refresh proven reviewers immediately, probe eligible fallbacks beyond four, preserve rejection reasons in status, and share lane-review helpers (#910).
+- fix(questions): prefer durable `office raise` and detect active Stalled workflow option menus in the orchestrator wait loop (#911).
+
 ## 3.14.0
 
 - catalog: `codex/gpt-6.1-terra` low, medium and high are dispatchable on recorded `office doctor --probe-route` passes (codex-cli 0.163.0, 2026-10-27); none, xhigh and max stay probe-eligible.

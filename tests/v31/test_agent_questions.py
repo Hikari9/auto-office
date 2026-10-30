@@ -273,3 +273,28 @@ def test_review_492_ask_and_negation_probes(nxt, asks):
 def test_reverify_ask_probes(nxt, asks):
     q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
     assert bool(q) is asks, (nxt, q)
+
+STALLED_WORKFLOW_MENU = (
+    "Stalled workflow\n"
+    "What should I do with the unresolved requirement?\n"
+    "1. Raise a question to the orchestrator\n"
+    "2. Continue with the old scope\n"
+    "3. Stop work\n"
+)
+
+
+def test_stalled_workflow_without_a_standard_footer_is_a_question_not_a_stall():
+    q = questions.parse(STALLED_WORKFLOW_MENU, status="working", busy=True)
+    assert q is not None and q["kind"] == "select"
+    assert [option["n"] for option in q["options"]] == [1, 2, 3]
+    assert "unresolved requirement" in q["question"]
+    assert questions.parse(STALLED_WORKFLOW_MENU, status="idle", busy=False) is None
+
+
+@pytest.mark.approved
+def test_wait_wakes_on_stalled_workflow_question_menu(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[STALLED_WORKFLOW_MENU], agent="blocked")
+    res = guide.wait(con, run, timeout=5, poll=0.1)
+    assert res.exit_code == questions.EXIT
+    assert any("question:" in line and "unresolved requirement" in line for line in res.lines)
+    assert any("question:" in line for line in guide.status(con, run).lines)
