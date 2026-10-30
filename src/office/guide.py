@@ -329,6 +329,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import gates as review_gates
         for line in review_gates.review_route_lines(con, run["id"], limit=3):
             res.add(line)
+        from office import routechange
+        routechange.sweep_recovered(con, run)
+        for line in routechange.recovery_lines(con, run):
+            res.add(line)
     from office import risk as risk_mod
     rline = risk_mod.line(run)
     if rline and (risk_mod.classification(run.get("risk")) == risk_mod.UNKNOWN or (run.get("gates") or {}).get("lightweight")):

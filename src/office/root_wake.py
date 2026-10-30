@@ -41,6 +41,8 @@ ACTIONABLE = frozenset({
     "review.queued_too_long", "review.stalled", "review.closed_unread",
     # the install was rebuilt under a running root wake and is healthy again (#920)
     "office.reinstalled",
+    # a route the run fell back from is available again (#921)
+    "route.recovered",
 })
 MIN_POLL = 0.5
 MAX_ATTEMPTS = 4
@@ -304,6 +306,8 @@ def reconcile(con, run: dict) -> int:
             con.execute("UPDATE root_wake_intents SET state='retired' WHERE run_id=? "
                         "AND state IN ('pending','retry','claimed')", (run["id"],))
         return 0
+    from office import routechange
+    routechange.sweep_recovered(con, run)  # before the events read below, so a recovery is a receipt this pass
     rows = con.execute("SELECT seq, kind FROM events WHERE run_id=? AND seq>? ORDER BY seq",
                        (run["id"], binding["last_event_seq"])).fetchall()
     if not rows:
