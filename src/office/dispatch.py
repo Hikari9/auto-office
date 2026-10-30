@@ -1736,6 +1736,21 @@ def _reply_digest(path: Path) -> str | None:
     return hashlib.sha256(data).hexdigest() if data else None
 
 
+def _reply_complete(run: dict, dispatch: dict, output: Path) -> bool:
+    """Whether the reply file holds a complete verdict the review contract accepts. A busy pane's reply is ingested
+    early only then (#918, A6). The reviewer flags follow the dispatch role; a mismatch only makes a reply read as
+    incomplete, which holds it back."""
+    from office import contract, gates, review_parse
+    try:
+        text = output.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    parsed = review_parse.parse(gates._last_block(text), plan_review=dispatch["role"] == "plan_reviewer",
+                                visual=dispatch["role"] in ("visual_reviewer", "visual_verifier"),
+                                contract=contract.of(run))
+    return parsed.valid
+
+
 def reply_pending(con, run: dict) -> list[dict]:
     """Reviewer replies written to disk whose dispatch is still open, oldest first: `id`, `task_id`, `kind` (its gate
     kind) and `quiet` (seconds since the last write). A live watch ingests a reply once it settles (#918); this only reads."""
@@ -3734,9 +3749,10 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # pane has been unreadable past the limit, a file that stopped
             # changing is the only evidence left, so it bounds the wait.
             return 0, "success"
-        if unchanged and not worker and time.monotonic() - settled_since >= busy_settle:
-            # A reviewer's reply has been byte-identical for the settle window while its pane still draws a turn:
-            # the agent is not writing it, so the pane's busy text does not hold it back (#918).
+        if unchanged and not worker and time.monotonic() - settled_since >= busy_settle \
+                and _reply_complete(run, first, output):
+            # A reviewer's complete reply has been byte-identical for the settle window while its pane still draws a
+            # turn: the agent is not writing it, so the pane's busy text does not hold it back (#918, A6).
             return 0, "success"
         fresh_output = bool(size) and size != last_size
         last_size = size or None

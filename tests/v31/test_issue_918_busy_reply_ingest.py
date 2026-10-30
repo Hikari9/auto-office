@@ -37,13 +37,26 @@ def test_a_reply_that_settles_is_ingested_while_the_pane_reads_busy(env, monkeyp
     _fake(env, monkeypatch)
     _, d = _live_dispatch(env, monkeypatch)
     out = env.tmp / "reply.txt"
-    out.write_text("VERDICT: APPROVED")
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")  # complete under the convergence contract the runs pin
     monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.2")
     stamps = []
     _pane_samples(monkeypatch, lambda n: stamps.append(time.monotonic()) or dict(BUSY))
     assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
     # Ingested only after the reply held still for the settle window; one or two polls would finish in ~0.02 s.
     assert stamps[-1] - stamps[0] >= 0.15, stamps
+
+
+@pytest.mark.approved
+def test_an_incomplete_reply_is_not_ingested_while_the_pane_reads_busy(env, monkeypatch):
+    """A6: the busy-settle ingest needs a complete verdict; a byte-identical draft without one waits."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("Still checking the diff; no verdict yet.")
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.05")
+    _pane_samples(monkeypatch, lambda n: dict(BUSY), limit=40)
+    with pytest.raises(Stop):  # still polling after the settle window: never returned success
+        dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
 
 
 @pytest.mark.approved
