@@ -46,8 +46,7 @@ def test_install_check_names_the_saved_choice_path_and_reads_and_writes_it():
     assert 'cat "$CFG"' in section
     assert "in one shell command, set `CFG=" in section
     assert "prints `lean`" in section
-    write = section.index('printf lean > "$CFG"')
-    assert section.index("mkdir -p") < write
+    assert 'CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"; mkdir -p "$(dirname "$CFG")" && printf lean >| "$CFG"' in section
     assert "the choice was not saved" in section
 
 
@@ -78,7 +77,7 @@ def test_install_check_hands_off_to_the_lean_skill():
 def test_install_check_finishes_an_incomplete_install_on_later_sessions():
     section = _install_check()
 
-    assert "If doctor fails or the install is incomplete, finish it (`office install --no-hooks`, `office doctor`)." in section
+    assert "If doctor fails, finish the install (`office install --no-hooks`, `office doctor`); if either step fails, stop" in section
 
 
 def test_install_check_no_longer_stops_to_ask_approval():
