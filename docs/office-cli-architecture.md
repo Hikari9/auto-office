@@ -288,22 +288,17 @@ Runtime resources (schemas, catalog seeds, protocol documentation) and skills sh
 
 ### 5.2 Installation and Upgrade Sequences
 - **Canonical Installation (D142-1)**:
-  `uv tool install office-skills`
-  Installs into an isolated virtual environment with pinned dependencies (`jsonschema`, `PyYAML`). Alternative: `pipx install office-skills`.
+  `uv tool install auto-office`
+  Installs into an isolated virtual environment with pinned dependencies (`jsonschema`, `PyYAML`). Alternative: `pipx install auto-office`.
+  The root `auto-office` plugin skill runs this when `office` is missing, after the user chooses it (`docs/onboarding.md`).
 - **Developer / Editable Installation**:
-  `uv tool install --editable <path/to/office-skills>`
-- **Skill Directory Symlinking (D142-3)**:
-  `office install` creates symlinks from each harness's global skill directory to the installed package's `skills/`:
-  - `~/.claude/skills/office` -> `<package_data>/skills/office`
-  - `~/.codex/skills/office` -> `<package_data>/skills/office`
-  - `~/.gemini/skills/office` -> `<package_data>/skills/office`
-  - `~/.hermes/skills/office` -> `<package_data>/skills/office`
-  In editable mode, symlinks point directly to the git checkout.
+  `uv tool install --editable <path/to/auto-office checkout>`
+- **Skill Delivery (D142-3)**:
+  The Claude and Codex plugins ship the skills from the checkout (`.claude-plugin/plugin.json` lists `./` and `./skills/`). `office install` configures harness hooks and creates no skill symlinks.
 - **Upgrade Workflow (D142-4)**:
-  `office upgrade` executes:
-  `uv tool upgrade office-skills && office install && office doctor`
+  Upgrade the package with `uv tool upgrade auto-office`, then run `office install` and `office doctor`.
 - **Uninstallation (D142-5)**:
-  `office uninstall` removes harness hook entries, deletes skill symlinks, and executes `uv tool uninstall office-skills`. Run directories and `runs.db` are preserved unless `--purge` is supplied.
+  `office uninstall` removes Office-managed harness hook entries and reviewer read rules, and keeps run state and `runs.db`. Remove the package with `uv tool uninstall auto-office`.
 
 ### 5.3 Versioning and Drift Policy (D142-3, D142-4)
 - A single unified version string governs the system: `src/office/_version.py` is the only place it is written; `pyproject.toml` reads it and `plugin.json` carries none.

@@ -84,7 +84,7 @@ Auto Office turns those into runtime behavior rather than hoping every agent rem
 
 ### Install the skills as a plugin
 
-This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills only; you still need the CLI above.
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills, including the root `auto-office` entry skill. If `office` is missing, that skill asks once whether to install the CLI from PyPI (`uv tool install auto-office`) or use `auto-office-lean`. Section 1 is the manual CLI install.
 
 ```bash
 # Claude Code

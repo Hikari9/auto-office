@@ -123,7 +123,23 @@ def check_versions(root=ROOT):
                 errors.append(f".claude-plugin/marketplace.json:{entry.get('name')}: must not hardcode version")
     return errors
 
-
+def check_plugin_skills(root=ROOT):
+    """A Claude plugin manifest may list skill paths. Each must be a ./ directory inside the plugin."""
+    manifest = root / '.claude-plugin' / 'plugin.json'
+    if not manifest.exists():
+        return []
+    skills = json.loads(manifest.read_text()).get('skills')
+    if skills is None:
+        return []
+    if not isinstance(skills, list) or not all(isinstance(entry, str) for entry in skills):
+        return ['.claude-plugin/plugin.json: skills must be a list of paths']
+    errors = []
+    plugin_root = root.resolve()
+    for entry in skills:
+        target = (root / entry).resolve()
+        if not entry.startswith('./') or not target.is_dir() or not target.is_relative_to(plugin_root):
+            errors.append(f'.claude-plugin/plugin.json: skills entry {entry!r} must be a ./ directory inside the plugin')
+    return errors
 
 def check_skill_metadata(root=ROOT):
     """Require each skill's OpenAI display name to equal its canonical skill name."""
@@ -203,6 +219,7 @@ def main():
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
     errors.extend(check_versions())
+    errors.extend(check_plugin_skills())
     errors.extend(check_skill_metadata())
         
     if errors:

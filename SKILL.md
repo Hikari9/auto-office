@@ -12,10 +12,8 @@ Do not write JSON, receipts, or telemetry for Office, and do not read Office sou
 
 ## Issue-only self-improvement
 
-On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the
-bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
-file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint;
-it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
+On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
+file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint; it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
 
 ## Permanent invariants
 
@@ -37,9 +35,11 @@ Take every decision to the user through the harness's native question tool when 
 
 ## Install check (every session, before anything else)
 
-Run `office --version`. This skill's directory is the `auto-office` package, so it is the install source.
-- **Not found:** stop and ask the user to approve installing it; never install silently. Then `uv tool install "<this skill's directory>"`, `office install --no-hooks` (onboarding offers hooks), `office doctor`.
-- **Release differs from this directory's `src/office/_version.py`, or `office doctor` prints `install: STALE`:** tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
+Detection: !`command -v office || echo "office: not found"`
+- **Found:** run `office --version`. If the release differs from this directory's `src/office/_version.py` or `office doctor` prints `install: STALE`, tell the user and offer `uv tool install --force --reinstall "<this skill's directory>"`, then `office install`. Runs already started keep their pinned runtime.
+- **Not found:** if `${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice` contains `lean`, hand off. Otherwise ask once, natively (see Asking the user): **Install the CLI (Recommended)**, **Lean for this request**, **Lean, don't ask again** (writes `lean` to that file first).
+- **Install:** `uv tool install auto-office`, `office install --no-hooks` (onboarding offers hooks), `office doctor`, then continue below.
+- **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
 
