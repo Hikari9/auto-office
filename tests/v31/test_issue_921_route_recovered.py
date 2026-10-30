@@ -220,6 +220,19 @@ def test_a_stale_line_is_not_shown_after_a_successful_dispatch_deleted_the_coold
     assert routechange.recovery_lines(plain.con, run(plain)) == []
 
 
+def test_a_success_that_deletes_a_live_demotion_does_not_recover_it_before_its_deadline(plain):
+    d = failed_route(plain)  # demoted until 30 minutes from now
+    with db.transaction(plain.con):  # a dispatch of the route succeeded and deleted its cooldown rows
+        plain.con.execute("DELETE FROM route_cooldowns WHERE route=?",
+                          (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),))
+    assert sweep(plain) == []
+    with db.transaction(plain.con):  # the deadline passes: the demotion has lapsed
+        plain.con.execute("UPDATE events SET payload_json=json_set(payload_json,'$.demoted_until',?) "
+                          "WHERE run_id='run-A' AND kind='route.failed'", (PAST,))
+    assert len(sweep(plain)) == 1
+    assert [r["basis"] for r in recovered(plain)] == ["demotion lapsed"]
+
+
 def test_a_routine_review_that_stayed_on_its_route_is_not_evidence(cold):
     with db.transaction(cold.con):
         state.record_route_change(cold.con, run(cold), "T1", CODEX, CODEX, kind="reviewer-fallback", reason="quota",

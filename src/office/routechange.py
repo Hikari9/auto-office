@@ -343,11 +343,11 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
     if any(expiry > now for expiry in expiries):
         return None
     if row["kind"] == "route.failed":
-        # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline stands.
+        # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline decides.
         if expiries:
             return "demotion lapsed", max(expiries)
-        deadline = payload.get("demoted_until")
-        return "demotion lapsed", parse_iso(deadline) if deadline else parse_iso(row["created_at"])
+        deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
+        return None if deadline > now else ("demotion lapsed", deadline)
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",
@@ -384,10 +384,9 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
         return []
     now = now or datetime.now(timezone.utc)
     seqs = []
-    for route in _latest_episodes(con, run["id"]):
-        with db.transaction(con):  # judged and recorded under the writer lock, on the newest episode at that moment
-            row, payload = _latest_episodes(con, run["id"]).get(route, (None, None))
-            if row is None or _recorded(con, run["id"], row["seq"]):
+    with db.transaction(con):  # judged and recorded under the writer lock, on each route's newest episode at that moment
+        for route, (row, payload) in _latest_episodes(con, run["id"]).items():
+            if _recorded(con, run["id"], row["seq"]):
                 continue
             found = _available_basis(con, run["id"], row, payload, now)
             if found is None:
