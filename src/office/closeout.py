@@ -11,6 +11,7 @@ Every `office close` path ends with one `office close done — <summary>` line.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -70,23 +71,13 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
     A task is covered by its own legacy gate, or by the lane gate whose frozen members include it
     (convergence lane gates have no task_id). A required review with no covering gate never ran.
     """
-    from office import convergence, state, visual
+    from office import state, visual
     required = [t for t in state.tasks(con, run["id"])
                 if t["status"] != "cancelled"
                 and visual.applicability(con, run, t, [])["status"] in ("required", "probe")]
     if not required:
         return []
-    latest: dict[str, dict] = {}
-    newest_unattributed: dict | None = None  # the newest lane gate that predates members_json
-    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
-                           "ORDER BY created_at, id", (run["id"],)).fetchall():
-        gate = dict(row)
-        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
-        if members is None:
-            newest_unattributed = gate
-            continue
-        for tid in members:
-            latest[tid] = gate
+    latest, newest_unattributed = _latest_visual_gates(con, run)
     lines = []
     for task in required:
         tid = task["id"]
@@ -102,6 +93,76 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
             summary = clean_text(gate["summary"] or "")[:180]
             lines.append(f"visual review skipped/degraded for {tid}: {reason}" + (f" ({summary})" if summary else ""))
     return lines
+
+
+def _latest_visual_gates(con, run: dict) -> tuple[dict[str, dict], dict | None]:
+    """The newest non-cancelled visual gate covering each task, and the newest gate with no recorded membership."""
+    from office import convergence
+    latest: dict[str, dict] = {}
+    newest_unattributed: dict | None = None  # the newest lane gate that predates members_json
+    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
+                           "ORDER BY created_at, id", (run["id"],)).fetchall():
+        gate = dict(row)
+        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
+        if members is None:
+            newest_unattributed = gate
+            continue
+        for tid in members:
+            latest[tid] = gate
+    return latest, newest_unattributed
+
+
+def acceptance_report(con, run: dict) -> list[str]:
+    """Closeout's per-criterion acceptance lines (#945, A15). Each criterion's kind comes from evidence Office
+    recorded, never from a caller-supplied label: verified-live when a live verification covers its task (the
+    run's last deploy verify passed, or the task's latest visual gate is a COMPARABLE capture of its accepted
+    revision); verified-against-fakes when the accepted revision's latest checks gate passed; otherwise
+    not-verified. A report that cannot be formed is one line, never a met claim."""
+    from office import state
+    tasks = [t for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
+    deployed = _deploy_verified(con, run)
+    latest, newest_unattributed = _latest_visual_gates(con, run)
+    criteria = []
+    for task in tasks:
+        kind = _evidence_kind(con, run, task, deployed, latest, newest_unattributed)
+        criteria.extend((text, kind) for text in task["accept"])
+    try:
+        return criteria_report(criteria)
+    except ValueError as exc:
+        return [f"acceptance not reported: {exc}"]
+
+
+def _evidence_kind(con, run: dict, task: dict, deployed: bool, latest: dict, newest_unattributed: dict | None) -> str:
+    rev = task.get("accepted_revision_id")
+    if not rev:
+        return NOT_VERIFIED
+    if deployed or _visual_live(task, rev, latest, newest_unattributed):
+        return VERIFIED_LIVE
+    if _checks_passed(con, run, task["id"], rev):
+        return VERIFIED_AGAINST_FAKES
+    return NOT_VERIFIED
+
+
+def _deploy_verified(con, run: dict) -> bool:
+    """The run's last deploy verify (land.verify) exited 0."""
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='land.verify' "
+                      "ORDER BY seq DESC LIMIT 1", (run["id"],)).fetchone()
+    return bool(row) and json.loads(row["payload_json"] or "{}").get("exit") == 0
+
+
+def _visual_live(task: dict, rev: str, latest: dict, newest_unattributed: dict | None) -> bool:
+    gate = latest.get(task["id"])
+    if gate is None or (newest_unattributed is not None and _order(gate) < _order(newest_unattributed)):
+        return False  # no covering gate, or an unattributed gate that may be newer
+    if gate["task_id"] and gate["revision_id"] != rev:
+        return False  # a task's own capture must be of its accepted revision
+    return gate["status"] == "done" and gate["evidence_status"] == "COMPARABLE"
+
+
+def _checks_passed(con, run: dict, task_id: str, rev: str) -> bool:
+    row = con.execute("SELECT verdict FROM gates WHERE run_id=? AND task_id=? AND revision_id=? AND kind='checks' "
+                      "AND status='done' ORDER BY created_at DESC, id DESC LIMIT 1", (run["id"], task_id, rev)).fetchone()
+    return bool(row) and row["verdict"] == "PASS"
 
 
 def _order(gate: dict) -> tuple[str, str]:

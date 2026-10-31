@@ -489,6 +489,9 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
     if disclosures:
         res.lines.extend(disclosures)
         res.data["visual_review_disclosures"] = disclosures
+    acceptance = closeout.acceptance_report(con, run)
+    res.lines.extend(acceptance)
+    res.data["acceptance"] = acceptance
     tail = "".join(f"; {line}" for line in disclosures)
     if handoff:
         owned = {str(t["pr"]["number"]) for t in state.tasks(con, run["id"])
