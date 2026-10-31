@@ -45,6 +45,9 @@ Auto Office {ver}
   office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
+  office executor-context <task> rotate|continue|threshold <tokens>
+                                    answer an executor's context signal: rotate to a fresh session on the same
+                                    worktree, keep going (not repeated until the next episode), or set this task's cap (0 disables)
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
   office answer <task|dispatch> <n> | -- "<text>" | --choice <n>|--keys <keys> [--expect <fp>]
@@ -298,6 +301,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
+    s = sp.add_parser("executor-context", parents=[common])
+    s.add_argument("task")
+    s.add_argument("action", choices=["rotate", "continue", "threshold"])
+    s.add_argument("tokens", nargs="?", help="with threshold: whole tokens; 0 disables this task's rotation")
     sp.add_parser("preflight", parents=[common])
     s = sp.add_parser("submit", parents=[common], add_help=False,
                       description="Visual selectors: must be plain CSS (document.querySelector), not Playwright-only selectors; state steps may use Playwright selectors.")
@@ -1204,6 +1211,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, stash_wip=args.stash_wip, reroute=args.reroute,
                            as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external, review_as=args.review_as,
                            review_cli=args.review_cli, review_external=args.review_external)
+    if cmd == "executor-context":
+        from office import executor_context
+        return executor_context.decide(con, run, args.task.upper(), args.action, args.tokens)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)
