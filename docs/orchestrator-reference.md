@@ -272,3 +272,53 @@ Every dispatch of multiple tasks now writes a compact `delegation.shadow` **oper
 `office inspect efficiency` reads observed Office-attributed usage and recent shadow events on demand. Economics collection remains opt-in and off by default (`economics.collect: false`); neither this command nor shadow dispatch reads transcripts, scans sessions, estimates billed dollars or enables telemetry. A root percentage is the share **of observed token components**, never proof of entire-run cost. Missing fields, outside-Office turns, actual USD, nominal estimates and subscription quota remain distinct. Unknown review/rework/admin costs are not silently zero.
 
 For controlled comparisons, `python eval/v31/compare_economics.py cases.json` accepts a JSON array with matched `pair_id` and `arm` (`baseline` or `treatment`), identical `task_shape`, `harness` and `billing_mode`, `verified_completion: true`, non-negative `integrated_defects`, measured values in `metrics`, and explicitly verified `complete_metrics`. Metrics are withheld unless both arms complete; reported actual USD comparisons require API billing and `cost_kind: actual`. It needs at least three complete, matched pairs with non-worse verified defects before identifying an improvement as claim-ready. **No real matched run dataset has been supplied in #502; no efficiency improvement is claimed yet.**
+
+## Executor context cap (#939)
+
+The per-executor cap is separate from the orchestrator's ctx-high notice. Pinned
+`executor_context.enabled` (default true) and `executor_context.threshold_tokens`
+(default 200000; 0 disables) live in `config/config.default.yaml` and ordinary run config.
+An invalid threshold falls back to 200000 and `office status` says so.
+
+Measurement: the supervisor checks attributable Claude and Codex session transcripts every
+15 seconds while the executor runs. Claude
+uses the last assistant message's input plus cached-input usage, excluding sidechains. Codex
+uses the last turn's input and output count, never cumulative lifetime totals. Unobserved or
+unsupported harnesses are not guessed and cannot claim an enforced cap.
+
+Signal: crossing the cap writes one `executor.context_cap` event (which wakes the root) and a
+`signaled` marker on the executor dispatch. Office takes no other action. The marker clears when
+the session drops below the cap; the next crossing is a new episode.
+
+Decisions (the root's only way to act):
+
+- `office executor-context <task> rotate`: refused when rotation is disabled for the task, the
+  task has no live executor, the live writer changed while the snapshot was taken, or a rotation is
+  already requested. An executor session (`OFFICE_DISPATCH_ID` set) is always refused. One transaction writes a
+  `requested` handoff snapshot (task state, worktree HEAD, git status and diff stat, existing
+  task commits as evidence to verify, remaining ACCEPT items, open findings) and enqueues a
+  deduplicated `rotate_executor` job. The snapshot never asserts completion. A private copy is
+  at the run's `dispatches/<old-id>/context-handoff.json` (0600).
+- `office executor-context <task> continue`: acknowledges a `signaled` marker. Refused when no
+  signal is pending.
+- `office executor-context <task> threshold <tokens>`: records a per-task cap as an
+  `executor.threshold` event. Whole tokens only; 0 disables rotation for the task.
+- Repo-wide: `office config --repo executor_context.threshold_tokens <tokens>`. A running run
+  keeps the policy it pinned at start, so use the task form for the current run.
+
+Opt-outs: `executor_context.threshold_tokens: 0` or `executor_context.enabled: false` disables
+the signal and rotation. `enabled: false` also overrides a per-task threshold.
+
+If a requested rotation cannot proceed (the task moved, or the executor submitted), its handoff
+becomes `skipped` with an `executor.rotate_skipped` event, which wakes the root; decide again.
+
+The rotation job stops the old executor's process tree and verifies it has exited before it
+creates a fresh dispatch on the same task, branch and worktree. The replacement brief carries the
+handoff. Dependency restacking is skipped so uncommitted WIP stays put. The exhausted session is
+never resumed, and the stop is not counted as a route failure or a retry. If the stop cannot be
+verified, the task is blocked with a visible reason and no replacement launches. A submitted or
+superseded executor is not restarted.
+
+`office status` shows the pending signal and each requested, restarted, or blocked handoff. `--json`
+exposes them as `executor_handoffs`. The DB row is authoritative; the file is a projection, and a
+file-write failure never causes a second launch.

@@ -37,6 +37,8 @@ ACTIONABLE = frozenset({
     "pr.error", "pr.merged", "worker.signal", "watchdog.stall", "amendment.applied", "amendment.contract_changed",
     "requirements.changed", "finding.disposition", "authority.plan", "authority.land",
     "ctx.high",
+    # an executor reached its context cap, or its requested rotation was skipped (#939)
+    "executor.context_cap", "executor.rotate_skipped",
     # review gates past a bound (#919)
     "review.queued_too_long", "review.stalled", "review.closed_unread",
     # the install was rebuilt under a running root wake and is healthy again (#920)
@@ -399,6 +401,9 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
     for e in reversed(candidates):
         if e["kind"] == "ctx.high":
             return (sha256_obj(("ctx.high", e["seq"], e["summary"])), e["summary"], human)
+    for e in reversed(candidates):
+        if e["kind"] in ("executor.context_cap", "executor.rotate_skipped"):
+            return (sha256_obj((e["kind"], e["seq"], e["summary"])), e["summary"], human)
     for e in reversed(candidates):
         if e["kind"] == "office.reinstalled":
             return (sha256_obj(("office.reinstalled", e["seq"])),
