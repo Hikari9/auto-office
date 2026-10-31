@@ -523,8 +523,9 @@ def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin
     assert [g["kind"] for g in _gates(env, "visual")] == ["visual", "visual"] and len(_gates(env, "convergence_review")) == 1
     env.office("resume", check=0)  # the queued re-run starts as the visual reviewer
     assert _scope(env, "L-T1")["status"] == "approved", _triples(env, "visual_reviewer")
-    # only one vision route exists here: the preference to start away from it gives way instead of blocking the review
-    assert {_last_triple(env, "visual_reviewer")} == tried, _triples(env, "visual_reviewer")
+    # Since #912 every eligible vision route qualifies, not just the first four, so the re-run starts away
+    # from every route the failed round tried and takes the next fallback instead.
+    assert _last_triple(env, "visual_reviewer") not in tried, _triples(env, "visual_reviewer")
 
 
 @V31
