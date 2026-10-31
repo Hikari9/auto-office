@@ -22,7 +22,22 @@ Measured on 2026-10-31 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CP
 
 From each checkout, collection used `uv run --frozen --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the resulting node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not a count of every function defined in source.
 
-Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen --extra test pytest -n 2 -q tests`. The baseline reported 4,013 passed, 2 failed, 2 skipped; the after revision reported 3,854 passed, 1 failed, 2 skipped. Both failed `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` with a missing `dispatchable` key; the baseline also failed `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest result summary totals one more than its collection count; that discrepancy was not investigated. These timings do not attest a passing suite.
+Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen --extra test pytest -n 2 -q tests`. The baseline reported 4,013 passed, 2 failed, 2 skipped; the after revision reported 3,854 passed, 1 failed, 2 skipped. Both failed `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` with a missing `dispatchable` key; the baseline also failed `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest result summary totals one more than its collection count; that discrepancy was not investigated. The default-tier run above is not the full suite. The full-suite result is under [Full suite](#full-suite).
+
+### Full suite
+
+`scripts/validate.sh --full` on T2 head `e0f9145f7a7e` (2026-10-31, same host as the table above): 6,084 passed, 10 failed, 154 skipped, 130 subtests passed in 2,269.60 s. This run is not a clean pass. The 10 failing nodes below also fail with `uv run --frozen --extra test pytest -n 2 --all` on base `origin/main` `d1402697`, with the same node set. None is in a file this PR changes. The result was recorded by the orchestrator; it was not re-executed in this worktree. Commits after `e0f9145f` change only documentation files.
+
+- `tests/test_release_identity.py::test_skill_checks_for_the_cli_before_anything_else`
+- `tests/v31/test_issue_703_effective_checks.py::test_amended_run_check_replaces_superseded_integration_command`
+- `tests/v31/test_issue_705_squash_close.py::test_owned_squash_pr_close_proves_heads_and_checks_without_fake_ancestry_or_consent`
+- `tests/v31/test_issue_705_squash_close.py::test_squash_close_preserves_the_pinned_v31_review_contract`
+- `tests/v31/test_issue_790_held_pointer.py::test_enter_that_cannot_submit_says_so_and_marks_one_same_route_retry`
+- `tests/v31/test_landing_gaps.py::test_run_checks_failing_on_a_moved_base_rebase_and_continue`
+- `tests/v31/test_review_reroute.py::test_the_review_reprompt_is_sent_only_inside_the_pane_identity_fence`
+- `tests/v31/test_review_reroute.py::test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command`
+- `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated`
+- `tests/v31/test_rolling_review.py::test_plan_review_ends_at_first_pass_even_on_an_older_version`
 
 ### Draft comment for #796
 

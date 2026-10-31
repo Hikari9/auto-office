@@ -60,8 +60,6 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 | `tests/v31/test_issue_836_close_cancels_jobs.py` | keep |
 | `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |
 | `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |
-| `tests/contracts/test_executor_policy.py` | keep |
-| `tests/contracts/test_route_parity.py` | keep |
 | `tests/test_adapters.py` | keep |
 | `tests/test_agy_usage.py` | keep |
 | `tests/test_alias_resolution.py` | keep |
