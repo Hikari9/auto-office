@@ -75,7 +75,7 @@ def test_resume_outside_herdr_succeeds_with_a_notice_and_no_wake(env, monkeypatc
     con = env.con()
     assert not root_wake.armed(con, _run(con)) and armed == [], out
     assert "root auto-wake not armed" in out and "Refused" not in out, out
-    assert root_wake.lines(con, _run(con)) == ["wake: unavailable (not inside a Herdr pane); use office wait"]
+    assert root_wake.lines(con, _run(con)) == ["wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"]
 
 
 def test_resume_with_an_unverifiable_pane_succeeds_with_a_notice_and_no_wake(env, monkeypatch):
@@ -91,7 +91,7 @@ def test_resume_with_an_unverifiable_pane_succeeds_with_a_notice_and_no_wake(env
 def test_status_prints_the_wake_state_on_every_non_terminal_run(env, monkeypatch):
     _go(env)
     code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
-    assert "wake: unavailable (not inside a Herdr pane)" in out, out
+    assert "wake: unavailable (Claude Stop/asyncRewake hook missing)" in out, out
     _verified_root(monkeypatch)
     env.office("resume", check=0, env={"HERDR_PANE_ID": PANE})
     code, out = env.office("status", check=0, env={"HERDR_PANE_ID": PANE})
