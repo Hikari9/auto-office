@@ -38,6 +38,9 @@ def test_wake_is_armed_by_resume_only_for_a_verified_root_and_attach_stays_stric
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    # Pin the host: process_key reads the real process tree, which differs between a Claude session and a check runner.
+    monkeypatch.setattr(discovery, "process_key", lambda: "claude:1:Mon")
+    monkeypatch.setattr(root_wake, "_native_hook_installed", lambda: False)
     assert root_wake.lines(con, run) == ["wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"]
     monkeypatch.setenv("HERDR_PANE_ID", PANE)
     with pytest.raises(state.Refused, match="not bound"):
