@@ -1816,7 +1816,10 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
 
 def _pane_group_wait() -> float:
     """How long a pane launch polls for the agent's foreground group (#507)."""
-    return _env_seconds("OFFICE_PANE_GROUP_WAIT", 3.0)
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
+    except ValueError:
+        return 3.0
 
 
 def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
@@ -3727,7 +3730,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
         unchanged = digest is not None and digest == last_digest
         if not unchanged:
-            settled_since = time.monotonic()
+            # Wall clock: a laptop sleep between polls must count as quiet time, which time.monotonic does not on macOS.
+            settled_since = time.time()
         last_digest = digest
         sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is not None:
@@ -3748,7 +3752,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # pane has been unreadable past the limit, a file that stopped
             # changing is the only evidence left, so it bounds the wait.
             return 0, "success"
-        if unchanged and not worker and time.monotonic() - settled_since >= busy_settle \
+        if unchanged and not worker and time.time() - settled_since >= busy_settle \
                 and data is not None and _reply_complete(run, first, data):
             # A reviewer's complete reply has been byte-identical for the settle window while its pane still draws a
             # turn: the agent is not writing it, so the pane's busy text does not hold it back (#918, A6).

@@ -81,6 +81,55 @@ def test_the_run_contract_decides_whether_a_busy_reply_is_complete(env, monkeypa
 
 
 @pytest.mark.approved
+def test_a_same_size_rewrite_of_a_complete_reply_is_not_ingested_while_busy(env, monkeypatch):
+    """Two complete, same-length verdicts alternate: only the byte digest can tell the rewrites apart."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    drafts = ["VERDICT: APPROVED\nNEXT: merge it", "VERDICT: APPROVED\nNEXT: merge IT"]
+    out.write_text(drafts[0])
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0")
+
+    def flip(n):
+        out.write_text(drafts[n % 2])  # same size every poll, bytes differ
+        return dict(BUSY)
+
+    _pane_samples(monkeypatch, flip, limit=40)
+    with pytest.raises(Stop):
+        dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
+
+
+class _SleepingClock:
+    """`time` as the watch sees it: `time()` jumps forward by `slept` seconds, as a laptop sleep does between polls.
+    `monotonic()` does not move, matching macOS, where the monotonic clock stops during sleep."""
+    slept = 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def time(self):
+        return time.time() + self.slept
+
+
+@pytest.mark.approved
+def test_a_busy_reply_settles_across_a_sleep_because_the_settle_clock_is_wall_time(env, monkeypatch):
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _SleepingClock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "60")
+
+    def sleep_then_look(n):
+        clock.slept += 120  # the laptop sleeps for two minutes after the first poll
+        return dict(BUSY)
+
+    _pane_samples(monkeypatch, sleep_then_look, limit=40)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+
+
+@pytest.mark.approved
 def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     _fake(env, monkeypatch)
     _, d = _live_dispatch(env, monkeypatch)
@@ -113,7 +162,13 @@ def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     ({"id": "D1", "task_id": None, "kind": "code_review", "scope": None}, None),
 ])
 def test_past_the_bound_each_reviewer_kind_names_a_same_revision_relaunch(reply, expected):
-    assert guide._stuck_reply_next(reply) == expected
+    assert guide._stuck_reply_next(reply, convergence=True) == expected
+
+
+def test_a_plan_review_under_v31_has_no_relaunch_because_plan_repin_is_convergence_only():
+    # `office review plan --as` is refused for a v3.1 run (legacy-contract), so naming it there would send the user to an error.
+    assert guide._stuck_reply_next({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
+                                   convergence=False) is None
 
 
 @pytest.mark.approved
@@ -163,7 +218,7 @@ def test_past_the_bound_a_plan_or_lane_reply_gets_its_relaunch_next(env, monkeyp
     con.commit()
     reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
     reply.parent.mkdir(parents=True, exist_ok=True)
-    reply.write_text("VERDICT: APPROVED\nFINDING F1 | high | partial")  # a partial reply: never ingested early
+    reply.write_text("VERDICT: APPROVED\nFINDING F1 | high | partial")
     settling = "D918 reply is written; Office ingests it when it settles, no action needed"
     assert settling in guide.status(con, run).lines
 

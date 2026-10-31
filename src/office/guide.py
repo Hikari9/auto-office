@@ -365,7 +365,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for r in replies:
         if r["quiet"] < hard:
             res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
-    stuck_reply = next((n for n in (_stuck_reply_next(r) for r in replies if r["quiet"] >= hard) if n), None)
+    convergence = contract.is_convergence(run)
+    stuck_reply = next((n for n in (_stuck_reply_next(r, convergence) for r in replies if r["quiet"] >= hard) if n), None)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
@@ -435,11 +436,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
 LANE_REVIEW_SPEC = {"convergence_review": "convergence", "visual": "visual"}  # gate kind -> `<scope>:<kind>` argument
 
 
-def _stuck_reply_next(reply: dict) -> str | None:
+def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
     """The command that re-runs a stuck reviewer on the same revision once its reply stayed unsettled past the hard
-    bound (#918): revoke the reviewer, then review again. A task visual review has no same-revision re-run, so None."""
+    bound (#918): revoke the reviewer, then review again. A plan review re-runs only under convergence-v1
+    (`office review plan --as`); a task visual review has no same-revision re-run. Both get None otherwise."""
     did, kind = reply["id"], reply["kind"]
     if kind == "plan_review":
+        if not convergence:
+            return None
         return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
     if reply["scope"] and kind in LANE_REVIEW_SPEC:
         spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
