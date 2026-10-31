@@ -42,9 +42,13 @@ def expire(env, d, when=None):
 
 
 def failed_route(env, text="not logged in"):  # an auth failure: a quota or auth route failure, recoverable
+    return failed_with(env, text, "nonzero")
+
+
+def failed_with(env, text, classification):
     env.dispatch("T1")
-    (d,) = env.dispatches()
-    fail(env, d, text)
+    (d,) = [x for x in env.dispatches() if x["task_id"] == "T1"]
+    fail(env, d, text, classification)
     return d
 
 
@@ -131,6 +135,33 @@ def test_a_review_skip_whose_rate_limit_lapsed_recovers_without_a_reprobe(cold):
     [seq] = sweep(cold)
     [rec] = recovered(cold)
     assert rec["route"] == CODEX and rec["basis"] == "cooldown lapsed" and rec["episode"] == evidence["seq"]
+
+
+def test_a_transport_failure_never_records_a_recovery(plain):
+    d = failed_with(plain, "socket hang up", "nonzero")
+    expire(plain, d)
+    assert sweep(plain) == [] and recovered(plain) == []
+
+
+def test_a_timeout_failure_never_records_a_recovery(plain):
+    d = failed_with(plain, "", "timeout")
+    expire(plain, d)
+    assert sweep(plain) == [] and recovered(plain) == []
+
+
+def test_a_review_skip_whose_rate_limit_lapsed_before_the_notice_does_not_recover(cold):
+    cooldown(cold, routing.cooldown_key("codex", "gpt-6.1-sol"), PAST)  # lapsed before the skip: not its reason
+    review_fallback(cold, CODEX)
+    assert sweep(cold) == []
+
+
+def test_a_review_skip_is_not_recovered_by_a_lapsed_demotion_of_its_route(cold):
+    """A demotion row is not the rate limit that skipped a review route, so its lapse alone recovers nothing."""
+    review_fallback(cold, CODEX)
+    cooldown(cold, routing.demotion_key("codex", "gpt-6.1-sol", "high"), FUTURE)
+    with db.transaction(cold.con):
+        cold.con.execute("UPDATE route_cooldowns SET expires_at=?", (now_iso(),))
+    assert sweep(cold) == []  # no re-probe passed
 
 
 def test_a_new_failure_after_a_recovery_is_a_new_episode(plain):
@@ -310,9 +341,9 @@ def test_a_live_no_effort_cooldown_blocks_a_lapsed_demotion_until_it_lapses(plai
 # ------------------------------------------------------------------ in-flight work and re-eligibility
 
 def test_a_recovery_touches_no_in_flight_dispatch_task_or_route(plain):
+    plain.dispatch("T2")  # in flight while the route is still demoted
     d = failed_route(plain)
     expire(plain, d)
-    plain.dispatch("T2")  # in flight when the route becomes available again
     before = (plain.dispatches(), [dict(r) for r in plain.con.execute("SELECT * FROM tasks ORDER BY id")])
 
     assert len(sweep(plain)) == 1

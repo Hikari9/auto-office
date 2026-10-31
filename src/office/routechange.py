@@ -350,8 +350,10 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
         deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
         return None if deadline > now else ("demotion lapsed", deadline)
     created = parse_iso(row["created_at"])
-    if expiries and max(expiries) > created:  # the rate limit that skipped the route was live then, and has lapsed
-        return "cooldown lapsed", max(expiries)
+    limit = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?",
+                        (routing.cooldown_key(harness, model),)).fetchone()  # the rate limit routing keys on the route
+    if limit and parse_iso(limit[0]) > created:  # the rate limit that skipped the route was live then, and has lapsed
+        return "cooldown lapsed", parse_iso(limit[0])
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",
@@ -403,7 +405,8 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
         return []
     seqs = []
     with db.transaction(con):  # judged again under the writer lock, so a concurrent sweep cannot record the same episode
-        if state.is_terminal(state.get_run(con, run["id"])):  # closed since the caller read it
+        current = state.get_run(con, run["id"])  # closed, or gone, since the caller read it
+        if current is None or state.is_terminal(current):
             return []
         for route, row, payload, (basis, at) in _recoverable(con, run["id"], now):
             harness, model, effort = _route_parts(con, run["id"], row, payload)
