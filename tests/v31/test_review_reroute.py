@@ -845,3 +845,46 @@ def test_a_reviewer_with_no_recorded_pane_is_not_prompted(env, monkeypatch):
     _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
     sent, _, _ = _reprompt(env, monkeypatch, fence, pane_id=None)
     assert sent == [] and entered == []
+
+
+# ------------------------------------------------------------------ prefer_not gives way when it is the only route
+
+LUNA = {"harness": "codex", "model_id": "luna", "effort": "high"}
+
+
+def _only_code_reviewer(env, entry):
+    """A user policy under which `entry` is the only code reviewer route: the strict seed is the whole review order (#837)."""
+    (env.tmp / "user-config.yaml").write_text(json.dumps(
+        {"roles": {"code_reviewer": {"preferred_seed": [entry]}},
+         "routing": {"user_policy": {"strict_allow_roles": ["code_reviewer"]}}}))
+
+
+def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing(env):
+    from office import candidates, state
+    _only_code_reviewer(env, LUNA)
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    assert [(g["round"], g["review_status"]) for g in _gates(env, "convergence_review")] == [(1, "UNAVAILABLE")]
+    executors = _executor_calls(env)
+    tried_triples = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")}
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+        # the fixture: with the tried route out, no code reviewer route qualifies
+        left = candidates.route_role(con, state.pinned_config(run), run, "code_reviewer", exclude=tried_triples,
+                                     probe=False)
+    finally:
+        con.close()
+    assert left.get("status") != "selected", left
+    (tried,) = tried_triples
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    code, out = env.office("review", "L-T1:convergence", check=0)
+    assert code == 0, out
+    assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
+    assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
+        == [tried, tried], "the re-run starts on the route the failed round used"
+    assert _executor_calls(env) == executors
+    assert _scope(env, "L-T1")["status"] == "approved"
+    assert _pin(env) is None
+    payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='convergence_review' ORDER BY rowid")[-1]["payload_json"])
+    assert payload["exclude_routes"] == [tried] and "review_override" not in payload, payload
