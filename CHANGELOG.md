@@ -2,6 +2,13 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.1
+
+- docs: point run gear executor slates to policy and clarify the truncated Sonnet fallback (#963).
+- test: cover route amendments without a worker environment (#963).
+- test: cover review-only reruns when the preferred alternate route is unavailable (#963).
+- fix(status): show pre-existing check failures alongside the accepted revision (#963).
+
 ## 3.15.0
 
 - Orchestrator stalls: office resume arms root auto-wake by default (--wake-off opts out) and status shows whether wake is armed; queued-too-long, stalled and closed-unread reviews raise a wake event with a next: line (#922, #919); no false stalls for panes waiting on monitors or running self-review subagents (#895); a written reviewer reply is ingested even while the pane reads busy (#918); the office CLI exits 75 with a retry message mid-reinstall and records office.reinstalled (#920); route.recovered event and status line when a quota/auth-avoided route is available again (#921, #946).
