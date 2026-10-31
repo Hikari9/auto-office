@@ -10,6 +10,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import yaml
+
 from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
 from office.result import Result
 
@@ -25,22 +27,28 @@ def _visual_capture_status() -> tuple[str, bool]:
     except ImportError:
         return ("visual capture: playwright missing (uv tool install 'auto-office[visual]'); "
                 "visual gates report CAPTURE_BLOCKED", False)
+    args: dict = {}
     try:
         from office import visual
+        # Match capture's optional OFFICE_CHROME override, without hanging doctor.
+        args = visual.launch_args()
         with sync_playwright() as playwright:
-            # Match capture's optional OFFICE_CHROME override, without hanging doctor.
-            browser = playwright.chromium.launch(**{**visual.launch_args(), "timeout": 10000})
+            browser = playwright.chromium.launch(**{**args, "timeout": 10000})
             browser.close()
     except Exception as error:
         reason = (str(error).splitlines() or [type(error).__name__])[0][:240]
-        install = visual.missing_browser_install(error)
-        if install:
-            return (f"visual capture: Chromium headless shell missing ({reason}); "
-                    f"{install}", True)
-        return (f"visual capture: Chromium headless shell cannot launch ({reason}); fix: "
-                f"{shlex.quote(sys.executable)} -m playwright install chromium-headless-shell "
-                "(on Linux also install system dependencies with --with-deps)", True)
+        if args.get("executable_path"):
+            # The launch used this binary, so the playwright install command would not fix it.
+            return (f"visual capture: Chrome at {args['executable_path']} cannot launch ({reason}); fix: check "
+                    "that it runs, or set OFFICE_CHROME to a working Chrome binary", True)
+        kind = "missing" if "Executable doesn't exist" in str(error) else "cannot launch"
+        return (f"visual capture: Chromium headless shell {kind} ({reason}); {_playwright_fix_hint()}", True)
     return "visual capture: playwright and Chromium headless shell available", False
+
+
+def _playwright_fix_hint() -> str:
+    return (f"fix: {shlex.quote(sys.executable)} -m playwright install chromium-headless-shell "
+            "(on Linux, add --with-deps)")
 
 
 def _visual_review_enabled(config: dict) -> bool:
@@ -54,7 +62,7 @@ def _effective_config() -> dict:
     repo = paths.repo_identity()
     try:
         return cfg.resolve(repo[0] if repo else None)[0]
-    except ValueError:
+    except (ValueError, yaml.YAMLError, OSError):
         return {}
 
 

@@ -42,7 +42,11 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
     for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
                            "ORDER BY created_at, id", (run["id"],)).fetchall():
         gate = dict(row)
-        for tid in ([gate["task_id"]] if gate["task_id"] else (convergence.gate_members(gate) or [])):
+        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
+        if members is None:  # a lane gate that predates members_json: the scope's current tasks
+            scope = convergence.find_scope(con, run, gate["scope"] or "")
+            members = scope["tasks"] if scope else []
+        for tid in members:
             latest[tid] = gate
     lines = []
     for task in required:
@@ -51,8 +55,9 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
         if gate is None:
             lines.append(f"visual review required for {tid} but never ran")
         elif gate["status"] != "done" or gate["evidence_status"] not in _VISUAL_SATISFIED:
-            reason = gate["evidence_status"] or gate["review_status"] or gate["status"]
-            detail = f" ({gate['summary'][:180]})" if gate["summary"] else ""
+            reason = (gate["status"] if gate["status"] != "done"
+                      else gate["evidence_status"] or gate["review_status"] or gate["status"])
+            detail = f" ({' '.join(gate['summary'].split())[:180]})" if gate["summary"] else ""
             lines.append(f"visual review skipped/degraded for {tid}: {reason}{detail}")
     return lines
 
