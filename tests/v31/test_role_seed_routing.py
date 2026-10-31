@@ -147,8 +147,8 @@ def test_default_config_reviewer_and_visual_seed_order():
                      ("opus", "claude", "low"), ("claude-opus-5-5", "agy", "low")]
     assert roles["plan_reviewer"]["preferred_seed"] == roles["code_reviewer"]["preferred_seed"]
     visual = [(e["model_id"], e["harness"], e["effort"]) for e in roles["visual_reviewer"]["preferred_seed"]]
-    assert visual == [("gemini-3.8-flash", "agy", "low"), ("gemini-3.8-flash", "agy", "medium"),
-                      ("gpt-6.1-terra", "codex", "low")]
+    assert visual == [("gemini-3.8-flash", "agy", "low"), ("gpt-6.1-terra", "codex", "low"),
+                      ("deepseek-v4.1-flash-free", "opencode", "max"), ("claude-sonnet-5-5", "agy", "medium")]
 
 
 # --- CLI: size-scoped user rules (#850) -----------------------------------------------------------------------

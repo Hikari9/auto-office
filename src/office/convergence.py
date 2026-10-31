@@ -665,6 +665,24 @@ def _same_reviewer(con, run: dict, scope_id: str, kind: str, cycle: int) -> str 
     return row["reviewer_dispatch_id"] if row else None
 
 
+def _lane_review_options(con, run: dict, job: dict, gate: dict, scope: dict, st: dict,
+                         kind: str) -> dict:
+    """One source for code/visual reviewer continuation and retry exclusions."""
+    excluded = list(st.get("exclude_routes") or [])
+    resume = _same_reviewer(con, run, scope["id"], kind, int(gate.get("cycle") or 1))
+    if excluded or job["payload"].get("review_only"):
+        resume = None
+    return {"exclude": excluded or None, "resume_from": resume,
+            "prefer_not": job["payload"].get("exclude_routes")}
+
+
+def _finish_lane_review(con, run: dict, gate: dict, outcome: dict) -> dict:
+    """Ingest a lane's final reviewer outcome with the same result shape."""
+    with db.transaction(con):
+        ingest(con, state.get_run(con, run["id"]), gate["id"], outcome)
+    return {"status": outcome.get("status"), "verdict": outcome.get("verdict")}
+
+
 def _carried(con, run: dict, scope_id: str, kind: str) -> list[dict]:
     rows = con.execute("SELECT code, level, severity, blocking, location, summary FROM findings WHERE run_id=? AND scope=? "
                        "AND gate_kind=? AND state='open' GROUP BY code ORDER BY MIN(created_at)",
@@ -783,33 +801,26 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             if precheck["reports"]:
                 brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify and deduplicate in your one verdict):\n"
                 brief += "\n".join(str(r) for r in precheck["reports"])
-            exclude = list(st.get("exclude_routes") or [])
-            resume = _same_reviewer(con, run, scope["id"], "convergence_review", int(gate.get("cycle") or 1))
+            route_options = _lane_review_options(con, run, job, gate, scope, st, "convergence_review")
             # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
             pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
-            away = job["payload"].get("exclude_routes")
-            # A review-only re-run starts a new reviewer, never the earlier session.
-            resume = resume if not (exclude or job["payload"].get("review_only")) else None
             reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
             for attempt in range(reprompts + 1):
-                outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                             exclude=exclude or None, resume_from=resume, review_override=pinned,
-                                             prefer_not=away)
+                outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout,
+                                             include_dirs=[checkout], review_override=pinned, **route_options)
                 problem = _stamp_reviewed_commit(run, commit, outcome)
                 if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
                     break  # ingest turns a still-wrong commit into INVALID_RESULT
                 # The same reviewer is asked again, in its own session when the harness can resume it: a stale
                 # checkout path or commit from an earlier round is the usual cause (#706).
-                resume = outcome["dispatch_id"]
+                route_options["resume_from"] = outcome["dispatch_id"]
                 role_line, _, rest = brief.partition("\n")
                 brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
                          f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
                          f"REVIEWED_COMMIT {commit}.\n{rest}")
     finally:
         gates.remove_checkout(run, checkout)
-    with db.transaction(con):
-        ingest(con, state.get_run(con, run["id"]), gate["id"], outcome)
-    return {"status": outcome.get("status"), "verdict": outcome.get("verdict")}
+    return _finish_lane_review(con, run, gate, outcome)
 
 
 VISUAL_FORMAT = """\
@@ -931,23 +942,17 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         *briefs.used_codes_line(gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"]))),
         "", VISUAL_FORMAT]) + "\n"
     evdir = lane_receipt.parent
-    resume = _same_reviewer(con, run, scope["id"], "visual", int(gate.get("cycle") or 1))
-    exclude = list(st.get("exclude_routes") or [])
-    away = job["payload"].get("exclude_routes")
+    route_options = _lane_review_options(con, run, job, gate, scope, st, "visual")
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
-                                 exclude=exclude or None,
-                                 resume_from=resume if not (exclude or job["payload"].get("review_only")) else None,
-                                 prefer_not=away)
+                                 **route_options)
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
         if parsed.evidence_status == "INVALID_COMPARISON":
             outcome = {**outcome, "status": contract.EVIDENCE_BLOCKED, "verdict": None,
                        "summary": "reviewer judged the capture not comparable (evidence state, not a verdict)"}
-    with db.transaction(con):
-        ingest(con, state.get_run(con, run["id"]), gate["id"], outcome)
-    return {"status": outcome.get("status"), "verdict": outcome.get("verdict")}
+    return _finish_lane_review(con, run, gate, outcome)
 
 
 def _non_producer_problems(cap: dict) -> list[dict]:
@@ -1417,7 +1422,8 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         if fb:
             kind = "visual" if fb["kind"] == "visual" else "convergence"
             inspect = " --inspected <every screenshot>, only if you can view them" if kind == "visual" else ""
-            return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict, no round spent). Re-run "
+            return (f"{sid}: no specialist reviewer returned a verdict (runtime status, not a verdict, no round spent). "
+                    f"Reason: {(fb.get('summary') or 'not recorded')[:520]}. Re-run "
                     f"only the review on a fallback reviewer: office review {sid}:{kind} [--as <harness>/<model>[@effort]]; or, "
                     f"as the orchestrator you are authorized to review on the reviewer's behalf (independent only if you did "
                     f"not produce the work; else it is refused or recorded as degraded): office review {sid}:{kind} --report "
