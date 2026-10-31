@@ -4,11 +4,13 @@ Unit tier. The same isolated Office home and scripted fake harness as the #845 s
 dispatch, routing and gates modules. No model is called.
 """
 import json
+import sqlite3
 
 from test_discovery_dispatch import Cold, cold, launched  # noqa: F401 (cold is a fixture)
+from test_adaptive_routing import cand, req
 from test_issue_845_user_allow import events, fail, plain  # noqa: F401 (plain is a fixture)
 
-from office import context_snapshot, db, gates, guide, root_wake, route_probe, routechange, routing, state
+from office import context_snapshot, db, gates, guide, paths, root_wake, route_probe, routechange, routing, state
 from office.util import now_iso, parse_iso
 
 PAST = "2000-01-01T00:00:00+00:00"
@@ -43,10 +45,10 @@ def failed_route(env, text="error: unknown model"):
     return d
 
 
-def review_fallback(env, before, after="codex@1/gpt-6-luna@low"):
+def review_fallback(env, before, after="codex@1/gpt-6-luna@low", skip_class="quota-auth"):
     with db.transaction(env.con):
         gates.review_route_notice(env.con, run(env), {"id": "G1", "task_id": "T1"}, "code_reviewer", before, after,
-                                  "quota")
+                                  "quota", skip_class=skip_class)
 
 
 def probe_pass(env, route, probed_at, invocation=None):
@@ -288,6 +290,7 @@ def test_the_next_dispatch_considers_the_recovered_route_under_normal_ranking_wi
     assert plain.decide(role="executor", exact=d["triple"])["status"] != "selected"
     expire(plain, d)
     sweep(plain)
+    assert len(recovered(plain)) == 1  # the recovery is recorded before routing reads it, so the ranking below is the real one
 
     again = plain.decide(role="executor", exact=d["triple"])
     assert again["status"] == "selected" and again["selected"] == d["triple"]
@@ -387,3 +390,120 @@ def test_reconcile_wakes_the_root_for_a_recovery_before_any_status_call(plain):
     rows = plain.con.execute("SELECT kind, state FROM root_wake_intents WHERE run_id='run-A' AND kind=?",
                              (RECOVERED,)).fetchall()
     assert [tuple(r) for r in rows] == [(RECOVERED, "pending")]
+
+
+def test_a_sweep_with_nothing_to_record_takes_no_writer_lock(plain, monkeypatch):
+    # Status, context and wake reads sweep on every call. With another writer holding the lock, a sweep that records
+    # nothing must still return, not wait out the transaction retries.
+    failed_route(plain)  # a live demotion: nothing is recoverable
+    plain.con.execute("PRAGMA busy_timeout=0")
+    monkeypatch.setattr(db.time, "sleep", lambda _s: None)
+    holder = sqlite3.connect(str(paths.runs_db()), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        assert sweep(plain) == []
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+
+def test_a_review_route_with_no_effort_recovers_on_a_pass_whose_probe_has_no_effort(cold):
+    none_route = "codex@1/gpt-6.1-sol@None"  # candidate_id writes a missing effort as the text None
+    review_fallback(cold, none_route)
+    with db.transaction(cold.con):
+        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
+                         "VALUES('probe:no-effort','codex','gpt-6.1-sol',NULL,'pass',?)", (FUTURE,))
+    assert len(sweep(cold)) == 1
+    [rec] = recovered(cold)
+    assert rec["route"] == none_route and rec["effort"] is None and rec["basis"] == "re-probe passed"
+
+
+def test_a_later_review_that_leaves_a_recovered_route_clears_its_line(cold):
+    review_fallback(cold, CODEX)
+    probe_pass(cold, CODEX, now_iso())
+    sweep(cold)
+    assert routechange.recovery_lines(cold.con, run(cold)) == [line_for(CODEX, "re-probe passed")]
+
+    review_fallback(cold, CODEX, after="codex@1/gpt-6-luna@low")  # routing passed the recovered route over again
+    assert routechange.recovery_lines(cold.con, run(cold)) == []
+
+
+def skip_decision(category=None):
+    """A review decision whose preferred primary (CODEX) was rejected and whose selection chose a luna route."""
+    primary = {"harness": "codex", "model_id": "gpt-6.1-sol", "effort": "high", "harness_version": "1.0.0"}
+    chosen = {"harness": "codex", "model_id": "gpt-6-luna", "effort": "low", "harness_version": "1.0.0"}
+    rejection = {"candidate": CODEX, "stage": 1, "reason": "trust floor"}
+    if category:
+        rejection.update(stage=6, category=category)
+    seed = [{"model_id": "gpt-6.1-sol", "effort": "high", "harness": "codex"}]
+    return {"request": {"preferred_seed": seed, "candidates": [primary, chosen]}, "rejected": [rejection]}, chosen
+
+
+def test_a_trust_or_capability_skip_never_yields_route_recovered(cold):
+    decision, chosen = skip_decision()
+    route, why, skip_class = gates._skipped_primary(decision, chosen)
+    assert (route, skip_class) == (CODEX, "other")
+    with db.transaction(cold.con):
+        gates.review_route_notice(cold.con, run(cold), {"id": "G1", "task_id": "T1"}, "code_reviewer", route,
+                                  "codex@1/gpt-6-luna@low", why, skip_class=skip_class)
+    probe_pass(cold, CODEX, FUTURE)  # the route is available again: a pass after the skip
+    assert sweep(cold) == [] and recovered(cold) == []
+
+
+def test_a_quota_skip_of_the_primary_recovers_on_a_passing_reprobe(cold):
+    decision, chosen = skip_decision(category="rate-limited")
+    route, why, skip_class = gates._skipped_primary(decision, chosen)
+    assert (route, skip_class) == (CODEX, "quota-auth")
+    with db.transaction(cold.con):
+        gates.review_route_notice(cold.con, run(cold), {"id": "G1", "task_id": "T1"}, "code_reviewer", route,
+                                  "codex@1/gpt-6-luna@low", why, skip_class=skip_class)
+    probe_pass(cold, CODEX, FUTURE)
+    assert len(sweep(cold)) == 1 and recovered(cold)[0]["route"] == CODEX
+
+
+def skip_notice(env, route, why, skip_class, after="codex@1/gpt-6-luna@low"):
+    with db.transaction(env.con):
+        gates.review_route_notice(env.con, run(env), {"id": "G1", "task_id": "T1"}, "code_reviewer", route, after, why,
+                                  skip_class=skip_class)
+
+
+def test_a_quota_crossing_primary_is_recovered_once_a_reprobe_passes(cold):
+    # Routing's own decision: the preferred primary crosses the quota reserve while a safe luna route is available.
+    primary = cand("codex", "gpt-6.1-sol", "high", quota=10)
+    primary["harness_version"] = "1.0.0"
+    chosen = cand("codex", "gpt-6-luna", "low", quota=60, out=0.5, idx=40)
+    chosen["harness_version"] = "1.0.0"
+    request = req([primary, chosen], role="executor",
+                  preferred_seed=[{"model_id": "gpt-6.1-sol", "effort": "high", "harness": "codex"}])
+    request["policy"] = {"cost_policy": "balanced", "quota_reserve_percent": 20}
+    decision = {**routing.route(request), "request": request}  # candidates.decide attaches the request the same way
+    chosen = decision["candidate"]
+    route, why, skip_class = gates._skipped_primary(decision, chosen)
+    assert (route, skip_class) == (CODEX, "quota-auth")
+    skip_notice(cold, route, why, skip_class)
+    probe_pass(cold, CODEX, FUTURE)
+    assert len(sweep(cold)) == 1 and recovered(cold)[0]["route"] == CODEX
+
+
+def test_a_probe_failed_on_an_auth_quota_block_is_recovered_once_a_reprobe_passes(cold):
+    primary = {"harness": "codex", "harness_version": "1.0.0", "model_id": "gpt-6.1-sol", "effort": "high",
+               "probe": {"result": "fail", "reason_class": "auth-quota-blocked", "detail": "429"}}
+    chosen = {"harness": "codex", "harness_version": "1.0.0", "model_id": "gpt-6-luna", "effort": "low"}
+    rejected = []
+    routing._reject_pool([primary], rejected)
+    decision = {"request": {"preferred_seed": [{"model_id": "gpt-6.1-sol", "effort": "high", "harness": "codex"}],
+                            "candidates": [primary, chosen]}, "rejected": rejected}
+    route, why, skip_class = gates._skipped_primary(decision, chosen)
+    assert (route, skip_class) == (CODEX, "quota-auth")
+    skip_notice(cold, route, why, skip_class)
+    probe_pass(cold, CODEX, FUTURE)
+    assert len(sweep(cold)) == 1
+
+
+def test_a_review_notice_without_a_skip_class_is_not_evidence(cold):
+    # Notices written before the skip class existed, and the last-failed path, say nothing about quota or auth.
+    with db.transaction(cold.con):
+        gates.review_route_notice(cold.con, run(cold), {"id": "G1", "task_id": "T1"}, "code_reviewer", CODEX,
+                                  "codex@1/gpt-6-luna@low", f"{CODEX} was rejected: trust floor")
+    probe_pass(cold, CODEX, FUTURE)
+    assert sweep(cold) == [] and recovered(cold) == []
