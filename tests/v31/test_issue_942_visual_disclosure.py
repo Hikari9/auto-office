@@ -51,7 +51,7 @@ def test_unreadable_config_fails_closed_so_the_launch_failure_counts(isolated_st
     baseline, _ = _doctor_problems(monkeypatch, PASSING, None)
     failed, res = _doctor_problems(monkeypatch, FAILING, None)
     assert failed == baseline + 1
-    assert FAILING[0] in res.lines
+    assert f"{FAILING[0]} (config unreadable; visual review assumed enabled)" in res.lines
 
 
 def test_default_config_enables_visual_review(isolated_state, monkeypatch):
@@ -70,14 +70,11 @@ def test_unreadable_user_config_yields_no_config(isolated_state, monkeypatch):
 
 
 def test_user_config_that_cannot_be_read_yields_no_config(isolated_state, monkeypatch):
-    user = isolated_state / "user.yaml"
-    user.write_text("gear_presets: {}\n")
-    user.chmod(0)
-    try:
-        monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
-        assert doctor._effective_config() is None
-    finally:
-        user.chmod(0o600)
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError("EACCES: user config")
+
+    monkeypatch.setattr(cfg, "read_files", unreadable)
+    assert doctor._effective_config() is None
 
 
 def test_config_resolve_error_yields_no_config(isolated_state, monkeypatch):
@@ -98,6 +95,11 @@ def test_config_resolve_error_yields_no_config(isolated_state, monkeypatch):
 ])
 def test_visual_review_disabled_when_no_preset_funds_browser_verification(config):
     assert doctor._visual_review_enabled(config) is False
+
+
+@pytest.mark.parametrize("config", [{"gear_presets": ["L"]}, {"gear_presets": "L"}, ["not", "a", "mapping"]])
+def test_malformed_config_shape_fails_closed(config):
+    assert doctor._visual_review_enabled(config) is True
 
 
 @pytest.mark.parametrize("presets", [
@@ -148,6 +150,13 @@ def test_first_non_blank_line_of_the_launch_error_is_the_reason(monkeypatch):
     _fake_playwright(monkeypatch, "\n  Host is missing required shared libraries\nmore detail")
     message, problem = doctor._visual_capture_status()
     assert problem and "(Host is missing required shared libraries)" in message
+
+
+def test_launch_error_reason_is_stripped_of_terminal_sequences(monkeypatch):
+    _fake_playwright(monkeypatch, "\x1b[31mHost is missing shared libraries\x1b[0m")
+    message, problem = doctor._visual_capture_status()
+    assert problem and "(Host is missing shared libraries)" in message
+    assert "\x1b" not in message and "\x9b" not in message
 
 
 def test_missing_optional_playwright_package_is_not_a_problem(monkeypatch):
@@ -273,19 +282,46 @@ def test_control_characters_in_a_summary_do_not_reach_the_report(tmp_path, monke
     lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
                          lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED",
                                            summary="\x1b[2Kcleared\x07 now"))
-    assert lines == ["visual review skipped/degraded for T1: CAPTURE_BLOCKED ([2Kcleared now)"]
-    assert "\x1b" not in lines[0] and "\x07" not in lines[0]
+    assert lines == ["visual review skipped/degraded for T1: CAPTURE_BLOCKED (cleared now)"]
+
+
+def test_c1_and_bidi_characters_in_a_summary_do_not_reach_the_report(tmp_path, monkeypatch):
+    lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
+                         lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED",
+                                           summary="ok\x9b31m‮reversed​ end"))
+    assert lines == ["visual review skipped/degraded for T1: CAPTURE_BLOCKED (ok 31m reversed end)"]
 
 
 def test_lane_gate_with_no_recorded_membership_makes_its_required_reviews_unverifiable(tmp_path, monkeypatch):
     tasks = [_task("T1", visual_spec={"url": "/a"}), _task("T2", visual_spec={"url": "/b"})]
 
     def legacy_lane(con):
-        _gate(con, "G-legacy", scope="L1", evidence="COMPARABLE")
-        _gate(con, "G2", task_id="T2", evidence="COMPARABLE")
+        _gate(con, "G-legacy", scope="L1", evidence="COMPARABLE", created_at="2026-10-31T00:00:00")
+        _gate(con, "G2", task_id="T2", evidence="COMPARABLE", created_at="2026-10-31T00:00:01")
 
     assert _disclosures(monkeypatch, tmp_path, tasks, legacy_lane) == [
         "visual review for T1 unverifiable: gate G-legacy has no recorded membership"]
+
+
+def test_newer_unattributed_gate_makes_an_older_covering_gate_unverifiable(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def done_then_legacy_failure(con):
+        _gate(con, "G1", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:00")
+        _gate(con, "G-legacy", scope="L1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:01")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, done_then_legacy_failure) == [
+        "visual review for T1 unverifiable: gate G-legacy has no recorded membership"]
+
+
+def test_older_unattributed_gate_does_not_override_a_newer_covering_gate(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def legacy_then_done(con):
+        _gate(con, "G-legacy", scope="L1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:00")
+        _gate(con, "G1", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:01")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, legacy_then_done) == []
 
 
 @pytest.mark.parametrize("path", ["merged", "handoff", "unmerged"])

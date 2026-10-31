@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
+from office import adapters, closeout, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
 from office.result import Result
 
 
@@ -36,7 +36,8 @@ def _visual_capture_status() -> tuple[str, bool]:
             browser = playwright.chromium.launch(**{**args, "timeout": 10000})
             browser.close()
     except Exception as error:
-        reason = next((line.strip() for line in str(error).splitlines() if line.strip()), type(error).__name__)[:240]
+        reason = next((line for line in (closeout.clean_text(raw) for raw in str(error).splitlines()) if line),
+                      type(error).__name__)[:240]
         if args.get("executable_path"):
             # The launch used this binary, so the playwright install command would not fix it.
             return (f"visual capture: Chrome at {args['executable_path']} cannot launch ({reason}); fix: check "
@@ -56,9 +57,11 @@ def _visual_review_enabled(config: dict | None) -> bool:
 
     An unreadable config (None) fails closed: the launch failure counts.
     """
-    if config is None:
+    if not isinstance(config, dict):
         return True
     presets = config.get("gear_presets") or {}
+    if not isinstance(presets, dict):
+        return True
     return any(isinstance(p, dict) and bool(p.get("funded_browser_verification")) for p in presets.values())
 
 
@@ -227,8 +230,11 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
         res.add(f"CLI runtime TSV: invalid: {exc} (repair the TSV before office harness sync)")
     visual_status, visual_problem = _visual_capture_status()
     if visual_problem:
-        if _visual_review_enabled(_effective_config()):
+        config = _effective_config()
+        if _visual_review_enabled(config):
             problems += 1
+            if config is None:
+                visual_status += " (config unreadable; visual review assumed enabled)"
         else:
             visual_status += " (visual review is not enabled; not a failure)"
     res.add(visual_status)
