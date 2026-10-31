@@ -171,3 +171,22 @@ def test_pr_sync_queue_uses_current_mode_not_stale_run_snapshot(env, monkeypatch
         assert len(rows) == 1 and json.loads(rows[0][0])['ref'] == 'G-stale'
     finally:
         con.close()
+
+
+def test_confirmed_disable_pins_off_after_transient_github_failure(env, monkeypatch):
+    """A temporary gh error cannot later override explicit --no-prs (#479)."""
+    github(env, monkeypatch, repo_view_failures=1)
+    env.trust()
+    start_inline(env)
+    assert _prs(env)['enabled'] is False and _prs(env)['transient'] is True
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep PRs off', '--confirm')
+    assert code == 0 and 'disabled' in out, out
+    assert _prs(env)['enabled'] is False and 'transient' not in _prs(env)
+    from office import prs, state
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute('SELECT id FROM runs').fetchone()[0])
+        assert prs.settings(con, run)['enabled'] is False
+    finally:
+        con.close()
+    assert len(_events(env)) == 1

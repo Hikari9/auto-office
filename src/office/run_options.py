@@ -64,7 +64,10 @@ def amend(con, run: dict, *, enable_prs: bool | None, quote: str | None,
     # --no-prs pins off; a fresh probe here sees newly granted GitHub access.
     before = prs.settings(con, run)
     desired = bool(enable_prs)
-    if bool(before.get("enabled")) == desired:
+    # A transient gh probe may report PRs off only provisionally. Explicit
+    # --no-prs must replace that retriable state or it could silently turn on
+    # at the next dispatch when GitHub recovers (#937, #479).
+    if bool(before.get("enabled")) == desired and not (not desired and before.get("transient")):
         return Result(lines=[f"task PRs already {'on' if desired else 'off'}; no change recorded"],
                       next="office status", data={"prs": before, "changed": False})
     if desired:
