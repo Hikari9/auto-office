@@ -8,8 +8,17 @@ ROW = re.compile(r"^\| `(tests/[^`]+)` \| ([\w-]+) \|", re.MULTILINE)
 
 
 def _rows(doc: str, heading: str) -> list[tuple[str, str]]:
-    body = (DOCS / doc).read_text(encoding="utf-8").split(heading, 1)[1]
-    return ROW.findall(body.split("\n## ", 1)[0])
+    text = (DOCS / doc).read_text(encoding="utf-8")
+    match = re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE)
+    assert match, f"{doc} has no heading {heading!r}"
+    body = text[match.end():]
+    next_section = re.search(r"^## ", body, re.MULTILINE)
+    if next_section:
+        body = body[: next_section.start()]
+    rows = ROW.findall(body)
+    table_lines = [line for line in body.splitlines() if line.startswith("| `tests/")]
+    assert rows and len(rows) == len(table_lines), f"{doc}: every test table row must match the (path, disposition) shape"
+    return rows
 
 
 def test_legacy_table_and_inventory_hold_the_same_path_dispositions():
