@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from office import contract, paths, planfile, planpath, state
+from office import contract, greenfield, paths, planfile, planpath, state
 
 # A task with no file scope (a comment or issue edit) commits nothing. The
 # executor records what it did here, untracked in its worktree; submit copies
@@ -213,7 +213,7 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     plan = state.current_plan(con, run["id"])
     if plan:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
-    if run.get("gear") == "greenfield" and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1":
+    if greenfield.enabled(run):
         guidance = [
             "GREENFIELD GEAR (explicit opt-in): use only for a new or near-empty repository. Inspect the ",
             "existing files and do not silently use this mode for a mature, multi-owner codebase.",
@@ -309,7 +309,7 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
-    if run.get("gear") == "greenfield" and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1":
+    if greenfield.enabled(run):
         plan = state.current_plan(con, run["id"])
         planned = next((t for t in (plan or {}).get("tasks") or [] if t["id"] == packet["task_id"]), {})
         phases = planned.get("phases") or []
