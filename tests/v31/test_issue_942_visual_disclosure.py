@@ -110,6 +110,11 @@ def test_visual_review_enabled_when_any_one_preset_funds_it(presets):
     assert doctor._visual_review_enabled({"gear_presets": presets}) is True
 
 
+@pytest.mark.parametrize("value", [True, "risk_forced", "acceptance_forced"])
+def test_every_funding_value_other_than_false_enables_visual_review(value):
+    assert doctor._visual_review_enabled({"gear_presets": {"XL": {"funded_browser_verification": value}}}) is True
+
+
 def _fake_playwright(monkeypatch, failure: str) -> None:
     module = ModuleType("playwright.sync_api")
 
@@ -159,6 +164,59 @@ def test_launch_error_reason_is_stripped_of_terminal_sequences(monkeypatch):
     assert "\x1b" not in message and "\x9b" not in message
 
 
+def test_successful_launch_is_available_and_not_a_problem(monkeypatch):
+    calls = []
+    module = ModuleType("playwright.sync_api")
+
+    class Browser:
+        def close(self):
+            calls.append("close")
+
+    class Chromium:
+        def launch(self, **kwargs):
+            calls.append(("launch", kwargs))
+            return Browser()
+
+    class Context:
+        def __enter__(self):
+            return type("API", (), {"chromium": Chromium()})()
+
+        def __exit__(self, *_):
+            return False
+
+    module.sync_playwright = Context
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", module)
+    monkeypatch.setattr(visual, "launch_args", lambda: {"headless": True})
+    message, problem = doctor._visual_capture_status()
+    assert problem is False and "available" in message
+    assert calls == [("launch", {"headless": True, "timeout": 10000}), "close"]
+
+
+def test_fix_command_quotes_an_interpreter_path_with_spaces(monkeypatch):
+    _fake_playwright(monkeypatch, "Host is missing required shared libraries")
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    monkeypatch.setattr(doctor.sys, "executable", "/opt/my python/bin/python3")
+    message, _ = doctor._visual_capture_status()
+    assert "fix: '/opt/my python/bin/python3' -m playwright install chromium-headless-shell" in message
+
+
+def test_long_launch_error_is_truncated_and_a_blank_one_falls_back_to_the_exception_name(monkeypatch):
+    _fake_playwright(monkeypatch, "x" * 300)
+    message, _ = doctor._visual_capture_status()
+    assert f"({'x' * 240})" in message
+    _fake_playwright(monkeypatch, "   ")
+    message, _ = doctor._visual_capture_status()
+    assert "(RuntimeError)" in message
+
+
+def test_repo_tier_config_is_resolved_from_the_repository_root(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(doctor.paths, "repo_identity", lambda: (tmp_path, "main"))
+    monkeypatch.setattr(cfg, "resolve", lambda root, *a, **k: (seen.append(root) or {}, []))
+    doctor._effective_config()
+    assert seen == [tmp_path]
+
+
 def test_missing_optional_playwright_package_is_not_a_problem(monkeypatch):
     monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     message, problem = doctor._visual_capture_status()
@@ -181,11 +239,11 @@ def _task(tid: str, *, visual_spec=None, title="", status="done") -> dict:
 
 
 def _gate(con, gid: str, *, task_id=None, members=None, scope=None, status="done", evidence=None,
-          review_status=None, summary=None, created_at="2026-10-31T00:00:00", kind="visual"):
+          review_status=None, summary=None, created_at="2026-10-31T00:00:00", kind="visual", run_id="R1"):
     con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, evidence_status, "
                 "review_status, summary, created_at, scope, members_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (gid, "R1", "task" if task_id else "lane", task_id, kind, gid, status, evidence, review_status,
+                (gid, run_id, "task" if task_id else "lane", task_id, kind, gid, status, evidence, review_status,
                  summary, created_at, scope, json.dumps(members) if members is not None else None))
 
 
@@ -354,3 +412,51 @@ def test_closeout_without_disclosures_leaves_the_final_line_unchanged(tmp_path, 
     lifecycle._closeout(con, {"id": "R1", "repo_root": str(tmp_path)}, {"target": "main"}, res, pr="#1")
     assert "visual_review_disclosures" not in res.data
     assert res.final == closeout.done("merged")
+
+
+def test_gates_of_another_run_or_another_kind_are_not_visual_evidence(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"}), _task("T2", visual_spec={"url": "/b"})]
+
+    def setup(con):
+        _gate(con, "G-other-run", task_id="T1", evidence="COMPARABLE", run_id="R2")
+        _gate(con, "G-review", task_id="T2", kind="code_review", evidence="COMPARABLE")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, setup) == [
+        "visual review required for T1 but never ran",
+        "visual review required for T2 but never ran",
+    ]
+
+
+def test_lane_and_task_gates_compete_on_creation_order(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def blocked_task_then_comparable_lane(con):
+        _gate(con, "G-task", task_id="T1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:00")
+        _gate(con, "G-lane", members=["T1"], scope="L1", evidence="COMPARABLE", created_at="2026-10-31T00:00:01")
+
+    def comparable_task_then_blocked_lane(con):
+        _gate(con, "G-task", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:00")
+        _gate(con, "G-lane", members=["T1"], scope="L1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:01")
+
+    assert _disclosures(monkeypatch, tmp_path / "a", tasks, blocked_task_then_comparable_lane) == []
+    (tmp_path / "b").mkdir()
+    assert _disclosures(monkeypatch, tmp_path / "b", tasks, comparable_task_then_blocked_lane) == [
+        "visual review skipped/degraded for T1: CAPTURE_BLOCKED"]
+
+
+def test_gates_with_the_same_creation_time_are_ordered_by_id(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def id_order_decides(con):
+        # Inserted in reverse id order, so insertion order would pick the blocked gate.
+        _gate(con, "G-b", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:00")
+        _gate(con, "G-a", task_id="T1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:00")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, id_order_decides) == []
+
+
+def test_evidence_status_is_the_reason_when_review_status_is_also_set(tmp_path, monkeypatch):
+    lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
+                         lambda con: _gate(con, "G1", task_id="T1", evidence="INVALID_COMPARISON",
+                                           review_status="UNAVAILABLE"))
+    assert lines == ["visual review skipped/degraded for T1: INVALID_COMPARISON"]
