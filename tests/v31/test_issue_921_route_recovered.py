@@ -337,9 +337,9 @@ def test_a_review_the_user_re_pinned_is_never_recovered(cold):
     with db.transaction(cold.con):
         state.record_route_change(cold.con, run(cold), "T1", CODEX, "codex@1/gpt-6-luna@low", kind="repin",
                                   reason="the user re-pinned the plan reviewer", actor="user", stage="code_reviewer",
-                                  extra={"notice": "review", "gate": "G1"})
+                                  extra={"notice": "review", "gate": "G1", "skip_class": "quota-auth"})
     probe_pass(cold, CODEX, FUTURE)
-    assert sweep(cold) == []  # the user's own decision is not a fallback the run should undo
+    assert sweep(cold) == []  # the evidence qualifies, but the user made the change: the user's decision stands
 
 
 def test_a_stale_line_is_not_shown_after_a_successful_dispatch_deleted_the_cooldown(plain):
