@@ -67,3 +67,33 @@ def test_invoker_and_fix_owner_changes_cannot_reset_round_counter():
     assert ledger['status'] == 'blocked-exhausted'
     with pytest.raises(ReviewContractError, match='exhausted'):
         case(ledger, verdict='APPROVED')
+
+
+def test_no_review_is_recorded_after_approval():
+    approved = case({}, verdict='APPROVED')
+    assert approved['status'] == 'approved'
+    with pytest.raises(ReviewContractError, match='already approved'):
+        case(approved, reviewer_session='fresh-reviewer-2')
+
+
+@pytest.mark.parametrize('field', ['reviewer_session', 'invoker_session', 'producer_session'])
+@pytest.mark.parametrize('blank', ['', '   '])
+def test_blank_identity_fails_closed(field, blank):
+    with pytest.raises(ReviewContractError, match='missing independently identifiable sessions'):
+        case({}, **{field: blank})
+
+
+def test_session_identity_comparison_ignores_case_and_padding():
+    with pytest.raises(ReviewContractError, match='distinct session'):
+        case({}, reviewer_session=' Coordinator ', invoker_session='coordinator')
+
+
+@pytest.mark.parametrize('override', [{'revision': None}, {'evidence': None}])
+def test_non_string_revision_or_evidence_is_a_contract_error(override):
+    with pytest.raises(ReviewContractError, match='must be strings'):
+        case({}, **override)
+
+
+def test_malformed_previous_entry_is_a_contract_error():
+    with pytest.raises(ReviewContractError, match='invalid previous review ledger'):
+        case({'reviews': ['not-a-review']})

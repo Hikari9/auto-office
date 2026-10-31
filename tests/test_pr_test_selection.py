@@ -470,3 +470,24 @@ def test_legacy_integration_mapping_runs_only_relevant_node(pr_repo):
 def test_curated_distribution_builder_is_explicitly_covered():
     from scripts.select_pr_tests import SPECIAL
     assert "tests/contracts/test_plugin_distribution.py" in SPECIAL["scripts/build_plugin_distribution.py"]
+
+
+def test_builder_change_selects_its_contract_module(pr_repo):
+    contract = "tests/contracts/test_plugin_distribution.py"
+    # The selector reads test modules from HEAD, so the contract module must be on the base branch.
+    git(pr_repo, "checkout", "-q", "main")
+    (pr_repo / "tests/contracts").mkdir(parents=True, exist_ok=True)
+    (pr_repo / contract).write_text("def test_contract(): pass\n")
+    git(pr_repo, "add", contract)
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "contract on base"], check=True)
+    git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(pr_repo, "checkout", "-q", "feature")
+    git(pr_repo, "merge", "-q", "--ff-only", "main")
+    (pr_repo / "scripts").mkdir(exist_ok=True)
+    (pr_repo / "scripts/build_plugin_distribution.py").write_text("def check(): return []\n")
+    git(pr_repo, "add", "scripts/build_plugin_distribution.py")
+    _, changed, chosen = selection(pr_repo)
+    assert changed == ["scripts/build_plugin_distribution.py"]
+    assert "tests/contracts/test_plugin_distribution.py" in chosen
+    assert all((pr_repo / p).is_file() for p in chosen)

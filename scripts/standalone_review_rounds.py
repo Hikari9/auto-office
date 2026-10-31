@@ -17,6 +17,11 @@ class ReviewContractError(ValueError):
     """The invoker must repair or escalate an invalid review record."""
 
 
+def _session(value) -> str:
+    """Session ids compare case- and whitespace-insensitively; blank means missing."""
+    return value.strip().casefold() if isinstance(value, str) else ""
+
+
 def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
            invoker_session: str, producer_session: str,
            fix_owner_session: str | None = None, evidence: str = "",
@@ -26,8 +31,14 @@ def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
     A caller can be orchestrator or executor. A chosen fix owner need not be the
     caller; the reviewer must be independent of caller, producer and fixer.
     """
-    if not isinstance(ledger, dict) or not isinstance(ledger.get("reviews", []), list):
+    if not isinstance(ledger, dict) or not isinstance(ledger.get("reviews", []), list) \
+            or not all(isinstance(entry, dict) for entry in ledger.get("reviews", [])):
         raise ReviewContractError("invalid previous review ledger")
+    if not isinstance(revision, str) or not isinstance(evidence, str):
+        raise ReviewContractError("revision and evidence must be strings")
+    reviewer_session, invoker_session, producer_session = (
+        _session(reviewer_session), _session(invoker_session), _session(producer_session))
+    fix_owner_session = _session(fix_owner_session) if fix_owner_session is not None else None
     reviews = ledger.get("reviews", [])
     if len(reviews) >= MAX_SUBSTANTIVE_ROUNDS:
         raise ReviewContractError("three substantive rounds exhausted; unresolved review remains blocked")

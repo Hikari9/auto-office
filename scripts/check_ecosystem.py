@@ -65,14 +65,15 @@ def frontmatter(path):
     if not m: return False,'missing YAML frontmatter', None, text
     try: fm=yaml.safe_load(m.group(1))
     except Exception as e: return False,f'bad YAML frontmatter: {e}', None, text
+    if not isinstance(fm, dict): return False,'frontmatter must be a YAML mapping', None, text
     required = {'name', 'description'}
     allowed = required | {'disable-model-invocation'}
-    keys = set(fm or {})
+    keys = set(fm)
     if not required <= keys or keys - allowed: return False,f'frontmatter requires name+description and only optional invocation control, got {keys}', fm, text
     if 'disable-model-invocation' in fm and not isinstance(fm['disable-model-invocation'], bool):
         return False,'disable-model-invocation must be a boolean', fm, text
-    if not re.match(r'^[a-z0-9-]+$', fm['name']): return False,'bad name', fm, text
-    if not fm['description'].strip(): return False,'empty description', fm, text
+    if not isinstance(fm['name'], str) or not re.match(r'^[a-z0-9-]+$', fm['name']): return False,'bad name', fm, text
+    if not isinstance(fm['description'], str) or not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
 
 def discovered_skills(root):

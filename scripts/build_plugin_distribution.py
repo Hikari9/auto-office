@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -20,11 +21,15 @@ def file_map(root: Path) -> dict[str, bytes]:
     """Expected distributed paths -> canonical bytes (no separate authored copies)."""
     cfg = json.loads((root / "plugin-distribution.json").read_text(encoding="utf-8"))
     visible = cfg["public_skills"]
-    assert len(visible) == len(set(visible)) == 16
-    assert set(visible).isdisjoint(cfg["retired_skills"])
+    if len(visible) != 16 or len(set(visible)) != 16:
+        raise ValueError("plugin-distribution.json must list exactly 16 unique public skills")
+    if not set(visible).isdisjoint(cfg["retired_skills"]):
+        raise ValueError("a public skill is also listed as retired")
     result: dict[str, bytes] = {}
 
     def include(path: Path, destination: str | None = None) -> None:
+        if path.is_symlink():
+            raise ValueError(f"symlinks are not allowed in the plugin source: {path.relative_to(root)}")
         if not path.is_file() or any(part in {"__pycache__", ".pytest_cache"} for part in path.parts):
             return
         if path.suffix in {".pyc", ".pyo"} or path.name == ".DS_Store":
@@ -61,6 +66,17 @@ def file_map(root: Path) -> dict[str, bytes]:
     return result
 
 
+def retired_reference_errors(dist: Path, retired: list[str]) -> list[str]:
+    """Public skills must not point users at a retired skill the plugin does not ship."""
+    errors = []
+    for doc in sorted((dist / "skills").glob("*/SKILL.md")):
+        text = doc.read_text(encoding="utf-8")
+        for name in retired:
+            if re.search(rf"(?:skills/|\.\./|`){re.escape(name)}(?![\w-])", text):
+                errors.append(f"{doc.relative_to(dist).as_posix()}: references retired skill {name}")
+    return errors
+
+
 def canonical_source(root: Path, path: str) -> Path | None:
     """Map a generated entry to its authored source; metadata is generated."""
     if path == "skills/auto-office/SKILL.md":
@@ -95,6 +111,7 @@ def check(root: Path = ROOT) -> list[str]:
     for name in cfg["retired_skills"]:
         if not (root / "skills" / name / "SKILL.md").is_file():
             errors.append(f"canonical retired resource missing: skills/{name}/SKILL.md")
+    errors += retired_reference_errors(dist, cfg["retired_skills"])
     claude = json.loads((root / ".claude-plugin/marketplace.json").read_text())
     codex = json.loads((root / ".agents/plugins/marketplace.json").read_text())
     if claude["plugins"][0].get("source") != "./plugin-dist":
