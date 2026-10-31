@@ -616,6 +616,18 @@ def test_a_review_change_the_user_recorded_is_never_recovered_even_with_quota_au
     assert sweep(cold) == []  # the evidence qualifies, but the user made the change: the user's decision stands
 
 
+def test_a_re_probe_in_flight_keeps_a_review_route_down_until_its_reservation_is_orphaned(cold):
+    review_fallback(cold, CODEX)
+    probe_pass(cold, CODEX, FUTURE)
+    with db.transaction(cold.con):  # a re-probe of the route is reserved after the pass
+        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
+                         "VALUES('probe:re-probe','codex','gpt-6.1-sol','high','pending','2999-06-01T00:00:00+00:00')")
+    during = parse_iso("2999-06-01T00:00:01+00:00")  # the reservation is fresh: routing rejects the route on it
+    assert routechange.sweep_recovered(cold.con, run(cold), now=during) == []
+    later = parse_iso("3000-01-01T00:00:00+00:00")  # never recorded and past its timeout: the pass stands
+    assert len(routechange.sweep_recovered(cold.con, run(cold), now=later)) == 1
+
+
 def skip_decision(category=None):
     """A review decision whose preferred primary (CODEX) was rejected and whose selection chose a luna route."""
     primary = {"harness": "codex", "model_id": "gpt-6.1-sol", "effort": "high", "harness_version": "1.0.0"}

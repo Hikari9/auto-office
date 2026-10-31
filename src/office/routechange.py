@@ -327,23 +327,30 @@ def _role(con, row, payload: dict) -> str | None:
     return d[0] if d else None
 
 
-def _newest_probe(con, harness: str | None, model: str, effort: str | None) -> dict | None:
+def _probe_fresh(probe: dict, now: datetime) -> bool:
+    from office import route_probe  # imported here, as in _invocation_model: route_probe imports candidates
+    defaults = route_policy.DISCOVERY_DEFAULTS
+    return route_probe._is_fresh(probe, defaults["probe_ttl_days"], defaults["probe_timeout_s"], now)
+
+
+def _newest_probe(con, harness: str | None, model: str, effort: str | None, now: datetime) -> dict | None:
     """The newest probe of a route's invocation and effort, whatever its profile or harness version. Routing reads the
-    exact fingerprint; this route-level view only errs toward keeping a route down."""
-    row = con.execute("SELECT result, reason_class, probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
-                      "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND probed_at IS NOT NULL "
-                      "ORDER BY probed_at DESC LIMIT 1", (harness or "", model, effort or "")).fetchone()
-    return dict(row) if row else None
+    exact fingerprint; this route-level view only errs toward keeping a route down. An orphaned pending reservation
+    (its probe never recorded, past its timeout) no longer speaks, so it is skipped."""
+    rows = con.execute("SELECT result, reason_class, probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
+                       "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND probed_at IS NOT NULL "
+                       "ORDER BY probed_at DESC", (harness or "", model, effort or "")).fetchall()
+    for row in rows:
+        probe = dict(row)
+        if probe["result"] != "pending" or _probe_fresh(probe, now):
+            return probe
+    return None
 
 
 def _probe_keeps_route_down(con, harness: str | None, model: str, effort: str | None, now: datetime) -> bool:
     """A newest probe that is not a pass and still fresh keeps the route down: routing rejects it on that probe."""
-    from office import route_probe  # imported here, as in _invocation_model: route_probe imports candidates
-    probe = _newest_probe(con, harness, model, effort)
-    if probe is None or probe["result"] == "pass":
-        return False
-    defaults = route_policy.DISCOVERY_DEFAULTS
-    return route_probe._is_fresh(probe, defaults["probe_ttl_days"], defaults["probe_timeout_s"], now)
+    probe = _newest_probe(con, harness, model, effort, now)
+    return probe is not None and probe["result"] != "pass" and _probe_fresh(probe, now)
 
 
 def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tuple[str, datetime] | None:
@@ -376,7 +383,7 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
     # Live at the notice: set before it and not refreshed since (a refresh after it leaves the skip's cause unknown).
     if limit and parse_iso(limit[1]) <= created < parse_iso(limit[0]):
         return "cooldown lapsed", parse_iso(limit[0])
-    latest = _newest_probe(con, harness, model, effort)
+    latest = _newest_probe(con, harness, model, effort, now)
     if latest is None or latest["result"] != "pass" or parse_iso(latest["probed_at"]) <= created:
         return None
     return "re-probe passed", max([parse_iso(latest["probed_at"])] + expiries)
