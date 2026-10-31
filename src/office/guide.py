@@ -432,13 +432,22 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     return res
 
 
+LANE_REVIEW_SPEC = {"convergence_review": "convergence", "visual": "visual"}  # gate kind -> `<scope>:<kind>` argument
+
+
 def _stuck_reply_next(reply: dict) -> str | None:
-    """The command that relaunches a task's code review on the same revision once its reply stayed unsettled past the
-    hard bound (#918). None for other reviews, which keep their own `next:`."""
-    if reply["kind"] != "code_review" or not reply["task_id"]:
-        return None
-    return (f"office revoke {reply['id']}, then office review {reply['task_id']} "
-            "to relaunch the review on the same revision")
+    """The command that re-runs a stuck reviewer on the same revision once its reply stayed unsettled past the hard
+    bound (#918): revoke the reviewer, then review again. A task visual review has no same-revision re-run, so None."""
+    did, kind = reply["id"], reply["kind"]
+    if kind == "plan_review":
+        return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
+    if reply["scope"] and kind in LANE_REVIEW_SPEC:
+        spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
+        return f"office revoke {spec}, then office review {spec} to re-run the review on the same revision"
+    if kind == "code_review" and reply["task_id"]:
+        return (f"office revoke {did}, then office review {reply['task_id']} "
+                "to relaunch the review on the same revision")
+    return None
 
 
 def add_bug_hints(con, run: dict, res: Result) -> Result:

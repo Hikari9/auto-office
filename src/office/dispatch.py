@@ -1749,10 +1749,11 @@ def _reply_complete(run: dict, dispatch: dict, data: bytes) -> bool:
 
 def reply_pending(con, run: dict) -> list[dict]:
     """Reviewer replies written to disk whose dispatch is still open, oldest first: `id`, `task_id`, `kind` (its gate
-    kind) and `quiet` (seconds since the last write). A live watch ingests a reply once it settles (#918); this only reads."""
+    kind), `scope` (its lane or shared scope, else None) and `quiet` (seconds since the last write). A live watch ingests
+    a reply once it settles (#918); this only reads."""
     now = time.time()
     out = []
-    for row in con.execute("SELECT d.id, d.task_id, g.kind FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+    for row in con.execute("SELECT d.id, d.task_id, g.kind, g.scope FROM dispatches d JOIN gates g ON g.id=d.gate_id "
                            "WHERE d.run_id=? AND d.launcher='herdr' AND d.ended_at IS NULL AND d.status='running' "
                            "ORDER BY d.started_at", (run["id"],)).fetchall():
         try:
@@ -1760,7 +1761,8 @@ def reply_pending(con, run: dict) -> list[dict]:
         except OSError:
             continue
         if info.st_size:
-            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "quiet": now - info.st_mtime})
+            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "scope": row["scope"],
+                        "quiet": now - info.st_mtime})
     return out
 
 
