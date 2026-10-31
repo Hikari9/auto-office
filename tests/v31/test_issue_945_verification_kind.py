@@ -35,16 +35,27 @@ def test_criterion_text_is_cleaned_in_the_summary_too():
     assert lines == ["verified-against-fakes: ship it", "not verified live: ship it (verified-against-fakes)"]
 
 
-@pytest.mark.parametrize("kind", [None, "", "verified", "Verified-Live", "met", ["verified-live"]])
+@pytest.mark.parametrize("kind", [None, "", "verified", "Verified-Live", "met", ["verified-live"],
+                                  " verified-live", "verified-live ", "verified-live\n"])
 def test_criterion_without_a_known_kind_is_rejected(kind):
     with pytest.raises(ValueError, match=NO_LABEL + re.escape(f"('deploy hook', {kind!r})")):
         closeout.criteria_report([("a", LIVE), ("deploy hook", kind)])
 
 
-@pytest.mark.parametrize("item", [None, "a", ("a",), ("a", LIVE, "extra")])
+@pytest.mark.parametrize("item", [None, "a", ("a",), ("a", LIVE, "extra"), ["a", LIVE]])
 def test_malformed_criterion_entry_is_rejected_as_a_value_error(item):
-    with pytest.raises(ValueError, match=NO_LABEL):
+    with pytest.raises(ValueError, match=NO_LABEL + re.escape(repr(item))):
         closeout.criteria_report([item])
+
+
+@pytest.mark.parametrize("cp", [0x00, 0x1F, 0x7F, 0x80, 0x9F, 0xAD, 0x61C, 0x180E, 0x200B, 0x200F, 0x202A, 0x202E,
+                                0x2060, 0x2064, 0x2066, 0x2069, 0xFEFF, 0xFFF9, 0xFFFB, 0xE0001, 0xE007F])
+def test_every_unprintable_code_point_is_stripped(cp):
+    assert closeout.clean_text(f"a{chr(cp)}b") == "a b"
+
+
+def test_visible_neighbours_of_the_unprintable_ranges_are_kept():
+    assert closeout.clean_text("a¬b⁥c") == "a¬b⁥c"
 
 
 def test_empty_report_is_rejected():
@@ -62,7 +73,7 @@ def test_generator_of_criteria_is_fully_reported():
     assert lines == ["verified-live: a", "verified-live: b", "all 2 acceptance criteria verified live"]
 
 
-@pytest.mark.parametrize("text", ["", "   ", None, "\x1b[0m", "\x07‮"])
+@pytest.mark.parametrize("text", ["", "   ", None, "\x1b[0m", "\x07‮", 123, b"ship", ["ship"]])
 def test_criterion_without_printable_text_is_rejected(text):
     with pytest.raises(ValueError, match=NO_LABEL):
         closeout.criteria_report([(text, LIVE)])

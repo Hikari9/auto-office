@@ -24,8 +24,8 @@ _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 
 _VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
-# Terminal escape sequences, C0/C1 controls, bidi overrides and zero-width characters.
-_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿]")
+# Terminal escape sequences, C0/C1 controls, bidi and format characters (zero-width, invisible, tag).
+_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\U000e0000-\U000e007f]")
 
 
 def clean_text(text: str) -> str:
