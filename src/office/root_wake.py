@@ -187,6 +187,12 @@ def _pane_lock(pane: str):
     return _flock(f"pane:{pane}", paths.state_home() / "root-wake-locks" / f"{name}.lock")
 
 
+def _native_proc_lock(key: str):
+    """Fence a native Claude root's process binding across a wake and rebind."""
+    name = sha256_obj(("proc", key))[:32]
+    return _flock(f"proc:{key}", paths.state_home() / "root-wake-locks" / f"{name}.lock")
+
+
 def _delivery_lock(run_id: str):
     """Serializes the final pre-send check and prompt with --wake-off and attach."""
     return _flock(f"run:{run_id}", paths.run_dir(run_id) / "root-wake.deliver.lock")
@@ -197,10 +203,10 @@ def rebind_fence(con, keys):
     """Held by office start/resume while they move the session binding: locks
     every Herdr pane among the caller's session keys, with no lookup first, so
     no wake to that pane can be between its final check and its send."""
-    panes = sorted({s for h, s in keys if h == "herdr" and s})
+    targets = sorted({(h, s) for h, s in keys if h in ("herdr", "proc") and s})
     with contextlib.ExitStack() as stack:
-        for pane in panes:
-            stack.enter_context(_pane_lock(pane))
+        for harness, ident in targets:
+            stack.enter_context(_pane_lock(ident) if harness == "herdr" else _native_proc_lock(ident))
         yield
 
 
@@ -259,6 +265,57 @@ def _off_marker(run_id: str) -> Path:
     return paths.run_dir(run_id) / "root-wake.off"
 
 
+def _native_proc_key() -> str | None:
+    """Only a real Claude parent process is eligible for native Stop-hook wake."""
+    key = discovery.process_key()
+    return key if key and key.split(":", 1)[0].lower() == "claude" else None
+
+
+def _native_hook_installed() -> bool:
+    """Do not promise a wake the Claude Code host has not been configured to run."""
+    from office import install
+    status = install.integration_status("claude")
+    return any(i["id"] == "turn.stop" and i["state"] == "current"
+               for i in status.get("items", []))
+
+
+def _attach_native(con, run: dict) -> str:
+    """Register this already-bound Claude root, never an arbitrary shell or worker."""
+    from office.state import Refused
+    key = _native_proc_key()
+    if not key:
+        raise Refused("wake-no-pane", "no verified Claude process for the native Stop wake path",
+                      next_step="office wait")
+    if not _native_hook_installed():
+        raise Refused("wake-hook-missing", "Claude Stop/asyncRewake hook is not installed",
+                      next_step="office install --only claude --item turn.stop, then office resume")
+    with _native_proc_lock(key), _delivery_lock(run["id"]):
+        with db.transaction(con):
+            if not con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='proc' "
+                               "AND session_id=? AND ended_at IS NULL", (run["id"], key)).fetchone():
+                raise Refused("wake-unbound", "this Claude process is not bound to the run as its orchestrator")
+            if discovery.executor_session_dispatch(con, [("proc", key)]):
+                raise Refused("wake-worker", "an executor cannot attach root wake")
+            baseline = _authoritative_action_signature(con, run)
+            con.execute("INSERT INTO root_wake_bindings(run_id, harness, session_id, pane_id, agent_name, enabled, "
+                        "generation, registered_at, last_event_seq, last_action_signature) VALUES(?, 'proc', ?, '', '', 1, 1, ?, "
+                        "(SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?), ?) "
+                        "ON CONFLICT(run_id) DO UPDATE SET harness='proc', session_id=excluded.session_id, "
+                        "pane_id='', agent_name='', enabled=1, generation=root_wake_bindings.generation+1, "
+                        "registered_at=excluded.registered_at, supervisor_pid=NULL, "
+                        "last_action_signature=excluded.last_action_signature",
+                        (run["id"], key, now_iso(), run["id"], baseline))
+            # Re-arm receipts that were not confirmed by a previous transport;
+            # a claimed prompt remains ambiguous and is not replayed.
+            con.execute("UPDATE root_wake_intents SET state='pending', token=NULL, lease_until=NULL, "
+                        "not_before=NULL WHERE run_id=? AND state='awaiting_attachment'",
+                        (run["id"],))
+            con.execute("UPDATE root_wake_intents SET state='awaiting_attachment', token=NULL, "
+                        "lease_until=NULL, last_error='root binding replaced; inspect original session' "
+                        "WHERE run_id=? AND state='claimed'", (run["id"],))
+    return "auto-wake enabled for Claude native Stop/asyncRewake (starts when this root turn ends)"
+
+
 def arm_on_resume(con, run: dict, *, explicit: bool = False) -> str:
     """Default wake for `office resume`. Never refuses: a root that cannot be verified resumes unarmed.
     `explicit` is `--auto-wake`, the only way to re-arm after `--wake-off`."""
@@ -281,8 +338,7 @@ def attach(con, run: dict, *, off: bool = False) -> str:
         raise Refused("wake-worker", "an executor cannot attach the root wake supervisor")
     pane = os.environ.get("HERDR_PANE_ID")
     if not off and not pane:
-        raise Refused("wake-no-pane", "auto-wake pilot requires the active HERDR_PANE_ID; no detached root launch",
-                      next_step="office resume without --auto-wake")
+        return _attach_native(con, run)
     if off:
         _off_marker(run["id"]).touch()
         with _delivery_lock(run["id"]), db.transaction(con):
@@ -515,6 +571,20 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
                              error[:300], until, attempts - 1 if defer else attempts, run_id, seq, token))
 
 
+def _wake_message(run: dict, seqs: list[int], action: str, human: bool) -> str:
+    """The same authority-guarded continuation for both verified transports."""
+    guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
+             "waiver, approval, or merge may be inferred." if human else "")
+    msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
+           f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
+           "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
+           "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
+           + guard)
+    if action.startswith(("ctx-high:", "office.reinstalled:")):
+        msg += "\n\n" + action
+    return msg
+
+
 def poll(con, run: dict) -> str:
     """One non-model supervisor tick; no authority or work dispatch happens here."""
     from office import dispatch
@@ -523,6 +593,9 @@ def poll(con, run: dict) -> str:
     if batch is None:
         return "no-action"
     binding, seqs, token, _, _, _ = batch
+    if binding["harness"] != "herdr":
+        _finish(con, run["id"], seqs, token, "defer", "not a Herdr root binding")
+        return "unsupported"
     try:
         # Revalidate current run, root ownership and registered pane immediately
         # before touching Herdr, never trust a stale session id or an output pane.
@@ -571,16 +644,7 @@ def poll(con, run: dict) -> str:
                 _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
                 return "no-action"
             signature, action, human = current
-            guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
-                     "waiver, approval, or merge may be inferred."
-                     if human else "")
-            msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
-                   f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
-                   "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
-                   "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
-                   + guard)
-            if action.startswith(("ctx-high:", "office.reinstalled:")):
-                msg += "\n\n" + action
+            msg = _wake_message(run, seqs, action, human)
             # Herdr prompt landed != root observation. The next `office context`
             # advances the distinct observed cursor; no repeated model keepalives.
             landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])
@@ -604,7 +668,7 @@ def observe(con, run: dict) -> None:
     if os.environ.get("OFFICE_DISPATCH_ID"):
         return
     binding = _binding(con, run["id"])
-    if not binding or ("herdr", binding["session_id"]) not in discovery.session_keys():
+    if not binding or (binding["harness"], binding["session_id"]) not in discovery.session_keys():
         return
     with db.transaction(con):
         # `claimed` too: Herdr's landing confirmation takes seconds, and a root
@@ -621,7 +685,7 @@ def record_root_activity(con, run: dict, *, before: int, command: str) -> None:
     The authoritative task/gate state remains the only completion evidence.
     """
     binding = _binding(con, run["id"])
-    if not binding or os.environ.get("OFFICE_DISPATCH_ID") or ("herdr", binding["session_id"]) not in discovery.session_keys():
+    if not binding or os.environ.get("OFFICE_DISPATCH_ID") or (binding["harness"], binding["session_id"]) not in discovery.session_keys():
         return
     latest = con.execute("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]
     if latest <= before:
@@ -646,7 +710,11 @@ def metrics(con, run: dict) -> dict:
                       (run["id"],)).fetchone()
     last = dict(row) if row else None
     delay = int((parse_iso(last["delivered_at"]) - parse_iso(last["event_at"])).total_seconds() * 1000) if last else None
-    return {"enabled": True, "harness": binding["harness"], "pane": binding["pane_id"],
+    return {"enabled": True, "harness": binding["harness"],
+            "transport": "claude-asyncRewake" if binding["harness"] == "proc" else "herdr",
+            "listener_active": (bool(binding["supervisor_pid"]) and pid_alive(binding["supervisor_pid"]))
+            if binding["harness"] == "proc" else True,
+            "pane": binding["pane_id"],
             "generation": binding["generation"], "last_event_seq": binding["last_event_seq"],
             "last_delivery": last, "last_delivery_ms": delay}
 
@@ -655,6 +723,8 @@ def _unarmed_line(con, run: dict) -> str:
     if _off_marker(run["id"]).exists():
         return "wake: off (--wake-off); office resume --auto-wake re-arms it"
     if not os.environ.get("HERDR_PANE_ID"):
+        if _native_proc_key() and not _native_hook_installed():
+            return "wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"
         return "wake: unavailable (not inside a Herdr pane); use office wait"
     return "wake: unavailable (this pane is not a verified bound Claude root); office resume from it arms wake"
 
@@ -671,10 +741,17 @@ def lines(con, run: dict) -> list[str]:
     waiting = counts.get("pending", 0) + counts.get("retry", 0) + counts.get("claimed", 0)
     failed = counts.get("awaiting_attachment", 0)
     delivered = counts.get("delivered", 0)
-    text = (f"wake: armed (Claude agent {binding['agent_name']} in Herdr pane {binding['pane_id']}); "
-            f"queued {waiting}, delivered/unobserved {delivered}, awaiting attachment {failed}")
+    if binding["harness"] == "proc":
+        pid = binding["supervisor_pid"]
+        phase = "listener active" if pid and pid_alive(pid) else "arms on next Claude Stop"
+        text = (f"wake: armed (Claude native Stop/asyncRewake; {phase}); "
+                f"queued {waiting}, delivered/unobserved {delivered}, awaiting attachment {failed}")
+    else:
+        text = (f"wake: armed (Claude agent {binding['agent_name']} in Herdr pane {binding['pane_id']}); "
+                f"queued {waiting}, delivered/unobserved {delivered}, awaiting attachment {failed}")
     if failed:
-        text += "; next: inspect pane before office resume"
+        text += ("; next: inspect native Claude session before office resume --auto-wake"
+                 if binding["harness"] == "proc" else "; next: inspect pane before office resume")
     last_ms = metrics(con, run).get("last_delivery_ms")
     if last_ms is not None:
         text += f"; last completion wake {last_ms}ms"
@@ -743,6 +820,8 @@ def ensure(run: dict) -> None:
         binding = _binding(con, run["id"])
         if not binding or state.is_terminal(state.get_run(con, run["id"])):
             return
+        if binding["harness"] == "proc":
+            return  # the native Claude Stop hook is itself the async watcher
         if binding["supervisor_pid"] and pid_alive(binding["supervisor_pid"]):
             return
         log_path = paths.run_dir(run["id"]) / "root-wake.log"
@@ -811,3 +890,164 @@ def supervise(run_id: str, *, once: bool = False) -> int:
             time.sleep(_retry_delay(failures))
     finally:
         lock.close()
+
+
+# #940: non-Herdr Claude Code root continuation. Native asyncRewake is a
+# *host-managed* idle callback, never a second model client or a shell injection.
+# Its Stop hook is a single background process with a bounded lifetime; the
+# same event intents, action signatures and receipts as Herdr remain authority.
+NATIVE_WATCH_SECONDS = 86380  # below the configured 24h Claude hook timeout
+
+
+def _native_valid(con, run: dict, key: str, session: str, generation: int) -> bool:
+    binding = _binding(con, run["id"])
+    return bool(binding and binding["harness"] == "proc"
+                and binding["session_id"] == key and binding["agent_name"] == session
+                and binding["generation"] == generation and not _off_marker(run["id"]).exists()
+                and not state.is_terminal(state.get_run(con, run["id"]))
+                and con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness='proc' "
+                                "AND session_id=? AND ended_at IS NULL", (run["id"], key)).fetchone())
+
+
+def _native_poll(con, run: dict, key: str, session: str, generation: int) -> str:
+    """One safe native receipt. Only the *caller*'s exit 2 signals Claude Code."""
+    reconcile(con, run)
+    batch = _claim(con, run)
+    if batch is None:
+        return "no-action"
+    _, seqs, token, _, _, _ = batch
+    # The lock fences prompt.started, --wake-off and rebinding against the
+    # final check, stderr write and durable receipt (exactly one wake intent).
+    with _native_proc_lock(key), _delivery_lock(run["id"]):
+        if not _native_valid(con, run, key, session, generation):
+            _finish(con, run["id"], seqs, token, "defer", "root resumed or rebound before wake")
+            return "detached"
+        current = _actionable_now(con, run, seqs)
+        live = _binding(con, run["id"])
+        if current is None or current[0] == live["last_action_signature"]:
+            _finish(con, run["id"], seqs, token, "settled", "transition settled before native wake")
+            return "no-action"
+        signature, action, human = current
+        try:
+            # Documented Claude Code asyncRewake contract: exit 2 and stderr
+            # become a system reminder in the *existing idle* session.
+            sys.stderr.write(_wake_message(run, seqs, action, human) + "\n")
+            sys.stderr.flush()
+        except OSError as exc:
+            _finish(con, run["id"], seqs, token, "awaiting_attachment",
+                    f"native hook output ambiguous: {type(exc).__name__}; inspect session")
+            return "unknown"
+        _finish(con, run["id"], seqs, token, "delivered", signature=signature,
+                generation=generation)
+        return "delivered"
+
+
+def native_prompt_started(payload: dict) -> None:
+    """An actual new user prompt invalidates the former idle Stop watcher.
+
+    Prompt-submit already has a managed Claude hook; no turn is synthesized.
+    Its immediate action cannot be mistaken for an idle agent to wake later.
+    """
+    if os.environ.get("OFFICE_DISPATCH_ID") or not payload.get("session_id"):
+        return
+    key = _native_proc_key()
+    if not key:
+        return
+    con = db.connect()
+    try:
+        row = con.execute("SELECT run_id FROM session_bindings WHERE harness='proc' AND session_id=? "
+                          "AND ended_at IS NULL", (key,)).fetchone()
+        if not row:
+            return
+        run_id = row[0]
+        with _native_proc_lock(key), _delivery_lock(run_id), db.transaction(con):
+            binding = _binding(con, run_id)
+            if binding and binding["harness"] == "proc" and binding["session_id"] == key \
+                    and binding["agent_name"] == payload["session_id"]:
+                con.execute("UPDATE root_wake_bindings SET generation=generation+1, "
+                            "supervisor_pid=NULL WHERE run_id=? AND generation=?",
+                            (run_id, binding["generation"]))
+                con.execute("UPDATE root_wake_intents SET state='pending', token=NULL, "
+                            "lease_until=NULL, not_before=NULL WHERE run_id=? AND state='claimed'",
+                            (run_id,))
+    finally:
+        con.close()
+
+
+def native_stop_hook(payload: dict, *, timeout: float = NATIVE_WATCH_SECONDS,
+                     poll_seconds: float = MIN_POLL) -> int:
+    """Wait inside Claude's async Stop hook; exit 2 only for a verified event.
+
+    An executor, a stray shell, a rebound root, and a different Claude session
+    cannot select a run from this hook. A duplicate Stop hook exits quietly.
+    """
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        return 0
+    session = payload.get("session_id")
+    key = _native_proc_key()
+    if not isinstance(session, str) or not session or not key:
+        return 0
+    con = db.connect()
+    try:
+        row = con.execute("SELECT run_id FROM session_bindings WHERE harness='proc' AND session_id=? "
+                          "AND ended_at IS NULL", (key,)).fetchone()
+        if not row:
+            return 0
+        run = state.get_run(con, row[0])
+        if not run or state.is_terminal(run):
+            return 0
+        if discovery.executor_session_dispatch(con, [("proc", key)]) or discovery.task_worktree(
+                con, Path(payload.get("cwd") or os.getcwd())):
+            return 0
+        binding = _binding(con, run["id"])
+        if not binding or binding["harness"] != "proc" or binding["session_id"] != key or \
+                (binding["agent_name"] and binding["agent_name"] != session):
+            return 0
+        from office import version
+        if not version.serves(run["office_version"], version.current()):
+            return 0
+        # No second background watcher when Claude re-enters and triggers an
+        # overlapping Stop. The wait is bounded so a previous hook can retire.
+        lock_path = paths.run_dir(run["id"]) / "root-wake.native.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock:
+            for _ in range(20):
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.1)
+            else:
+                return 0
+            try:
+                with _native_proc_lock(key), _delivery_lock(run["id"]), db.transaction(con):
+                    live = _binding(con, run["id"])
+                    if not live or live["harness"] != "proc" or live["session_id"] != key or \
+                            (live["agent_name"] and live["agent_name"] != session):
+                        return 0
+                    con.execute("UPDATE root_wake_bindings SET agent_name=?, supervisor_pid=? "
+                                "WHERE run_id=? AND generation=?", (session, os.getpid(), run["id"], live["generation"]))
+                    generation = live["generation"]
+                # The slow 3.15.0 stall/review watchdog is *reused*, not reimplemented.
+                threading.Thread(target=_watchdog_loop, args=(run["id"],), daemon=True,
+                                 name=f"office-native-stall-{run['id'][:8]}").start()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if not _native_valid(con, run, key, session, generation):
+                        return 0
+                    outcome = _native_poll(con, run, key, session, generation)
+                    if outcome == "delivered":
+                        return 2
+                    if outcome in ("detached", "unknown"):
+                        return 0
+                    time.sleep(poll_seconds)
+                return 0
+            finally:
+                with db.transaction(con):
+                    con.execute("UPDATE root_wake_bindings SET supervisor_pid=NULL WHERE run_id=? "
+                                "AND harness='proc' AND session_id=? AND agent_name=? AND generation=? "
+                                "AND supervisor_pid=?",
+                                (run["id"], key, session, generation, os.getpid()))
+                fcntl.flock(lock, fcntl.LOCK_UN)
+    finally:
+        con.close()
