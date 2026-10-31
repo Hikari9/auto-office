@@ -18,14 +18,15 @@ from office.state import Refused, Usage
 
 
 def git(repo, *args):
-    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+    return subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", *args], check=True,
                           capture_output=True, text=True).stdout.strip()
 
 
 def fixture_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    git(repo, "init", "-b", "main")
+    git(repo, "init")
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
     git(repo, "config", "user.name", "Batch Test")
     git(repo, "config", "user.email", "batch@example.invalid")
     version = repo / "src" / "office"
@@ -451,19 +452,37 @@ def test_cli_routing_without_active_run(tmp_path, monkeypatch, capsys):
     assert "require --batch" in capsys.readouterr().out
 
 
-def test_suite_runs_without_credentials_or_office_env(tmp_path, monkeypatch):
+def _alive(pid: int) -> bool:
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+
+def _wait_dead(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_suite_runs_with_an_allowlisted_environment_only(tmp_path, monkeypatch):
     repo = fixture_repo(tmp_path)
-    monkeypatch.setenv("GH_TOKEN", "ghp_leak")
-    monkeypatch.setenv("OFFICE_DISPATCH_ID", "D1")
-    dump = tmp_path / "env.txt"
+    planted = {"GH_TOKEN": "ghp_leak", "GITHUB_REPOSITORY": "x/y", "DB_PASSWORD": "pw", "MY_SECRET": "s",
+               "API_KEY": "k", "AWS_REGION": "us-east-1", "SSH_AUTH_SOCK": "/tmp/agent", "OFFICE_DISPATCH_ID": "D1",
+               "GPG_KEY_ID": "ABC", "DATABASE_URL": "postgres://u:pw@h/db", "github_token": "lower"}
+    for name, value in planted.items():
+        monkeypatch.setenv(name, value)
     script = tmp_path / "dump_env.sh"
     script.write_text('env > "$1"\n')
+    dump = tmp_path / "env.txt"
     manifest = {"id": "env-check", "timeout_seconds": 60, "full_suite": ["sh", str(script), str(dump)]}
     code, _ = batch._run_full(repo, git(repo, "rev-parse", "origin/main"), manifest, tmp_path / "batches")
     assert code == 0
-    text = dump.read_text()
-    assert "ghp_leak" not in text and "OFFICE_DISPATCH_ID" not in text
-    assert "PATH=" in text
+    names = {line.split("=", 1)[0] for line in dump.read_text().splitlines() if "=" in line}
+    assert not (names & set(planted))
+    assert {"PATH", "HOME"} <= names
+    assert f"HOME={Path.home()}" not in dump.read_text()
 
 
 def test_suite_timeout_kills_its_whole_process_group(tmp_path):
@@ -471,19 +490,42 @@ def test_suite_timeout_kills_its_whole_process_group(tmp_path):
     pidfile = tmp_path / "child.pid"
     script = tmp_path / "hang.sh"
     script.write_text('sleep 30 & echo $! > "$1"\nwait\n')
-    manifest = {"id": "timeout-check", "timeout_seconds": 2, "full_suite": ["sh", str(script), str(pidfile)]}
+    manifest = {"id": "timeout-check", "timeout_seconds": 5, "full_suite": ["sh", str(script), str(pidfile)]}
     started = time.monotonic()
+    code, log = batch._run_full(repo, git(repo, "rev-parse", "origin/main"), manifest, tmp_path / "batches")
+    assert code == 124 and time.monotonic() - started < 30
+    assert "timed out" in log.read_text()
+    assert _wait_dead(int(pidfile.read_text()))
+
+
+def test_background_child_does_not_outlive_a_passing_suite(tmp_path):
+    repo = fixture_repo(tmp_path)
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "leave.sh"
+    script.write_text('sleep 30 & echo $! > "$1"\nexit 0\n')
+    manifest = {"id": "leave-check", "timeout_seconds": 60, "full_suite": ["sh", str(script), str(pidfile)]}
     code, _ = batch._run_full(repo, git(repo, "rev-parse", "origin/main"), manifest, tmp_path / "batches")
-    assert code == 124
-    assert time.monotonic() - started < 20  # the 30s child must not hold the suite open
-    child = int(pidfile.read_text())
-    for _ in range(50):
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.1)
-    pytest.fail("the suite's child process survived its timeout")
+    assert code == 0
+    assert _wait_dead(int(pidfile.read_text()))
+
+
+def test_suite_that_cannot_start_is_a_red_result_not_a_traceback(tmp_path):
+    repo = fixture_repo(tmp_path)
+    manifest = {"id": "nostart", "timeout_seconds": 60, "full_suite": ["/nonexistent/suite-binary"]}
+    code, log = batch._run_full(repo, git(repo, "rev-parse", "origin/main"), manifest, tmp_path / "batches")
+    assert code == 127 and "could not start" in log.read_text()
+
+
+def test_each_suite_attempt_keeps_its_own_log(tmp_path):
+    repo = fixture_repo(tmp_path)
+    sha = git(repo, "rev-parse", "origin/main")
+    script = tmp_path / "fail.sh"
+    script.write_text("exit 1\n")
+    manifest = {"id": "logs", "timeout_seconds": 60, "full_suite": ["sh", str(script)]}
+    first = batch._run_full(repo, sha, manifest, tmp_path / "batches")[1]
+    second = batch._run_full(repo, sha, manifest, tmp_path / "batches")[1]
+    assert first != second
+    assert {p.name for p in (tmp_path / "batches" / "logs").iterdir()} == {f"full-{sha}-1.log", f"full-{sha}-2.log"}
 
 
 def test_compose_ignores_commit_signing_and_hooks(tmp_path, monkeypatch):
@@ -956,5 +998,209 @@ def test_compose_ignores_operator_merge_hooks(tmp_path, monkeypatch):
     # Fails only inside the throwaway compose checkout, so the fake GitHub merge in the repo still works.
     hook.write_text('#!/bin/sh\ncase "$PWD" in *office-batch-compose*) exit 1;; esac\nexit 0\n')
     hook.chmod(0o755)
+    git(repo, "config", "core.hooksPath", str(repo / ".git" / "hooks"))
     result = batch.land_batch(str(m), cwd=repo)
     assert result.data["batch"]["status"] == "green"
+
+
+def _stub_run_lane(monkeypatch, repo, m, snapshot):
+    data = json.loads(m.read_text())
+    data["lanes"] = [{"id": "R", "run": "run-e", "version_bump": True}]
+    m.write_text(json.dumps(data))
+    run = {"id": "run-e", "repo_root": str(repo)}
+    monkeypatch.setattr(batch, "_run_lane", lambda con, lane, repo_, base: (run, [("t1", 1), ("t2", 2)]))
+    monkeypatch.setattr(batch.paths, "runs_db", lambda: m)
+    monkeypatch.setattr("office.db.connect", lambda: type("C", (), {"close": lambda self: None})())
+    monkeypatch.setattr("office.db.transaction", lambda con: contextlib.nullcontext())
+    monkeypatch.setattr(batch.land, "_snapshot", snapshot)
+    monkeypatch.setattr(batch.land, "_land_lock", lambda r: contextlib.nullcontext())
+    tasks = {"t1": {"pr": {"number": 1}}, "t2": {"pr": {"number": 2}}}
+    updates, recorded = [], []
+    monkeypatch.setattr(batch.state, "get_task", lambda con, rid, tid: tasks[tid])
+    monkeypatch.setattr(batch.state, "update_task", lambda con, rid, tid, **fields: updates.append((tid, fields["pr"])))
+    monkeypatch.setattr(batch.state, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(batch.state, "get_run", lambda con, rid: {"id": rid, "landing": {}})
+    monkeypatch.setattr(batch.land, "_record", lambda con, r, **fields: recorded.append(fields))
+    return updates, recorded
+
+
+def test_run_lane_snapshot_with_tuples_still_merges(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    _stub_run_lane(monkeypatch, repo, m, lambda con, r: {"commit": "c", "gates": (("g", "pass"),)})
+    assert batch.land_batch(str(m), cwd=repo).data["batch"]["status"] == "green"
+
+
+def test_run_integration_changing_during_suite_recomposes(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    box = {"c": "c1"}
+    _stub_run_lane(monkeypatch, repo, m, lambda con, r: {"commit": box["c"]})
+
+    def suite(repo_, sha, manifest, folder):
+        box["c"] = "c2"  # the run's integration changes while the suite runs
+        return 0, folder / "x.log"
+
+    monkeypatch.setattr(batch, "_run_full", suite)
+    with pytest.raises(Refused, match="a run's integration changed"):
+        batch.land_batch(str(m), cwd=repo)
+    status = json.loads(batch._state_path(repo, "release-a").read_text())
+    assert status["status"] == "pending" and status["validated"] is None
+    assert events == []
+
+
+def test_retry_full_after_run_changed_recomposes_instead_of_reattesting(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    box = {"c": "c1"}
+    _stub_run_lane(monkeypatch, repo, m, lambda con, r: {"commit": box["c"]})
+    monkeypatch.setattr(batch, "_run_full", lambda repo_, sha, manifest, folder: (1, folder / "red.log"))
+    with pytest.raises(Refused, match="full suite exited 1"):
+        batch.land_batch(str(m), cwd=repo)
+    box["c"] = "c2"
+    with pytest.raises(Refused, match="integration changed since the composition"):
+        batch.land_batch(str(m), cwd=repo, retry_full=True)
+    assert json.loads(batch._state_path(repo, "release-a").read_text())["status"] == "pending"
+    assert events == []
+
+
+def test_lost_post_merge_observation_recovers_on_rerun(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    real_git = batch._git
+    failing = {"on": True}
+
+    def flaky(repo_, *args):
+        if failing["on"] and args == ("rev-parse", "origin/main") and events[-1:] == ["merge:2"]:
+            failing["on"] = False
+            raise Refused("batch-fetch-failed", "network dropped after the merge")
+        return real_git(repo_, *args)
+
+    monkeypatch.setattr(batch, "_git", flaky)
+    with pytest.raises(Refused, match="network dropped"):
+        batch.land_batch(str(m), cwd=repo)
+    assert json.loads(batch._state_path(repo, "release-a").read_text())["status"] == "blocked"
+    assert batch.land_batch(str(m), cwd=repo).data["batch"]["status"] == "green"
+    assert events.count("merge:1") == 1 and events.count("merge:2") == 1
+
+
+def test_crash_after_last_merge_then_main_moves_refuses_green(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    real_save = batch._save
+    crashed = {"on": True}
+
+    def save(path, data):
+        if crashed["on"] and data.get("status") == "green":
+            crashed["on"] = False
+            git(repo, "switch", "main")
+            git(repo, "fetch", "origin", "main")
+            git(repo, "reset", "--hard", "origin/main")
+            (repo / "external.txt").write_text("external\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-m", "external after the last merge")
+            git(repo, "push", "origin", "main")
+            raise RuntimeError("interrupted before the green record was saved")
+        real_save(path, data)
+
+    monkeypatch.setattr(batch, "_save", save)
+    with pytest.raises(RuntimeError):
+        batch.land_batch(str(m), cwd=repo)
+    with pytest.raises(Refused, match="is not the validated result of this batch"):
+        batch.land_batch(str(m), cwd=repo)
+    assert json.loads(batch._state_path(repo, "release-a").read_text())["status"] == "blocked"
+
+
+def test_validated_batch_that_merged_nothing_recomposes_when_main_moved():
+    manifest = {"id": "r", "base": "main", "version": "3.15.0", "version_file": "src/office/_version.py",
+                "changelog_file": "CHANGELOG.md", "full_suite": ["true"], "merge_method": "merge",
+                "lanes": [{"id": "A", "pr": 1}]}
+    record = {k: manifest[k] for k in ("base", "version", "version_file", "changelog_file", "full_suite", "merge_method")}
+    record.update(start="a" * 40, lanes=manifest["lanes"], completed=[], status="validated",
+                  validated={"sha": "x"}, composed="c" * 40, trees={"A": "t"}, run_snapshots={})
+    out = batch._resume(record, manifest, "b" * 40)
+    assert out["status"] == "pending" and out["validated"] is None
+
+
+def test_record_from_before_composed_checks_is_refused():
+    manifest = {"id": "r", "base": "main", "version": "3.15.0", "version_file": "src/office/_version.py",
+                "changelog_file": "CHANGELOG.md", "full_suite": ["true"], "merge_method": "merge",
+                "lanes": [{"id": "A", "pr": 1}]}
+    record = {k: manifest[k] for k in ("base", "version", "version_file", "changelog_file", "full_suite", "merge_method")}
+    record.update(start="a" * 40, lanes=manifest["lanes"], completed=["A"], status="merging", composed="c" * 40)
+    with pytest.raises(Refused, match="predates the composed-tree checks"):
+        batch._resume(record, manifest, "a" * 40)
+
+
+def test_corrupt_batch_record_is_refused_not_a_traceback(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    path = batch._state_path(repo, "release-a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    with pytest.raises(Refused, match="unreadable"):
+        batch.land_batch(str(m), cwd=repo)
+    assert events == []
+
+
+def test_stacked_pr_is_retargeted_only_after_its_checks_pass(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    _stub_run_lane(monkeypatch, repo, m, lambda con, r: {"commit": "c"})
+    prs[2]["base"] = "pr1"
+    seen = []
+    monkeypatch.setattr(batch.land, "_wait_checks",
+                        lambda run, number: seen.append(prs[2]["base"]) if number == 2 else None)
+    assert batch.land_batch(str(m), cwd=repo).data["batch"]["status"] == "green"
+    assert seen == ["pr1"] and prs[2]["base"] == "main"
+
+
+@pytest.mark.parametrize("sha", ["", "abc", "g" * 40])
+def test_malformed_pr_head_is_refused_before_merge(tmp_path, monkeypatch, sha):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    prs[1]["head"] = sha
+    with pytest.raises(Refused, match="no readable head SHA"):
+        batch.land_batch(str(m), cwd=repo)
+    assert events == []
+
+
+def test_unrelated_history_fails_compose_without_calling_it_a_conflict(tmp_path, monkeypatch):
+    repo, prs, events, m = setup_two(tmp_path, monkeypatch)
+    git(repo, "switch", "--orphan", "pr3")
+    (repo / "orphan.txt").write_text("unrelated\n")
+    git(repo, "add", "orphan.txt")
+    git(repo, "commit", "-m", "unrelated history")
+    prs[3] = {"head": git(repo, "rev-parse", "HEAD"), "files": [{"path": "orphan.txt"}],
+              "state": "OPEN", "base": "main", "draft": False}
+    git(repo, "switch", "main")
+    data = json.loads(m.read_text())
+    data["lanes"].append({"id": "C", "pr": 3, "land_after": ["B"]})
+    m.write_text(json.dumps(data))
+    with pytest.raises(Refused, match="merging #3 failed"):
+        batch.land_batch(str(m), cwd=repo)
+    assert events == []
+
+
+@pytest.mark.parametrize("heading,counts", [
+    ("## 3.15.0", True),
+    ("## [3.15.0] - 2026-10-31", True),
+    ("## v3.15.0", True),
+    ("##\n\n3.15.0", False),
+])
+def test_changelog_heading_forms(tmp_path, heading, counts):
+    repo = fixture_repo(tmp_path)
+    start = git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "office" / "_version.py").write_text('__version__ = "3.15.0"\n')
+    (repo / "CHANGELOG.md").write_text(f"# Changelog\n\n{heading}\n\n- batch\n\n## 3.14.0\n\n- initial\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "bump")
+    manifest = {"version": "3.15.0", "version_file": "src/office/_version.py", "changelog_file": "CHANGELOG.md"}
+    head = git(repo, "rev-parse", "HEAD")
+    if counts:
+        batch._verify_version(repo, start, head, manifest)
+    else:
+        with pytest.raises(Refused, match="needs exactly one 3.15.0 header"):
+            batch._verify_version(repo, start, head, manifest)
+
+
+def test_suite_log_and_run_snapshot_survive_a_real_red_then_retry(tmp_path):
+    repo = fixture_repo(tmp_path)
+    sha = git(repo, "rev-parse", "origin/main")
+    script = tmp_path / "fail.sh"
+    script.write_text("echo red\nexit 1\n")
+    manifest = {"id": "logs2", "timeout_seconds": 60, "full_suite": ["sh", str(script)]}
+    _, log = batch._run_full(repo, sha, manifest, tmp_path / "batches")
+    assert log.read_text().endswith("red\n") and log.stat().st_mode & 0o777 == 0o600
