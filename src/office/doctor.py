@@ -10,7 +10,9 @@ import sys
 import tomllib
 from pathlib import Path
 
-from office import adapters, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
+import yaml
+
+from office import adapters, closeout, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
 from office.result import Result
 
 
@@ -25,21 +27,51 @@ def _visual_capture_status() -> tuple[str, bool]:
     except ImportError:
         return ("visual capture: playwright missing (uv tool install 'auto-office[visual]'); "
                 "visual gates report CAPTURE_BLOCKED", False)
+    args: dict = {}
     try:
         from office import visual
+        # Match capture's optional OFFICE_CHROME override, without hanging doctor.
+        args = visual.launch_args()
         with sync_playwright() as playwright:
-            # Match capture's optional OFFICE_CHROME override, without hanging doctor.
-            browser = playwright.chromium.launch(**{**visual.launch_args(), "timeout": 10000})
+            browser = playwright.chromium.launch(**{**args, "timeout": 10000})
             browser.close()
     except Exception as error:
-        reason = (str(error).splitlines() or [type(error).__name__])[0][:240]
-        install = visual.missing_browser_install(error)
-        if install:
-            return (f"visual capture: Chromium headless shell missing ({reason}); "
-                    f"{install}", True)
-        return (f"visual capture: Chromium headless shell cannot launch ({reason}); "
-                "check Playwright browser installation and system dependencies", True)
+        reason = next((line for line in (closeout.clean_text(raw) for raw in str(error).splitlines()) if line),
+                      type(error).__name__)[:240]
+        if args.get("executable_path"):
+            # The launch used this binary, so the playwright install command would not fix it.
+            return (f"visual capture: Chrome at {args['executable_path']} cannot launch ({reason}); fix: check "
+                    "that it runs, or set OFFICE_CHROME to a working Chrome binary", True)
+        kind = "missing" if "Executable doesn't exist" in str(error) else "cannot launch"
+        return (f"visual capture: Chromium headless shell {kind} ({reason}); {_playwright_fix_hint()}", True)
     return "visual capture: playwright and Chromium headless shell available", False
+
+
+def _playwright_fix_hint() -> str:
+    deps = " --with-deps" if sys.platform.startswith("linux") else ""
+    return f"fix: {shlex.quote(sys.executable)} -m playwright install{deps} chromium-headless-shell"
+
+
+def _visual_review_enabled(config: dict | None) -> bool:
+    """Visual review is enabled when some gear preset funds browser verification (#942).
+
+    An unreadable config (None) fails closed: the launch failure counts.
+    """
+    if not isinstance(config, dict):
+        return True
+    presets = config.get("gear_presets") or {}
+    if not isinstance(presets, dict):
+        return True
+    return any(isinstance(p, dict) and bool(p.get("funded_browser_verification")) for p in presets.values())
+
+
+def _effective_config() -> dict | None:
+    from office import config as cfg
+    repo = paths.repo_identity()
+    try:
+        return cfg.resolve(repo[0] if repo else None)[0]
+    except (ValueError, yaml.YAMLError, OSError):
+        return None
 
 
 def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | None = None,
@@ -196,7 +228,15 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
     except (cli_runtimes.ManifestError, OSError) as exc:
         problems += 1
         res.add(f"CLI runtime TSV: invalid: {exc} (repair the TSV before office harness sync)")
-    visual_status, _ = _visual_capture_status()
+    visual_status, visual_problem = _visual_capture_status()
+    if visual_problem:
+        config = _effective_config()
+        if _visual_review_enabled(config):
+            problems += 1
+            if config is None:
+                visual_status += " (config unreadable; visual review assumed enabled)"
+        else:
+            visual_status += " (visual review is not enabled; not a failure)"
     res.add(visual_status)
     con = db.connect()
     try:

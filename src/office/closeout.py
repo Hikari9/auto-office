@@ -23,6 +23,60 @@ _DOC = re.compile(r"(^|/)(CHANGELOG|README)[^/]*$", re.IGNORECASE)
 _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 
+_VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
+# Terminal escape sequences, C0/C1 controls, bidi overrides and zero-width characters.
+_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
+
+
+def clean_text(text: str) -> str:
+    """One line of text safe to print: unprintable characters become spaces, whitespace collapses."""
+    return " ".join(_UNPRINTABLE.sub(" ", text).split())
+
+
+def visual_review_disclosures(con, run: dict) -> list[str]:
+    """One line per task whose required visual review did not finish with comparable evidence (#942).
+
+    A task is covered by its own legacy gate, or by the lane gate whose frozen members include it
+    (convergence lane gates have no task_id). A required review with no covering gate never ran.
+    """
+    from office import convergence, state, visual
+    required = [t for t in state.tasks(con, run["id"])
+                if t["status"] != "cancelled"
+                and visual.applicability(con, run, t, [])["status"] in ("required", "probe")]
+    if not required:
+        return []
+    latest: dict[str, dict] = {}
+    newest_unattributed: dict | None = None  # the newest lane gate that predates members_json
+    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
+                           "ORDER BY created_at, id", (run["id"],)).fetchall():
+        gate = dict(row)
+        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
+        if members is None:
+            newest_unattributed = gate
+            continue
+        for tid in members:
+            latest[tid] = gate
+    lines = []
+    for task in required:
+        tid = task["id"]
+        gate = latest.get(tid)
+        if newest_unattributed is not None and (gate is None or _order(gate) < _order(newest_unattributed)):
+            # The unattributed gate may have covered this task, and it is newer than any gate that did.
+            lines.append(f"visual review for {tid} unverifiable: gate {newest_unattributed['id']} has no recorded membership")
+        elif gate is None:
+            lines.append(f"visual review required for {tid} but never ran")
+        elif gate["status"] != "done" or gate["evidence_status"] not in _VISUAL_SATISFIED:
+            reason = (gate["status"] if gate["status"] != "done"
+                      else gate["evidence_status"] or gate["review_status"] or "no comparable evidence")
+            summary = clean_text(gate["summary"] or "")[:180]
+            lines.append(f"visual review skipped/degraded for {tid}: {reason}" + (f" ({summary})" if summary else ""))
+    return lines
+
+
+def _order(gate: dict) -> tuple[str, str]:
+    return (gate["created_at"], gate["id"])
+
+
 def done(summary: str) -> str:
     return f"office close done — {summary}"
 
