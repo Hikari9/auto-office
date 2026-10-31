@@ -126,6 +126,16 @@ def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
 
 
 @pytest.mark.approved
+def test_orchestrator_without_worker_env_can_change_route(live, monkeypatch):
+    monkeypatch.delenv("OFFICE_ROLE", raising=False)
+    monkeypatch.delenv("OFFICE_DISPATCH_ID", raising=False)
+    code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, env=EXTERNAL)
+    assert code == 0, out
+    candidate = _state(live.con())["task_route"]["candidate"]
+    assert (candidate["harness"], candidate["model_id"], candidate["effort"]) == ("claude", "sonnet", "high")
+
+
+@pytest.mark.approved
 def test_amend_route_with_as_relaunches_on_the_named_route(live):
     # The positive counterpart: `amend route` keeps working and records the named route.
     code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, env=EXTERNAL)
