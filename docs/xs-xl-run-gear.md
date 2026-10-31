@@ -67,22 +67,20 @@ Legacy pinned run presets retain their historical contracts.
 | L | 44 |
 | XL | 47 |
 
-User-approved soft **ideal executor ordering**, assuming all exact model+effort+harness
-routes qualify and quota is available. This is **not** a command to launch unavailable
-models, override factual gates, or prefer an expensive model regardless of task fit.
+The soft ideal executor slates live in [`catalog/executor-policy.yaml`](../catalog/executor-policy.yaml).
+Read the effective policy with:
 
-| Size | Preferred | Immediate same-model harness self-fallback | Next qualified alternative | Last qualified alternative |
-| --- | --- | --- | --- | --- |
-| XS | Claude Haiku 5.5 medium (34; conditional) | — | Gemini 3.8 Flash low (33) | GPT-6.1 Terra low (36; conditional) |
-| S | Gemini 3.8 Flash medium (40) | — | Claude Haiku 5.5 high (38; conditional) | GPT-6.1 Terra medium (41; conditional) |
-| M | **Claude Code** Sonnet 5.5 medium (41; currently non-dispatchable) | **agy** Sonnet 5.5 medium (41; exact same model/effort) | GPT-6.1 Terra medium (41; conditional) | OpenCode GLM-5.3-Flash max (42; conditional) |
-| L | **Claude Code** Sonnet 5.5 high (47) | **agy** Sonnet 5.5 high (47; same effort) | GPT-6.1 Terra high (44; conditional) | Gemini 4 Argon **medium** (conditional, exact score not yet verified) |
-| XL | Claude Code Opus 5.5 medium (51) | — | Codex GPT-6.1 Sol medium (48; discovery-only) | Gemini 4 Argon **high** (53; conditional) |
+```bash
+office route policy --effective --role executor
+```
 
-**Required guardrails:** Sonnet 5.5 Claude Code → agy is the only same-model
-harness fallback, at the **same effort**, immediately before switching model family.
-Claude Code Sonnet Medium cannot dispatch until its missing exact invocation/effort
-evidence is verified; a currently qualified agy variant may be selected instead.
+These preferences do not guarantee that a route is eligible or available.
+
+**Required guardrails:** For new gears, when eligible Claude Code and agy Sonnet 5.5
+routes have the same effort, the adaptive slate places agy immediately after Claude
+Code if Claude Code is within the displayed slate and agy does not already precede it.
+Adaptive selection may still choose another model for task fit; legacy runs retain
+their ordering. This applies to M and L as well as other new-gear task sizes.
 Reserve Opus 5.5 automatic executor routing for **genuinely XL subtasks**, even inside
 an XL parent run. No active MiMo routes. Haiku 5.5, Sol 6.1, Terra 6.1, Argon and
 GLM conditional rows are never promoted merely because they appear here.
@@ -160,14 +158,10 @@ The historical six presets (`direct`, `direct+review`, `light`, `quick`, `expres
 
 ## M executor Haiku High transition (#861, October 28, 2026)
 
-For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, OpenCode
-GLM-5.3 Flash Max, then Codex GPT-6.1 Terra Medium. GLM is preferred F1,
-but currently has no qualified exact shipped catalog route: report its
-missing/unqualified status and skip to Terra F2 when eligible. Never claim
-GLM was selected or dispatched when absent. Sonnet Medium is no longer a
-preferred M route, but stays a disclosed operational fallback until qualified
-preferred routes are available. Other sizes, planner/reviewer funding and
-historical pinned runs are unchanged.
+For new M subtasks, Sonnet Medium remains a disclosed operational fallback.
+The effective policy shows the current preferred slate; never claim a route
+was selected or dispatched when it is absent or unqualified. Other sizes,
+planner/reviewer funding and historical pinned runs are unchanged by #861.
 
 The exact `claude/claude-haiku-5-5@high` M executor/worker route has a
 narrow owner-authorized AA v4.3.2 38-vs-40 size-floor exception. The real
