@@ -265,6 +265,14 @@ gear_presets:
     allow_advisory_undercut: true
     plan_review_max_rounds: 3
     code_review_max_rounds: 3
+  greenfield:
+    dedicated_planner: false # inline plan: 2-3 phases in one task, not a serial task chain
+    plan_review: false
+    independent_code_review: true # one end-of-build convergence; risk floor stays in force
+    funded_browser_verification: acceptance_forced
+    allow_advisory_undercut: true
+    plan_review_max_rounds: null
+    code_review_max_rounds: 3
   XL:
     dedicated_planner: false # the orchestrator plans; `office start --planner dedicated` asks for one (#850)
     plan_review: true
