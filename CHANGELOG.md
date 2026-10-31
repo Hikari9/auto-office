@@ -5,6 +5,7 @@ One line or short list per version, newest first. The version itself lives only 
 ## 3.15.1
 
 - docs: point run gear executor slates to policy and clarify the truncated Sonnet fallback (#963).
+- fix(skill): the install check's consent stays the native **Install the CLI** choice (#924), not a separate approval stop; the legacy release-identity test and the orchestrator reference follow it.
 - test: cover route amendments without a worker environment (#963).
 - test: cover review-only reruns when the preferred alternate route is unavailable (#963).
 - fix(status): show pre-existing check failures alongside the accepted revision (#963).
