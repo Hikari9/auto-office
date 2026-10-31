@@ -26,7 +26,7 @@ Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen 
 
 ### Full suite
 
-`scripts/validate.sh --full` on T2 head `e0f9145f7a7e` (2026-10-31, same host as the table above): 6,084 passed, 10 failed, 154 skipped, 130 subtests passed in 2,269.60 s. This run is not a clean pass. The 10 failing nodes below also fail with `uv run --frozen --extra test pytest -n 2 --all` on base `origin/main` `d1402697`, with the same node set. None is in a file this PR changes. The result was recorded by the orchestrator; it was not re-executed in this worktree. Commits after `e0f9145f` change only documentation and `docs/test_contract_dispositions.py`, a parity check that was not part of the recorded run.
+`scripts/validate.sh --full` on T2 head `e0f9145f7a7e` (2026-10-31, same host as the table above): 6,084 passed, 10 failed, 154 skipped, 130 subtests passed in 2,269.60 s. This run is not a clean pass. The 10 failing nodes below also fail with `uv run --frozen --extra test pytest -n 2 --all` on base `origin/main` `d1402697`, with the same node set. None is in a file this PR changes. The result was recorded by the orchestrator; it was not re-executed in this worktree. Commits after `e0f9145f` change only documentation and `tests/test_test_retirement_record.py`, a parity check that was not part of the recorded run.
 
 - `tests/test_release_identity.py::test_skill_checks_for_the_cli_before_anything_else`
 - `tests/v31/test_issue_703_effective_checks.py::test_amended_run_check_replaces_superseded_integration_command`

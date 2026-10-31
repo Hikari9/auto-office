@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-DOCS = Path(__file__).parent
+DOCS = Path(__file__).resolve().parents[1] / "docs"
 ROW = re.compile(r"^\| `(tests/[^`]+)` \| ([\w-]+) \|", re.MULTILINE)
 
 
