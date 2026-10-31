@@ -259,7 +259,7 @@ def test_ecosystem_check_rejects_non_list_skills(tmp_path):
 
 # The only bare-name installs allowed are the README's two "never" warnings, matched by path and exact preceding text.
 ALLOWED_WARNINGS = {("README.md", "unrelated project, so never `"), ("README.md", "never `uv tool install auto-office` or `")}
-INSTALL = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)\b[^`\n)]*")
+INSTALL = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)\b(?:\\\n|[^`\n)])*")
 BARE_REQUIREMENT = re.compile(r"(?<![\w/@.+-])['\"]?auto-office(?:\[[\w,]+\])?['\"]?(?![\w/-]|\.\w)")
 
 
@@ -296,12 +296,14 @@ def test_the_pypi_install_guard_catches_every_bare_shape():
                  "uv tool install 'auto-office[visual]'", "pipx install auto-office.", "uv pip install -U auto-office",
                  "uv tool install --python 3.12 auto-office", "uv tool install --python=3.12 auto-office",
                  'uv tool install --python "3.12" auto-office', "uv tool install --with playwright 'auto-office[visual]'",
-                 "uv tool install --reinstall-package auto-office auto-office", "pip install auto-office==0.0.3"):
+                 "uv tool install --reinstall-package auto-office auto-office", "pip install auto-office==0.0.3",
+                 "uv tool install \\\n  auto-office", "uv tool install --force \\\n    'auto-office[visual]'\n"):
         assert _pypi_installs(bare), bare
     for sourced in ('uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"',
                     "uv tool install git+https://github.com/Hikari9/auto-office",
                     "uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'",
-                    "uv tool install --editable <path/to/auto-office checkout>"):
+                    "uv tool install --editable <path/to/auto-office checkout>",
+                    "uv tool install \\\n  git+https://github.com/Hikari9/auto-office"):
         assert not _pypi_installs(sourced), sourced
 
 
