@@ -356,16 +356,20 @@ def _exact_probe(con, harness: str | None, model: str, effort: str | None, now: 
     return probe
 
 
-def _keeps_route_down(con, harness: str | None, model: str, effort: str | None, probe: dict | None, now: datetime,
-                     discovery: dict) -> bool:
-    """A fresh probe that is not a pass holds the route down, or holds it while its re-probe is in flight. Routing reads
-    probes only for a discovery-eligible route, a catalog row that is not dispatchable: a dispatchable one is available
-    whatever its probe (route_policy.row_status)."""
-    from office import route_probe  # imported here, as in _exact_probe
+def _keeps_route_down(harness: str | None, model: str, effort: str | None, role: str | None, probe: dict | None,
+                      now: datetime, discovery: dict) -> bool:
+    """A fresh probe that is not a pass holds the route down, or holds it while its re-probe is in flight. Routing attaches
+    and reads a probe only for a route it treats as discovery-eligible: a catalog row that is discovery-eligible and that
+    no role allow admits (candidates.py). Any other route is available whatever its probe."""
+    from office import candidates, route_probe  # imported here: candidates imports this package's routing
     if probe is None or probe["result"] == "pass" or not _probe_fresh(probe, now, discovery):
         return False
-    row = route_probe.catalog_row({"harness": harness, "model_id": model, "effort": effort})
-    return not (row is not None and row.get("dispatchable") is not False)
+    cand = {"harness": harness, "model_id": model, "invocation_model_id": model, "effort": effort}
+    row = route_probe.catalog_row(cand)
+    if row is not None and not route_policy.row_status(row)["discovery_eligible"]:
+        return False
+    cand["harness_version"] = adapters.route_version(harness, adapters.load_all()[harness])
+    return not (role and route_policy.user_allows(cand, role, candidates.current_user_policies()))
 
 
 def _cooldown_expiries(con, harness: str | None, model: str, effort: str | None) -> list[datetime]:
@@ -392,7 +396,7 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime,
     if any(expiry > now for expiry in expiries):
         return None
     probe = _exact_probe(con, harness, model, effort, now, discovery)
-    if _keeps_route_down(con, harness, model, effort, probe, now, discovery):
+    if _keeps_route_down(harness, model, effort, _role(con, row, payload), probe, now, discovery):
         return None
     if row["kind"] == "route.failed":
         # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline decides.
@@ -501,8 +505,8 @@ def recovery_lines(con, run: dict) -> list[str]:
         harness, model, effort = payload.get("harness"), payload.get("model"), payload.get("effort")
         if model and any(expiry > now for expiry in _cooldown_expiries(con, harness, model, effort)):
             continue
-        if model and _keeps_route_down(con, harness, model, effort, _exact_probe(con, harness, model, effort, now, discovery),
-                                       now, discovery):
+        if model and _keeps_route_down(harness, model, effort, payload.get("role"),
+                                       _exact_probe(con, harness, model, effort, now, discovery), now, discovery):
             continue
         since = payload.get("available_at") or row["created_at"]
         if not _considered_since(con, run["id"], since, route, payload.get("role")):
