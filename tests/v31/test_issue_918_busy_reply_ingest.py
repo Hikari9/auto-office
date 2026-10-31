@@ -197,7 +197,7 @@ MANUAL = "office revoke D1, then office resume; the reply is at /runs/r1/dispatc
     ({"id": "D1", "task_id": "T1", "kind": "code_review", "scope": None},
      True, "office revoke D1, then office review T1 to relaunch the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
-     True, "office revoke D1, then office review plan to re-run the plan review"),
+     True, "office revoke D1, then office review plan --quote \"<user's words>\" to re-run the plan review"),
     ({"id": "D1", "task_id": None, "kind": "convergence_review", "scope": "L-T1"},
      True, "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "visual", "scope": "L-T1"},
@@ -244,7 +244,7 @@ def test_status_and_wait_say_a_written_reply_settles_then_past_the_bound_name_th
 @pytest.mark.approved
 @pytest.mark.parametrize("gate, role, subject, task_id, scope, expected", [
     ("plan_review", "plan_reviewer", "plan", None, None,
-     "office revoke D918, then office review plan to re-run the plan review"),
+     "office revoke D918, then office review plan --quote \"<user's words>\" to re-run the plan review"),
     ("visual", "visual_reviewer", "lane", None, "L-T1",
      "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
 ])

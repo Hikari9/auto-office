@@ -3731,11 +3731,11 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         mono = time.monotonic()
         # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
         unchanged = digest is not None and digest == last_digest
-        # A suspend or a clock step moves the wall clock but not the monotonic one (macOS stops the monotonic clock in
-        # sleep), so their difference is the jump. A slow poll moves both and is not one. The agent was not watched
-        # through a jump, so the settle window restarts rather than counting it as quiet time.
-        jump = None if last_poll is None else abs((now - last_poll) - (mono - last_mono))
-        if not unchanged or jump is None or jump > max(5.0, 3 * poll):
+        # A suspend or a clock step moves the wall clock but not the monotonic one (the monotonic clock stops in sleep on
+        # macOS and Linux), so their difference is the jump, in either direction. A slow poll moves both and is not one.
+        # The agent was not watched through a jump, so the settle window restarts rather than counting it as quiet time.
+        step = None if last_poll is None else (now - last_poll) - (mono - last_mono)
+        if not unchanged or step is None or abs(step) > 1.0:
             settled_since = now
         last_digest, last_poll, last_mono = digest, now, mono
         sample = _herdr_agent_sample(spec["herdr_agent"])
