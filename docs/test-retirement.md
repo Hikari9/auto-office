@@ -49,11 +49,11 @@ Keep #796 focused on improving the performance of optional historical and full d
 |---|---:|---:|
 | Test modules outside `tests/contracts/` | 298 | 295 |
 | Collected nodes (`pytest --all --collect-only tests`) | 6,407 | 6,247 |
-| Nodes removed (includes the renamed node) | 225 | |
-| Nodes added | | 65 (64 in `PDC`, 1 renamed node) |
-| Test functions deleted or rewritten (rows below) | | 56 (55 deleted, 1 rewritten) |
+| Nodes removed | 224 | |
+| Nodes added | | 64 (all in `PDC`) |
+| Test functions deleted (rows below) | | 55 (0 rewritten) |
 
-Check the row count against `git diff --stat`: 3 modules deleted (16 functions) plus 39 functions removed from 7 retained modules is 55 removed `def test_` lines, plus 1 rewritten function whose `def` line is unchanged. `PDC` adds 21 functions (64 nodes).
+Check the row count against `git diff --stat`: 3 modules deleted (16 functions) plus 39 functions removed from 7 retained modules is 55 removed `def test_` lines, and no function is rewritten. `PDC` adds 21 functions (64 nodes).
 
 ## Fault injection
 
@@ -116,7 +116,7 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_argon_catalog_809.py::test_argon_exception_remains_l_executor_only_and_high_is_xl` | 1 | deleted (module) | `PDC::test_a_floor_exception_waives_only_its_exact_scope`; `tests/contracts/test_route_parity.py::test_effective_shipped_routes_match_main` |
 | `tests/v31/test_issue809_regression.py::test_size_floors_are_pinned_and_an_equal_score_passes` | 5 | deleted | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value` |
 | `tests/v31/test_issue809_regression.py::test_each_gear_slate_leads_with_its_documented_route` | 5 | deleted | `PDC::test_the_router_follows_the_preferred_slate_order_and_falls_through_it`; `tests/contracts/test_route_parity.py::test_effective_shipped_routes_match_main` |
-| `tests/v31/test_issue809_regression.py::test_sonnet_falls_back_claude_to_agy_at_the_same_effort_before_any_other_model` | 1 | deleted | `PDC::test_the_router_follows_the_preferred_slate_order_and_falls_through_it`; `PDC::test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data`; `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`; `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs` (rewritten) |
+| `tests/v31/test_issue809_regression.py::test_sonnet_falls_back_claude_to_agy_at_the_same_effort_before_any_other_model` | 1 | deleted | `PDC::test_the_router_follows_the_preferred_slate_order_and_falls_through_it`; `PDC::test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data`; `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`; `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs` (owned by main `1e22deca`) |
 | `tests/v31/test_issue809_regression.py::test_opus_is_reserved_for_xl_subtasks` | 4 | deleted | `PDC::test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data` |
 | `tests/v31/test_issue809_regression.py::test_argon_medium_l_exception_is_exact_and_audited` | 1 | deleted | `PDC::test_a_floor_exception_waives_only_its_exact_scope` [argon-medium-l-intelligence-floor] |
 | `tests/v31/test_issue809_regression.py::test_terra_effort_boundaries_pass_exactly_the_sizes_whose_floor_they_meet` | 6 | deleted | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value`. Obsolete part: the per-effort Terra score table. |
@@ -153,7 +153,6 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_alias_high_now_invokes_sonnet_5_5` | 1 | deleted | `tests/test_alias_resolution.py::test_alias_is_offered_at_every_effort_of_the_newest_member` (generic alias resolution). Obsolete part: the shipped Sonnet alias's invocation target and score are catalog data and are no longer asserted. |
 | `tests/v31/test_issue811_terra_supersession.py::test_six_terra_rows_are_present_and_only_probed_efforts_dispatch` | 1 | deleted | Obsolete: pins six catalog rows and their scores. Eligible-but-undispatchable rule: `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
 | `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
-| `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs` | 1 | rewritten and renamed | Now `test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs`. It asserted the pre-#861 M slate (Sonnet first) and failed on main. It now pins the claude-to-agy hoist and the legacy-gear exclusion on the L slate with a hand-written expected order, so the only guard of that hard-coded behavior stays. |
 
 ## Module inventory
 
@@ -279,7 +278,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_issue809_real_routes.py` | consolidate | 10 of 18 nodes pinned floors, restrictions and exceptions for named models; the receipt, discovery, legacy-pinned and self-fallback nodes stay |
 | `tests/v31/test_issue809_regression.py` | consolidate | 6 of 16 nodes pinned floors, slate heads and exceptions; gear funding, subagent funding, inline ownership and legacy resume stay |
 | `tests/v31/test_issue809_rollout_metrics.py` | keep |  |
-| `tests/v31/test_issue809_run_gear.py` | consolidate | one node rewritten: it asserted the pre-#861 M slate and failed on main; it now uses the L slate with a hand-written order |
+| `tests/v31/test_issue809_run_gear.py` | keep | unchanged by this change; main `1e22deca` owns the fix to `test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs` |
 | `tests/v31/test_issue809_self_review_subagents.py` | keep |  |
 | `tests/v31/test_issue809_xl_review.py` | keep |  |
 | `tests/v31/test_issue811_terra_supersession.py` | consolidate | 1 of 6 nodes pinned the six Terra catalog rows; the supersession nodes stay |
