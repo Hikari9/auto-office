@@ -444,7 +444,7 @@ def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
     none, so they name the manual step and the reply file the orchestrator reads the verdict from. None otherwise."""
     did, kind = reply["id"], reply["kind"]
     if kind == "plan_review" and convergence:
-        return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
+        return f"office revoke {did}, then office review plan to re-run the plan review"
     if reply["scope"] and kind in LANE_REVIEW_SPEC:
         spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
         return f"office revoke {spec}, then office review {spec} to re-run the review on the same revision"

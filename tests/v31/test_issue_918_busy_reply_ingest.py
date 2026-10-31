@@ -99,16 +99,22 @@ def test_a_same_size_rewrite_of_a_complete_reply_is_not_ingested_while_busy(env,
         dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
 
 
-class _SleepingClock:
-    """`time` as the watch sees it: `time()` jumps forward by `slept` seconds, as a laptop sleep does between polls.
-    `monotonic()` does not move, matching macOS, where the monotonic clock stops during sleep."""
-    slept = 0.0
+class _Clock:
+    """`time` as the watch sees it. `wall` and `mono` are offsets added to the real clocks. A laptop sleep moves only
+    `wall`, matching macOS, where the monotonic clock stops during sleep. A slow poll moves both."""
+
+    def __init__(self):
+        self.wall = 0.0
+        self.mono = 0.0
 
     def __getattr__(self, name):
         return getattr(time, name)
 
     def time(self):
-        return time.time() + self.slept
+        return time.time() + self.wall
+
+    def monotonic(self):
+        return time.monotonic() + self.mono
 
 
 @pytest.mark.approved
@@ -119,19 +125,50 @@ def test_a_suspend_or_clock_step_restarts_the_settle_window(env, monkeypatch, ju
     _, d = _live_dispatch(env, monkeypatch)
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: APPROVED\nNEXT: merge it")
-    clock = _SleepingClock()
+    clock = _Clock()
     monkeypatch.setattr(dispatch_mod, "time", clock)
     monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.2")
 
     def jump_after_first_poll(n):
         if n == 1:
-            clock.slept += jump
+            clock.wall += jump
         return dict(BUSY)
 
     calls = _pane_samples(monkeypatch, jump_after_first_poll, limit=2000)
     assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
     # The first poll after the jump only restarts the window: an ingest there would be the bug.
     assert len(calls) >= 3, calls
+
+
+@pytest.mark.approved
+def test_a_slow_pane_read_does_not_restart_the_settle_window(env, monkeypatch):
+    """A pane read that takes 20 s moves both clocks: the gap between polls is that read's own time, not a jump, so
+    the quiet window keeps counting. The window is longer than one poll's 20 s, so a window restarted every poll
+    never fills; the reply ingests on the second poll, once the reads have added up to the window."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _Clock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "30")
+
+    def slow_read(n):
+        clock.wall += 20.0
+        clock.mono += 20.0
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, slow_read, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    assert len(calls) == 2, calls
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("raw, expected", [("nan", 600.0), ("inf", 600.0), ("abc", 600.0), ("-2", 0.0), ("0.5", 0.5)],
+                         ids=["nan", "inf", "junk", "negative", "fraction"])
+def test_the_hard_bound_env_is_read_as_seconds_and_junk_falls_back(monkeypatch, raw, expected):
+    monkeypatch.setenv("OFFICE_REPLY_HARD_BOUND_S", raw)
+    assert dispatch_mod.reply_hard_bound() == expected
 
 
 @pytest.mark.approved
@@ -160,7 +197,7 @@ MANUAL = "office revoke D1, then office resume; the reply is at /runs/r1/dispatc
     ({"id": "D1", "task_id": "T1", "kind": "code_review", "scope": None},
      True, "office revoke D1, then office review T1 to relaunch the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
-     True, "office revoke D1, then office review plan --as <harness>/<model> to re-run the plan review"),
+     True, "office revoke D1, then office review plan to re-run the plan review"),
     ({"id": "D1", "task_id": None, "kind": "convergence_review", "scope": "L-T1"},
      True, "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "visual", "scope": "L-T1"},
@@ -207,7 +244,7 @@ def test_status_and_wait_say_a_written_reply_settles_then_past_the_bound_name_th
 @pytest.mark.approved
 @pytest.mark.parametrize("gate, role, subject, task_id, scope, expected", [
     ("plan_review", "plan_reviewer", "plan", None, None,
-     "office revoke D918, then office review plan --as <harness>/<model> to re-run the plan review"),
+     "office revoke D918, then office review plan to re-run the plan review"),
     ("visual", "visual_reviewer", "lane", None, "L-T1",
      "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
 ])
