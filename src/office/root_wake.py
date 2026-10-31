@@ -43,6 +43,7 @@ ACTIONABLE = frozenset({
     "office.reinstalled",
 })
 MIN_POLL = 0.5
+FAILURE_BACKOFF_CAP = 30.0  # a supervisor tick that keeps failing retries no faster than this (#920)
 MAX_ATTEMPTS = 4
 WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
 # Herdr reports a Claude agent whose turn finished as `done` until its pane is
@@ -121,14 +122,36 @@ def _recorded(con, run_id: str, token: str) -> bool:
                        (run_id, token)).fetchone() is not None
 
 
+_HEALTH_PROBE = "import office.cli; from office import version; version.current()"
+
+
+def _install_healthy() -> bool:
+    """True when a fresh interpreter imports the CLI and resolves the version from disk (#920).
+
+    A fresh process is required: this one already holds the modules it loaded before the replacement."""
+    try:
+        proc = subprocess.run([sys.executable, "-c", _HEALTH_PROBE], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _retry_delay(failures: int) -> float:
+    """Seconds to sleep before the next supervisor tick: MIN_POLL when healthy, else doubling per consecutive failure."""
+    if failures == 0:
+        return MIN_POLL
+    return min(MIN_POLL * 2 ** failures, FAILURE_BACKOFF_CAP)
+
+
 def _recover_reinstall(con, run: dict) -> bool:
     """Record one `office.reinstalled` event after a healthy tick ends an episode opened by `_tick_failed` (#920).
 
+    The event needs a positive health probe. Until it passes the mark stays, so the next healthy tick retries.
     The event carries the mark's token, and the mark is removed only after the event commits. A crash or a
     failed unlink after commit leaves the token recorded, so the retry removes the mark without recording
     again. A run that has ended gets no wake. The run lock serializes the supervisor and the watchdog thread."""
     mark = _reinstall_mark(run["id"])
-    if not mark.exists():
+    if not mark.exists() or not _install_healthy():
         return False
     with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"):
         if not mark.exists():
@@ -756,15 +779,18 @@ def supervise(run_id: str, *, once: bool = False) -> int:
         # the 0.5s completion-wake critical path, with an independent cadence.
         threading.Thread(target=_watchdog_loop, args=(run_id,), daemon=True,
                          name=f"office-stall-{run_id[:8]}").start()
+        failures = 0
         while True:
             try:
                 if not _supervise_tick(run_id):
                     return 0
+                failures = 0
             except (ImportError, OSError) as exc:
-                # The install is being replaced under this process (#833, #920): keep supervising.
+                # The install is being replaced under this process (#833, #920): keep supervising, backing off.
                 _tick_failed(run_id, exc)
+                failures += 1
             if once:
                 return 0
-            time.sleep(MIN_POLL)
+            time.sleep(_retry_delay(failures))
     finally:
         lock.close()

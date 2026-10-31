@@ -51,6 +51,15 @@ class _ReplacedModule:
         raise self._exc
 
 
+_REAL_INSTALL_HEALTHY = root_wake._install_healthy
+
+
+@pytest.fixture(autouse=True)
+def install_is_healthy(monkeypatch):
+    """The real probe starts a fresh interpreter; these tests treat the install as healthy unless they say otherwise."""
+    monkeypatch.setattr(root_wake, "_install_healthy", lambda: True)
+
+
 # --- the CLI fails fast with a dedicated code while the install is being rebuilt -------------------------------
 
 
@@ -349,6 +358,57 @@ def test_supervisor_survives_a_rebuild_and_records_one_office_reinstalled_per_re
     # A later healthy tick with no failure in between records nothing more.
     assert root_wake.supervise(run["id"], once=True) == 0
     assert len(_reinstalled(con, run)) == 1
+
+
+def test_a_persistent_oserror_backs_off_and_never_records_a_recovery(env, monkeypatch):
+    """A tick that keeps raising OSError sleeps longer each time up to the cap, and records no recovery (#920)."""
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(root_wake, "ensure", lambda run: None)
+    monkeypatch.setattr(root_wake, "_watchdog_loop", lambda run_id: None)  # keep the watchdog thread out of the loop
+
+    def broken_poll(con, run):
+        raise OSError(5, "Input/output error")
+    monkeypatch.setattr(root_wake, "poll", broken_poll)
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 10:
+            raise _Stop()
+    monkeypatch.setattr(root_wake.time, "sleep", fake_sleep)
+
+    with pytest.raises(_Stop):
+        root_wake.supervise(run["id"])
+
+    assert sleeps == [min(root_wake.MIN_POLL * 2 ** n, root_wake.FAILURE_BACKOFF_CAP) for n in range(1, 11)]
+    assert max(sleeps) == root_wake.FAILURE_BACKOFF_CAP
+    assert _reinstalled(con, run) == []
+    assert root_wake._reinstall_mark(run["id"]).exists()
+
+
+def test_recovery_waits_for_a_positive_health_probe(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    root_wake._mark_reinstall(run["id"])
+    monkeypatch.setattr(root_wake, "_install_healthy", lambda: False)
+
+    assert root_wake._recover_reinstall(con, run) is False
+    assert root_wake._reinstall_mark(run["id"]).exists()
+    assert _reinstalled(con, run) == []
+
+    monkeypatch.setattr(root_wake, "_install_healthy", lambda: True)
+    assert root_wake._recover_reinstall(con, run)
+    assert len(_reinstalled(con, run)) == 1
+
+
+def test_the_health_probe_passes_on_a_healthy_install():
+    assert _REAL_INSTALL_HEALTHY() is True
+
+
+def test_the_health_probe_fails_when_its_interpreter_cannot_run_the_probe(monkeypatch):
+    monkeypatch.setattr(root_wake.sys, "executable", "/usr/bin/false")
+    assert _REAL_INSTALL_HEALTHY() is False
 
 
 def test_a_permanent_import_failure_is_logged_with_its_cause_and_not_called_a_rebuild(env, monkeypatch, capsys):
