@@ -6,6 +6,45 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 
 ## Counts
 
+### Same-host comparison
+
+Measured on 2026-10-31 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CPython 3.14.8. The baseline is the run's `origin/main` base `d14026977392289164d1e09fe454728c71f65b28`; the after revision is T1's accepted `ae49b25a3e71fa89632e3cb028a0ee14a862e1c4`. A separate checkout with its own dependencies was used for the baseline. The timing runs overlapped each other and a separate full validation on the host, so the wall times are load-dependent and should not be read as a controlled speedup.
+
+| Tier and measure | Before | After |
+|---|---:|---:|
+| Default: test modules with collected nodes | 202 | 200 |
+| Default: test functions with collected nodes | 2,169 | 2,135 |
+| Default: collected nodes | 4,016 | 3,856 |
+| Default: wall time | 322.57 s | 308.54 s |
+| `--all`: test modules with collected nodes | 305 | 303 |
+| `--all`: test functions with collected nodes | 4,317 | 4,283 |
+| `--all`: collected nodes | 6,407 | 6,247 |
+
+From each checkout, collection used `uv run --frozen --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the resulting node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not a count of every function defined in source.
+
+Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen --extra test pytest -n 2 -q tests`. The baseline reported 4,013 passed, 2 failed, 2 skipped; the after revision reported 3,854 passed, 1 failed, 2 skipped. Both failed `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` with a missing `dispatchable` key; the baseline also failed `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest result summary totals one more than its collection count; that discrepancy was not investigated. The default-tier run above is not the full suite. The full-suite result is under [Full suite](#full-suite).
+
+### Full suite
+
+`scripts/validate.sh --full` on T2 head `e0f9145f7a7e` (2026-10-31, same host as the table above): 6,084 passed, 10 failed, 154 skipped, 130 subtests passed in 2,269.60 s. This run is not a clean pass. The 10 failing nodes below also fail with `uv run --frozen --extra test pytest -n 2 --all` on base `origin/main` `d1402697`, with the same node set. None is in a file this PR changes. The result was recorded by the orchestrator; it was not re-executed in this worktree. Commits after `e0f9145f` change only documentation and `tests/test_test_retirement_record.py`, a parity check that was not part of the recorded run.
+
+- `tests/test_release_identity.py::test_skill_checks_for_the_cli_before_anything_else`
+- `tests/v31/test_issue_703_effective_checks.py::test_amended_run_check_replaces_superseded_integration_command`
+- `tests/v31/test_issue_705_squash_close.py::test_owned_squash_pr_close_proves_heads_and_checks_without_fake_ancestry_or_consent`
+- `tests/v31/test_issue_705_squash_close.py::test_squash_close_preserves_the_pinned_v31_review_contract`
+- `tests/v31/test_issue_790_held_pointer.py::test_enter_that_cannot_submit_says_so_and_marks_one_same_route_retry`
+- `tests/v31/test_landing_gaps.py::test_run_checks_failing_on_a_moved_base_rebase_and_continue`
+- `tests/v31/test_review_reroute.py::test_the_review_reprompt_is_sent_only_inside_the_pane_identity_fence`
+- `tests/v31/test_review_reroute.py::test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command`
+- `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated`
+- `tests/v31/test_rolling_review.py::test_plan_review_ends_at_first_pass_even_on_an_older_version`
+
+### Draft comment for #796
+
+Keep #796 focused on improving the performance of optional historical and full diagnostic runs. Ordinary PRs use the scoped gate in [validation.md](validation.md); this issue does not require preserving every historical test node as a mandatory per-PR check. Full validation remains required for the cases specified there.
+
+### T1 inventory
+
 | | Before | After |
 |---|---:|---:|
 | Test modules outside `tests/contracts/` | 298 | 295 |
@@ -420,7 +459,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 266, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 267, 'historical-diagnostic': 21, 'consolidate': 7, 'retire': 3}.
 
 ## Left alone on purpose
 
@@ -429,4 +468,3 @@ Totals: {'keep': 266, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3
 - `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`: `adaptive.py` hard-codes the Sonnet claude-to-agy hoist, so this is its only guard.
 - `tests/v31/test_issue809_real_routes.py::test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback`: it is the only test of the `Temporary Sonnet Medium M fallback` disclosure.
 - `tests/test_alias_resolution.py` and `tests/v31/test_intelligence_floor.py` still pin some shipped model names. They are `SPECIAL` modules for `catalog/` and `config/` changes, so they stay.
-- `docs/contract-suite.md` still says every legacy module is `keep`. It is outside this task's scope and now out of date.
