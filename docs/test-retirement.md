@@ -71,14 +71,11 @@ Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at
 
 ## Open pull requests that edit the same test files
 
-Listed by `gh pr list --repo Hikari9/auto-office --state open` and each PR's files on 2026-10-31. These runs need a rebase after this lands.
+Listed by `gh pr list --repo Hikari9/auto-office --state open` and each open PR's files (`gh api repos/Hikari9/auto-office/pulls/<n>/files`) on 2026-10-31. Every open PR other than this one was checked against all 12 test files this change deletes, edits or adds. Only the row below overlaps. That run needs a rebase after this lands.
 
 | PR | File |
 |---|---|
 | #951 | `tests/v31/test_issue809_regression.py` |
-| #934 | `tests/v31/test_issue809_run_gear.py` |
-| #929 | `tests/test_route_policy.py`, `tests/v31/test_issue809_run_gear.py`, `tests/v31/test_issue811_terra_supersession.py`, `tests/v31/test_role_seed_routing.py` |
-| #903 | `tests/v31/test_issue809_run_gear.py` |
 
 ## Function-level traceability
 
