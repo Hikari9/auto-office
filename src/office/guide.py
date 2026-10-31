@@ -366,11 +366,13 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(line)
     replies = [] if state.is_terminal(run) else dispatch_mod.reply_pending(con, run)
     hard = dispatch_mod.reply_hard_bound()
+    convergence = contract.is_convergence(run)
+    stuck_reply = None
     for r in replies:
         if r["quiet"] < hard:
             res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
-    convergence = contract.is_convergence(run)
-    stuck_reply = next((n for n in (_stuck_reply_next(r, convergence) for r in replies if r["quiet"] >= hard) if n), None)
+        else:
+            stuck_reply = stuck_reply or _stuck_reply_next(r, convergence)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
@@ -446,7 +448,7 @@ def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
     none, so they name the manual step and the reply file the orchestrator reads the verdict from. None otherwise."""
     did, kind = reply["id"], reply["kind"]
     if kind == "plan_review" and convergence:
-        return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
+        return f"office revoke {did}, then office review plan --quote \"<user's words>\" to re-run the plan review"
     if reply["scope"] and kind in LANE_REVIEW_SPEC:
         spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
         return f"office revoke {spec}, then office review {spec} to re-run the review on the same revision"

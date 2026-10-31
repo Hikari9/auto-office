@@ -272,6 +272,30 @@ def test_queued_and_closed_unread_episodes_are_news_not_a_stall(env, monkeypatch
     assert not any("queued" in line for line in guide.stalls(con, run))
 
 
+def test_office_wait_without_a_root_binding_exits_0_on_a_queued_review_with_its_next(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_QUEUED_S", "60")
+    monkeypatch.setattr(gates_mod, "owner_state", lambda con, run, g: ("queued", "job J4 is queued"))
+    _review_gate(env.con(), _run(env.con()), "GQ5", created_for=600)
+    code, out = env.office("wait", "--timeout", "3", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "review GQ5 queued 600s past its bound" in out and "next: office revoke T1, then office review T1" in out, out
+    code, out = env.office("wait", "--timeout", "0", "--poll", "0.2", env=EXTERNAL)
+    # The live episode still shows as a blocker line, but it is not news again: no event line, no exit 0.
+    assert code == 124 and not any(line.startswith("· ") and "GQ5" in line for line in out.splitlines()), out
+
+
+def test_office_wait_without_a_root_binding_exits_0_on_a_closed_unread_verdict(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    _closed_review(con, _run(con), "GU2")
+    _event(con, _run(con), "gate.pass", "T1", 899)
+    code, out = env.office("wait", "--timeout", "3", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "review GU2 closed" in out and "next: office context to read the T1 verdict" in out, out
+
+
 def test_a_second_root_wait_does_not_block_on_the_marker_lock(env):
     _go(env)
     run = _run(env.con())

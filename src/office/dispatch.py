@@ -1763,7 +1763,7 @@ def reply_pending(con, run: dict) -> list[dict]:
             continue
         if info.st_size:
             out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "scope": row["scope"],
-                        "path": str(path), "quiet": now - info.st_mtime})
+                        "path": str(path), "quiet": max(0.0, now - info.st_mtime)})
     return out
 
 
@@ -3700,7 +3700,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     noticed = False
     history: list[dict] = []
     last_size = None
-    last_digest = last_poll = settled_since = None
+    last_digest = last_poll = last_mono = settled_since = None
     busy_settle = _env_seconds("OFFICE_REPLY_BUSY_SETTLE_S", REPLY_BUSY_SETTLE_S)
     unknown = 0
     unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
@@ -3728,14 +3728,16 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         data = _reply_bytes(output) if size else None
         digest = hashlib.sha256(data).hexdigest() if data else None
         now = time.time()  # wall clock: a laptop sleep must not hide in monotonic time on macOS
+        mono = time.monotonic()
         # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
         unchanged = digest is not None and digest == last_digest
-        # A gap far past the poll interval is a suspend or a clock step: the agent was not watched through it, so the
-        # settle window restarts rather than counting the gap as quiet time.
-        gap = None if last_poll is None else now - last_poll
-        if not unchanged or gap is None or not 0 <= gap <= max(5.0, 3 * poll):
+        # A suspend or a clock step moves the wall clock but not the monotonic one (the monotonic clock stops in sleep on
+        # macOS and Linux), so their difference is the jump, in either direction. A slow poll moves both and is not one.
+        # The agent was not watched through a jump, so the settle window restarts rather than counting it as quiet time.
+        step = None if last_poll is None else (now - last_poll) - (mono - last_mono)
+        if not unchanged or step is None or abs(step) > 1.0:
             settled_since = now
-        last_digest, last_poll = digest, now
+        last_digest, last_poll, last_mono = digest, now, mono
         sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is not None:
             unknown = unknown + 1 if sample.get("busy") is None else 0

@@ -99,16 +99,22 @@ def test_a_same_size_rewrite_of_a_complete_reply_is_not_ingested_while_busy(env,
         dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
 
 
-class _SleepingClock:
-    """`time` as the watch sees it: `time()` jumps forward by `slept` seconds, as a laptop sleep does between polls.
-    `monotonic()` does not move, matching macOS, where the monotonic clock stops during sleep."""
-    slept = 0.0
+class _Clock:
+    """`time` as the watch sees it. `wall` and `mono` are offsets added to the real clocks. A laptop sleep moves only
+    `wall`, matching macOS, where the monotonic clock stops during sleep. A slow poll moves both."""
+
+    def __init__(self):
+        self.wall = 0.0
+        self.mono = 0.0
 
     def __getattr__(self, name):
         return getattr(time, name)
 
     def time(self):
-        return time.time() + self.slept
+        return time.time() + self.wall
+
+    def monotonic(self):
+        return time.monotonic() + self.mono
 
 
 @pytest.mark.approved
@@ -119,19 +125,50 @@ def test_a_suspend_or_clock_step_restarts_the_settle_window(env, monkeypatch, ju
     _, d = _live_dispatch(env, monkeypatch)
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: APPROVED\nNEXT: merge it")
-    clock = _SleepingClock()
+    clock = _Clock()
     monkeypatch.setattr(dispatch_mod, "time", clock)
     monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.2")
 
     def jump_after_first_poll(n):
         if n == 1:
-            clock.slept += jump
+            clock.wall += jump
         return dict(BUSY)
 
     calls = _pane_samples(monkeypatch, jump_after_first_poll, limit=2000)
     assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
     # The first poll after the jump only restarts the window: an ingest there would be the bug.
     assert len(calls) >= 3, calls
+
+
+@pytest.mark.approved
+def test_a_slow_pane_read_does_not_restart_the_settle_window(env, monkeypatch):
+    """A pane read that takes 20 s moves both clocks: the gap between polls is that read's own time, not a jump, so
+    the quiet window keeps counting. The window is longer than one poll's 20 s, so a window restarted every poll
+    never fills; the reply ingests on the second poll, once the reads have added up to the window."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _Clock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "30")
+
+    def slow_read(n):
+        clock.wall += 20.0
+        clock.mono += 20.0
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, slow_read, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    assert len(calls) == 2, calls
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("raw, expected", [("nan", 600.0), ("inf", 600.0), ("abc", 600.0), ("-2", 0.0), ("0.5", 0.5)],
+                         ids=["nan", "inf", "junk", "negative", "fraction"])
+def test_the_hard_bound_env_is_read_as_seconds_and_junk_falls_back(monkeypatch, raw, expected):
+    monkeypatch.setenv("OFFICE_REPLY_HARD_BOUND_S", raw)
+    assert dispatch_mod.reply_hard_bound() == expected
 
 
 @pytest.mark.approved
@@ -160,7 +197,7 @@ MANUAL = "office revoke D1, then office resume; the reply is at /runs/r1/dispatc
     ({"id": "D1", "task_id": "T1", "kind": "code_review", "scope": None},
      True, "office revoke D1, then office review T1 to relaunch the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
-     True, "office revoke D1, then office review plan --as <harness>/<model> to re-run the plan review"),
+     True, "office revoke D1, then office review plan --quote \"<user's words>\" to re-run the plan review"),
     ({"id": "D1", "task_id": None, "kind": "convergence_review", "scope": "L-T1"},
      True, "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "visual", "scope": "L-T1"},
@@ -207,7 +244,7 @@ def test_status_and_wait_say_a_written_reply_settles_then_past_the_bound_name_th
 @pytest.mark.approved
 @pytest.mark.parametrize("gate, role, subject, task_id, scope, expected", [
     ("plan_review", "plan_reviewer", "plan", None, None,
-     "office revoke D918, then office review plan --as <harness>/<model> to re-run the plan review"),
+     "office revoke D918, then office review plan --quote \"<user's words>\" to re-run the plan review"),
     ("visual", "visual_reviewer", "lane", None, "L-T1",
      "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
 ])
@@ -257,3 +294,83 @@ def test_past_the_bound_a_task_visual_review_names_the_manual_step_and_the_reply
 def test_pane_group_wait_keeps_its_reading_of_bad_values(monkeypatch, value, expected):
     monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", value)
     assert dispatch_mod._pane_group_wait() == expected
+
+
+class _NoSleepClock(_Clock):
+    """A watch clock whose poll sleep returns at once, so a test can set the poll interval to seconds."""
+
+    def sleep(self, seconds):
+        pass
+
+
+@pytest.mark.approved
+def test_a_backward_clock_step_under_the_old_tolerance_restarts_the_settle_window(env, monkeypatch):
+    """A 2 s step back is under the old 5 s tolerance, but it is a clock step all the same: the window restarts."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _Clock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "30")
+
+    def step_back(n):
+        clock.wall += 9.0
+        clock.mono += 9.0
+        if n == 1:
+            clock.wall -= 2.0
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, step_back, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    # The restart lands on poll 2, so the window fills on poll 5. Without it the window fills on poll 4.
+    assert len(calls) == 5, calls
+
+
+@pytest.mark.approved
+def test_a_sleep_under_the_old_tolerance_restarts_the_settle_window(env, monkeypatch):
+    """At a 5 s poll the old tolerance was 15 s. A 10 s suspend is under it and still a suspend: the window restarts."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _NoSleepClock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "29")
+
+    def poll_then_sleep(n):
+        clock.wall += 5.0  # the poll interval passes on both clocks
+        clock.mono += 5.0
+        if n == 1:
+            clock.wall += 10.0  # a suspend moves wall time only
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, poll_then_sleep, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=5) == (0, "success")
+    # The suspend restarts the window on poll 2, so it fills on poll 7. Without the restart it fills on poll 4.
+    assert len(calls) == 7, calls
+
+
+@pytest.mark.approved
+def test_a_reply_with_a_future_mtime_reads_as_just_written(env, monkeypatch):
+    """A future mtime (clock skew, a network filesystem) must not read as negative quiet time."""
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, task_id, subject, kind, input_key, status, created_at) "
+                "VALUES('G918', ?, 'T1', 'task', 'code_review', 'task:T1:r1', 'running', ?)",
+                (run["id"], d["started_at"]))
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, started_at, kind, status, launcher, pane_id, pid, gate_id) "
+                "VALUES('D918', ?, 'T1', 'code_reviewer', ?, 'reviewer', 'running', 'herdr', 'w1:p1', ?, 'G918')",
+                (run["id"], d["started_at"], os.getpid()))
+    con.commit()
+    reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    future = time.time() + 3600
+    os.utime(reply, (future, future))
+    try:
+        pending = dispatch_mod.reply_pending(con, run)
+    finally:
+        con.close()
+    assert [p["quiet"] for p in pending] == [0.0], pending
