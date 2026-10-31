@@ -962,7 +962,7 @@ def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str, str] | Non
               if routing.preferred_rank(c, seed) is not None}
     for r in decision.get("rejected") or []:
         if r.get("candidate") in wanted:
-            skip_class = "quota-auth" if r.get("category") in routing.QUOTA_AUTH_CATEGORIES else "other"
+            skip_class = "quota-auth" if routing.quota_auth_rejection(r) else "other"
             return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}", skip_class
     return None
 

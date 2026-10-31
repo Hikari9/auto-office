@@ -280,9 +280,11 @@ def _resume_spec(d: dict, cand: dict) -> dict | None:
 
 RECOVERED_KIND = "route.recovered"
 # Evidence that a run fell back from or avoided a route: a runtime failure (its demotion) and a review that left its route.
+# A review notice is evidence only when it says the route was avoided for quota or auth. Unclassified notices (before
+# #921, or a reviewer that fell back from a failed route, which its route.failed covers) are not.
 _EVIDENCE_SQL = ("SELECT seq, kind, task_id, dispatch_id, created_at, payload_json FROM events WHERE run_id=? AND "
-                 "(kind='route.failed' OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review')) "
-                 "ORDER BY seq")
+                 "(kind='route.failed' OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
+                 "AND json_extract(payload_json,'$.skip_class')='quota-auth')) ORDER BY seq")
 # A candidate id, `harness@major/model_id@effort` (routing.candidate_id).
 _CANDIDATE = re.compile(r"(?P<harness>[^@/]+)@[^/]*/(?P<model>[^@]+)@(?P<effort>.+)\Z")
 
@@ -349,8 +351,6 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
             return "demotion lapsed", max(expiries)
         deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
         return None if deadline > now else ("demotion lapsed", deadline)
-    if payload.get("skip_class") == "other":  # a trust or capability skip: the route was never avoided for quota or auth
-        return None
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",
