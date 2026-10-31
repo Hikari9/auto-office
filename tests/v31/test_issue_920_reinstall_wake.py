@@ -117,8 +117,8 @@ def test_console_script_entry_fails_fast_when_the_cli_import_is_mid_rebuild(monk
 
 
 @pytest.mark.parametrize(("failure", "cause"), [
-    (OSError("replaced"), "OSError: office.cli"),
-    (SyntaxError("truncated version.py"), "SyntaxError: office.cli"),
+    (OSError(2, "replaced", str(version.PACKAGE_ROOT / "cli.py")), "FileNotFoundError: office.cli"),
+    (SyntaxError("truncated version.py", (str(version.PACKAGE_ROOT / "version.py"), 1, 1, "")), "SyntaxError: office.version"),
 ])
 def test_a_replaced_cli_module_exits_with_the_retry_code(monkeypatch, capsys, failure, cause):
     """An OSError or SyntaxError while the CLI module loads is the same replacement, not a traceback."""
@@ -155,9 +155,50 @@ def test_a_dependency_import_failure_exits_1_with_its_cause_and_a_reinstall_hint
     assert entrypoint.entry() == 1
     err = capsys.readouterr().err
     assert "ModuleNotFoundError: jsonschema" in err
-    assert "uv tool install --force auto-office" in err
+    assert "uv tool install --force auto-office" in err and "--editable" in err and "retry after" in err
     assert "rebuilt" not in err and "Traceback" not in err
     assert probed == []
+
+
+def test_a_nameless_import_failure_raised_by_a_dependency_exits_1(monkeypatch, capsys):
+    """An ImportError with no module name, raised by third-party code, is a dependency failure, not a rebuild (A15)."""
+    from office import __main__ as entrypoint
+
+    class Dependency:
+        def __getattr__(self, name):
+            raise ImportError("libssl.so: cannot open shared object file")
+
+    monkeypatch.setitem(sys.modules, "office.cli", Dependency())
+
+    assert entrypoint.entry() == 1
+    err = capsys.readouterr().err
+    assert err.startswith("office: cannot start, a dependency failed to import (ImportError: ")
+    assert "rebuilt" not in err and "Traceback" not in err
+
+
+def test_a_syntax_error_in_a_dependency_file_exits_1(monkeypatch, capsys):
+    from office import __main__ as entrypoint
+
+    class Dependency:
+        def __getattr__(self, name):
+            raise SyntaxError("invalid syntax", ("/site-packages/dep.py", 3, 1, ""))
+
+    monkeypatch.setitem(sys.modules, "office.cli", Dependency())
+
+    assert entrypoint.entry() == 1
+    err = capsys.readouterr().err
+    assert "SyntaxError: dep.py" in err and "rebuilt" not in err
+
+
+def test_a_nameless_import_failure_inside_the_package_still_exits_75(monkeypatch, capsys):
+    from office import __main__ as entrypoint
+
+    partial = ImportError("partially written")
+    partial.filename = str(version.PACKAGE_ROOT / "cli.py")
+    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(partial))
+
+    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
+    assert capsys.readouterr().err.strip() == retry_line("ImportError: office.cli")
 
 
 def test_python_dash_m_office_exits_1_for_a_dependency_failure(tmp_path):
