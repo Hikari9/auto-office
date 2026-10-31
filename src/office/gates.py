@@ -833,7 +833,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             if last_failed and last_failed[0] != triple:
                 review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
             elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
-                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id)
+                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id,
+                                    skip_class=skipped[2])
             con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
                         "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
         ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
@@ -1002,10 +1003,10 @@ def _launch_spec(ddir: Path) -> dict:
     return spec if isinstance(spec, dict) else {}
 
 
-def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
-    """(route, why) when routing passed over the review's preferred primary route for `chosen`: the first
+def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str, str] | None:
+    """(route, why, skip_class) when routing passed over the review's preferred primary route for `chosen`: the first
     preferred_seed entry matched a candidate that selection rejected (quota cooldown, trust, capability) and
-    `chosen` is not that entry's route."""
+    `chosen` is not that entry's route. skip_class is "quota-auth" for a quota or auth rejection, else "other"."""
     seed = ((decision.get("request") or {}).get("preferred_seed") or [])[:1]
     if not seed or routing.preferred_rank(chosen, seed) is not None:
         return None
@@ -1013,17 +1014,21 @@ def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
               if routing.preferred_rank(c, seed) is not None}
     for r in decision.get("rejected") or []:
         if r.get("candidate") in wanted:
-            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}"
+            skip_class = "quota-auth" if routing.quota_auth_rejection(r) else "other"
+            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}", skip_class
     return None
 
 
 def review_route_notice(con, run: dict, gate: dict, role: str, before: str | None, after: str, reason: str, *,
-                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office") -> None:
+                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office",
+                        skip_class: str | None = None) -> None:
     """A user-visible notice that a plan or lane review left its primary or pinned route: old route, new route and
-    why, in `office status` and `office inspect route`. Caller holds the tx."""
+    why, in `office status` and `office inspect route`. `skip_class` (#921) says whether the route was avoided for
+    quota or auth. Caller holds the tx."""
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    extra = {"notice": "review", "gate": gate["id"], **({"skip_class": skip_class} if skip_class else {})}
     state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
-                              stage=role, extra={"notice": "review", "gate": gate["id"]})
+                              stage=role, extra=extra)
     if kind == "reviewer-fallback":
         state.emit(con, run, "route.fallback", f"{scope} {role} fell back from {before or 'unrecorded'} to {after}: {reason}",
                    task_id=gate.get("task_id"), dispatch_id=dispatch_id,

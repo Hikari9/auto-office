@@ -10,12 +10,13 @@ the new model/effort, resuming its session where the harness can.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
-from office import adapters, candidates, db, dispatch, jobs, routing, scoring, state
+from office import adapters, candidates, db, dispatch, jobs, route_policy, routing, scoring, state
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, loads, now_iso
+from office.util import dumps, loads, now_iso, parse_iso
 
 USAGE = 'office amend route <task|dispatch> --as <harness>/<model>[@effort] --quote "<user\'s words>" [--restart]'
 LIVE = ("launching", "running")
@@ -284,3 +285,247 @@ def _resume_spec(d: dict, cand: dict) -> dict | None:
         return None
     return {"parent": d["id"], "session_id": session, "argv": argv[0], "herdr_kind": argv[1],
             "findings": f"your route changed to {routing.candidate_id(cand)}; continue the task"}
+
+
+# ------------------------------------------------------------------ route available again (#921)
+
+RECOVERED_KIND = "route.recovered"
+# Evidence that a run fell back from or avoided a route: a runtime failure (its demotion), a rerun that left a route
+# after its quota wall (`route.fallback` with a quota or auth source), and a review that left its route. A review notice is
+# evidence only when it says the route was avoided for quota or auth. Unclassified notices (before #921, or a reviewer
+# that fell back from a failed route, which its route.failed covers) are not. A projected quota-reserve skip is never
+# evidence: its reserve is not re-checked when recovery is swept. Notices written before the skip class excluded reserve
+# skips carry `quota-auth` too, so the reserve reason text excludes them as well.
+_EVIDENCE_SQL = ("SELECT seq, kind, task_id, dispatch_id, created_at, payload_json FROM events WHERE run_id=? AND "
+                 "((kind='route.failed' AND json_extract(payload_json,'$.reason') IN ('auth','usage_limit')) "
+                 "OR (kind='route.fallback' AND json_extract(payload_json,'$.source') IN ('auth','usage_limit')) "
+                 "OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
+                 "AND json_extract(payload_json,'$.skip_class')='quota-auth' "
+                 "AND COALESCE(instr(json_extract(payload_json,'$.reason'),'crosses reserve'),0)=0)) ORDER BY seq")
+
+
+def _route_of(row, payload: dict) -> str | None:
+    """The route triple a piece of evidence is about: the failed route, or the route a fallback or review left (`before`)."""
+    return payload.get("route") if row["kind"] == "route.failed" else payload.get("before")
+
+
+def _invocation_model(con, run_id: str, route: str, harness: str, model_id: str, effort: str) -> str:
+    """The invocation model a candidate ran as. Cooldowns and probes key on it, and it differs from the model id for
+    aliased routes (sonnet runs as claude-sonnet-5). A dispatch of the route records it. A route never dispatched (a
+    skipped primary) has no dispatch row, so the shipped catalog resolves the alias instead."""
+    row = con.execute("SELECT invocation_model_id FROM dispatches WHERE run_id=? AND triple=? "
+                      "AND invocation_model_id IS NOT NULL ORDER BY started_at DESC LIMIT 1", (run_id, route)).fetchone()
+    if row:
+        return row[0]
+    from office import route_probe  # imported here: route_probe imports candidates, which imports this package's routing
+    catalog = route_probe.catalog_row({"harness": harness, "model_id": model_id, "effort": effort})
+    return (catalog or {}).get("invocation_model_id") or model_id
+
+
+def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str | None, str | None]:
+    """(harness, invocation model, effort) of the route the evidence names. A runtime failure carries its invocation
+    model; a review or fallback carries only a candidate id, resolved through the route's dispatches."""
+    if row["kind"] == "route.failed":
+        return payload.get("harness"), payload.get("model"), payload.get("effort")
+    route = _route_of(row, payload) or ""
+    match = routing.CANDIDATE_ID_RE.fullmatch(route)
+    if not match:
+        return None, None, None
+    harness = match["harness"]
+    effort = None if match["effort"] == "None" else match["effort"]  # candidate_id writes a missing effort as "None"
+    return harness, _invocation_model(con, run_id, route, harness, match["model"], effort), effort
+
+
+def _role(con, row, payload: dict) -> str | None:
+    """The role whose routing decided the evidence's route: the review stage, or the role of the dispatch the event names."""
+    if row["kind"] == "route.changed":
+        return payload.get("stage")
+    d = con.execute("SELECT role FROM dispatches WHERE id=?", (row["dispatch_id"],)).fetchone()
+    return d[0] if d else None
+
+
+def _discovery(run: dict) -> dict:
+    """The probe freshness settings routing reads for this run: its pinned policy, as a dispatch reads them."""
+    return route_policy.discovery_settings(state.pinned_config(run))
+
+
+def _probe_fresh(probe: dict, now: datetime, discovery: dict) -> bool:
+    from office import route_probe  # imported here, as in _invocation_model: route_probe imports candidates
+    return route_probe._is_fresh(probe, discovery["probe_ttl_days"], discovery["probe_timeout_s"], now)
+
+
+def _exact_probe(con, harness: str | None, model: str, effort: str | None, now: datetime,
+                 discovery: dict) -> dict | None:
+    """The probe row routing reads for this route now: its exact fingerprint, with the harness's current version and
+    adapter and the default launch profile. A row for another profile, version or adapter says nothing about it. A
+    pending row whose probe never recorded, past its timeout, is no verdict."""
+    from office import route_probe  # route_probe imports candidates, which imports this package's routing
+    adapter = adapters.load_all().get(harness)
+    if adapter is None:
+        return None
+    cand = {"harness": harness, "harness_version": adapters.route_version(harness, adapter),
+            "invocation_model_id": model, "effort": effort}
+    probe = route_probe.exact_row(con, cand, adapter)
+    if probe is None or probe["probed_at"] is None:
+        return None
+    if probe["result"] == "pending" and not _probe_fresh(probe, now, discovery):
+        return None
+    return probe
+
+
+def _keeps_route_down(harness: str | None, model: str, effort: str | None, role: str | None, probe: dict | None,
+                      now: datetime, discovery: dict) -> bool:
+    """A fresh probe that is not a pass holds the route down, or holds it while its re-probe is in flight. Routing attaches
+    and reads a probe only for a route it treats as discovery-eligible: a catalog row that is discovery-eligible and that
+    no role allow admits (candidates.py). Any other route is available whatever its probe."""
+    from office import candidates, route_probe  # imported here: candidates imports this package's routing
+    if probe is None or probe["result"] == "pass" or not _probe_fresh(probe, now, discovery):
+        return False
+    cand = {"harness": harness, "model_id": model, "invocation_model_id": model, "effort": effort}
+    row = route_probe.catalog_row(cand)
+    if row is not None and not route_policy.row_status(row)["discovery_eligible"]:
+        return False
+    cand["harness_version"] = adapters.route_version(harness, adapters.load_all()[harness])
+    return not (role and route_policy.user_allows(cand, role, candidates.current_user_policies()))
+
+
+def _cooldown_expiries(con, harness: str | None, model: str, effort: str | None) -> list[datetime]:
+    """The expiry of each cooldown row routing keys on for this route, lapsed or not."""
+    keys = (*routing._demotion_keys({"harness": harness, "invocation_model_id": model, "effort": effort}),
+            routing.cooldown_key(harness, model))
+    return [parse_iso(expires) for (expires,) in con.execute(
+        f"SELECT expires_at FROM route_cooldowns WHERE route IN ({','.join('?' * len(keys))})", keys).fetchall()]
+
+
+def _available_basis(con, run_id: str, row, payload: dict, now: datetime,
+                     discovery: dict) -> tuple[str, datetime] | None:
+    """(why, the instant the route became available) when the evidence's route is available again, else None. A route
+    the user declared is the user's choice and is never recovered here. Routing rejects a route while any of its
+    cooldown keys is live, or while its exact probe is fresh and not a pass, so neither may be. A runtime failure, or a
+    rerun that left a usage-limited route, is then recovered: its demotion lapsed, at the latest expiry. A review change set
+    no cooldown, so it needs a re-probe that passed after it, and that pass is the instant."""
+    if payload.get("declared") or payload.get("actor") == "user":  # the user's declaration or re-pin is the decision
+        return None
+    harness, model, effort = _route_parts(con, run_id, row, payload)
+    if not model:
+        return None
+    expiries = _cooldown_expiries(con, harness, model, effort)
+    if any(expiry > now for expiry in expiries):
+        return None
+    probe = _exact_probe(con, harness, model, effort, now, discovery)
+    if _keeps_route_down(harness, model, effort, _role(con, row, payload), probe, now, discovery):
+        return None
+    if row["kind"] in ("route.failed", "route.fallback"):
+        # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline decides.
+        if expiries:
+            return "demotion lapsed", max(expiries)
+        deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
+        return None if deadline > now else ("demotion lapsed", deadline)
+    created = parse_iso(row["created_at"])
+    limit = con.execute("SELECT expires_at, updated_at FROM route_cooldowns WHERE route=?",
+                        (routing.cooldown_key(harness, model),)).fetchone()  # the rate limit routing keys on the route
+    # Live at the notice: set before it and not refreshed since (a refresh after it leaves the skip's cause unknown).
+    if limit and parse_iso(limit[1]) <= created < parse_iso(limit[0]):
+        return "cooldown lapsed", parse_iso(limit[0])
+    if probe is None or probe["result"] != "pass" or parse_iso(probe["probed_at"]) <= created:
+        return None
+    return "re-probe passed", max([parse_iso(probe["probed_at"])] + expiries)
+
+
+def _available_text(route: str, basis: str) -> str:
+    return f"preferred route {route} is available again ({basis}); the next review, rerun or dispatch ranks it normally"
+
+
+def _recorded(con, run_id: str, episode: int) -> bool:
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? AND json_extract(payload_json,'$.episode')=?",
+                       (run_id, RECOVERED_KIND, episode)).fetchone() is not None
+
+
+def _latest_episodes(con, run_id: str) -> dict[str, tuple]:
+    """route -> (newest evidence row, its payload). A route is judged by its newest episode only."""
+    latest: dict[str, tuple] = {}
+    for row in con.execute(_EVIDENCE_SQL, (run_id,)).fetchall():
+        payload = loads(row["payload_json"], {})
+        if route := _route_of(row, payload):
+            latest[route] = (row, payload)
+    return latest
+
+
+def _recoverable(con, run: dict, now: datetime) -> list[tuple]:
+    """(route, evidence row, payload, (why, instant)) for each route whose newest episode is available and unrecorded.
+    Read-only."""
+    found, discovery = [], _discovery(run)
+    for route, (row, payload) in _latest_episodes(con, run["id"]).items():
+        if _recorded(con, run["id"], row["seq"]):
+            continue
+        if (basis := _available_basis(con, run["id"], row, payload, now, discovery)) is not None:
+            found.append((route, row, payload, basis))
+    return found
+
+
+def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]:
+    """Record one `route.recovered` per route a non-terminal run fell back from or avoided that is available again.
+    Keyed by the evidence's seq, so each episode is recorded once. Only events are written: no dispatch, task or
+    route changes, and the next review, rerun or dispatch ranks the route under the normal policy. Returns new seqs."""
+    if state.is_terminal(run):
+        return []
+    now = now or datetime.now(timezone.utc)
+    if not _recoverable(con, run, now):  # read-only: a sweep with nothing to record takes no writer lock
+        return []
+    seqs = []
+    with db.transaction(con):  # judged again under the writer lock, so a concurrent sweep cannot record the same episode
+        current = state.get_run(con, run["id"])  # closed, or gone, since the caller read it
+        if current is None or state.is_terminal(current):
+            return []
+        for route, row, payload, (basis, at) in _recoverable(con, current, now):
+            harness, model, effort = _route_parts(con, run["id"], row, payload)
+            seqs.append(state.emit(
+                con, run, RECOVERED_KIND, _available_text(route, basis), task_id=row["task_id"],
+                payload={"route": route, "harness": harness, "model": model, "effort": effort,
+                         "role": _role(con, row, payload), "basis": basis, "episode": row["seq"],
+                         "evidence": row["kind"], "available_at": at.isoformat(timespec="microseconds")}))
+    return seqs
+
+
+def _considered_since(con, run_id: str, at: str, route: str, role: str | None) -> bool:
+    """Whether routing since `at` (the instant the route became available) used or passed over the route: a dispatch
+    or review gate on the route itself, a review that left it, or a dispatch of the same role that routing chose for
+    (not pinned to a declared route, which skips the ranking)."""
+    return con.execute(
+        "SELECT 1 FROM dispatches WHERE run_id=? AND started_at>? AND (triple=? OR (role IS ? AND override_json IS NULL)) "
+        "UNION ALL SELECT 1 FROM gates WHERE run_id=? AND created_at>? AND route=? "
+        "UNION ALL SELECT 1 FROM events WHERE run_id=? AND created_at>? AND kind='route.changed' "
+        "AND json_extract(payload_json,'$.notice')='review' AND json_extract(payload_json,'$.before')=? LIMIT 1",
+        (run_id, at, route, role, run_id, at, route, run_id, at, route)).fetchone() is not None
+
+
+def recovery_lines(con, run: dict) -> list[str]:
+    """`preferred route X is available again` for each recovered route that is still available: no cooldown is live on it
+    now (an in-flight failure sets one, whatever its reason, and a quota wall sets one with no route event), its exact
+    probe does not reject it now, routing has not used or passed over it since it became available, and that episode is
+    still the route's newest evidence."""
+    if state.is_terminal(run):
+        return []
+    now = datetime.now(timezone.utc)
+    discovery = _discovery(run)
+    newest = _latest_episodes(con, run["id"])
+    lines, seen = [], set()
+    for row in con.execute("SELECT created_at, payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC",
+                           (run["id"], RECOVERED_KIND)).fetchall():
+        payload = loads(row["payload_json"], {})
+        route = payload.get("route")
+        if route in seen:
+            continue
+        seen.add(route)
+        if route in newest and newest[route][0]["seq"] != payload.get("episode"):
+            continue
+        harness, model, effort = payload.get("harness"), payload.get("model"), payload.get("effort")
+        if model and any(expiry > now for expiry in _cooldown_expiries(con, harness, model, effort)):
+            continue
+        if model and _keeps_route_down(harness, model, effort, payload.get("role"),
+                                       _exact_probe(con, harness, model, effort, now, discovery), now, discovery):
+            continue
+        since = payload.get("available_at") or row["created_at"]
+        if not _considered_since(con, run["id"], since, route, payload.get("role")):
+            lines.append(_available_text(route, payload.get("basis")))
+    return lines

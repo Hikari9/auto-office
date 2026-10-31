@@ -5,6 +5,8 @@ agent never needs an `office next` command or the Office source to proceed.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import re
 
@@ -281,6 +283,9 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     return None
 
 
+VERDICT_LINES = 3  # closed verdicts one status shows and marks read (#919)
+
+
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
            probe_panes: bool = False) -> Result:
     worker = os.environ.get("OFFICE_DISPATCH_ID")
@@ -327,6 +332,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import gates as review_gates
         for line in review_gates.review_route_lines(con, run["id"], limit=3):
             res.add(line)
+        from office import routechange
+        routechange.sweep_recovered(con, run)
+        for line in routechange.recovery_lines(con, run):
+            res.add(line)
     from office import risk as risk_mod
     rline = risk_mod.line(run)
     if rline and (risk_mod.classification(run.get("risk")) == risk_mod.UNKNOWN or (run.get("gates") or {}).get("lightweight")):
@@ -355,6 +364,15 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import dispatch as dispatch_mod
     for line in dispatch_mod.headless_fallbacks(con, run):
         res.add(line)
+    replies = [] if state.is_terminal(run) else dispatch_mod.reply_pending(con, run)
+    hard = dispatch_mod.reply_hard_bound()
+    convergence = contract.is_convergence(run)
+    stuck_reply = None
+    for r in replies:
+        if r["quiet"] < hard:
+            res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
+        else:
+            stuck_reply = stuck_reply or _stuck_reply_next(r, convergence)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
@@ -365,10 +383,27 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(f"question: {q}")
     for line in _amendment_stalls(con, run):
         res.add(f"blocker: {line}")
+    episodes, verdict_lines = [], []
+    if not state.is_terminal(run):
+        from office import db, watchdog
+        verdicts = watchdog.unread_verdicts(con, run)
+        episodes = watchdog.review_episodes(con, run, probe=probe_panes, verdicts=verdicts)
+        # A verdict is read only once its line is printed: an episode line, or one of at most a few verdict lines.
+        # Session hooks cut the output by bytes, so a longer list would lose lines that were marked read.
+        in_episode = {ep["episode"] for ep in episodes if ep["kind"] == "review.closed_unread"}
+        pending = [v for v in verdicts if v["gate"]["id"] not in in_episode]
+        shown = pending[:VERDICT_LINES]
+        verdict_lines = [watchdog.verdict_line(v["gate"]) for v in shown]
+        if len(pending) > len(shown):
+            verdict_lines.append(f"{len(pending) - len(shown)} more closed verdicts unread; the next office status shows them")
+        printed = in_episode | {v["gate"]["id"] for v in shown}
+        if episodes or verdicts:
+            with db.transaction(con):
+                watchdog.record_review_episodes(con, run, episodes)
+                watchdog.mark_review_verdicts_read(con, run, [v for v in verdicts if v["gate"]["id"] in printed])
+    # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
+    res.lines[1:1] = [*verdict_lines, *(f"blocker: {ep['text']}" for ep in episodes)]
     if probe_panes:
-        from office import watchdog
-        for stall in watchdog.reviewer_stalls(con, run):
-            res.add(f"blocker: {stall}")
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.
         for b in questions.blocked_unrecorded(con, run):
@@ -386,6 +421,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     if "FULL SUITE NOT VERIFIED" in detail:
         res.add(f"verification warning: {detail}")
     res.next = next_action(con, run)
+    if episodes:
+        res.next = episodes[0]["next"]
+    elif stuck_reply:
+        res.next = stuck_reply
+    elif (res.next.startswith(WAITING_ACTIONS) and not state.is_terminal(run) and _work_in_flight(con, run)
+          and not root_wake.armed(con, run) and not wait_in_flight(run["id"])):
+        # Nothing for the root to do and no one will wake it: it must block on `office wait`.
+        res.next = "office wait (work is running and no root wake is armed)"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
@@ -394,6 +437,27 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
+
+
+LANE_REVIEW_SPEC = {"convergence_review": "convergence", "visual": "visual"}  # gate kind -> `<scope>:<kind>` argument
+
+
+def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
+    """The next command for a stuck reviewer once its reply stayed unsettled past the hard bound (#918). Where a
+    same-revision re-run exists it names that (revoke, then review). A v3.1 plan review and a task visual review have
+    none, so they name the manual step and the reply file the orchestrator reads the verdict from. None otherwise."""
+    did, kind = reply["id"], reply["kind"]
+    if kind == "plan_review" and convergence:
+        return f"office revoke {did}, then office review plan --quote \"<user's words>\" to re-run the plan review"
+    if reply["scope"] and kind in LANE_REVIEW_SPEC:
+        spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
+        return f"office revoke {spec}, then office review {spec} to re-run the review on the same revision"
+    if kind == "code_review" and reply["task_id"]:
+        return (f"office revoke {did}, then office review {reply['task_id']} "
+                "to relaunch the review on the same revision")
+    if kind == "plan_review" or (kind == "visual" and reply["task_id"]):
+        return f"office revoke {did}, then office resume; the reply is at {reply['path']}"
+    return None
 
 
 def add_bug_hints(con, run: dict, res: Result) -> Result:
@@ -466,9 +530,10 @@ def _snapshot(con, run: dict) -> tuple:
     return run["phase"], run["requirements_version"], run["plan_version"], tasks
 
 
-def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[str]:
+def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: list[dict] | None = None) -> list[str]:
     """Work Office believes is in progress with nothing left to advance it. `acts` is the pane
-    activity `questions.scan` already read, by dispatch id, so no pane is read twice."""
+    activity `questions.scan` already read, by dispatch id, so no pane is read twice. `episodes` is
+    `watchdog.review_episodes` already computed by the caller; it is read here when absent."""
     out = []
     from office import gates as gates_mod
     for g in con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running')", (run["id"],)).fetchall():
@@ -485,7 +550,10 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None) -> list[st
     out.extend(_amendment_stalls(con, run))
     out.extend(_idle_executors(con, run, acts))
     from office import watchdog
-    out.extend(watchdog.reviewer_stalls(con, run))
+    if episodes is None:
+        episodes = watchdog.review_episodes(con, run, probe=True)
+    # Only a running reviewer is a stall (exit 3). Queued and closed-unread episodes are news (exit 0).
+    out.extend(ep["text"] for ep in episodes if ep["kind"] == "review.stalled")
     return out
 
 
@@ -555,7 +623,7 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
     """Executors whose agent stopped without submitting. Nothing else ends that
     wait: the session is alive, so no exit is recorded and no job is pending.
     Liveness unknown (herdr unreachable) is never a stall."""
-    from office import db, dispatch, rerun
+    from office import db, dispatch, rerun, watchdog
     from office.util import now_iso, parse_iso
     threshold = idle_stall_s()
     out = []
@@ -602,7 +670,6 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
                        f"pane tail in {tail}; next: {actions}")
             continue
         if act["busy"] or changed:
-            from office import watchdog
             # A spinner, even a ticking spinner, is not progress by itself (#701).
             # Watchdog reports only after unchanged pane, worktree and log evidence.
             if act["busy"]:
@@ -620,6 +687,11 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
             continue
         idle = (parse_iso(now_iso()) - parse_iso(idle_since)).total_seconds()
         if idle < threshold:
+            continue
+        if watchdog.child_state(d) is not False:
+            # A live child (a background monitor, `office wait`) is work in flight: restart the idle clock (#895).
+            with db.transaction(con):
+                con.execute("UPDATE dispatches SET idle_since=? WHERE id=?", (now_iso(), d["id"]))
             continue
         tail = _write_pane_tail(run, d, act)
         prompt = f'office prompt {d["id"]} -- "<message>", ' if d["launcher"] == "herdr" else ""
@@ -781,7 +853,7 @@ def _action_signature(con, run: dict) -> str | None:
     same unchanged next: line from waking each invocation into a busy loop.
     """
     action = next_action(con, state.get_run(con, run["id"]))
-    if action.startswith(("exceptions only", "no action", "none;")):
+    if action.startswith(WAITING_ACTIONS):
         return None
     return sha256_obj((_snapshot(con, run), action))
 
@@ -818,15 +890,56 @@ def _wait_clock():
     return time.monotonic, time.sleep
 
 
+def _wait_marker(run_id: str) -> Path:
+    return paths.run_dir(run_id) / "office-wait.lock"
+
+
+@contextlib.contextmanager
+def waiting(run_id: str):
+    """Holds an exclusive lock on the run's wait marker while the root's `office wait` runs. The OS
+    releases it when the process exits, so a crash never leaves a wait that looks in flight. An
+    executor's own wait does not count: only the orchestrator's wait can stand in for a wake."""
+    if os.environ.get("OFFICE_DISPATCH_ID"):
+        yield
+        return
+    marker = _wait_marker(run_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    with marker.open("a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another root wait holds it: never block here, so this wait keeps its own --timeout.
+            yield
+            return
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def wait_in_flight(run_id: str) -> bool:
+    marker = _wait_marker(run_id)
+    if not marker.exists():
+        return False
+    with marker.open("a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return False
+
+
 def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     """Block until something needs the orchestrator, then print status.
     Exit 0: a task, phase, plan or requirements change, or a new actionable
     orchestrator event. Exit 3: a stall, or an already-reported orchestrator
     action with no work in flight to advance it (your move, #735).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
-    the `office answer` command). Exit 124: timeout with nothing new. A watcher
+    the `office answer` command). Exit 124: timeout with nothing new. A review gate
+    queued past its bound or closed unread (#919) is news: exit 0, once per episode. A watcher
     keys on the exit code, never on matching status text."""
-    from office import db, dispatch, jobs, lifecycle, questions
+    from office import db, dispatch, jobs, lifecycle, questions, watchdog
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
@@ -844,8 +957,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         from office import ctx_alert
         ctx_alert.notice(con, run)
         asked, _, acts = questions.scan(con, run)
-        stuck = stalls(con, run, since=started_at, acts=acts) + signals
+        episodes = watchdog.review_episodes(con, run, probe=True)
+        stuck = stalls(con, run, since=started_at, acts=acts, episodes=episodes) + signals
         fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
+        review_news = watchdog.fresh_review_episodes(con, run, episodes)
         changed = _snapshot(con, run) != start
         # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
         # refused submit, a gate failure, a recheck the orchestrator must route. A pure
@@ -870,7 +985,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                      and not _work_in_flight(con, run))
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or fresh_stall or changed or news or pending or your_move or terminal or now() >= deadline:
+        if asked or fresh_stall or changed or news or review_news or pending or your_move or terminal or now() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -901,7 +1016,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (fresh_stall or changed or news or pending or your_move or terminal):
+            elif not (fresh_stall or changed or news or review_news or pending or your_move or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)
@@ -1005,8 +1120,12 @@ _URGENT_KINDS = frozenset({
     # convergence contract (#337)
     "gate.recheck", "plan.recheck", "plan.intake_gap", "plan.budget_exhausted", "convergence.recheck",
     "convergence.intake_gap", "convergence.escalation", "convergence.unavailable", "convergence.blocked",
-    "convergence.conflict"})
+    "convergence.conflict",
+    # review gates past a bound (#919)
+    "review.queued_too_long", "review.stalled", "review.closed_unread"})
 _SEEN = "orchestrator:seen:"
+# next: prefixes that leave the root nothing to do until an event or a running task moves on.
+WAITING_ACTIONS = ("exceptions only", "no action", "none;")
 
 
 def _urgent(event: dict) -> bool:
