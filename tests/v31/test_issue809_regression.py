@@ -42,21 +42,20 @@ def _funded(gear, **risk):
 
 
 @pytest.mark.parametrize("gear,expected", [
-    ("XS", ()), ("S", ("four-lens",)), ("M", ("four-lens",)),
-    ("L", ("edge-cases", "test-strength")), ("XL", ("edge-cases", "test-strength")),
+    ("XS", ()), ("S", ("combined",)), ("M", ("combined",)),
+    ("L", ("combined",)), ("XL", ("combined",)),
 ])
 def test_subagent_funding_per_gear(gear, expected):
     assert sub.rubrics(_funded(gear), {"scope": ["src/a.py"]}) == expected
 
 
 @pytest.mark.parametrize("gear", ["L", "XL"])
-def test_l_and_xl_fund_up_to_four_specialists(gear):
+def test_l_and_xl_fund_one_surface_aware_combined_audit(gear):
     run = _funded(gear, classification="elevated")
-    task = {"scope": ["scripts/build.sh"], "descriptor": {}}
-    assert sorted(sub.rubrics(run, task)) == ["edge-cases", "platform", "security", "test-strength"]
-    assert len(sub.rubrics(run, task)) == 4
-    assert sub.rubrics(_funded(gear), {"scope": ["src/auth/login.py"]})[0] == "security"
-    assert "platform" in sub.rubrics(_funded(gear), {"scope": ["src/a.py"], "descriptor": {"domain": "infrastructure"}})
+    assert sub.rubrics(run, {"scope": ["scripts/auth.sh"]}) == ("combined",)
+    assert sub.platform_relevant(["scripts/build.sh"])
+    assert sub.security_relevant(["src/auth/login.py"])
+    assert not sub.security_relevant(["src/calculator.py"])
 
 
 def test_legacy_pinned_runs_fund_no_subagents():

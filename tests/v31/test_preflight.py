@@ -365,163 +365,50 @@ def _blast_is_high(blast):
 
 
 @given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
-def test_inline_self_review_needs_a_known_low_gear_and_every_risk_signal_clear(gear, blast, size, irreversible, high):
-    """Every doubt resolves to more review: whatever is unknown, unset or mistyped is never inline."""
+def test_every_gear_and_risk_resolves_to_single_review(gear, blast, size, irreversible, high):
     from office import briefs
-    if briefs.self_review_tier(gear, _risk(blast, irreversible, size, high)) == "inline":
-        assert gear in LOW_GEARS and blast in ("local", "repo")
-        assert not (irreversible or high or size in ("L", "XL"))
+    assert briefs.self_review_tier(gear, _risk(blast, irreversible, size, high)) == "single"
 
 
-@given(gear=st.sampled_from(LOW_GEARS), blast=st.sampled_from(["local", "repo"]), size=_CLEAN_SIZES)
-def test_a_low_gear_with_a_contained_clean_risk_is_inline(gear, blast, size):
+@pytest.mark.parametrize("gear", ["direct", "light", "quick", "express", "full", "XL", None])
+def test_executor_initial_and_fix_briefs_are_single_and_bound_to_one_round(gear):
     from office import briefs
-    assert briefs.self_review_tier(gear, _risk(blast, size=size)) == "inline"
-
-
-@example(gear="direct", blast="production", size=None, irreversible=False, high=False)  # each signal alone is enough
-@example(gear="direct", blast="production-data", size=None, irreversible=False, high=False)
-@example(gear="direct", blast="local", size="L", irreversible=False, high=False)
-@example(gear="light", blast="repo", size="XL", irreversible=False, high=False)
-@example(gear="direct", blast="local", size=None, irreversible=True, high=False)
-@example(gear="direct", blast="local", size=None, irreversible=False, high=True)
-@given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
-def test_any_high_risk_signal_is_deep_review_in_every_gear(gear, blast, size, irreversible, high):
-    from office import briefs
-    if irreversible or high or size in ("L", "XL") or _blast_is_high(blast):
-        assert briefs.self_review_tier(gear, _risk(blast, irreversible, size, high)) == "deep"
-
-
-@given(risk=st.one_of(_UNUSABLE_RISK, st.builds(_risk, _BLASTS, st.booleans(), _SIZES, st.booleans())))
-def test_gear_full_is_deep_even_without_a_usable_risk_record(risk):
-    from office import briefs
-    assert briefs.self_review_tier("full", risk) == "deep"
-
-
-@given(gear=_GEARS.filter(lambda g: g != "full"), risk=_UNUSABLE_RISK)
-def test_an_unusable_risk_record_is_single_never_inline(gear, risk):
-    from office import briefs
-    assert briefs.self_review_tier(gear, risk) == "single"
-    assert briefs.self_review_tier(gear, {}) == "single"  # an empty record says nothing either
-
-
-@given(gear=_GEARS, blast=st.sampled_from(["local", "repo", "production", "production-data", None]),
-       size=_SIZES, irreversible=st.booleans())
-def test_the_risk_a_run_resolves_drives_the_tier(gear, blast, size, irreversible):
-    """The planner's own risk record, not a hand-built one, reaches the same verdicts."""
-    from office import briefs
-    from office.config import resolve_risk
-    tier = briefs.self_review_tier(gear, json.dumps(resolve_risk({}, blast, size, irreversible)))
-    if irreversible or size in ("L", "XL") or _blast_is_high(blast):
-        assert tier == "deep"
-    elif gear in LOW_GEARS and blast in ("local", "repo"):
-        assert tier == "inline"
-    else:
-        assert tier != "inline"  # no blast radius is unknown, not low
-
-
-@example(blast="LOCAL")
-@example(blast="Repo")
-@example(blast=["local"])
-@example(blast=3)
-@example(blast="")
-@given(blast=st.one_of(st.text(max_size=8), st.integers(), st.lists(st.text(max_size=5), max_size=2)).filter(
-    lambda b: b not in ("local", "repo", "production", "production-data")))
-def test_a_blast_radius_that_is_not_exactly_a_known_value_is_single_never_inline(blast):
-    from office import briefs
-    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
-
-
-@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("light", "repo", "inline"),
-                                               ("quick", "local", "single"), ("express", "repo", "single"),
-                                               ("full", "production", "deep")])
-def test_initial_and_fix_round_briefs_print_the_tier_the_gear_and_blast_radius_call_for(gear, blast, tier):
-    from office import briefs
-    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
-              "base_commit": "abc123"}
-    run = {"id": "r", "gear": gear, "risk_json": _risk(blast)}
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1,
+              "requirements_version": 1, "base_commit": "abc123"}
+    run = {"id": "r", "gear": gear, "risk_json": _risk("production")}
     initial = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": None})
     fix = briefs.executor_brief(_NoFindings(), run, {**packet, "fix_of": "R1"})
-    assert _tier_of(initial) == _tier_of(fix) == tier
+    assert _tier_of(initial) == _tier_of(fix) == "single"
+    assert "ROUND 1" in initial and "ROUND 1" in fix
+    assert "No parallel specialists" not in initial
+    assert "Never spawn parallel specialists" in initial
 
 
-def test_pathologically_nested_risk_record_fails_toward_review():
+def test_a_bad_risk_json_does_not_escalate_to_parallel_subagents():
     from office import briefs
-    assert briefs.self_review_tier("direct", "[" * 500_000) == "single"
-    assert briefs.self_review_tier("full", "[" * 500_000) == "deep"
+    assert briefs.self_review_tier("full", "[" * 500_000) == "single"
 
 
-def _self_review_block(brief: str) -> str:
-    return brief[brief.index("SELF-REVIEW before submitting"):brief.index("WHEN DONE run: office preflight")]
-
-
-def _tier_brief(tier: str) -> str:
+def test_single_brief_keeps_test_strength_and_moves_security_to_convergence():
     from office import briefs
-    gear, risk = {"inline": ("direct", _risk("local")), "single": ("quick", _risk("local")),
-                  "deep": ("full", _risk("production"))}[tier]
-    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
-              "base_commit": "abc123"}
-    brief = briefs.executor_brief(None, {"gear": gear, "risk_json": risk}, packet)
-    assert f"(tier: {tier})" in brief
-    return _self_review_block(brief)
-
-
-@pytest.mark.parametrize("tier", ["inline", "single", "deep"])
-def test_every_tier_keeps_lenses_json_shape_fix_rule_and_mutation_proof(tier):
-    block = _tier_brief(tier)
-    for lens in ("(a) security", "(b) edge cases", "(c) platform and build", "(d) test strength"):
-        assert lens in block, lens
-    assert '[{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}]' in block
-    assert "Fix every medium or higher finding inside SCOPE" in block
-    assert "revert the fix, confirm the test fails, restore it" in block
-    assert "git diff abc123" in block
-    assert "A finding outside SCOPE goes in your report, unfixed" in block
-
-
-def test_inline_tier_has_no_subagent_instruction_and_the_shared_round_rules():
-    block = _tier_brief("inline")
-    assert "subagent" not in block.lower()
-    assert "fix-diff re-review" in block and "3-round cap" in block
-    assert "one fresh pass per lens yourself" in block
-    assert "You may skip a lens that clearly does not\n    apply, with a one-line reason in your report" in block
-
-
-def test_inline_tier_applies_to_repo_blast_but_not_to_quick_gear():
-    from office import briefs
-    assert briefs.self_review_tier("direct", _risk("repo")) == "inline"
-    assert briefs.self_review_tier("light", _risk("repo")) == "inline"
-    assert briefs.self_review_tier("quick", _risk("local")) == "single"
-    assert briefs.self_review_tier("quick", _risk("repo")) == "single"
-    assert briefs.self_review_tier("direct", _risk("repo", high=True)) == "deep"
-    assert briefs.self_review_tier("direct", _risk(None)) == "single"
-
-
-def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
-    block = _tier_brief("single")
-    assert "Start exactly one subagent" in block and "all four" in block
-    assert "four parallel subagents" not in block
-    assert block.lower().count("subagent") == 1
-    assert "3-round cap" in block and "skip a lens" not in block
-
-
-def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
-    block = _tier_brief("deep")
-    assert "Start four parallel subagents" in block
-    assert "each given only the diff and one\n    lens" in block and "3-round cap" in block
-    assert "exactly one subagent" not in block
+    text = "\n".join(briefs.self_review_lines("abc123", "deep"))
+    assert "test strength" in text and "edge cases" in text
+    assert "Security is not an executor lens" in text
+    assert "mandatory independent security pass" in text
+    assert "ONE read-only combined audit" in text
+    assert "ROUND 1" in text
+    assert "TRUNCATED self-review truncated: budget cap" in text
+    assert "git diff abc123" in text
+    assert "main source change" not in text or "main" in text
 
 
 @pytest.mark.parametrize("injected", ["inline", "single", "deep", "none", True])
-def test_packet_cannot_lower_the_tier(injected):
+def test_packet_cannot_force_an_old_tier(injected):
     from office import briefs
-    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
-              "self_review_tier": injected, "tier": injected, "gear": "direct", "risk": {"blast_radius": "local"},
-              "risk_json": _risk("local"), "blast_radius": "local"}
-    deep = briefs.executor_brief(None, {"gear": "full", "risk_json": _risk("production")}, packet)
-    assert "(tier: deep)" in deep
-    unset = briefs.executor_brief(None, {"gear": "direct", "risk_json": _risk(None)}, packet)
-    assert "(tier: single)" in unset
-    assert "(tier: single)" in briefs.executor_brief(None, {}, packet)
+    packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1,
+              "requirements_version": 1, "self_review_tier": injected, "tier": injected}
+    brief = briefs.executor_brief(None, {"gear": "XL", "risk_json": _risk("production")}, packet)
+    assert "(tier: single)" in brief
 
 
 def _tier_of(brief: str) -> str:
@@ -556,7 +443,7 @@ def test_fix_round_brief_prints_the_same_tier_as_the_initial_brief(gear, blast, 
 
 def test_office_submit_skill_simplifies_before_self_review():
     text = (Path(__file__).resolve().parents[2] / "skills/office-submit/SKILL.md").read_text()
-    order = [text.index(h) for h in ("## 1. Simplify", "## 2. Adversarial self-review", "## 3. Checks",
+    order = [text.index(h) for h in ("## 1. Simplify", "## 2. One-round self-review", "## 3. Checks",
                                      "## 5. Preflight", "## 6. Submit", "## 7. Report")]
     assert order == sorted(order)
     simplify = text[order[0]:order[1]]
@@ -636,22 +523,16 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     assert guards()[0] == [] and len(guards()[1]) == 1
 
 
-def test_office_submit_skill_reads_the_tier_and_no_longer_requires_four_subagents_unconditionally():
+def test_office_submit_skill_enforces_single_review_and_red_green_without_parallel_specialists():
     text = (Path(__file__).resolve().parents[2] / "skills/office-submit/SKILL.md").read_text()
-    step = text[text.index("## 2. Adversarial self-review"):text.index("## 3. Checks")]
-    assert "`SELF-REVIEW` line" in step and "(tier: <tier>)" in step
-    for tier in ("`inline`", "`single`", "`deep`"):
-        assert tier in step, tier
-    inline = step[step.index("**`inline`:**"):step.index("**`single`:**")]
-    single = step[step.index("**`single`:**"):step.index("**`deep`:**")]
-    deep = step[step.index("**`deep`:**"):]
-    assert "no subagents" in inline and "Agent" not in inline
-    assert "skip a lens that clearly does not apply" in inline and "one-line reason" in inline
-    assert "exactly one `Agent` subagent" in single and "all four lenses" in single
-    assert "four `Agent` subagents" in deep
-    assert "3-round cap" in step and "fix-diff re-review" in step
-    assert "four `Agent` subagents" not in step.replace(deep.split("\n\n")[0], "")
-    assert "You cannot lower it" in step
+    step = text[text.index("## 2. One-round self-review"):text.index("## 3. Checks")]
+    assert "single-tier" in step and "one" in step.lower()
+    assert "edge cases" in step and "test strength" in step
+    assert "independent" in step and "convergence" in step
+    assert "main-change proof" in step and "disposable checkout" in step
+    assert "ROUND 1" in step and "TRUNCATED self-review truncated: budget cap" in step
+    assert "four-specialist swarm" in step
+    assert "15%" in step
 
 
 @pytest.mark.integration

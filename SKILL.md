@@ -104,16 +104,18 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
   workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
 - An executor that cannot finish stops with `office raise --kind question|blocker|scope-request [--path P] -- "<text>"`, not `submit`; its task stays blocked. Answer with `office answer <task> -- "<text>"`. Grant a scope-request only by `office amend <scope> --contract`, which also unblocks it.
-- Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
-  gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
-  `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
-  that changes behavior gets one fix-diff re-review and names its test plus `mutation=failed`; 3-round cap;
-  `contract-conflict` stops with the ACCEPT line quoted; submit consumes the file), then `office preflight`, which
-  refuses a missing, stale, or open ledger. `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits
-  (convergence runs; v3.1-pinned runs keep ledger-less submits), records the ledger digest or a typed exemption (`empty`, `read-only`, or
-  an inline-tier `--self-review-exempt trivial|mechanical`) on the revision, and an exemption never weakens independent review. Each ends
-  with one `TASK=... SUBMIT=... NEXT=...` line (saved in `pane-final.txt`); act on its `NEXT=`. A worker
-  refused as lease-lost, superseded-dispatch, or task-paused is done: never prompt it to retry.
+- Executors simplify (behavior-preserving, in SCOPE), run targeted checks, and self-review the main diff
+  exactly once at the default single tier: edge cases and test-strength always, platform only for relevant
+  changed files. The independent Office-funded task audit is at most one combined read-only subagent,
+  not four specialists. Security is required at convergence for sensitive paths (auth, permissions,
+  secrets, input parsing, production writes). Record findings in OFFICE_SELF_REVIEW.md, with a one-round
+  cap and TRUNCATED self-review truncated: budget cap if the 15% self-review token budget is spent.
+  A medium/high finding fixed in scope names its test and mutation=failed; open medium/high findings
+  stop at round one. office preflight automatically proves the main source change by reverting it in a
+  disposable checkout, keeping tests, requiring red, then restoring source and requiring green;
+  office submit requires SHA-bound passing proof. There is no fix-diff re-review. Legacy-pinned runs
+  keep their review contract. The ledger is consumed on submit, never part of the revision.
+  Workers end with one TASK=... SUBMIT=... NEXT=... status line. A refused or lost lease ends that session.
 - Before submitting a plan inline, run the same four lenses over it and put what they surface in tasks' `accept:` criteria. Plan seams, not internals
   (`scope:` is an ownership envelope; `shared:`, `lane:`, `converge:`, `accept_needs:`, `integration_risk: high`): `docs/orchestrator-reference.md`.
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours: `office amend <T2|plan> -- "<delta>"`. Plan review

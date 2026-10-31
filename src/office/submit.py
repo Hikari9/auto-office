@@ -584,6 +584,13 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
                             'trivial|mechanical -- "<reason>"' if tier == "inline" else ""))
         raise Refused(category, f"{task['id']} self-review ledger refused submission: {details}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
+    from office import self_review_proof
+    proof = self_review_proof.gate(con, run, task, wt, base, head,
+                                    preflight.committed_changes(wt, base, head, dep_bases), execute=False)
+    if not proof["ok"]:
+        raise Refused("self-review-proof", f"{task['id']}: {proof['reason']}",
+                      scope=task["id"], preserved="your worktree (nothing was submitted)",
+                      next_step="run office preflight for automatic red/green proof, then submit")
     receipt = _self_review_receipt(wt, task, run, head, tree, tier, enforced, exempt, reason,
                                    preflight.committed_changes(wt, base, head, dep_bases), preflight)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
