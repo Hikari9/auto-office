@@ -10,7 +10,7 @@ import pytest
 
 from test_issue_895_false_stalls import _ago, _reviewer_gate
 from test_root_wake_723 import PANE, setup_root
-from test_wait import _go
+from test_wait import EXTERNAL, _go
 
 from office import context_snapshot, db, guide, rerun, root_wake, state, watchdog
 from office import gates as gates_mod
@@ -387,3 +387,28 @@ def test_a_queued_live_job_next_is_office_wait_not_status(env, monkeypatch):
     _review_gate(con, _run(con), "GQ9", created_for=600)
     (ep,) = watchdog.review_episodes(con, _run(con), probe=False)
     assert ep["next"].startswith("office wait (review job is alive)"), ep
+
+
+def test_a_queued_review_past_its_bound_wakes_the_wait_once_with_its_next(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_QUEUED_S", "60")
+    monkeypatch.setattr(gates_mod, "owner_state", lambda con, run, g: ("queued", "job J1 is queued"))
+    con = env.con()
+    _review_gate(con, _run(con), "GW1", created_for=600)
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "T1 lane review GW1 queued" in out and "next: office revoke T1, then office review T1" in out, out
+    code, out = env.office("wait", "--timeout", "0.5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "wait: nothing new" in out, out
+
+
+def test_an_unread_closed_review_wakes_the_wait_with_its_next(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    run = _run(con)
+    _closed_review(con, run)
+    _event(con, run, "gate.pass", "T1", 899)
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "verdict is unread" in out and "next: office context to read the T1 verdict" in out, out

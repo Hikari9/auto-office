@@ -286,14 +286,23 @@ def mark_review_episodes_read(con, run: dict, episodes: list[dict]) -> None:
             state.advance_cursor(con, run["id"], f"{REVIEW_READ}:{ep['episode']}", ep["read_seq"])
 
 
+def _recorded(con, run: dict, ep: dict) -> bool:
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? "
+                       "AND json_extract(payload_json, '$.episode')=? LIMIT 1",
+                       (run["id"], ep["kind"], ep["episode"])).fetchone() is not None
+
+
 def record_review_episodes(con, run: dict, episodes: list[dict]) -> None:
     """One orchestrator event per episode, deduplicated on its payload key like watchdog.stall.
     Caller holds the transaction."""
     from office import state
     for ep in episodes:
-        seen = con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? "
-                           "AND json_extract(payload_json, '$.episode')=? LIMIT 1",
-                           (run["id"], ep["kind"], ep["episode"])).fetchone()
-        if not seen:
+        if not _recorded(con, run, ep):
             state.emit(con, run, ep["kind"], f"{ep['text']}; next: {ep['next']}"[:300],
                        audience="orchestrator", payload={"episode": ep["episode"]})
+
+
+def fresh_review_episodes(con, run: dict, episodes: list[dict]) -> list[dict]:
+    """Queued-too-long and closed-unread episodes no orchestrator event has recorded yet. `office wait`
+    wakes on these (exit 0): stalled reviewers are a stall (exit 3) and reach the wait through guide.stalls."""
+    return [ep for ep in episodes if ep["kind"] != "review.stalled" and not _recorded(con, run, ep)]

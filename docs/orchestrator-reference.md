@@ -71,7 +71,8 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
 - Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
-  record each episode as an orchestrator event, which wakes an armed root:
+  record each episode as an orchestrator event, which wakes an armed root. `office wait` exits 0 on `review.queued_too_long`
+  and `review.closed_unread`, and exits 3 on `review.stalled`:
   - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900). Task reviews only; plan
     reviews show on the plan review status line. A queue nothing drains (owner `queued`) gets `office revoke <task>`, then
     `office review <task>` on the same revision. A live or unknown job gets `office wait` first.

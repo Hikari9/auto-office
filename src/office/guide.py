@@ -886,9 +886,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     orchestrator event. Exit 3: a stall, or an already-reported orchestrator
     action with no work in flight to advance it (your move, #735).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
-    the `office answer` command). Exit 124: timeout with nothing new. A watcher
+    the `office answer` command). Exit 124: timeout with nothing new. A review gate
+    queued past its bound or closed unread (#919) is news: exit 0, once per episode. A watcher
     keys on the exit code, never on matching status text."""
-    from office import db, dispatch, jobs, lifecycle, questions
+    from office import db, dispatch, jobs, lifecycle, questions, watchdog
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
@@ -906,8 +907,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         from office import ctx_alert
         ctx_alert.notice(con, run)
         asked, _, acts = questions.scan(con, run)
-        stuck = stalls(con, run, since=started_at, acts=acts) + signals
+        episodes = watchdog.review_episodes(con, run, probe=True)
+        stuck = stalls(con, run, since=started_at, acts=acts, episodes=episodes) + signals
         fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
+        review_news = watchdog.fresh_review_episodes(con, run, episodes)
         changed = _snapshot(con, run) != start
         # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
         # refused submit, a gate failure, a recheck the orchestrator must route. A pure
@@ -932,7 +935,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                      and not _work_in_flight(con, run))
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or fresh_stall or changed or news or pending or your_move or terminal or now() >= deadline:
+        if asked or fresh_stall or changed or news or review_news or pending or your_move or terminal or now() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -963,7 +966,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (fresh_stall or changed or news or pending or your_move or terminal):
+            elif not (fresh_stall or changed or news or review_news or pending or your_move or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)
