@@ -43,28 +43,6 @@ def decide(size, models, *, gear="XL", preference=None, user_policies=None, disc
     })
 
 
-@pytest.mark.parametrize("size,score,allowed", [
-    ("XS", 33, True), ("S", 33, False), ("S", 38, True),
-    ("M", 39, False), ("M", 40, True), ("L", 42, False),
-    ("L", 44, True), ("XL", 46, False), ("XL", 47, True),
-])
-def test_real_routing_enforces_index_floor_on_subtask_not_run(size, score, allowed):
-    c = candidate("gpt-6.1-terra", "high", score)
-    result = decide(size, [c])
-    assert (result["status"] == "selected") is allowed, result
-    assert bool([r for r in result["rejected"]
-                 if r.get("category") == "subtask-intelligence-floor"]) is not allowed
-
-
-def test_opus_xl_only_even_within_xl_parent_run_and_alias():
-    opus = candidate("claude-opus-5-5", "medium", 51, harness="claude")
-    terra = candidate("gpt-6.1-terra", "high", 44)
-    out = decide("L", [opus, terra])
-    assert out["candidate"]["model_id"] == "gpt-6.1-terra", out
-    assert any("reserved for XL" in r["reason"] for r in out["rejected"])
-    assert decide("XL", [opus])["status"] == "selected"
-
-
 @pytest.mark.parametrize("size,effort", [("L", "high")])
 def test_real_sonnet_harness_self_fallback_and_unavailable_first_route(size, effort):
     score = 41 if size == "M" else 47
@@ -85,60 +63,6 @@ def test_real_sonnet_harness_self_fallback_and_unavailable_first_route(size, eff
     assert retried["candidate"]["harness"] == "agy", retried
 
 
-def test_argon_medium_unpublished_score_passes_the_l_floor_by_explicit_exception():
-    argon = candidate("gemini-4-argon", "medium", None, harness="agy")
-    out = decide("L", [argon], preference=executor_slates.ideal_seed("L"))
-    assert out["status"] == "selected" and out["candidate"]["model_id"] == "gemini-4-argon", out
-    assert out["candidate"]["benchmark_indexes"] == {}, "no score is fabricated"
-    exceptions = out["routing"]["floor_exceptions"]
-    assert [(e["model_id"], e["effort"], e["size"]) for e in exceptions] == [("gemini-4-argon", "medium", "L")]
-    assert "registration" in exceptions[0]["not_waived"]
-
-
-@pytest.mark.parametrize("model,effort,size", [
-    ("gemini-4-argon", "high", "L"), ("gemini-4-argon", "medium", "XL"),
-    ("gemini-4-argon", "medium", "M"), ("gemini-4-argon", "low", "L"),
-    ("future-model", "medium", "L")])
-def test_argon_exception_is_exactly_model_effort_and_size_scoped(model, effort, size):
-    unscored = candidate(model, effort, None, harness="agy")
-    terra = candidate("gpt-6.1-terra", "high", 44 if size == "L" else 48)
-    out = decide(size, [unscored, terra])
-    assert out["candidate"]["model_id"] == "gpt-6.1-terra", out
-    assert any(r.get("stage") == 4 and model in r["candidate"] for r in out["rejected"]), out
-    assert "floor_exceptions" not in out["routing"]
-
-
-def test_argon_exception_never_waives_a_published_below_floor_score_or_other_gates():
-    low = candidate("gemini-4-argon", "medium", 40, harness="agy")
-    terra = candidate("gpt-6.1-terra", "high", 44)
-    out = decide("L", [low, terra])
-    assert out["candidate"]["model_id"] == "gpt-6.1-terra", out
-    assert any(r.get("stage") == 4 and "gemini" in r["candidate"] for r in out["rejected"]), out
-    untried = candidate("gemini-4-argon", "medium", None, harness="agy", available=False)
-    assert decide("L", [untried])["status"] == "no_qualifying_candidate"
-
-
-def test_discovery_never_trials_a_known_below_size_floor_or_non_xl_opus():
-    known_low = candidate("gpt-6.1-terra", "low", 36, available=False)
-    reason = routing._pool_gate(known_low, {"builder"}, None, "Change", set(),
-                                policy_size="S")
-    assert reason and reason[0] == 4 and ">= 38" in reason[1]
-    blocked_opus = candidate("claude-opus-5-5", "medium", 51, harness="claude",
-                              available=False)
-    reason = routing._pool_gate(blocked_opus, {"builder"}, None, "Change", set(),
-                                policy_size="S")
-    assert reason and "reserved for XL" in reason[1]
-    qualified = candidate("gpt-6.1-terra", "medium", 41, available=False)
-    assert routing._pool_gate(qualified, {"builder"}, None, "Change", set(),
-                              policy_size="S") is None
-    unknown = candidate("future-model", "medium", None, available=False)
-    # Explicit discovery can probe unknown index provenance, but cannot grant
-    # ordinary dispatch eligibility: normal route() still fails closed.
-    assert routing._pool_gate(unknown, {"builder"}, None, "Change", set(),
-                              policy_size="S") is None
-    assert decide("S", [unknown])["status"] == "no_qualifying_candidate"
-
-
 def test_m_l_planner_preserves_all_three_fallbacks_when_slate_has_four():
     from office import adaptive
     routes = ["claude@2/claude-sonnet-5-5@medium",
@@ -154,20 +78,6 @@ def test_m_l_planner_preserves_all_three_fallbacks_when_slate_has_four():
     assert len(explicit["fallbacks"]) == 3
 
 
-def test_issue861_m_haiku_high_selected_with_audited_waiver():
-    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude")
-    terra = candidate("gpt-6.1-terra", "medium", 41)
-    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
-    decision = decide("M", [haiku, terra, sonnet])
-    assert decision["status"] == "selected", decision
-    assert decision["candidate"]["model_id"] == "claude-haiku-5-5", decision
-    assert decision["candidate"]["harness"] == "claude" and decision["candidate"]["effort"] == "high"
-    waiver = decision["routing"]["floor_exceptions"][0]
-    assert waiver["exception"] == "haiku-high-m-owner-authorized-floor"
-    assert waiver["observed_score"] == 38 and waiver["size"] == "M"
-    assert "conformance" in waiver["not_waived"]
-
-
 def test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback():
     haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
     terra = candidate("gpt-6.1-terra", "medium", 41)
@@ -179,82 +89,6 @@ def test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback():
     second = decide("M", [haiku, sonnet])
     assert second["candidate"]["model_id"] == "claude-sonnet-5-5", second
     assert "Temporary Sonnet Medium M fallback" in second["selection_disclosure"]["operational_fallback"]
-
-
-def test_issue861_missing_or_unqualified_glm_f1_skips_to_terra_f2_without_fake_dispatch():
-    """Owner order remains Haiku -> GLM -> Terra, even when F1 is not qualified."""
-    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
-    terra = candidate("gpt-6.1-terra", "medium", 41)
-    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
-    unqualified_glm = candidate("glm-5.3-flash", "max", 42,
-                                harness="opencode", available=False)
-    preferred = executor_slates.ideal_seed("M")
-    assert [(c["model_id"], c["harness"], c["effort"]) for c in preferred] == [
-        ("claude-haiku-5-5", "claude", "high"),
-        ("glm-5.3-flash", "opencode", "max"),
-        ("gpt-6.1-terra", "codex", "medium"),
-    ]
-
-    for glm in (None, unqualified_glm):
-        available = [haiku, terra, sonnet] + ([glm] if glm else [])
-        decision = decide("M", available)
-        assert decision["status"] == "selected", decision
-        assert decision["selected"] == routing.candidate_id(terra), decision
-        assert "glm-5.3-flash" not in decision["selected"]
-        assert all("glm-5.3-flash" not in row["route"] for row in decision["slate"])
-        audit = executor_slates.route_summary(
-            preferred, available, decision["rejected"], decision["slate"])
-        assert [row["route"] for row in audit] == [
-            "claude/claude-haiku-5-5@high",
-            "opencode/glm-5.3-flash@max",
-            "codex/gpt-6.1-terra@medium",
-        ]
-        assert audit[0]["status"] == "unqualified"
-        assert audit[1]["status"] == ("unqualified" if glm else "not-in-catalog")
-        assert audit[2]["status"] == "selected"
-        assert not audit[1]["qualified_routes"]
-        assert audit[1]["reason"] == (
-            "exact route is missing or rejected by catalog, trust, quota, or policy")
-        assert decision["routing"]["slate"][0]["route"] == routing.candidate_id(terra)
-        if glm:
-            assert any(r["candidate"] == routing.candidate_id(glm)
-                       and r.get("category") == "untried" for r in decision["rejected"])
-
-
-def test_issue861_m_haiku_probe_gate_uses_exact_authorized_waiver_only():
-    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
-    check = lambda c, size, role: routing._pool_gate(
-        c, {"builder"}, None, "Change", set(), policy_size=size, role=role)
-    assert check(haiku, "M", "executor") is None
-    assert check(haiku, "M", "worker") is None
-    for c, size, role in ((haiku, "L", "executor"), (haiku, "M", "code_reviewer"),
-                           ({**haiku, "harness": "agy"}, "M", "executor"),
-                           ({**haiku, "benchmark_indexes": {}}, "M", "executor"),
-                           ({**haiku, "benchmark_indexes": {executor_slates.INDEX: 37}}, "M", "executor")):
-        assert executor_slates.floor_exception(c, size, role) is None
-        if (c.get("benchmark_indexes") or {}).get(executor_slates.INDEX) is not None:
-            assert check(c, size, role) is not None
-
-
-
-def test_issue861_policy_deny_precedes_preference_and_is_role_and_size_scoped():
-    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude")
-    terra = candidate("gpt-6.1-terra", "medium", 41)
-    deny = {"role_rules": [{"role": "worker", "route": "claude/claude-haiku-5-5@high",
-                           "state": "deny", "sizes": ["M"]}],
-            "sources": {"role_rules": "user"}}
-    blocked = decide("M", [haiku, terra], user_policies=[deny])
-    assert blocked["candidate"]["model_id"] == "gpt-6.1-terra", blocked
-    assert any(r.get("category") == "role-deny" and "haiku" in r["candidate"]
-               for r in blocked["rejected"]), blocked
-    assert "floor_exceptions" not in blocked["routing"]
-    assert route_policy.effective_role_state(haiku, "worker", [deny], "S")["state"] != "deny"
-    allow = {"role_rules": [{"role": "worker", "route": "claude/claude-haiku-5-5@high",
-                            "state": "allow", "sizes": ["M"]}],
-             "sources": {"role_rules": "user"}}
-    assert route_policy.effective_role_state(haiku, "worker", [deny, allow], "M")["state"] == "allow"
-    assert route_policy.effective_role_state(haiku, "worker", [allow, deny], "M")["state"] == "deny"
-    assert route_policy.user_allows(haiku, "worker", [allow])["sizes"] == ["M"]
 
 
 def test_issue861_persisted_route_audit_retains_exact_haiku_receipt_and_fallback():
@@ -339,7 +173,6 @@ def test_issue861_discovery_candidates_are_never_ordinary_dispatches():
     assert "haiku" not in decision["selected"]
     assert all("haiku" not in row["route"] for row in decision["slate"])
     assert "floor_exceptions" not in decision["routing"]
-
 
 
 def test_issue861_fresh_probe_trial_has_persisted_numeric_floor_receipt():

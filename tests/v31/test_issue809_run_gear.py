@@ -435,16 +435,20 @@ def test_a_revision_that_drops_the_run_gear_recommendation_clears_it(env):
 
 def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
     from test_issue809_real_routes import candidate, decide
-    pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
-            candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
-            candidate("gpt-6.1-terra", "medium", 44),
-            candidate("glm-5.3-flash", "max", 42, harness="opencode")]
-    new = decide("M", pool, gear="M")
-    assert [e["route"].split("@")[0] for e in new["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
+    # Terra out-scores the agy Sonnet, so utility order alone would put it between the two Sonnet harnesses.
+    pool = [candidate("claude-sonnet-5-5", "high", 47, harness="claude"),
+            candidate("claude-sonnet-5-5", "high", 44, harness="agy", remaining=60),
+            candidate("gpt-6.1-terra", "high", 50)]
+
+    def harnesses(decision):
+        return [e["route"].split("@")[0] for e in decision["selection_disclosure"]["slate"][:3]]
+
+    new = decide("L", pool, gear="L")
+    assert harnesses(new) == ["claude", "agy", "codex"]
     assert new["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
-    legacy = decide("M", pool, gear="express")
+    legacy = decide("L", pool, gear="express")
+    assert harnesses(legacy) == ["claude", "codex", "agy"]
     assert "sonnet_self_fallbacks" not in legacy["routing"]
-    assert len(legacy["selection_disclosure"]["slate"]) == 3
 
 
 def test_planner_free_text_rejects_control_characters():

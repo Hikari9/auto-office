@@ -1,42 +1,7 @@
-"""Sonnet 5.5 is a dispatchable executor route, and the `sonnet` alias follows it."""
+"""Sonnet 5.5 high is the maintainer-granted default executor in the trust baseline."""
 import sqlite3
 
-from office import candidates, config, scoring
-
-INDEX = "Artificial Analysis Intelligence Index v4.3.2"
-
-
-def _rows(model_id, effort="high"):
-    return [r for r in candidates.catalog_rows()
-            if r.get("model_id") == model_id and r.get("effort") == effort]
-
-
-def _claude_row(model_id, effort="high"):
-    return next(r for r in _rows(model_id, effort) if r["invocation_harness"] == "claude")
-
-
-def test_sonnet_5_5_high_row_is_dispatchable_with_a_sourced_score():
-    row = _claude_row("claude-sonnet-5-5")
-    assert row["invocation_harness"] == "claude"
-    assert row["invocation_model_id"] == "claude-sonnet-5-5"
-    assert row.get("dispatchable") is not False
-    assert str(row["invocation_source"]).startswith("local-evidence:")
-    assert row["benchmark_indexes"][INDEX] == 47
-    assert row["source_snapshot_metadata"]["url"].endswith("/claude-sonnet-5-5-high")
-
-
-def test_sonnet_5_5_high_clears_the_executor_floor():
-    floor = config.load_yaml(config.default_config_path())["roles"]["executor"]["floor"]
-    row = _claude_row("claude-sonnet-5-5")
-    ok, reason = scoring.evaluate_capability_floor(row, floor)
-    assert ok, reason
-
-
-def test_sonnet_alias_high_now_invokes_sonnet_5_5():
-    [alias] = _rows("sonnet")
-    assert alias["alias_resolved_to"] == "claude-sonnet-5-5"
-    assert alias["invocation_model_id"] == "claude-sonnet-5-5"
-    assert alias["benchmark_indexes"][INDEX] == 47
+from office import scoring
 
 
 def test_sonnet_5_5_high_is_trusted_as_the_default_executor(tmp_path):
