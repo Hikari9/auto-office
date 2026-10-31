@@ -10,7 +10,7 @@ evidence), and a PR leaves draft when its task is accepted.
 Everything here runs as outbox jobs (`pr_sync`): GitHub is never called inside
 a transaction, and a GitHub failure is a notice, never a lifecycle failure.
 PRs are off when the run is local, the repository has no `origin`, `gh` is
-missing, or `office start --no-prs` was given; the 3.1 flow then applies.
+missing, or live run options currently have `--no-prs` set; the 3.1 flow then applies.
 """
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ def _detect(con, run: dict) -> dict:
 
 
 def settings(con, run: dict) -> dict:
-    """The run's PR settings, detected once (outside any transaction) and pinned.
+    """The run's PR settings, detected outside transactions and pinned until
+    a user explicitly amends them with `office amend options`.
 
     A transient detection failure (`gh repo view` erred or timed out) is not
     pinned for good: it is probed again on each later call (dispatch, land,
@@ -198,8 +199,11 @@ def pr_blocker(con, run: dict, task: dict) -> str | None:
 
 
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
-    if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
-        state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
+    # Live run options can change after a worker loaded `run`. Use the state
+    # visible in this transaction, not that worker's stale snapshot (#937).
+    current = state.get_run(con, run["id"])
+    if enabled(current) and has_pr(state.get_task(con, run["id"], task_id)):
+        state.enqueue(con, current, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
                       dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
 
 
