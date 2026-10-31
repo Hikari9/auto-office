@@ -197,14 +197,6 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
             if lines:
                 _say(harness, event, _budget(lines + ["office status --verbose"]))
             return 0
-        if event in ("tool.post", "turn.stop") and worker and dispatch_id:
-            # Best-effort signal; the supervisor monitor re-checks every poll.
-            from office import executor_context
-            try:
-                executor_context.check(dispatch_id)
-            except Exception:
-                pass
-            return 0
         if event == "tool.pre" and worker:
             return _guard_write(harness, payload, run, con)
         return 0

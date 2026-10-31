@@ -20,8 +20,7 @@ MARKER = "--office-managed"
 
 # Portable event -> native event name, per harness with a verified JSON schema.
 EVENTS = {
-    "claude": {"session.start": "SessionStart", "prompt.submit": "UserPromptSubmit", "tool.pre": "PreToolUse",
-               "tool.post": "PostToolUse"},
+    "claude": {"session.start": "SessionStart", "prompt.submit": "UserPromptSubmit", "tool.pre": "PreToolUse"},
     "gemini": {"session.start": "SessionStart", "prompt.submit": "BeforeAgent", "tool.pre": "BeforeTool"},
 }
 CONFIG = {

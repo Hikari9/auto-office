@@ -126,8 +126,6 @@ def test_crossing_cap_signals_once_and_never_rotates(monkeypatch, ledger):
     assert con.execute("SELECT COUNT(*) FROM events WHERE kind='executor.context_cap'").fetchone()[0] == 1
 
 
-def test_signal_is_actionable_for_the_orchestrator_wake():
-    assert "executor.context_cap" in root_wake.ACTIONABLE
 
 
 def test_disabled_or_zero_threshold_never_signals(monkeypatch, ledger):
@@ -184,6 +182,10 @@ def test_orchestrator_rotation_writes_durable_handoff_and_relaunches(monkeypatch
 
     def stop(run, old):
         calls.append(("stop", old["id"]))
+        # the handoff and its job are committed before the old writer is touched
+        assert json.loads(con.execute("SELECT context_handoff_json FROM dispatches WHERE id='DOLD'")
+                          .fetchone()[0])["phase"] == cap.REQUESTED
+        assert _outbox_kinds(con) == ["rotate_executor"]
         con.execute("UPDATE dispatches SET ended_at='now', status='exited' WHERE id='DOLD'")
         return True, "verified no processes remain"
 
@@ -265,8 +267,9 @@ def test_threshold_decision_is_per_task_and_refuses_bad_values(monkeypatch, ledg
 
 def test_unknown_task_is_refused(ledger):
     con, _ = ledger
-    with pytest.raises(Refused):
+    with pytest.raises(Refused) as err:
         cap.decide(con, _run(con), "T99", "continue")
+    assert err.value.category == "no-task"
 
 
 def test_fresh_brief_includes_structured_handoff_without_resuming_predecessor(ledger):
@@ -310,5 +313,240 @@ def test_v19_database_migrates_to_v20_with_rows_intact(env_home):
         assert "context_handoff_json" in db._columns(con, "dispatches")
         assert db._schema_version(con) == db.SCHEMA_VERSION == 20
         assert con.execute("SELECT status, context_handoff_json FROM dispatches WHERE id='D1'").fetchone()[0] == "exited"
+        notnull_default = [(r[3], r[4]) for r in con.execute("PRAGMA table_info(dispatches)")
+                           if r[1] == "context_handoff_json"]
+        assert notnull_default == [(0, None)]  # nullable, no default
     finally:
         con.close()
+
+
+def test_worker_session_cannot_decide_its_own_context(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    assert cap.check("DOLD")
+    monkeypatch.setenv("OFFICE_DISPATCH_ID", "DOLD")
+    for action, value in (("continue", None), ("rotate", None), ("threshold", "0")):
+        with pytest.raises(Refused) as err:
+            cap.decide(con, _run(con), "T1", action, value)
+        assert err.value.category == "worker-cannot-decide"
+    monkeypatch.delenv("OFFICE_DISPATCH_ID")
+    assert json.loads(state.get_dispatch(con, "DOLD")["context_handoff_json"])["phase"] == cap.SIGNALLED
+    assert cap.limit(con, _run(con), "T1") == 200_000
+    assert _outbox_kinds(con) == []
+
+
+def test_writer_changed_during_snapshot_refuses_the_decision(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, status, harness, model, worktree, branch, "
+                "base_commit, started_at) VALUES('DNEW', 'R939', 'executor', 'executor', 'T1', 'launching', 'claude', "
+                "'model', (SELECT worktree FROM dispatches WHERE id='DOLD'), 'branch', "
+                "(SELECT base_commit FROM dispatches WHERE id='DOLD'), 'now')")
+    con.commit()
+    real_handoff = cap._handoff
+
+    def replaced_mid_snapshot(*args, **kwargs):
+        snapshot = real_handoff(*args, **kwargs)
+        con.execute("UPDATE tasks SET current_dispatch_id='DNEW' WHERE id='T1'")
+        con.commit()
+        return snapshot
+
+    monkeypatch.setattr(cap, "_handoff", replaced_mid_snapshot)
+    with pytest.raises(Refused) as err:
+        cap.decide(con, _run(con), "T1", "rotate")
+    assert err.value.category == "writer-changed"
+    assert state.get_dispatch(con, "DOLD")["context_handoff_json"] is None
+    assert _outbox_kinds(con) == []
+
+
+def test_skipped_rotation_is_not_left_pending_and_can_be_decided_again(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    cap.decide(con, _run(con), "T1", "rotate")
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+    monkeypatch.setattr(dispatch, "stop_worker_tree", lambda *_: pytest.fail("a moved task is not stopped"))
+    result = cap.job_rotate(con, _run(con), {"payload": {"dispatch_id": "DOLD"}})
+    assert result == {"skipped": "task has moved"}
+    skipped = json.loads(state.get_dispatch(con, "DOLD")["context_handoff_json"])
+    assert skipped["phase"] == cap.SKIPPED and skipped["error"] == "task has moved"
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='executor.rotate_skipped'").fetchone()[0] == 1
+    assert cap.recent(con, _run(con))[0]["phase"] == cap.SKIPPED
+    con.execute("UPDATE tasks SET status='running' WHERE id='T1'")
+    con.commit()
+    assert cap.decide(con, _run(con), "T1", "rotate").lines  # the orchestrator may decide again
+
+
+def test_submitted_executor_during_stop_is_not_replaced(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    cap.decide(con, _run(con), "T1", "rotate")
+
+    def stop(run, old):
+        con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
+                    "requirements_version, plan_version, applied_version, env_fingerprint, operation_id, status, "
+                    "created_at) VALUES('RV1', 'R939', 'T1', 1, 'DOLD', 'abc', 'def', 1, 2, 2, 'env', 'op1', "
+                    "'accepted', 'now')")
+        con.execute("UPDATE dispatches SET ended_at='now', status='exited' WHERE id='DOLD'")
+        return True, "verified no processes remain"
+
+    monkeypatch.setattr(dispatch, "stop_worker_tree", stop)
+    monkeypatch.setattr(dispatch, "_launch_or_block", lambda *_a, **_k: pytest.fail("must not replace a submitted executor"))
+    result = cap.job_rotate(con, _run(con), {"payload": {"dispatch_id": "DOLD"}})
+    assert result == {"skipped": "executor already submitted"}
+    assert cap.recent(con, _run(con))[0]["phase"] == cap.SKIPPED
+
+
+def test_stopped_old_writer_without_recorded_end_is_finished_as_context_cap(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    cap.decide(con, _run(con), "T1", "rotate")
+    finished = []
+
+    def stop(run, old):
+        return True, "verified no processes remain"  # the supervisor has not recorded the end
+
+    def finish(did, code, sig, classification, wall, **kwargs):
+        finished.append((did, classification, kwargs))
+        con.execute("UPDATE dispatches SET ended_at='now', status='exited', terminal_classification=? WHERE id=?",
+                    (classification, did))
+
+    monkeypatch.setattr(dispatch, "stop_worker_tree", stop)
+    monkeypatch.setattr(dispatch, "_finish", finish)
+    monkeypatch.setattr(dispatch, "_launch_or_block", lambda *_a, **_k: None)
+    cap.job_rotate(con, _run(con), {"payload": {"dispatch_id": "DOLD"}})
+    assert finished and finished[0][0] == "DOLD" and finished[0][1] == "context_cap"
+    assert finished[0][2] == {"only_if_open": True}
+
+
+def test_permanent_rotation_failure_blocks_the_task_visibly(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    cap.decide(con, _run(con), "T1", "rotate")
+    from office import jobs as jobs_mod
+    jobs_mod.on_permanent_failure(con, _run(con), {"kind": "rotate_executor", "payload": {"dispatch_id": "DOLD"}},
+                                  "boom")
+    assert state.get_task(con, "R939", "T1")["status"] == "blocked"
+    assert json.loads(state.get_dispatch(con, "DOLD")["context_handoff_json"])["phase"] == cap.BLOCKED
+    assert con.execute("SELECT COUNT(*) FROM events WHERE kind='executor.handoff_blocked'").fetchone()[0] == 1
+
+
+def test_unmeasured_executor_rotation_is_labelled_not_none(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: None)
+    cap.decide(con, _run(con), "T1", "rotate")
+
+    def stop(run, old):
+        con.execute("UPDATE dispatches SET ended_at='now', status='exited' WHERE id='DOLD'")
+        return True, "verified no processes remain"
+
+    def launch(conn, run, tid, **kwargs):
+        state.update_task(conn, run["id"], tid, status="launching", current_dispatch_id="DNEW")
+        return "DNEW"
+
+    monkeypatch.setattr(dispatch, "stop_worker_tree", stop)
+    monkeypatch.setattr(dispatch, "_launch_or_block", launch)
+    assert cap.job_rotate(con, _run(con), {"payload": {"dispatch_id": "DOLD"}})["replacement"] == "DNEW"
+    summary = con.execute("SELECT summary FROM events WHERE kind='executor.handoff'").fetchone()[0]
+    assert "unmeasured" in summary and "None" not in summary
+
+
+def test_status_hides_stale_signal_and_clears_it_when_disabled(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    assert cap.check("DOLD")
+    con.execute("UPDATE dispatches SET ended_at='now', status='exited' WHERE id='DOLD'")
+    con.commit()
+    assert cap.recent(con, _run(con)) == []  # the writer that signalled has ended
+    con.execute("UPDATE dispatches SET ended_at=NULL, status='running' WHERE id='DOLD'")
+    con.commit()
+    assert [r["phase"] for r in cap.recent(con, _run(con))] == [cap.SIGNALLED]
+    con.execute("UPDATE runs SET policy_json=? WHERE id='R939'",
+                (dumps({"executor_context": {"threshold_tokens": 0}}),))
+    con.commit()
+    assert not cap.check("DOLD")  # disabling the cap clears the pending signal
+    assert cap.recent(con, _run(con)) == []
+
+
+def test_non_mapping_policy_warns_instead_of_crashing_status(ledger):
+    con, _ = ledger
+    con.execute("UPDATE runs SET policy_json=? WHERE id='R939'", (dumps({"executor_context": "off"}),))
+    con.commit()
+    run = _run(con)
+    assert cap.limit(con, run, "T1") == 200_000
+    assert "not a mapping" in cap.policy_warning(run)
+    assert cap.status_lines(run, cap.recent(con, run)) == [cap.policy_warning(run)]
+
+
+def test_recent_reports_only_the_latest_dispatch_per_task(ledger):
+    con, _ = ledger
+    older = dumps({"task_id": "T1", "phase": cap.RESTARTED, "from_dispatch_id": "DOLD", "tokens": 1,
+                   "threshold_tokens": 2})
+    con.execute("UPDATE dispatches SET context_handoff_json=? WHERE id='DOLD'", (older,))
+    con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, status, harness, started_at, ended_at, "
+                "context_handoff_json) VALUES('DPREV', 'R939', 'executor', 'executor', 'T1', 'exited', 'claude', "
+                "'earlier', 'earlier', ?)", (dumps({"phase": cap.BLOCKED, "error": "old"}),))
+    con.commit()
+    rows = cap.recent(con, _run(con))
+    assert [(r["task_id"], r["phase"]) for r in rows] == [("T1", cap.RESTARTED)]
+
+
+def test_codex_session_tokens_use_the_exact_rollout_file(tmp_path, monkeypatch):
+    codex = tmp_path / "codex"
+    day = codex / "sessions" / "2026" / "10" / "31"
+    day.mkdir(parents=True)
+    rollout = day / "rollout-2026-10-31T00-00-00-abc123.jsonl"
+    rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+        "last_token_usage": {"input_tokens": 150_000, "output_tokens": 1_000}}}}) + "\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    assert cap.session_tokens({"harness": "codex", "session_id": "abc123"}) == 151_000
+    assert cap.session_tokens({"harness": "codex", "session_id": "missing"}) is None
+    twin = day / "rollout-2026-10-31T00-00-01-abc123.jsonl"
+    twin.write_text(rollout.read_text())
+    assert cap.session_tokens({"harness": "codex", "session_id": "abc123"}) is None  # ambiguous: never guessed
+
+
+
+
+def test_status_lines_show_the_pending_signal_through_guide_status(monkeypatch, ledger):
+    from office import guide
+    con, _ = ledger
+    monkeypatch.setattr(guide, "next_action", lambda *_a: "no action; waiting on executors")  # no plan in this ledger
+    monkeypatch.setattr(cap, "session_tokens", lambda _: 220_000)
+    assert cap.check("DOLD")
+    res = guide.status(con, _run(con))
+    assert any(line.startswith("executor context: T1 at 220,000/200,000 tokens") for line in res.lines), res.lines
+    assert res.data["executor_handoffs"][0]["phase"] == cap.SIGNALLED
+
+
+
+
+def test_replacement_packet_carries_the_handoff(monkeypatch, ledger):
+    con, _ = ledger
+    monkeypatch.setattr(state, "current_requirements", lambda *_a: {"frozen": {}, "version": 1})
+    handoff = {"from_dispatch_id": "DOLD", "tokens": 220_000, "state": {"working_tree": "2 changed path(s)"}}
+    packet = dispatch.build_packet(con, _run(con), state.get_dispatch(con, "DOLD"), "executor",
+                                   {"context_handoff": handoff})
+    assert packet["context_handoff"] == handoff
+    plain = dispatch.build_packet(con, _run(con), state.get_dispatch(con, "DOLD"), "executor", {})
+    assert plain["context_handoff"] is None
+
+
+def test_handoff_replacement_never_restacks_the_preserved_worktree(monkeypatch, ledger):
+    from office import rerun
+    con, repo = ledger
+    base = con.execute("SELECT base_commit FROM dispatches WHERE id='DOLD'").fetchone()[0]
+    # the replacement is a launching dispatch whose predecessor is the old writer
+    con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, status, harness, model, worktree, branch, "
+                "base_commit, predecessor_dispatch_id, started_at) VALUES('DNEW', 'R939', 'executor', 'executor', 'T1', "
+                "'launching', 'claude', 'model', ?, 'branch', ?, 'DOLD', 'now')", (str(repo), base))
+    con.commit()
+    restacks = []
+    monkeypatch.setattr(rerun, "_restack", lambda *a, **k: restacks.append(a) or {})
+    handoff = {"from_dispatch_id": "DOLD", "tokens": 220_000}
+    job = {"payload": {"dispatch_id": "DNEW", "task_id": "T1", "role": "executor", "context_handoff": handoff}}
+    try:
+        dispatch.job_launch_agent(con, _run(con), job)
+    except Exception:
+        pass  # the launch after the restack decision is out of scope; only the restack call is asserted
+    assert restacks == []

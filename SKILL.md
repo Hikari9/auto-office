@@ -224,35 +224,9 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
 
-## Executor context cap and fresh-session handoff
+## Executor context cap
 
-Office measures each executor's current session context (not the run total). The default
-cap is 200,000 tokens (`executor_context.threshold_tokens: 200000`). Crossing it records one
-signal per episode and wakes you. **Office never rotates an executor by itself.** Only a
-decision you record with an office command rotates it:
-
-- `office executor-context <task> rotate`: durable handoff, then a fresh session on the same
-  task, branch and worktree. Office stops and verifies the old writer is gone before launching.
-- `office executor-context <task> continue`: acknowledge the signal and keep going. It is not
-  repeated until the session drops below the cap and crosses it again.
-- `office executor-context <task> threshold <tokens>`: set this task's cap. Use this to raise it
-  for the current run.
-
-Persistent repo-wide change: `office config --repo executor_context.threshold_tokens <tokens>`
-(applies to runs started after the change; a running run keeps its pinned policy).
-
-Opt-outs: `executor_context.threshold_tokens: 0` or `executor_context.enabled: false` disables
-the signal and rotation. `threshold <task> 0` disables the cap for one task.
-
-Claude and Codex sessions with attributable transcripts are measured by the supervisor (Claude
-also at installed post-tool hooks). Harnesses without trustworthy session usage telemetry are
-**unmeasured**; never claim a cap ran for them. The root's `/compactable` guidance is separate.
-
-`office status` shows `executor context:` while a decision is pending and `executor handoff:` for
-requested, restarted, or blocked rotations. The handoff report (state, commits, uncommitted diff
-stat, remaining acceptance, open findings) is in runs.db and `dispatches/<old-id>/context-handoff.json`.
-The new brief carries it; the executor verifies its claims and preserves uncommitted work. If the
-old writer cannot be confirmed stopped, Office blocks the task and never launches overlapping writers.
+Crossing the per-executor cap (`executor_context.threshold_tokens`, default 200000) signals you (`executor.context_cap`, shown in `office status`). Office never rotates an executor on its own. Decide with `office executor-context <task> rotate | continue | threshold <tokens>`. Opt out with `executor_context.threshold_tokens: 0` or `executor_context.enabled: false`. Handoff contents and failure behavior: `docs/orchestrator-reference.md`.
 
 ## Diagnostics
 

@@ -281,7 +281,7 @@ The per-executor cap is separate from the orchestrator's ctx-high notice. Pinned
 An invalid threshold falls back to 200000 and `office status` says so.
 
 Measurement: the supervisor checks attributable Claude and Codex session transcripts every
-15 seconds; the installed Claude `PostToolUse` hook also checks at tool boundaries. Claude
+15 seconds while the executor runs. Claude
 uses the last assistant message's input plus cached-input usage, excluding sidechains. Codex
 uses the last turn's input and output count, never cumulative lifetime totals. Unobserved or
 unsupported harnesses are not guessed and cannot claim an enforced cap.
@@ -293,7 +293,8 @@ the session drops below the cap; the next crossing is a new episode.
 Decisions (the root's only way to act):
 
 - `office executor-context <task> rotate`: refused when rotation is disabled for the task, the
-  task has no live executor, or a rotation is already requested. One transaction writes a
+  task has no live executor, the live writer changed while the snapshot was taken, or a rotation is
+  already requested. An executor session (`OFFICE_DISPATCH_ID` set) is always refused. One transaction writes a
   `requested` handoff snapshot (task state, worktree HEAD, git status and diff stat, existing
   task commits as evidence to verify, remaining ACCEPT items, open findings) and enqueues a
   deduplicated `rotate_executor` job. The snapshot never asserts completion. A private copy is
@@ -307,6 +308,9 @@ Decisions (the root's only way to act):
 
 Opt-outs: `executor_context.threshold_tokens: 0` or `executor_context.enabled: false` disables
 the signal and rotation. `enabled: false` also overrides a per-task threshold.
+
+If a requested rotation cannot proceed (the task moved, or the executor submitted), its handoff
+becomes `skipped` with an `executor.rotate_skipped` event, which wakes the root; decide again.
 
 The rotation job stops the old executor's process tree and verifies it has exited before it
 creates a fresh dispatch on the same task, branch and worktree. The replacement brief carries the
