@@ -27,6 +27,36 @@ the default for both checkpoints above), `--percent` for a bare remaining number
 record (reporting or diffing across two reads), exit `0` on a successful read and exit `2` for
 UNKNOWN.
 
+### Runtime timeout recovery and disclosure (#941)
+
+`office` retries a quota probe **once after 2 seconds** whenever its 20-second
+command timeout fires, even when the host-load check does not classify the host
+as overloaded. Each of the two attempts has its own 20-second limit.
+
+The shared cache stores a successful harness reading for
+`OFFICE_QUOTA_CACHE_TTL` seconds (default **300**); a failed attempt is cached
+briefly (up to **60** seconds) to prevent repeated costly probes. Unlike before,
+a failed attempt **does not erase the timestamped last successful reading**.
+After two timeouts, an older success may be used only while it is less than
+`OFFICE_QUOTA_LAST_GOOD_TTL` seconds old (default **600**), with the original
+remaining percentage and any per-model-family limits intact. This is not a
+fresh live reading: the dispatch record and `office status` explicitly say
+`routed on last-known quota`, including its age and the timeout cause.
+
+Expired readings, authentication/non-timeout errors, disabled probes, missing
+probe commands, and explicitly unknown family readings remain
+**unknown/unavailable** (never fabricated as healthy). An entirely absent
+family entry retains the existing harness-wide fallback contract. If such a route is selected, `office status` must
+display `routed on unknown quota` or `routed on unavailable quota` with its
+cause. Unknown is still scored conservatively, not as unlimited. Setting either
+TTL to `0` disables its corresponding cached reading; setting the normal cache
+TTL to `0` disables the last-known fallback as well.
+
+The cached fallback is a bounded recovery exception to the pre-dispatch probe
+requirement. Operators must never manually treat an arbitrary fit-test number
+as a fresh dispatch reading or hide its age.
+
+
 **Quota depends on the account's tier, not just usage.** Claude (Pro/Max/Team) and Codex
 (Plus/Pro/Team/Enterprise) carry different absolute limits per tier. `claude-usage.py` and
 `codex-usage.py` read the vendor API's own `utilization`, which the vendor already computes against
@@ -117,7 +147,7 @@ programmatic — no browser, no Chrome automation, no model tokens consumed, sta
 | Exit | Meaning | Routing action |
 |---|---|---|
 | `0` | Headroom read | Weigh the number against what the run needs, when it resets, and what a worse route would cost. **No threshold is hardcoded** — a low number can still be the right spend. State the number and the reasoning. |
-| `2` | UNKNOWN — no credential, no token, or the API refused | **Unavailable, not low.** Say which probe failed and why, and route around it unless the user says otherwise. |
+| `2` | UNKNOWN — no credential, no token, or the API refused | **Unavailable, not low.** Prefer a known viable route; if an unknown route is selected, disclose the affected harness and reason in `office status` rather than silently assuming quota. |
 
 Never spend a run discovering that a tool was never usable. An optimistic route on an UNKNOWN
 reading burns the run's wall-clock and lands you mid-plan with no executor — which is a different
