@@ -294,3 +294,83 @@ def test_past_the_bound_a_task_visual_review_names_the_manual_step_and_the_reply
 def test_pane_group_wait_keeps_its_reading_of_bad_values(monkeypatch, value, expected):
     monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", value)
     assert dispatch_mod._pane_group_wait() == expected
+
+
+class _NoSleepClock(_Clock):
+    """A watch clock whose poll sleep returns at once, so a test can set the poll interval to seconds."""
+
+    def sleep(self, seconds):
+        pass
+
+
+@pytest.mark.approved
+def test_a_backward_clock_step_under_the_old_tolerance_restarts_the_settle_window(env, monkeypatch):
+    """A 2 s step back is under the old 5 s tolerance, but it is a clock step all the same: the window restarts."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _Clock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "30")
+
+    def step_back(n):
+        clock.wall += 9.0
+        clock.mono += 9.0
+        if n == 1:
+            clock.wall -= 2.0
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, step_back, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    # The restart lands on poll 2, so the window fills on poll 5. Without it the window fills on poll 4.
+    assert len(calls) == 5, calls
+
+
+@pytest.mark.approved
+def test_a_sleep_under_the_old_tolerance_restarts_the_settle_window(env, monkeypatch):
+    """At a 5 s poll the old tolerance was 15 s. A 10 s suspend is under it and still a suspend: the window restarts."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _NoSleepClock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "29")
+
+    def poll_then_sleep(n):
+        clock.wall += 5.0  # the poll interval passes on both clocks
+        clock.mono += 5.0
+        if n == 1:
+            clock.wall += 10.0  # a suspend moves wall time only
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, poll_then_sleep, limit=50)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=5) == (0, "success")
+    # The suspend restarts the window on poll 2, so it fills on poll 7. Without the restart it fills on poll 4.
+    assert len(calls) == 7, calls
+
+
+@pytest.mark.approved
+def test_a_reply_with_a_future_mtime_reads_as_just_written(env, monkeypatch):
+    """A future mtime (clock skew, a network filesystem) must not read as negative quiet time."""
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, task_id, subject, kind, input_key, status, created_at) "
+                "VALUES('G918', ?, 'T1', 'task', 'code_review', 'task:T1:r1', 'running', ?)",
+                (run["id"], d["started_at"]))
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, started_at, kind, status, launcher, pane_id, pid, gate_id) "
+                "VALUES('D918', ?, 'T1', 'code_reviewer', ?, 'reviewer', 'running', 'herdr', 'w1:p1', ?, 'G918')",
+                (run["id"], d["started_at"], os.getpid()))
+    con.commit()
+    reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    future = time.time() + 3600
+    os.utime(reply, (future, future))
+    try:
+        pending = dispatch_mod.reply_pending(con, run)
+    finally:
+        con.close()
+    assert [p["quiet"] for p in pending] == [0.0], pending
