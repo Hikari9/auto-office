@@ -134,7 +134,7 @@ def current() -> str:
             raise RuntimeError(f"OFFICE_VERSION_OVERRIDE={override!r} is not an exact PEP 440 version")
         return override
     base = base_version()
-    identity = _cached_source_identity(base) if _is_source_checkout() else base
+    identity = _cached_source_identity(base) if _is_source_checkout() and not _probing else base
     if not is_exact(identity):
         raise RuntimeError(f"Auto Office version {identity!r} is not an exact PEP 440 version")
     return identity
@@ -144,6 +144,8 @@ def current() -> str:
 # replacement fails its imports or its version probe. EX_TEMPFAIL: the caller should retry.
 REBUILD_EXIT_CODE = 75
 REBUILD_RETRY_SECONDS = 5
+# Set only while rebuilding_reason() runs, so the probe before every command spawns no git subprocess.
+_probing = False
 
 
 def rebuilding_reason() -> str | None:
@@ -151,10 +153,14 @@ def rebuilding_reason() -> str | None:
 
     Only an import or read failure counts as a rebuild. A bad OFFICE_VERSION_OVERRIDE
     stays a RuntimeError: that is configuration, and retrying it cannot help."""
+    global _probing
+    _probing = True  # the probe needs imports and reads, not the git-derived source identity (#920)
     try:
         current()
     except (ImportError, OSError) as exc:
         return failure_cause(exc)
+    finally:
+        _probing = False
     return None
 
 
