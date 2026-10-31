@@ -185,6 +185,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   the by-hand steps; a refusal pushes nothing, and a timed-out push is reported as unknown, not as nothing pushed. The `pr.recovered` event records the
   heads and base.
 - Office rewrites only the block above the PR body's `<!-- office:pr ... -->` line; put criteria that report data below it.
+- If GitHub access becomes available after a run started with `--no-prs`, ask the user to authorize
+  `office amend options --prs --quote "<user's exact words>" --confirm` before switching. Office records a
+  `run.options_amended` event, enables subsequent task PRs and queues PR sync for already accepted work.
+  Disabling PRs after a PR exists, a sync job was queued, or an executor has live PR instructions is unsafe
+  and refused; changing gear/base/review gates is not a supported live option amendment.
 - With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR with `Closes #<issue>`, and
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
 - If `office land` stops after the task PRs merge, retry it: recorded merges are skipped, default-branch verification resumes,

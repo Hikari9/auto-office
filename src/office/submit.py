@@ -670,9 +670,13 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
         if ledger_copy:
             state.record_evidence(con, run["id"], "self_review_ledger", ledger_copy, task_id=task["id"],
                                   revision_id=rev_id, digest=receipt["sha256"])
-        if prs.enabled(run):
-            prs.advance_branch(run, d, commit)
-            prs.queue(con, run, task["id"], "revision", rev_id)
+        # #937: --no-prs can be amended while this executor is working.
+        # Re-read inside the submit transaction so a stale start-of-submit
+        # snapshot cannot drop a revision PR sync after a confirmed toggle.
+        pr_run = state.get_run(con, run["id"])
+        if prs.enabled(pr_run):
+            prs.advance_branch(pr_run, d, commit)
+            prs.queue(con, pr_run, task["id"], "revision", rev_id)
         dispatch_mod.renew_lease(con, d["lease_id"])
         if status == "amendment_pending":
             state.emit(con, run, "submit.amendment_pending", f"{task['id']} {rev_id} submitted under p{applied}; "
