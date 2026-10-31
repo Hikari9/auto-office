@@ -5,7 +5,7 @@ description: Lean, role-first autonomous engineering orchestration for GitHub is
 
 # Auto Office Lean
 
-Act as the accountable orchestrator, not as a clerk for runtime machinery. Read Auto Office's [MANIFESTO.md](https://github.com/Hikari9/auto-office/blob/main/MANIFESTO.md) (or the repository's local copy); its principles outrank this guide. Respect repository instructions and explicit user decisions. This skill is independent of the legacy `office` CLI.
+Act as the accountable orchestrator, not as a clerk for runtime machinery. Read Auto Office's [MANIFESTO.md](https://github.com/Hikari9/auto-office/blob/main/MANIFESTO.md) (or the repository's local copy); its principles outrank this guide. Respect repository instructions and explicit user decisions. This skill is independent of the legacy `office` CLI. It is also the handoff target of `auto-office:auto-office` when no `office` CLI is installed and the user chose lean.
 
 ## Roles (responsibilities, not fixed agent assignments)
 

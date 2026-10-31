@@ -116,8 +116,8 @@ def test_shipped_discovery_catalog_exactly_matches_locked_choices():
     expected |= {("agy", "gemini-4-argon", e) for e in ("medium", "high")}
     # The other five Agy Claude rows are dispatchable with launch evidence; Opus low never showed its banner.
     expected.add(("agy", "claude-opus-5-5", "low"))
-    # GPT-6.1 Terra (#811): every AA effort, including none, until an exact probe qualifies it.
-    expected |= {("codex", "gpt-6.1-terra", e) for e in ("none", "low", "medium", "high", "xhigh", "max")}
+    # GPT-6.1 Terra (#811): low, medium and high passed exact probes and dispatch; the rest stay eligible.
+    expected |= {("codex", "gpt-6.1-terra", e) for e in ("none", "xhigh", "max")}
     assert actual == expected
     for row in rows:
         if row.get("dispatchable") is False:

@@ -375,8 +375,10 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     out += ["If an office command prints AMENDMENT <id>: apply it at a safe boundary, then run office ack <id>.",
             "QUESTIONS if you need a decision or cannot finish, run `office raise [--kind question|blocker|scope-request] "
             "[--path P] -- \"<text>\"` (no commit needed; office submit takes finished work only), then stop and wait: "
-            "the orchestrator is notified by office wait and the answer arrives as a message. A question tool or ending "
-            "your turn on the question also works. Planning, scope, ordering, and test-detail questions it decides; "
+            "the orchestrator is notified by office wait (exit 5) and the answer arrives as a message. "
+            "Prefer `office raise`: it is durable and recorded. A question tool or ending your turn on the question "
+            "is only noticed while your pane is open and scanned. Planning, scope, "
+            "ordering, and test-detail questions the orchestrator decides; "
             "requirement, authority, and irreversible or external ones it takes to the user. An answer never changes "
             "your contract: a scope-request needs a contract amendment. Do not guess past a scope or requirement "
             "doubt, and do not poll for the answer."]
