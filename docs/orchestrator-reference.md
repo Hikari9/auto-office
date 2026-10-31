@@ -79,8 +79,8 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   - `review.stalled`: a running reviewer past `OFFICE_REVIEW_NO_PROGRESS_S` (default 900) or `OFFICE_REVIEW_WALL_S` (default 3600).
     Next: as the stall line says.
   - `review.closed_unread`: a review closed past `OFFICE_REVIEW_UNREAD_S` (default 900) whose verdict has not been shown to the
-    orchestrator. Next: `office context`, then act on the verdict. `office status` or `office wait` showing the episode marks
-    that verdict read; `office context` is read-only and does not.
+    orchestrator. Next: `office context`, then act on the verdict. Each `office status` run marks every closed verdict read, so a
+    verdict shown early never becomes unread at the bound; `office wait` and `office context` do not.
   - A healthy running review emits nothing.
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3, and the stall line names the
   dispatch, any refused-submit reason, its `pane-tail.txt` and the next command. Fix the blocker, then

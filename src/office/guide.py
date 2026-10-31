@@ -371,9 +371,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     if not state.is_terminal(run):
         from office import db, watchdog
         episodes = watchdog.review_episodes(con, run, probe=probe_panes)
-        with db.transaction(con):
-            watchdog.record_review_episodes(con, run, episodes)
-            watchdog.mark_review_episodes_read(con, run, episodes)
+        verdicts = watchdog.unread_verdicts(con, run)
+        if episodes or verdicts:
+            with db.transaction(con):
+                watchdog.record_review_episodes(con, run, episodes)
+                watchdog.mark_review_verdicts_read(con, run, verdicts)
     # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
     res.lines[1:1] = [f"blocker: {ep['text']}" for ep in episodes]
     if probe_panes:

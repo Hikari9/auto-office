@@ -412,3 +412,16 @@ def test_an_unread_closed_review_wakes_the_wait_with_its_next(env, monkeypatch):
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
     assert code == 0, out
     assert "verdict is unread" in out and "next: office context to read the T1 verdict" in out, out
+
+
+def test_a_verdict_status_showed_before_the_bound_is_not_unread_when_the_bound_passes(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    run = _run(con)
+    _closed_review(con, run, finished_for=5)
+    _event(con, run, "gate.pass", "T1", 4)
+    env.office("status", check=0, env={"HERDR_PANE_ID": ""})  # shows the verdict while it is young
+    con.execute("UPDATE gates SET finished_at=? WHERE id='GU1'", (_ago(1000),))
+    con.commit()
+    assert watchdog.review_episodes(con, _run(con), probe=False) == []
