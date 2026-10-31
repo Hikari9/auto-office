@@ -2,6 +2,19 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.0
+
+- Orchestrator stalls: office resume arms root auto-wake by default (--wake-off opts out) and status shows whether wake is armed; queued-too-long, stalled and closed-unread reviews raise a wake event with a next: line (#922, #919); no false stalls for panes waiting on monitors or running self-review subagents (#895); a written reviewer reply is ingested even while the pane reads busy (#918); the office CLI exits 75 with a retry message mid-reinstall and records office.reinstalled (#920); route.recovered event and status line when a quota/auth-avoided route is available again (#921).
+- fix(visual): refresh proven reviewers immediately, probe eligible fallbacks beyond four, preserve rejection reasons in status, and share lane-review helpers (#910).
+- fix(questions): worker brief prefers durable office raise; the real AskUserQuestion menu from rock-pages e789954a T6 is pinned as a wake fixture, since the footer parser already detects it (#911).
+- fix(jobs): terminal outbox rows keep their claim token as provenance, restoring the #705 squash-close close-replay contract after #883 (#898).
+- test(review): realign the codex Enter-recovery fixtures with #882's composer behavior so the review-reprompt tests pass again (#898).
+- fix(plan-review): a stale PASS ends plan review while a stale round keeps open defects and ATTENTION blocking, the round-budget rule is one shared helper, and a round already in flight reviews an amended revision without re-queueing (#892).
+- test(gates): run-check fixtures fail with the task's change, not on base, and the #809 M executor slate is read from effective policy instead of a frozen tuple (#892).
+- fix(amend): `--as` is refused on every amendment except `office amend route` with nothing recorded, and `amend route` refuses any plan-amendment flag given a value, empty or not, rather than dropping it, with the drift guard derived from the parser; an executor, including one in its task worktree without its dispatch env, cannot record a route change through `amend route` (#896).
+- fix(gates): full-suite checks run under `verification.full_suite_timeout_seconds` (default 7200) only when the command is exactly `scripts/validate.sh` or `./scripts/validate.sh`, alone or with `--full`; launchers, `env`, chains and redirections keep `check_timeout_seconds`. A check timeout names its limit and the setting to raise, and only Office's own kill records a timeout (#897).
+- feat(plugin): ship the root auto-office skill in the Claude Code plugin, with CLI-detect onboarding that gates the PyPI install on the user's choice (#914).
+
 ## 3.14.0
 
 - catalog: `codex/gpt-6.1-terra` low, medium and high are dispatchable on recorded `office doctor --probe-route` passes (codex-cli 0.163.0, 2026-10-27); none, xhigh and max stay probe-eligible.

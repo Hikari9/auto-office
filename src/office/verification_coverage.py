@@ -39,14 +39,19 @@ _SAFE_VALUES = frozenset({"-n", "--numprocesses", "--tb", "--maxfail", "--durati
 _SAFE_EQUALS = ("--tb=", "--maxfail=", "--durations=", "--dist=", "--color=", "-n=")
 
 
-def _tokens(command: str) -> list[str]:
-    """Parse a single simple shell invocation; refuse chains and substitutions."""
-    if any(ch in command for ch in ";&|<>`\n") or "$(" in command:
+def _simple_words(command: str) -> list[str]:
+    """Split a single simple shell invocation; refuse chains and substitutions."""
+    if any(ch in command for ch in ";&|<>`\n\r") or "$(" in command:
         return []
     try:
-        words = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
         return []
+
+
+def _tokens(command: str) -> list[str]:
+    """`_simple_words` without a leading `env` or variable assignments."""
+    words = _simple_words(command)
     if words and words[0] == "env":
         words.pop(0)
     while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
@@ -104,6 +109,19 @@ def _is_validate_script(command: str) -> bool:
     if words[:1] in (["bash"], ["sh"]):
         words = words[1:]
     return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
+
+
+_FULL_SUITE_ARGV = (["scripts/validate.sh"], ["./scripts/validate.sh"],
+                    ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
+
+
+def is_full_suite(command: str) -> bool:
+    """The full regression run `--pr` does not replace: exactly `scripts/validate.sh` or
+    `./scripts/validate.sh`, alone or with `--full`.
+
+    Shell launchers (`bash`, `sh`), `env`, variable prefixes, redirections, chaining and
+    comments are not classified, so they keep check_timeout_seconds (AMENDMENT A2)."""
+    return _simple_words(command) in _FULL_SUITE_ARGV
 
 
 _SCOPED_GATE_SHA256 = {

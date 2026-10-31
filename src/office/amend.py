@@ -91,7 +91,8 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
           quote: str | None = None, cwd: Path | None = None, redirect: dict | None = None,
           drop_criteria: list[str] | None = None, add_criteria: list[str] | None = None,
           drop_non_goals: list[str] | None = None, add_non_goals: list[str] | None = None,
-          no_review: bool = False, reason: str | None = None, edits: dict | None = None) -> Result:
+          no_review: bool = False, reason: str | None = None, edits: dict | None = None,
+          route_as: str | None = None, restart: bool = False) -> Result:
     """`edits` ({add_accept, drop_accept, add_checks, drop_checks, set_fields}) change the named tasks' structured
     contract in the plan itself (`planfile.edit_task`), so the amendment is enforced, not only delivered as prose.
     `redirect` ({defect, root_cause, requirement, reviewer}) marks a contract
@@ -100,10 +101,17 @@ def amend(con, run: dict, scope: str, delta: str, *, contract: bool = False, req
     amendment that only adds criteria is not delivered to live tasks; naming tasks as the scope
     (`office amend T1,T2 --requirements ...`) forces delivery to those.
     `no_review` (with a `reason`) is the orchestrator's veto of plan review for an ordinary amendment. It
-    matters only while a plan-review cycle is open: once it closes, no amendment is reviewed (#418)."""
+    matters only while a plan-review cycle is open: once it closes, no amendment is reviewed (#418).
+    `route_as` and `restart` are refused here: a route changes only through `office amend route` (#896)."""
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-amend", "workers do not amend the plan; report the problem in your submission",
                       next_step="office submit")
+    if route_as is not None or restart:
+        from office import routechange
+        flag = f"--as {route_as!r}" if route_as is not None else "--restart"
+        raise Refused("route-not-amendment", f"{flag} belongs to a route change, and no contract or ordinary amendment "
+                      "makes one; nothing was recorded", scope=scope,
+                      preserved="plan, contracts, and route unchanged", next_step=routechange.USAGE)
     if not delta or not delta.strip():
         raise Usage("missing-delta", "an amendment needs a delta", next_step='office amend <scope> -- "<delta>"')
     if state.is_terminal(run):
@@ -369,7 +377,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
             rereview = plans.review_after_revision(con, run, version)
             rereview = rereview if "queued" in rereview else None
         elif plans.review_required(run) and not plans.plan_review_ended(con, run):
-            rereview = plans.queue_plan_review(con, run, version)
+            # A round already in flight reviews this revision too: its first PASS ends the review (Q14, S3).
+            rereview = None if plans.review_in_flight(con, run) else plans.queue_plan_review(con, run, version)
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, ordinary)"
                    + (f" | affected {', '.join(affected)}" if affected else ""), audience="runtime")
     jobs.kick(con, run["id"])
