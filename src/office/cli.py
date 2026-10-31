@@ -216,6 +216,7 @@ _ROUTE_AMEND_ONLY_FLAGS = {
     "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
     "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
     "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+    "prs": "--prs", "no_prs": "--no-prs", "confirm": "--confirm",
 }
 
 
