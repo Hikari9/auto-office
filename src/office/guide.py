@@ -358,8 +358,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
-    from office import ctx_alert
+    from office import ctx_alert, executor_context
     ctx_alert.notice(con, run)
+    handoffs = executor_context.recent(con, run)
+    for handoff in handoffs:
+        res.add(f"executor handoff: {handoff['task_id']} {handoff['phase']} "
+                f"({handoff['tokens']:,}/{handoff['threshold_tokens']:,} context tokens) "
+                f"{handoff['from_dispatch_id']} -> {handoff.get('new_dispatch_id') or '-'}"
+                + (f" BLOCKED: {handoff['error']}" if handoff.get("error") else ""))
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -391,6 +397,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
     res.data["root_wake"] = root_wake.metrics(con, run)
+    res.data["executor_handoffs"] = handoffs
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res

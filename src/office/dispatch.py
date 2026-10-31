@@ -1974,6 +1974,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
         "base_parents": extra.get("base_parents"),
+        "context_handoff": extra.get("context_handoff"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 
@@ -2020,7 +2021,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     predecessor = role == "executor" and dispatch.get("predecessor_dispatch_id")
     created = not (Path(dispatch["worktree"]) / ".git").exists()
     wt = ensure_worktree(run, dispatch, restack_existing=bool(predecessor))
-    if predecessor:
+    if predecessor and not payload.get("context_handoff"):
         # An amendment or manual dispatch reuses the old task branch. Its recorded base
         # can be stale after depends changes / dependency re-acceptance (#696).
         # Restack in this launch job (outside the amendment DB transaction), before
@@ -4587,6 +4588,8 @@ def supervise(dispatch_id: str) -> int:
 
     # An in-process supervisor hands its caller's handlers back when the dispatch ends.
     previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    context_stop = threading.Event()
+    context_thread = None
     timer = None
     log_path = None
     try:
@@ -4596,6 +4599,11 @@ def supervise(dispatch_id: str) -> int:
             run = state.get_run(con, d["run_id"])
         finally:
             con.close()
+        if d.get("role") == "executor":
+            from office import executor_context
+            context_thread = threading.Thread(target=executor_context.monitor,
+                                              args=(dispatch_id, context_stop), daemon=True)
+            context_thread.start()
         if os.environ.get("OFFICE_SUPERVISOR_VIA") == "herdr" and d.get("launcher") != "herdr":
             # This pane command arrived after the launch fell back to a plain
             # process; running it too would mean two writers for one dispatch.
@@ -4732,6 +4740,7 @@ def supervise(dispatch_id: str) -> int:
                 _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
                         empty_reply=empty_reply)
         finally:
+            context_stop.set()
             if timer:
                 timer.cancel()
             for s, handler in previous.items():
@@ -4789,7 +4798,7 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
                 con.execute("DELETE FROM route_cooldowns WHERE route=?",
                             (routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort")),))
-            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")
+            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal", "context_cap") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
             run = state.get_run(con, d["run_id"])
@@ -4853,6 +4862,12 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d.get("task_id") else None
     if task is None or task["current_dispatch_id"] != dispatch_id:
+        return
+    # #939: the separate context-rotation job owns this transition. A signal
+    # from stopping the old writer is neither an executor failure nor a route
+    # failure. Never auto-retry this session or consume a retry allowance.
+    if (d.get("context_handoff_json") and task["status"] in ("running", "launching")
+            and not con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone()):
         return
     if task["status"] == "changes_required":
         # Findings arrived while this session was alive and it ended without
