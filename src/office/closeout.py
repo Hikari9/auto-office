@@ -23,6 +23,22 @@ _DOC = re.compile(r"(^|/)(CHANGELOG|README)[^/]*$", re.IGNORECASE)
 _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 
+def visual_review_disclosures(con, run: dict) -> list[str]:
+    """Disclose visual gates without completed comparable evidence."""
+    rows = con.execute(
+        "SELECT task_id, evidence_status, status, summary FROM gates "
+        "WHERE run_id=? AND kind='visual' ORDER BY created_at, id", (run["id"],)
+    ).fetchall()
+    latest = {row["task_id"]: row for row in rows if row["task_id"]}
+    return [
+        f"visual review skipped/degraded for {tid}: "
+        f"{row['evidence_status'] or row['status']}"
+        + (f" ({row['summary'][:180]})" if row["summary"] else "")
+        for tid, row in sorted(latest.items())
+        if row["evidence_status"] != "COMPARABLE" or row["status"] not in ("done", "completed")
+    ]
+
+
 def done(summary: str) -> str:
     return f"office close done — {summary}"
 
