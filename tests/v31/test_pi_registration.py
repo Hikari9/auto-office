@@ -394,7 +394,8 @@ def test_pi_reviewer_profile_is_a_read_only_allowlist_for_code_and_plan_review_o
     assert "--approve" not in argv
     assert prof["prompt"] == "stdin" and prof["output"] == "stdout"
     assert prof["verify_worktree_unchanged"] is True
-    assert "herdr_kind" not in prof, "no pane form: the headless allowlist is the only reviewer launch"
+    assert "herdr_kind" not in prof and "interactive" not in prof, "no pane form: the headless allowlist is the only launch"
+    assert argv[len(argv) - len(_adapter()["office_profiles"]["worker"]["argv"]):] == _adapter()["office_profiles"]["worker"]["argv"]
     assert "review" in adapter["capabilities"] and "planning" not in adapter["capabilities"]
 
 
@@ -445,3 +446,75 @@ def test_worktree_guard_is_off_for_harnesses_with_their_own_sandbox(tmp_path):
     repo = _git_repo(tmp_path)
     assert gates._worktree_guard({"harness": "codex"}, "reviewer", repo) is None
     assert gates._worktree_guard({"harness": "pi"}, "worker", repo) is None
+
+
+# ---------------------------------------------------------------- registering a reviewer is as easy as an executor
+
+def _effective(role, monkeypatch):
+    from office import routecmd
+    monkeypatch.setattr(adapters, "installed", lambda a: True)
+    monkeypatch.setattr(adapters, "harness_version", lambda a: "1.1.0")
+    return "\n".join(routecmd.policy(role=role, effective=True).lines)
+
+
+def test_one_command_registers_pi_luna_high_as_code_and_plan_reviewer(monkeypatch):
+    """The worked example: `office model add pi/openai/gpt-6-luna --effort high --role reviewer`, no adapter edit."""
+    from office import harnesscmd
+    result = harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
+    assert result.data["added"] == ["pi/gpt-6-luna@high"]
+    assert result.data["allowed_roles"] == ["code_reviewer", "plan_reviewer"]
+    assert "read-only tools only" in "\n".join(result.lines)
+    for role in ("code_reviewer", "plan_reviewer"):
+        assert "pi/gpt-6-luna@high: allow (user) -> dispatches (ready)" in _effective(role, monkeypatch), role
+    for role in ("executor", "integration_reviewer", "closeout_verifier"):
+        assert "pi/gpt-6-luna@high: allow" not in _effective(role, monkeypatch), role
+    cands, _ = candidates.build_candidates(None, "code_reviewer", probe=False)
+    assert [c for c in cands if c["harness"] == "pi" and "gpt-6-luna" in str(c)], "the new route is a review candidate"
+
+
+def test_role_executor_allows_the_same_rows_for_executor_only(monkeypatch):
+    from office import harnesscmd
+    harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["executor"])
+    assert "pi/gpt-6-luna@high: allow (user) -> dispatches (ready)" in _effective("executor", monkeypatch)
+    assert "pi/gpt-6-luna@high: allow" not in _effective("code_reviewer", monkeypatch)
+
+
+def test_a_user_adapter_gets_a_derived_read_only_reviewer_from_one_line(tmp_path, monkeypatch):
+    """A harness with a worker form and `reviewer_readonly_args` needs no hand-written reviewer profile."""
+    import yaml
+    from office import harnesscmd
+    adir = tmp_path / "adapters"
+    adir.mkdir()
+    (adir / "acme.yaml").write_text(yaml.safe_dump({
+        "id": "acme", "invocation": {"executable": "acme"}, "capabilities": ["builder"],
+        "effort_mapping": {"high": "high"}, "reviewer_readonly_args": ["--read-only"],
+        "office_profiles": {"worker": {"argv": ["run", "--model", "{model}", "--effort", "{effort}"],
+                                       "prompt": "stdin", "output": "stdout", "herdr_kind": "acme",
+                                       "interactive": {"argv": ["--model", "{model}"]}}}}))
+    monkeypatch.setattr(adapters, "user_adapter_files", lambda: sorted(adir.glob("*.yaml")))
+    acme = adapters.load_all()["acme"]
+    prof = adapters.profile(acme, "reviewer")
+    assert prof["argv"] == ["--read-only", "run", "--model", "{model}", "--effort", "{effort}"]
+    assert prof["verify_worktree_unchanged"] is True and "interactive" not in prof and "herdr_kind" not in prof
+    assert "review" in acme["capabilities"] and adapters.profile(acme, "vision") is None
+    result = harnesscmd.model_add("acme/vendor/m1", ["high"], roles=["reviewer"])
+    assert result.data["allowed_roles"] == ["code_reviewer", "plan_reviewer"]
+
+
+def test_an_explicit_reviewer_profile_is_never_overridden_by_the_derived_form():
+    adapter = {"office_profiles": {"worker": {"argv": ["w"]}, "reviewer": {"argv": ["mine"]}},
+               "reviewer_readonly_args": ["--ro"]}
+    assert adapters.derive_reviewer_profile(adapter) is None
+
+
+def test_role_reviewer_is_refused_for_a_harness_without_read_only_args_or_profile():
+    from office import harnesscmd
+    from office.state import Refused  # noqa: F401
+    with pytest.raises(Exception) as exc:
+        harnesscmd.model_add("kilo/vendor/m1", ["high"], roles=["reviewer"])
+    assert "no reviewer launch profile" in str(exc.value) and "reviewer_readonly_args" in str(exc.value)
+    assert not [r for r in _rows() if r.get("invocation_harness") == "kilo" and r.get("model_id") == "m1"], \
+        "a refused registration writes nothing"
+    with pytest.raises(Exception) as exc:
+        harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], roles=["planner"])
+    assert "--role takes" in str(exc.value)

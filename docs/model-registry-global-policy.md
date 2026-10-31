@@ -64,7 +64,14 @@ office model registry --json
 office model ceiling openai/gpt-sol --through 5.6
 office model unceil openai/gpt-sol
 office model enable codex/luna
+office model add pi/openai/gpt-6-luna --effort high --role reviewer   # register + allow code/plan review
 ```
+
+`office model add ... --role executor|reviewer` registers the catalog rows and writes the matching
+role `allow` in one step. A reviewer runs on the adapter's `reviewer` launch form, or one derived from
+its worker form plus `reviewer_readonly_args` (read-only tools only, headless, never vision). Derived
+forms set `verify_worktree_unchanged`: a review that changed HEAD, the tracked diff or untracked files
+fails that route as degraded and the next reviewer runs. See `skills/auto-adapter/SKILL.md`.
 
 The `enable` command removes **legacy user-overlay** disables set by
 `office model disable`; it never bypasses an existing technical

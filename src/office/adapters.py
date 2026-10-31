@@ -107,15 +107,45 @@ def load_sources() -> dict[str, tuple[dict, str, Path]]:
     return copy.deepcopy(cached)
 
 
+def derive_reviewer_profile(adapter: dict) -> dict | None:
+    """The generic read-only reviewer launch form for a harness with no verified isolation.
+
+    An adapter that declares a worker profile and `reviewer_readonly_args` (the harness flags that leave
+    it only read tools) and no reviewer profile of its own gets one derived from the worker form: the same
+    trust flags, model and effort pins, prompt and reply transport, headless only (no pane form), the
+    read-only args first, and `verify_worktree_unchanged` so Office fails a review that changed the
+    worktree as degraded. No hand-written reviewer profile is needed."""
+    profiles = adapter.get("office_profiles") or {}
+    args = adapter.get("reviewer_readonly_args")
+    worker = profiles.get("worker")
+    if "reviewer" in profiles or not isinstance(worker, dict) or not isinstance(worker.get("argv"), list) \
+            or not isinstance(args, list) or not args:
+        return None
+    derived = {k: v for k, v in worker.items() if k not in ("argv", "herdr_kind", "interactive")}
+    derived["argv"] = [*[str(a) for a in args], *worker["argv"]]
+    derived["output"] = "stdout"
+    derived["verify_worktree_unchanged"] = True
+    return derived
+
+
+def _with_derived_reviewer(data: dict) -> dict:
+    if (derived := derive_reviewer_profile(data)) is not None:
+        data.setdefault("office_profiles", {})["reviewer"] = derived
+        caps = list(data.get("capabilities") or [])
+        data["capabilities"] = caps if "review" in caps else [*caps, "review"]
+    return data
+
+
 def _load_sources_uncached() -> dict[str, tuple[dict, str, Path]]:
     out: dict[str, tuple[dict, str, Path]] = {}
     for p in sorted(adapter_dir().glob("*.yaml")):
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        data = _with_derived_reviewer(yaml.safe_load(p.read_text(encoding="utf-8")) or {})
         out[data.get("id", p.stem)] = (data, "seed", p)
     for p in user_adapter_files():
         data = _read(p)
         if data is None or _has_todo(data):
             continue
+        data = _with_derived_reviewer(data)
         aid = str(data.get("id") or p.stem)
         if aid in out and out[aid][1] == "seed":
             if data.get("override_seed") is not True:

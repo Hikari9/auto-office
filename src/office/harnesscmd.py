@@ -760,7 +760,28 @@ def _efforts(raw: list[str] | None) -> list[str]:
     return out
 
 
-def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | None = None) -> Result:
+ROLE_ALIASES = {"executor": ["executor"], "reviewer": ["code_reviewer", "plan_reviewer"]}
+
+
+def _add_roles(roles: list[str] | None, harness: str, adapter: dict) -> list[str]:
+    """Policy roles for `office model add --role` (executor, reviewer), validated before anything is written."""
+    names = [r.strip() for item in roles or [] for r in str(item).split(",") if r.strip()]
+    unknown = [r for r in names if r not in ROLE_ALIASES]
+    if unknown:
+        raise _usage(f"--role takes {', '.join(ROLE_ALIASES)}, not {', '.join(unknown)}", next_step="office model add --help")
+    out = [pr for r in dict.fromkeys(names) for pr in ROLE_ALIASES[r]]
+    for r in names:
+        kind = "worker" if r == "executor" else "reviewer"
+        if not adapters.profile(adapter, kind):
+            hint = ("add `reviewer_readonly_args` (the harness flags that leave only read tools) or an office_profiles.reviewer "
+                    "to the adapter" if kind == "reviewer" else "declare office_profiles.worker")
+            raise _usage(f"{harness} has no {kind} launch profile, so it cannot serve {r}: {hint}",
+                         next_step=f"office harness validate {harness}")
+    return out
+
+
+def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | None = None,
+              roles: list[str] | None = None) -> Result:
     harness, slug = _parse_model_ident(ident)
     adapter = adapters.load_all().get(harness)
     if not adapter or not adapter.get("office_profiles"):
@@ -768,6 +789,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     want = _efforts(efforts)
     if not want:
         raise _usage("name at least one --effort", next_step=f"office model add {ident} --effort medium")
+    policy_roles = _add_roles(roles, harness, adapter)
     mid = model_id or slug.rsplit("/", 1)[-1]
     if not MODEL_ID_RE.match(mid):
         raise _usage(f"model id {mid!r} must be letters, digits, '.', '_' or '-'", next_step="pass --model-id <name>")
@@ -796,10 +818,20 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
         added.append(f"{harness}/{mid}@{e}")
     target = user_catalog.save(overlay)
     note = cli_runtimes.refresh_if_saved()
+    allowed = []
+    if policy_roles:
+        from office import routecmd
+        for pr in policy_roles:
+            routecmd.change("allow", role=pr, route=",".join(added))
+            allowed.append(pr)
+    policy_line = ("policy: neutral for every role (eligible, not denied); change it with office route allow|deny"
+                   if not allowed else f"policy: allowed for {', '.join(allowed)}; every other role stays neutral. "
+                   + ("A reviewer on a harness without verified isolation runs with read-only tools only and fails as "
+                      "degraded if it changes the worktree" if any(r.endswith("reviewer") for r in allowed) else ""))
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
-                         "policy: neutral for every role (eligible, not denied); change it with office route allow|deny", *([note] if note else [])],
-                  next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target)})
+                         policy_line, *([note] if note else [])],
+                  next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target), "allowed_roles": allowed})
 
 
 def model_list(harness: str | None = None) -> Result:
