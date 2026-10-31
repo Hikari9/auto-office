@@ -72,8 +72,9 @@ def frontmatter(path):
     if not required <= keys or keys - allowed: return False,f'frontmatter requires name+description and only optional invocation control, got {keys}', fm, text
     if 'disable-model-invocation' in fm and not isinstance(fm['disable-model-invocation'], bool):
         return False,'disable-model-invocation must be a boolean', fm, text
-    if not isinstance(fm['name'], str) or not re.match(r'^[a-z0-9-]+$', fm['name']): return False,'bad name', fm, text
-    if not isinstance(fm['description'], str) or not fm['description'].strip(): return False,'empty description', fm, text
+    if not isinstance(fm['name'], str) or not re.fullmatch(r'[a-z0-9-]+', fm['name']): return False,'bad name', fm, text
+    if not isinstance(fm['description'], str): return False,'description must be a string', fm, text
+    if not fm['description'].strip(): return False,'empty description', fm, text
     return True,'ok', fm, text
 
 def discovered_skills(root):

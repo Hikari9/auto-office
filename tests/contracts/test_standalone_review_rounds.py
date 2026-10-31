@@ -97,3 +97,31 @@ def test_non_string_revision_or_evidence_is_a_contract_error(override):
 def test_malformed_previous_entry_is_a_contract_error():
     with pytest.raises(ReviewContractError, match='invalid previous review ledger'):
         case({'reviews': ['not-a-review']})
+
+
+def test_malformed_unavailable_list_is_a_contract_error():
+    with pytest.raises(ReviewContractError, match='invalid previous review ledger'):
+        case({'reviews': [], 'unavailable': None}, verdict='UNAVAILABLE', evidence='no CLI')
+
+
+def test_ledger_keeps_the_callers_spelling_and_compares_normalized():
+    ledger = case({}, reviewer_session='  Rev-ABC ', invoker_session='coordinator')
+    assert ledger['reviews'][0]['reviewer_session'] == 'Rev-ABC'
+
+
+def test_fix_owner_must_be_a_string_and_blank_means_no_owner():
+    with pytest.raises(ReviewContractError, match='ASCII'):
+        case({}, fix_owner_session=5)
+    ledger = case({}, fix_owner_session='   ')
+    assert ledger['reviews'][0]['fix_owner_session'] is None
+
+
+def test_fix_owner_identity_is_compared_normalized():
+    with pytest.raises(ReviewContractError, match='distinct session'):
+        case({}, reviewer_session='Fixer', fix_owner_session=' fixer ')
+
+
+@pytest.mark.parametrize('lookalike', ['coordinator​', 'coordinаtor'])
+def test_non_ascii_identities_fail_closed(lookalike):
+    with pytest.raises(ReviewContractError, match='ASCII'):
+        case({}, invoker_session=lookalike)

@@ -18,8 +18,17 @@ class ReviewContractError(ValueError):
 
 
 def _session(value) -> str:
-    """Session ids compare case- and whitespace-insensitively; blank means missing."""
+    """Comparison key for an ASCII session id: padding stripped, case-folded. Blank gives ''."""
     return value.strip().casefold() if isinstance(value, str) else ""
+
+
+def _stored(value) -> str:
+    """The id as the caller wrote it, minus padding, for the ledger."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _list_of_dicts(value) -> bool:
+    return isinstance(value, list) and all(isinstance(entry, dict) for entry in value)
 
 
 def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
@@ -31,14 +40,14 @@ def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
     A caller can be orchestrator or executor. A chosen fix owner need not be the
     caller; the reviewer must be independent of caller, producer and fixer.
     """
-    if not isinstance(ledger, dict) or not isinstance(ledger.get("reviews", []), list) \
-            or not all(isinstance(entry, dict) for entry in ledger.get("reviews", [])):
+    if not isinstance(ledger, dict) or not _list_of_dicts(ledger.get("reviews", [])) \
+            or not _list_of_dicts(ledger.get("unavailable", [])):
         raise ReviewContractError("invalid previous review ledger")
     if not isinstance(revision, str) or not isinstance(evidence, str):
         raise ReviewContractError("revision and evidence must be strings")
-    reviewer_session, invoker_session, producer_session = (
-        _session(reviewer_session), _session(invoker_session), _session(producer_session))
-    fix_owner_session = _session(fix_owner_session) if fix_owner_session is not None else None
+    for identity in (reviewer_session, invoker_session, producer_session, fix_owner_session):
+        if identity is not None and (not isinstance(identity, str) or not identity.isascii()):
+            raise ReviewContractError("session ids must be ASCII strings")
     reviews = ledger.get("reviews", [])
     if len(reviews) >= MAX_SUBSTANTIVE_ROUNDS:
         raise ReviewContractError("three substantive rounds exhausted; unresolved review remains blocked")
@@ -48,14 +57,17 @@ def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
         raise ReviewContractError("INTAKE_GAP requires a real owner decision before recheck")
     if verdict not in VERDICTS | {"UNAVAILABLE"}:
         raise ReviewContractError("invalid reviewer verdict")
-    if not reviewer_session or not invoker_session or not producer_session:
+    reviewer, invoker, producer = (_session(reviewer_session), _session(invoker_session),
+                                   _session(producer_session))
+    if not reviewer or not invoker or not producer:
         raise ReviewContractError("missing independently identifiable sessions")
-    if reviewer_session in {invoker_session, producer_session, fix_owner_session}:
+    fixer = _session(fix_owner_session) or None  # a blank fix owner means no fix owner
+    if reviewer in {invoker, producer, fixer}:
         raise ReviewContractError("reviewer must be a distinct session from invoker/producer/fixer")
     copy = deepcopy(ledger)
     if verdict == "UNAVAILABLE":
         copy.setdefault("unavailable", []).append({"revision": revision,
-                                                    "reviewer_session": reviewer_session,
+                                                    "reviewer_session": _stored(reviewer_session),
                                                     "reason": evidence.strip() or "unknown"})
         return copy
     if not re.fullmatch(r"[a-fA-F0-9]{40}", revision):
@@ -65,10 +77,10 @@ def record(ledger: dict, *, verdict: str, revision: str, reviewer_session: str,
     copy.setdefault("reviews", []).append({
         "round": len(reviews) + 1,
         "revision": revision.lower(),
-        "reviewer_session": reviewer_session,
-        "invoker_session": invoker_session,
-        "producer_session": producer_session,
-        "fix_owner_session": fix_owner_session,
+        "reviewer_session": _stored(reviewer_session),
+        "invoker_session": _stored(invoker_session),
+        "producer_session": _stored(producer_session),
+        "fix_owner_session": _stored(fix_owner_session) or None,
         "verdict": verdict,
         "evidence": evidence.strip(),
     })
