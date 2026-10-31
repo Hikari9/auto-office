@@ -290,13 +290,20 @@ def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env
     dispatched = con.execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at LIMIT 1").fetchone()[0]
     line = next(l for l in out.splitlines() if l.startswith("ACTUAL DISPATCH T1: "))
     assert line.startswith(f"ACTUAL DISPATCH T1: {dispatched} | ") and route, line
-    # S's ideal slate starts with Gemini Flash at medium: every ideal that did not run says why.
+    # Every ideal in S's slate that did not run says why.
     skipped = [l for l in out.splitlines() if l.startswith("  ideal route skipped: #")]
     ideals = executor_slates.ideal_seed("S")
     assert len(skipped) in (len(ideals) - 1, len(ideals)), out  # the adaptive pick is one of the ideals, or none of them
-    for ideal in ideals[1:]:  # the Gemini ideal may be the pick; the Haiku and Terra ideals are discovery-only
+    # Any dispatchable ideal may be the adaptive pick (Gemini, or Terra since #909). Every other ideal is skipped
+    # with its reason: an unproven route is discovery-only (unqualified), a dispatchable one is outranked (in-slate).
+    harness, rest = dispatched.split("/", 1)
+    picked_model, picked_effort = rest.rsplit("@", 1)
+    for ideal in ideals:
+        if (ideal["model_id"], ideal["effort"]) == (picked_model, picked_effort) and \
+                ideal.get("harness", harness.split("@")[0]) == harness.split("@")[0]:
+            continue
         ref = f"{ideal.get('harness', '*')}/{ideal['model_id']}@{ideal['effort']}"
-        assert any(f"{ref} (unqualified)" in l for l in skipped), (ref, skipped)
+        assert any(f"{ref} (unqualified)" in l or f"{ref} (in-slate)" in l for l in skipped), (ref, skipped)
     assert all(" (selected)" not in l for l in skipped), skipped
 
 
