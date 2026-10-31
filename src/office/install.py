@@ -20,7 +20,7 @@ MARKER = "--office-managed"
 
 # Portable event -> native event name, per harness with a verified JSON schema.
 EVENTS = {
-    "claude": {"session.start": "SessionStart", "prompt.submit": "UserPromptSubmit", "tool.pre": "PreToolUse"},
+    "claude": {"session.start": "SessionStart", "prompt.submit": "UserPromptSubmit", "tool.pre": "PreToolUse", "turn.stop": "Stop"},
     "gemini": {"session.start": "SessionStart", "prompt.submit": "BeforeAgent", "tool.pre": "BeforeTool"},
 }
 CONFIG = {
@@ -65,6 +65,10 @@ def _write_shim() -> Path:
 
 def _entry(harness: str, portable: str, command: str) -> dict:
     hook = {"type": "command", "command": f"{command} hook {portable} --harness {harness} {MARKER}", "timeout": 5}
+    if portable == "turn.stop" and harness == "claude":
+        # Claude Code 2.1.x native idle re-entry: code 2 + stderr resumes the
+        # original session, not a headless replacement. Stop hook is async.
+        hook.update({"asyncRewake": True, "timeout": 86400})
     if portable == "tool.pre":
         return {"matcher": WRITE_MATCHER, "hooks": [hook]}
     if portable == "shell.pre":

@@ -38,7 +38,7 @@ def test_wake_is_armed_by_resume_only_for_a_verified_root_and_attach_stays_stric
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
-    assert root_wake.lines(con, run) == ["wake: unavailable (not inside a Herdr pane); use office wait"]
+    assert root_wake.lines(con, run) == ["wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"]
     monkeypatch.setenv("HERDR_PANE_ID", PANE)
     with pytest.raises(state.Refused, match="not bound"):
         root_wake.attach(con, run)
