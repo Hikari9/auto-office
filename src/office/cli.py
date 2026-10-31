@@ -51,6 +51,8 @@ Auto Office {ver}
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office self-improve               print the manual bug-filing workflow and the run's bug? signals
+  office land --batch batch.json [--dry-run|--retry-full]
+                                    land ordered run/PR lanes; full suite only after final merge
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
@@ -341,6 +343,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
     s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
     s.add_argument("--rebase", action="store_true", help="move the run onto the newer default branch first")
+    s.add_argument("--batch", metavar="MANIFEST.json",
+                   help="merge ordered run/PR lanes with one version owner and a final full suite")
+    s.add_argument("--dry-run", action="store_true", help="with --batch: validate and show order without merging")
+    s.add_argument("--retry-full", action="store_true",
+                   help="with --batch: rerun a red full suite without new fix lanes")
     s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
     s.add_argument("--mark-deployed", action="store_true",
                    help="with --e2e: the operator confirms the merged tree is already live in prod")
@@ -940,6 +947,14 @@ def _run(args, unknown) -> int:
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
+    if cmd == "land" and args.batch:
+        from office import batch_landing
+        if any((args.land_mode, args.detect, args.rebase, args.redeploy, args.mark_deployed, args.quote)):
+            raise OfficeError("batch-flags", "--batch cannot be combined with run landing/deploy flags", exit_code=2)
+        return emit(batch_landing.land_batch(args.batch, cwd=cwd,
+                                             dry_run=args.dry_run, retry_full=args.retry_full), args)
+    if cmd == "land" and (args.dry_run or args.retry_full):
+        raise OfficeError("batch-flags", "--dry-run and --retry-full require --batch", exit_code=2)
     if cmd == "land" and args.detect:
         from office import land, paths
         ident = paths.repo_identity(cwd)
