@@ -438,6 +438,15 @@ def test_the_health_probe_passes_on_a_healthy_install():
     assert _REAL_INSTALL_HEALTHY() is True
 
 
+def test_the_health_probe_ignores_an_office_package_in_the_working_directory(tmp_path, monkeypatch):
+    """`python -c` would import a stray office/ package from the working directory; -I keeps the installed one (#920)."""
+    (tmp_path / "office").mkdir()
+    (tmp_path / "office" / "__init__.py").write_text("raise ImportError('poisoned working directory')\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert _REAL_INSTALL_HEALTHY() is True
+
+
 @pytest.mark.parametrize("interpreter", ["/usr/bin/false", "/nonexistent/office-python"])
 def test_the_health_probe_fails_when_its_interpreter_cannot_run_the_probe(monkeypatch, interpreter):
     """A non-zero exit and a missing interpreter both read as an unhealthy install."""
