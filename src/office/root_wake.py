@@ -45,6 +45,7 @@ ACTIONABLE = frozenset({
     "route.recovered",
 })
 MIN_POLL = 0.5
+FAILURE_BACKOFF_CAP = 30.0  # a supervisor tick that keeps failing retries no faster than this (#920)
 MAX_ATTEMPTS = 4
 WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
 # Herdr reports a Claude agent whose turn finished as `done` until its pane is
@@ -123,15 +124,45 @@ def _recorded(con, run_id: str, token: str) -> bool:
                        (run_id, token)).fetchone() is not None
 
 
+_HEALTH_PROBE = "import office.cli; from office import version; version.current()"
+
+
+class InstallUnhealthy(OSError):
+    """The install is not healthy yet. Raised inside a supervisor tick, so the tick counts as failed and backs off (#920)."""
+
+
+def _install_healthy() -> bool:
+    """True when a fresh interpreter imports the CLI and resolves the version from disk (#920).
+
+    A fresh process is required: this one already holds the modules it loaded before the replacement. `-I` keeps the
+    working directory and PYTHONPATH off sys.path, so a stray `office/` there cannot pass or fail the probe."""
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-c", _HEALTH_PROBE], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _retry_delay(failures: int) -> float:
+    """Seconds to sleep before the next supervisor tick: MIN_POLL when healthy, else doubling per consecutive failure."""
+    if failures == 0:
+        return MIN_POLL
+    return min(MIN_POLL * 2 ** min(failures, 16), FAILURE_BACKOFF_CAP)  # 2**16 * MIN_POLL already exceeds the cap
+
+
 def _recover_reinstall(con, run: dict) -> bool:
     """Record one `office.reinstalled` event after a healthy tick ends an episode opened by `_tick_failed` (#920).
 
-    The event carries the mark's token, and the mark is removed only after the event commits. A crash or a
-    failed unlink after commit leaves the token recorded, so the retry removes the mark without recording
-    again. A run that has ended gets no wake. The run lock serializes the supervisor and the watchdog thread."""
+    The event needs a positive health probe. Until it passes the mark stays, and the tick that tried raises
+    InstallUnhealthy so it backs off. The event carries the mark's token, and the mark is removed only after the
+    event commits. A crash or a failed unlink after commit leaves the token recorded, so the retry removes the mark
+    without recording again. A run that has ended gets no wake. The run lock serializes the supervisor and the
+    watchdog thread."""
     mark = _reinstall_mark(run["id"])
     if not mark.exists():
         return False
+    if not _install_healthy():
+        raise InstallUnhealthy("install is not healthy yet; the recovery waits for a passing probe")
     with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"):
         if not mark.exists():
             return False
@@ -687,8 +718,7 @@ def _watchdog_loop(run_id: str) -> None:
             run = state.get_run(con, run_id)
             if not run or state.is_terminal(run) or not _binding(con, run_id):
                 return
-            watchdog_tick(con, run)
-            _recover_reinstall(con, run)
+            watchdog_tick(con, run)  # no recovery here: a healthy watchdog does not show the supervisor is healthy (#920)
         except Exception as exc:
             if isinstance(exc, (ImportError, OSError)):
                 _tick_failed(run_id, exc)
@@ -761,15 +791,18 @@ def supervise(run_id: str, *, once: bool = False) -> int:
         # the 0.5s completion-wake critical path, with an independent cadence.
         threading.Thread(target=_watchdog_loop, args=(run_id,), daemon=True,
                          name=f"office-stall-{run_id[:8]}").start()
+        failures = 0
         while True:
             try:
                 if not _supervise_tick(run_id):
                     return 0
+                failures = 0
             except (ImportError, OSError) as exc:
-                # The install is being replaced under this process (#833, #920): keep supervising.
+                # The install is being replaced under this process (#833, #920): keep supervising, backing off.
                 _tick_failed(run_id, exc)
+                failures += 1
             if once:
                 return 0
-            time.sleep(MIN_POLL)
+            time.sleep(_retry_delay(failures))
     finally:
         lock.close()
