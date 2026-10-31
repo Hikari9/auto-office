@@ -125,6 +125,30 @@ def check_versions(root=ROOT):
 
 
 
+def check_plugin_skills(root=ROOT):
+    """The Claude plugin must expose the root SKILL.md and skills/. Each entry is a ./ directory inside the plugin."""
+    manifest = root / '.claude-plugin' / 'plugin.json'
+    if not manifest.exists():
+        return []
+    skills = json.loads(manifest.read_text()).get('skills')
+    if not isinstance(skills, list) or not all(isinstance(entry, str) for entry in skills):
+        return ['.claude-plugin/plugin.json: skills must be a list of paths']
+    errors = []
+    plugin_root = root.resolve()
+    exposed = set()
+    for entry in skills:
+        valid = entry.startswith('./') and '\x00' not in entry
+        target = (root / entry).resolve() if valid else None
+        if not valid or not target.is_dir() or not target.is_relative_to(plugin_root):
+            errors.append(f'.claude-plugin/plugin.json: skills entry {entry!r} must be a ./ directory inside the plugin')
+        else:
+            exposed.add(target)
+    for required in ('./', './skills/'):
+        if (root / required).resolve() not in exposed:
+            errors.append(f'.claude-plugin/plugin.json: skills must expose {required!r}')
+    return errors
+
+
 def check_skill_metadata(root=ROOT):
     """Require each skill's OpenAI display name to equal its canonical skill name."""
     errors=[]
@@ -203,6 +227,7 @@ def main():
     budget_errors = check_skill_budgets()
     errors.extend(budget_errors)
     errors.extend(check_versions())
+    errors.extend(check_plugin_skills())
     errors.extend(check_skill_metadata())
         
     if errors:

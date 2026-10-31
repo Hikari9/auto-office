@@ -273,3 +273,53 @@ def test_review_492_ask_and_negation_probes(nxt, asks):
 def test_reverify_ask_probes(nxt, asks):
     q = questions.final_question(f"Stopped.\nTASK=T1 SUBMIT=not attempted NEXT={nxt}\n")
     assert bool(q) is asks, (nxt, q)
+
+# The menu a rock-pages T6 worker (run e789954a) showed: Claude's AskUserQuestion widget. "Stalled workflow" is
+# its tab chip, not a title, and the footer is the standard one, so the footer path already detects it (#911).
+STALLED_WORKFLOW_MENU = """\
+\u23fa The workflow is still stuck: LastProcessedDateTime has not moved since 16:00:03.
+  I'm saving the stall evidence, then raising a blocker.
+
+  Ran 1 shell command
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+ \u2610 Stalled workflow
+
+\u2502 The volunteer-path workflow stalls in its 'Resolve and claim' activity and never writes a ledger row.
+\u2502 Admin-attributed declines complete fine. How should T6 proceed?
+
+\u276f 1. Stop T6 here and fix T4 first (Recommended)
+     Hold T6 until the Resolve/claim actions are diagnosed and fixed in T4.
+  2. Roll back binding, record blocker, submit partial
+     Run the provisioner --rollback on preview now so real declines stop stalling.
+  3. Diagnose in the Rock admin UI with an admin session
+     This is a privileged read on preview; I would not do it without your yes.
+  4. Type something.
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  5. Chat about this
+
+Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel
+"""
+
+
+def test_the_real_stalled_workflow_menu_is_a_select_question():
+    q = questions.parse(STALLED_WORKFLOW_MENU, status="working", busy=True)
+    assert q is not None and q["kind"] == "select"
+    assert [option["n"] for option in q["options"]] == [1, 2, 3, 4, 5]
+    assert "How should T6 proceed?" in q["question"]
+
+
+def test_stalled_workflow_text_without_an_active_menu_is_not_a_question():
+    history = ("\u23fa Earlier the Stalled workflow menu appeared and I picked option 1.\n"
+               "  1. Stop T6 here\n  2. Roll back\n\n\u23fa Continuing with T4. Running the tests now.\n")
+    assert questions.parse(history, status="working", busy=True) is None
+    answered = STALLED_WORKFLOW_MENU + "\n\u23fa Stopping T6 as chosen. Raising the blocker now.\n"
+    assert questions.parse(answered, status="working", busy=True) is None
+
+
+@pytest.mark.approved
+def test_wait_wakes_on_stalled_workflow_question_menu(env, monkeypatch):
+    _, run, d, con = _herdr_worker(env, monkeypatch, reads=[STALLED_WORKFLOW_MENU], agent="blocked")
+    res = guide.wait(con, run, timeout=5, poll=0.1)
+    assert res.exit_code == questions.EXIT
+    assert any("question:" in line and "How should T6 proceed?" in line for line in res.lines)
+    assert any("question:" in line for line in guide.status(con, run).lines)
