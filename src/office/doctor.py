@@ -23,7 +23,7 @@ def _visual_capture_status() -> tuple[str, bool]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return ("visual capture: playwright missing (uv tool install 'auto-office[visual]'); "
+        return ("visual capture: playwright missing (uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'); "
                 "visual gates report CAPTURE_BLOCKED", False)
     try:
         from office import visual

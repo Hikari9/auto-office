@@ -462,7 +462,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--probe-route", metavar="HARNESS[@MAJOR]/MODEL@EFFORT",
                    help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
-    s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
+    s.add_argument("--check", action="store_true", help="check the release on GitHub main and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
     s.add_argument("target", nargs="?", help="the run (default: this session's run)")
     s.add_argument("--to", metavar="X.Y", help="the release line (default: this runtime's)")

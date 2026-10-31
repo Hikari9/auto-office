@@ -22,7 +22,7 @@ def _startup_failure(exc: Exception) -> int:
     cause = _cause(exc)
     if _is_dependency_failure(exc):
         print(f"office: cannot start, a dependency failed to import ({cause}). Reinstall auto-office from its source: "
-              "`uv tool install --force --editable <checkout>` for a checkout, or `uv tool install --force auto-office` "
+              "`uv tool install --force --editable <checkout>` for a checkout, or `uv tool install --force git+https://github.com/Hikari9/auto-office` "
               "for a release (keep any extras). If a reinstall is already running, retry after it finishes.",
               file=sys.stderr)
         return 1

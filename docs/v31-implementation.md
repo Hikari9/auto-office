@@ -318,7 +318,7 @@ spokes once `office doctor` shows no remaining consumers.
 ## 12. Cutover and rollback
 
 1. Merge with 3.1 as the default for new runs (`runtime.new_runs` defaults to `3.1`).
-2. `uv tool install auto-office` (or `--editable` from the checkout), `office install`, `office doctor`.
+2. `uv tool install git+https://github.com/Hikari9/auto-office` (or `--editable` from the checkout), `office install`, `office doctor`.
 3. Active 3.0 runs drain on their retained commits; they are never rewritten.
 4. **Rollback** (future runs only): set `runtime: {new_runs: "3.0"}` in
    `~/.config/auto-office/config.yaml`. `office start` then refuses and names the retained 3.0
