@@ -303,6 +303,8 @@ def test_built_executor_candidates_never_include_an_unscoped_shipped_deny(tmp_pa
     monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
+    from office import paths
+    assert str(paths.runs_db()).startswith(str(tmp_path)), "the test must never open the real runs.db"
     con = db.connect()
     try:
         built, _ = candidates.build_candidates(con, "executor", probe=False,
