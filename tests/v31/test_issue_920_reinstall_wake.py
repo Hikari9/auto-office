@@ -667,3 +667,17 @@ def test_each_recovery_has_its_own_actionable_signature(env, monkeypatch):
     signatures = [root_wake._actionable_now(con, _run(con), [seq])[0] for seq in seqs]
 
     assert signatures[0] != signatures[1]
+
+
+def test_the_rebuild_probe_skips_the_source_identity_and_leaves_no_cached_base(monkeypatch):
+    """The probe runs before every command: it must not spawn git, nor cache a base-only identity for later callers."""
+    resolved = []
+    monkeypatch.setattr(version, "_is_source_checkout", lambda: True)
+    monkeypatch.setattr(version, "_cached_source_identity", lambda base: resolved.append(base) or f"{base}+gabc")
+    version.current.cache_clear()
+    try:
+        assert version.rebuilding_reason() is None
+        assert resolved == []  # the probe needed no git-derived identity
+        assert version.current() == f"{version.base_version()}+gabc"  # nor did it cache the bare base
+    finally:
+        version.current.cache_clear()

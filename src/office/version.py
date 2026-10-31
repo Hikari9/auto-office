@@ -156,7 +156,8 @@ def rebuilding_reason() -> str | None:
     global _probing
     _probing = True  # the probe needs imports and reads, not the git-derived source identity (#920)
     try:
-        current()
+        # Uncached: the probe's base-only answer must not reach the lru_cache that later callers read.
+        getattr(current, "__wrapped__", current)()
     except (ImportError, OSError) as exc:
         return failure_cause(exc)
     finally:
