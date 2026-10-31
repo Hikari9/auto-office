@@ -24,6 +24,13 @@ def classify(task: dict, *, run_gear: str | None = None) -> dict:
     so callers can pass it, but it never influences sizing.
     """
     d = task.get("descriptor") or {}
+    if run_gear == "greenfield":
+        # One cohesive build must qualify for the strong (XL) executor slate;
+        # a short file list or a deceptively easy first phase must not downsize it.
+        # This is a routing floor, not an elevated safety-risk classification.
+        return {"task_size": "XL", "task_size_rationale": "greenfield: one executor builds all 2-3 phases as a single cohesive XL task",
+                "task_size_source": "greenfield-gear", "profile": "deep", "profile_version": PROFILE_VERSION,
+                "task_size_version": VERSION, "decomposition_recommended": False}
     scopes = task.get("scope") or []
     deps = task.get("depends") or []
     interfaces = task.get("interfaces") or []

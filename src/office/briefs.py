@@ -81,7 +81,12 @@ visual:
   selectors: header, nav                   (elements to measure)
 route: <harness/model@effort>, <fallback>, <fallback>   (optional; omit to accept Office's ranked slate)
 route_why: <concrete reason>   (required when the primary is outside the close-call band of the best route)
-task_size: XS | S | M | L | XL   (each task independently; the plan may omit for runtime inference)
+phases:                     (greenfield gear: REQUIRED, 2-3 large phases in one task)
+- foundation, contracts, and project skeleton
+- working core plus real acceptance tests
+- integration, verification, and handoff
+Task phases are checkpoints inside one executor session, not separate Office tasks or review gates.
+task_size: XS | S | M | L | XL   (each task independently; greenfield pins a cohesive XL executor task)
 task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
 inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; S/M inline exceptions)
 """
@@ -208,7 +213,17 @@ def planner_brief(con, run: dict, packet: dict) -> str:
     plan = state.current_plan(con, run["id"])
     if plan:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
-    if contract.is_convergence(run):
+    if run.get("gear") == "greenfield" and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1":
+        guidance = [
+            "GREENFIELD GEAR (explicit opt-in): use only for a new or near-empty repository. Inspect the ",
+            "existing files and do not silently use this mode for a mature, multi-owner codebase.",
+            "Plan exactly ONE T1 task with one broad but explicit ownership scope and 2-3 distinct large",
+            "`phases:` list items, covering foundation, working core, and end-to-end verification as appropriate.",
+            "Each phase is a checkpoint within the SAME strong executor session, not a task handoff or lane review.",
+            "Put the full test and user-visible acceptance seams in T1; submit/review only after the whole build.",
+            "Do not prescribe tiny per-file tasks; do not bypass checks, visual acceptance, security or authorization.",
+        ]
+    elif contract.is_convergence(run):
         guidance = [
             "CONTRACT the seams, not the internals: nail down details the builder cannot safely rediscover "
             "independently; leave the rest to builder judgment.",
@@ -294,6 +309,14 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                 "and moves any file left from an earlier dispatch out of this worktree before you start, so write it "
                 "fresh for every submission, including a retry or fix round; submit refuses a file whose content "
                 "matches evidence already submitted for this task."]
+    if run.get("gear") == "greenfield" and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1":
+        plan = state.current_plan(con, run["id"])
+        planned = next((t for t in (plan or {}).get("tasks") or [] if t["id"] == packet["task_id"]), {})
+        phases = planned.get("phases") or []
+        out += ["GREENFIELD one cohesive build: complete ALL phases in this single executor session. "
+                "You may commit checkpoints but do not call office submit or request an Office review between phases.",
+                "PHASES (in order; checks and independent convergence run after the full build):"]
+        out += [f"    {i}. {phase}" for i, phase in enumerate(phases, 1)]
     built_on = _builds_on(con, run, packet)
     if built_on:
         out.append(f"BUILDS ON {', '.join(built_on)} (already in this worktree's base)")
@@ -438,6 +461,8 @@ def self_review_tier(gear, risk_json) -> str:
     an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
     if gear in ("L", "XL", "full"):
         return "deep"
+    # Greenfield is one cohesive task, not a safety exemption: it takes the same
+    # tiers as any other gear, so low risk gets `single` and elevated risk gets `deep`.
     try:
         risk = json.loads(risk_json) if isinstance(risk_json, (str, bytes)) else risk_json
     except (ValueError, RecursionError):
