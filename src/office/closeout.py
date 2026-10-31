@@ -25,7 +25,7 @@ _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 _VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
 # Terminal escape sequences, C0/C1 controls, bidi overrides and zero-width characters.
-_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
+_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿]")
 
 
 def clean_text(text: str) -> str:
@@ -46,14 +46,16 @@ def criteria_report(criteria: list[tuple[str, str | None]]) -> list[str]:
     and an empty list, raise ValueError rather than report the work as met. The summary names the
     criteria not verified live, faked and unverified together, or says all are verified live.
     """
+    criteria = list(criteria)  # a generator is truthy even when it yields nothing
     if not criteria:
         raise ValueError("acceptance cannot be reported as met without labeled criteria")
     lines, weak = [], []
-    for text, kind in criteria:
+    for item in criteria:
+        text, kind = item if isinstance(item, tuple) and len(item) == 2 else (None, None)
         label = clean_text(text) if isinstance(text, str) else ""
         if not label or kind not in VERIFICATION_KINDS:
             raise ValueError(f"acceptance criterion needs text and one verification kind "
-                             f"({', '.join(VERIFICATION_KINDS)}); got {text!r} as {kind!r}")
+                             f"({', '.join(VERIFICATION_KINDS)}); got {item!r}")
         lines.append(f"{kind}: {label}")
         if kind != VERIFIED_LIVE:
             weak.append(f"{label} ({kind})")
