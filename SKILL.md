@@ -1,6 +1,7 @@
 ---
 name: auto-office
-description: Adaptive office engineering runtime for the complete lifecycle from intent through planning, routed execution, independent review, verification, and closeout, driven through one `office` CLI. Use when explicitly invoked as /auto-office or when the user directly asks to run an Auto Office lifecycle. Routes each role by harness, model, and effort under pinned policy, trust and capability floors, and live quota; the runtime owns state, receipts, evidence, and review mechanics. Preserves human merge-to-main unless the user chose merge or end-to-end at intake, no-self-approval, private evidence, and version-pinned runs.
+description: Original full Auto Office lifecycle orchestrator. Invoke ONLY when the user explicitly requests /auto-office (or host-supported namespaced /auto-office:auto-office). Do not auto-activate for ordinary engineering tasks. Uses the installed office CLI to plan, route, review, verify and close with pinned authority.
+disable-model-invocation: true
 ---
 
 # Auto Office
@@ -12,8 +13,10 @@ Do not write JSON, receipts, or telemetry for Office, and do not read Office sou
 
 ## Issue-only self-improvement
 
-On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
-file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint; it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
+On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the
+bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
+file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint;
+it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
 
 ## Permanent invariants
 
@@ -36,10 +39,10 @@ Take every decision to the user through the harness's native question tool when 
 ## Install check (every session, before anything else)
 
 Detection: !`command -v office || echo "office: not found"`
-- **Found:** run `office --version` and `office doctor`. If doctor fails, ask once, natively (see Asking the user): **Repair the install** (`office install --no-hooks`, `office doctor`) or **Lean for this request** (hand off now); repair only on yes, and if either step fails, stop, report that command, and offer the lean hand-off. If the release differs from this directory's `src/office/_version.py` or doctor prints `install: STALE`, tell the user and offer `uv tool upgrade auto-office` if the CLI came from PyPI, or `uv tool install --force --reinstall "<this skill's directory>"` if it came from a checkout or editable install, then `office install`. Runs already started keep their pinned runtime.
+- **Found:** run `office --version` and `office doctor`. If doctor fails, ask once, natively (see Asking the user): **Repair the install** (`office install --no-hooks`, `office doctor`) or **Lean for this request** (hand off now); repair only on yes, and if either step fails, stop, report that command, and offer the lean hand-off. If the release differs from this directory's `src/office/_version.py` or doctor prints `install: STALE`, tell the user and offer `uv tool upgrade auto-office` if the CLI came from PyPI, or `uv tool install --force --reinstall "<this skill's directory>"` if it came from a full checkout containing pyproject.toml, never a plugin-only skill folder, then `office install`. Runs already started keep their pinned runtime.
 - **Not found:** in one shell command, set `CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"` and run `cat "$CFG"`; if it prints `lean` (a trailing newline is fine), hand off. Otherwise ask once per session, natively (see Asking the user): **Install the CLI (Recommended)**, **Lean for this request**, **Lean, don't ask again** (in one shell command: `CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"; mkdir -p "$(dirname "$CFG")" && printf lean >| "$CFG"`; if that fails, tell the user the choice was not saved and continue this request as **Lean for this request**). Either Lean choice: hand off. Only if the user asks to be asked again, run `rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"`.
-- **Install:** ask the user to approve installing it; never install without that. Only after the user picks **Install the CLI**, run `uv tool install auto-office` and check its exit status. If it fails, stop, report that command, and offer the lean hand-off. If it succeeds and `command -v office` fails, the uv bin directory is not on PATH: tell the user to run `uv tool update-shell`, open a new shell, and stop (no lean offer for this case). Otherwise run `office install --no-hooks` (onboarding offers hooks) and `office doctor`. Stop at the first failure, report that command, and offer the lean hand-off. On success, continue below.
-- **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there. If that Skill call fails, read `skills/auto-office-lean/SKILL.md` in this skill's directory and follow it.
+- **Install:** only after the user picks **Install the CLI**, run `uv tool install auto-office` and check its exit status. If it fails, stop, report that command, and offer the lean hand-off. If it succeeds and `command -v office` fails, the uv bin directory is not on PATH: tell the user to run `uv tool update-shell`, open a new shell, and stop (no lean offer for this case). Otherwise run `office install --no-hooks` (onboarding offers hooks) and `office doctor`. Stop at the first failure, report that command, and offer the lean hand-off. On success, continue below.
+- **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there. If that Skill call fails, read sibling `../auto-office-lean/SKILL.md` in the installed plugin root and follow it.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
 
@@ -97,7 +100,7 @@ never wait or `--skip`; continue on the current preferences and tell the user to
   Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
   it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
   Take it to the user (native question tool) on requirements, authority (trust, login, update), irreversible or external actions; never answer those.
-- Root wake is on by default: `office resume` from a bound, verified Claude Herdr root pane arms it; `--wake-off` disables it until `office resume --auto-wake` (still accepted) re-arms it. Outside Herdr or when the pane is unverified, resume prints a notice and no wake. `office status` prints `wake: armed|off|unavailable`. Also arm `office wait` instead of ending the turn on an event-dependent step; `next: office wait` means work runs with no wake. `office status` prints a `blocker:` line for a live pane herdr reports `blocked` with no recorded question (`office wait` records it). Review gates past a bound print one event each (`review.queued_too_long`, `review.stalled`, `review.closed_unread`); its `next:` is `office revoke <task>` then `office review <task>` on the same revision, or `office context` for a verdict.
+- `office status` prints a `blocker:` line for a live pane herdr reports `blocked` with no recorded question; `office wait` records it.
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its parent's),
   posts review results, and marks it ready on acceptance. Reviewers are read only from their reply files, never pane text. A bad reply re-prompts
   the same reviewer (no round spent); after three it needs you.
@@ -201,10 +204,7 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
-
 ## Diagnostics
-
 `office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
-
 Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.

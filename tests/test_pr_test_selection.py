@@ -465,3 +465,8 @@ def test_legacy_integration_mapping_runs_only_relevant_node(pr_repo):
     _, _, chosen = selection(pr_repo)
     assert "tests/test_integration.py" not in chosen
     assert "tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log" in chosen
+
+
+def test_curated_distribution_builder_is_explicitly_covered():
+    from scripts.select_pr_tests import SPECIAL
+    assert "tests/contracts/test_plugin_distribution.py" in SPECIAL["scripts/build_plugin_distribution.py"]

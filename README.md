@@ -84,7 +84,7 @@ Auto Office turns those into runtime behavior rather than hoping every agent rem
 
 ### Install the skills as a plugin
 
-This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills, including the root `auto-office` entry skill. If `office` is missing, that skill asks once per session whether to install the CLI from PyPI (`uv tool install auto-office`) or use `auto-office-lean`, until a choice is saved. Section 1 is the manual CLI install.
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills only; you still need the CLI above.
 
 ```bash
 # Claude Code
@@ -95,7 +95,15 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it and the plugin manifests carry no version. `scripts/check_ecosystem.py` enforces it.
+Both marketplaces install the generated `./plugin-dist` package, which exposes **exactly 16 skills**, including the full root `auto-office`. Claude Code namespaces it as `/auto-office:auto-office`; a bare `/auto-office` alias depends on the host. The skill is discoverable before the `office` CLI is installed.
+
+`disable-model-invocation: true` (Claude Code) keeps the full hub, Lean, Intake and Takeover manual-only. `auto-review` does not set it, so an explicitly requesting agent can call it. Codex may not honor this flag; that is untested.
+
+Without the CLI, the root skill asks once whether to install it or use Lean. It hands off to Lean only on the user's choice, and saves that choice until reset.
+
+The repo-root `SKILL.md` and `skills/` are canonical. `python3 scripts/build_plugin_distribution.py --sync` regenerates `plugin-dist/`, the marketplace source; `--check` and `scripts/check_ecosystem.py` fail when it drifts. Eight retired skills keep their source paths for pinned runs but are not in the plugin.
+
+Verify after install: `claude plugin details auto-office@auto-office` lists 16 skills including `auto-office`. Plugin installation does not install the `office` CLI; run `office doctor` separately.
 
 ### 1. Install the CLI
 
@@ -120,7 +128,7 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The separately installed `/auto-office` skill offers `office install --no-hooks` during its explicit first-run onboarding. `office install` registers the CLI runtime and optional harness hooks, **not plugin skills**.
 
 | Agent / harness | After `office install` |
 |---|---|

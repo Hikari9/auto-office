@@ -32,6 +32,8 @@ SPECIAL = {
     "src/office/_resources/": ("tests/test_resource_bundle.py",),
     ".githooks/": ("tests/test_pre_push_hook.py",),
     "scripts/select_pr_tests.py": ("tests/test_pr_test_selection.py",),
+    # New plugin distribution builder has direct contract coverage, despite a different module basename.
+    "scripts/build_plugin_distribution.py": ("tests/contracts/test_plugin_distribution.py",),
     "pyproject.toml": ("tests/v31/test_verification_coverage.py",),
     "src/office/integration.py": ("tests/v31/test_run_checks.py", "tests/v31/test_verification_coverage.py"),
     "src/office/land.py": ("tests/v31/test_land.py", "tests/v31/test_land_recovery.py"),

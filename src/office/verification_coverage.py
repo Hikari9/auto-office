@@ -126,14 +126,16 @@ def is_full_suite(command: str) -> bool:
 
 _SCOPED_GATE_SHA256 = {
     "scripts/validate.sh": "24c65e6e3cd90eb81d7ce777d5dc7798b05ae76714c3e618c925d7f693304157",
-    "scripts/select_pr_tests.py": "ebdf1a495c490bc1d81b758f6a27c9925ac07518d504887ef4cfe3da2b5ff5d5",
-    "tests/test_pr_test_selection.py": "e94154d0575e7a518a241e5f0c36e778d1c0bb6c9792a181a0d06835446ffd4b",
+    "scripts/select_pr_tests.py": "3f03150de53f9eec769ca89463bdb9552ae7f07b13338e4827142e81a4e57ed9",
+    "tests/test_pr_test_selection.py": "3d79b198bd567ac5731f0c996a3aa5a67e8b0367b05784cbe4a6fdc856a1d7d5",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
     "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
+    "tests/contracts/test_plugin_distribution.py": "9864087e850ce3a60b3aeacc1c5deac77f90aa6b91c388b760d3b85f14d55cb0",
     "tests/contracts/test_route_parity.py": "abbfc5288b84e1a9af689e971f2e325902b01af1aae2f5a78d12331f613aa689",
+    "tests/contracts/test_standalone_review_rounds.py": "d8f76746b3863d0815ddc7de1b7b963c11a326e2176ecfffeec1d1f76e6f5f4a",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
     "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",
