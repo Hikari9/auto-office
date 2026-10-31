@@ -131,6 +131,20 @@ def main(argv: list[str]) -> int:
     runs = _active_runs(primary)
     if not runs:
         return 0
+    # Claude Stop's asyncRewake hook is deliberately process-bound. The Stop
+    # payload has a native session ID, but no pre-existing .office/sessions file
+    # for that ID: the verified `office resume` bound the ancestor Claude process.
+    # Never select a run merely because it is the sole active run here.
+    if harness == "claude" and event in ("turn.stop", "prompt.submit") and not _disabled(primary):
+        try:
+            from office import root_wake
+            if event == "turn.stop":
+                return root_wake.native_stop_hook(payload)
+            root_wake.native_prompt_started(payload)
+        except Exception as exc:
+            _log_error(primary, event, harness, exc)
+            if event == "turn.stop":
+                return 0  # fail open: never accidentally block Claude's turn
     bound_files = [p for p in _session_files(primary, harness, session) if p.exists()]
     worker = bool(os.environ.get("OFFICE_DISPATCH_ID"))
     if not bound_files and not worker:
