@@ -281,12 +281,15 @@ RECOVERED_KIND = "route.recovered"
 # Evidence that a run fell back from or avoided a route: a runtime failure (its demotion), a rerun that left a route
 # after its quota wall (`route.fallback` with a quota or auth source), and a review that left its route. A review notice is
 # evidence only when it says the route was avoided for quota or auth. Unclassified notices (before #921, or a reviewer
-# that fell back from a failed route, which its route.failed covers) are not.
+# that fell back from a failed route, which its route.failed covers) are not. A projected quota-reserve skip is never
+# evidence: its reserve is not re-checked when recovery is swept. Notices written before the skip class excluded reserve
+# skips carry `quota-auth` too, so the reserve reason text excludes them as well.
 _EVIDENCE_SQL = ("SELECT seq, kind, task_id, dispatch_id, created_at, payload_json FROM events WHERE run_id=? AND "
                  "((kind='route.failed' AND json_extract(payload_json,'$.reason') IN ('auth','usage_limit')) "
                  "OR (kind='route.fallback' AND json_extract(payload_json,'$.source') IN ('auth','usage_limit')) "
                  "OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
-                 "AND json_extract(payload_json,'$.skip_class')='quota-auth')) ORDER BY seq")
+                 "AND json_extract(payload_json,'$.skip_class')='quota-auth' "
+                 "AND COALESCE(instr(json_extract(payload_json,'$.reason'),'crosses reserve'),0)=0)) ORDER BY seq")
 
 
 def _route_of(row, payload: dict) -> str | None:

@@ -50,7 +50,8 @@ def _using_executor_policy(policy: dict):
 
 # Rejections that mean a route was avoided for a hard quota or auth failure (#921). Others (trust, capability, concurrency,
 # a projected quota reserve, a runtime demotion whose reason is not quota or auth) are not recovered when their route becomes
-# available again: a reserve skip clears only when the reserve gate admits the route, which a probe pass does not show.
+# available again. A projected quota reserve is never recovery evidence: recovery does not re-run the reserve gate, so a
+# probe pass does not show that the reserve admits the route.
 QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited"})
 QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked"})
 

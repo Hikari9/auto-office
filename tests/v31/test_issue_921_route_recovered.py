@@ -822,23 +822,50 @@ def skip_notice(env, route, why, skip_class, after="codex@1/gpt-6-luna@low"):
                                   skip_class=skip_class)
 
 
-def test_a_reserve_skip_never_recovers_even_when_its_probe_passes_and_the_reserve_still_rejects_it(cold):
-    """ACCEPT 1: a reserve skip clears when the reserve gate admits the route, not when a probe passes. Routing still rejects
-    the primary on the reserve here, so a passing probe records no recovery and the skip is not evidence at all."""
-    # Routing's own decision: the preferred primary crosses the quota reserve while a safe luna route is available.
-    primary = cand("codex", "gpt-6.1-sol", "high", quota=10)
+def reserve_request(primary_quota):
+    """A preferred primary whose projected quota crosses the reserve at `primary_quota`, and a safe luna route."""
+    primary = cand("codex", "gpt-6.1-sol", "high", quota=primary_quota)
     primary["harness_version"] = "1.0.0"
     chosen = cand("codex", "gpt-6-luna", "low", quota=60, out=0.5, idx=40)
     chosen["harness_version"] = "1.0.0"
     request = req([primary, chosen], role="executor",
                   preferred_seed=[{"model_id": "gpt-6.1-sol", "effort": "high", "harness": "codex"}])
     request["policy"] = {"cost_policy": "balanced", "quota_reserve_percent": 20}
+    return request
+
+
+def test_a_reserve_skip_never_recovers_even_when_its_probe_passes_and_the_reserve_still_rejects_it(cold):
+    """ACCEPT 1: a reserve skip is not recovery evidence. A passing probe does not show the reserve admits the route, so the
+    skip records no recovery while the reserve still rejects it."""
+    request = reserve_request(primary_quota=10)
     decision = {**routing.route(request), "request": request}  # candidates.decide attaches the request the same way
-    chosen = decision["candidate"]
     assert any(r["candidate"] == CODEX and r["reason_class"] == "quota-reserve" for r in decision["rejected"])
-    route, why, skip_class = gates._skipped_primary(decision, chosen)
+    route, why, skip_class = gates._skipped_primary(decision, decision["candidate"])
     assert (route, skip_class) == (CODEX, "other")
     skip_notice(cold, route, why, skip_class)
+    probe_pass(cold, CODEX, FUTURE)
+    assert sweep(cold) == [] and recovered(cold) == []
+
+
+def test_a_reserve_skip_stays_unrecovered_once_the_reserve_admits_the_route_and_routing_selects_it(cold):
+    """A reserve skip is excluded even after the reserve admits the route: recovery never re-runs the reserve gate, so the
+    recorded skip stays unrecovered. Routing selecting the primary again is what clears the skip, not a recovery event."""
+    request = reserve_request(primary_quota=10)
+    decision = {**routing.route(request), "request": request}
+    route, why, skip_class = gates._skipped_primary(decision, decision["candidate"])
+    skip_notice(cold, route, why, skip_class)
+
+    admitted = {**routing.route(reserve_request(primary_quota=80)), "request": reserve_request(primary_quota=80)}
+    assert routing.candidate_id(admitted["candidate"]) == CODEX
+    probe_pass(cold, CODEX, FUTURE)
+    assert sweep(cold) == [] and recovered(cold) == []
+
+
+def test_a_pre_fix_reserve_notice_marked_quota_auth_is_still_not_evidence(cold):
+    """A review notice written before reserve skips were excluded keeps skip_class quota-auth; its reserve reason keeps it out
+    of recovery evidence."""
+    skip_notice(cold, CODEX, f"{CODEX} was rejected: projected quota crosses reserve while safe alternative exists",
+                "quota-auth")
     probe_pass(cold, CODEX, FUTURE)
     assert sweep(cold) == [] and recovered(cold) == []
 
