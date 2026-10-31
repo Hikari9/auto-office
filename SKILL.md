@@ -57,13 +57,15 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 
 ## Start
 
+For an intentionally new or near-empty repository, the explicit `--gear greenfield` build contract is documented in [`docs/greenfield-lean-gear.md`](docs/greenfield-lean-gear.md): one strong executor owns 2-3 internal phases, followed by one independent convergence review.
+
 1. Check for an Auto Office update as described above, then create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
-   `--gear XS|S|M|L|XL` (complexity and coordination, never risk; an unknown size is M), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
+   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for near-empty repos only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
    unset risk is unknown, never low: an unknown run keeps independent code review under every gear until the plan classifies it, see "Risk floor and the lightweight path").
    Never ask about benchmark refreshes; that is the `auto-update-benchmarks` skill, run only when the user explicitly calls it.
 4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.
@@ -119,6 +121,14 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours: `office amend <T2|plan> -- "<delta>"`. Plan review
   reviews the initial plan only: once it closes (APPROVED, its round cap, or a waiver) no amendment is reviewed again; you own them. While
   it is still open a revision is its next round; to skip that for a trivial one, `office amend plan --no-review --reason "<why>" -- "<delta>"`.
+- Live task-PR publishing is the **only** start option that can be changed after launch:
+  `office amend options --prs --quote "<user's exact approval>" --confirm` turns it on when GitHub is available;
+  `office amend options --no-prs --quote "<user's exact approval>" --confirm` turns it off only before any
+  PR sync work or recorded PR and with no executor still running with PR instructions. `--confirm` explicitly
+  confirms the quoted authorization for headless use; an interactive terminal can confirm with `y` instead.
+  The new setting is written to `runs.db` with a `run.options_amended` before/after event and persists on resume.
+  Turning PRs on queues sync for earlier submitted/accepted work. It does **not** alter the run's base,
+  gear, requirements, review gates or deployment authorization; unsafe/unsupported changes are refused with a reason.
 - A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"` (also
   `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`). It versions the contract, runs the new check at the gate (an accepted
   task reruns it and reopens only on failure), records old and effective contract plus rationale (`office inspect amendments`), and never
@@ -191,6 +201,18 @@ the rollback target. Deploy output is verified into a private rollback archive b
 recovered once when its head is one Office reviewed or pushed and folding the open tasks onto the default branch reproduces the reviewed tree; else land refuses and pushes nothing. `office close --abandon "<reason>"` stops
 early; `--landed-externally <merged-pr-url>` verifies external or owned squash landing, then closes. Rebase, `--no-prs`, recovery and PR-body detail:
 `docs/orchestrator-reference.md`.
+
+## Batch landing
+
+For a multi-run or multi-PR release, use office land --batch <manifest.json> from
+the target repo, first with --dry-run. Each run or PR lane declares
+land_after dependencies; exactly one lane owns the version bump. The
+batch composes the pinned PR heads, runs the full suite once on that composed
+SHA, and merges nothing unless the suite passes. Each merge pins the validated
+head, and the default branch tree must equal the composed tree at the end. A
+red batch resumes after an appended fix PR (or an explicit --retry-full for a
+transient failure). See docs/batch-landing.md. Do not confuse this
+cross-run release operation with a single-run office land or deploy.
 
 ## Takeover
 

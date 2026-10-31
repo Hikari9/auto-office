@@ -47,6 +47,7 @@ packages = ["src/office"]
 # The hub (SKILL.md) links to these for operating detail, so a wheel-only install needs them.
 "docs/orchestrator-reference.md" = "office/_resources/docs/orchestrator-reference.md"
 "docs/review-convergence.md" = "office/_resources/docs/review-convergence.md"
+"docs/greenfield-lean-gear.md" = "office/_resources/docs/greenfield-lean-gear.md"
 "docs/onboarding.md" = "office/_resources/docs/onboarding.md"
 "scripts/codex-usage.py" = "office/_resources/scripts/codex-usage.py"
 "scripts/claude-usage.py" = "office/_resources/scripts/claude-usage.py"
