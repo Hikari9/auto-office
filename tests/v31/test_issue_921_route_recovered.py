@@ -149,6 +149,16 @@ def test_a_review_skip_whose_rate_limit_lapsed_recovers_without_a_reprobe(cold):
     assert rec["route"] == CODEX and rec["basis"] == "cooldown lapsed" and rec["episode"] == evidence["seq"]
 
 
+def test_a_review_skip_whose_rate_limit_lapsed_is_not_recovered_over_a_fresh_failed_probe(cold):
+    cooldown(cold, routing.cooldown_key("codex", "gpt-6.1-sol"), FUTURE)
+    review_fallback(cold, CODEX)
+    put_probe(cold, CODEX, "fail", now_iso(), "auth-quota-blocked")  # routing rejects the route on this fresh probe
+    with db.transaction(cold.con):
+        cold.con.execute("UPDATE route_cooldowns SET expires_at=?", (now_iso(),))
+    assert sweep(cold) == []
+    assert recovered(cold) == []
+
+
 def test_a_transport_failure_never_records_a_recovery(plain):
     d = failed_with(plain, "socket hang up", "nonzero")
     expire(plain, d)
@@ -361,7 +371,7 @@ def test_a_declared_route_failure_is_never_recovered(plain):
     d = {"route": "codex@1/gpt-6.1-sol@medium", "harness": "codex", "model": "gpt-6.1-sol", "effort": "medium"}
     with db.transaction(plain.con):
         state.emit(plain.con, run(plain), "route.failed", "declared route failed", task_id="T1",
-                   payload={**d, "reason": "unsupported-model-effort", "declared": True, "demoted_until": PAST})
+                   payload={**d, "reason": "auth", "declared": True, "demoted_until": PAST})
     assert sweep(plain) == []  # no cooldown is live, but the user declared this route: it is not swapped or recovered
 
 
@@ -709,6 +719,30 @@ def test_a_fresh_failure_of_another_harness_version_does_not_keep_the_route_down
     probe_at(plain, d, "fail", "auth-quota-blocked", harness_version="0.0.0-other")  # routing never reads this version
     expire(plain, d)
     assert len(sweep(plain)) == 1
+
+
+def test_a_fresh_failed_probe_after_the_recovery_hides_its_line(plain, monkeypatch):
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    d = failed_route(plain)
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+    line = line_for(d["triple"], "demotion lapsed")
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+    probe_at(plain, d, "fail", "auth-quota-blocked")  # from now on routing rejects the route on this exact probe
+    assert routechange.recovery_lines(plain.con, run(plain)) == []
+    assert line not in guide.status(plain.con, run(plain)).lines
+
+
+def test_a_configured_probe_timeout_judges_an_orphaned_reservation_by_the_run_policy(plain):
+    d = failed_route(plain)
+    expire(plain, d)
+    with db.transaction(plain.con):  # this run's policy raises the probe timeout past the default
+        plain.con.execute("UPDATE runs SET policy_json=? WHERE id='run-A'",
+                          (json.dumps({"routing": {"discovery": {"probe_timeout_s": 600}}}),))
+    started = datetime.now(timezone.utc) - timedelta(seconds=200)  # past the default 120 s, inside the configured 600 s
+    put_probe(plain, d["triple"], "pending", started.isoformat(), invocation=d["invocation_model_id"])
+    assert sweep(plain) == []  # still in flight under this run's policy: routing holds the route
 
 
 def skip_decision(category=None):

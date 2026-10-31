@@ -327,13 +327,18 @@ def _role(con, row, payload: dict) -> str | None:
     return d[0] if d else None
 
 
-def _probe_fresh(probe: dict, now: datetime) -> bool:
+def _discovery(run: dict) -> dict:
+    """The probe freshness settings routing reads for this run: its pinned policy, as a dispatch reads them."""
+    return route_policy.discovery_settings(state.pinned_config(run))
+
+
+def _probe_fresh(probe: dict, now: datetime, discovery: dict) -> bool:
     from office import route_probe  # imported here, as in _invocation_model: route_probe imports candidates
-    defaults = route_policy.DISCOVERY_DEFAULTS
-    return route_probe._is_fresh(probe, defaults["probe_ttl_days"], defaults["probe_timeout_s"], now)
+    return route_probe._is_fresh(probe, discovery["probe_ttl_days"], discovery["probe_timeout_s"], now)
 
 
-def _exact_probe(con, harness: str | None, model: str, effort: str | None, now: datetime) -> dict | None:
+def _exact_probe(con, harness: str | None, model: str, effort: str | None, now: datetime,
+                 discovery: dict) -> dict | None:
     """The probe row routing reads for this route now: its exact fingerprint, with the harness's current version and
     adapter and the default launch profile. A row for another profile, version or adapter says nothing about it. A
     pending row whose probe never recorded, past its timeout, is no verdict."""
@@ -344,9 +349,16 @@ def _exact_probe(con, harness: str | None, model: str, effort: str | None, now: 
     cand = {"harness": harness, "harness_version": adapters.route_version(harness, adapter),
             "invocation_model_id": model, "effort": effort}
     probe = route_probe.exact_row(con, cand, adapter)
-    if probe is None or probe["probed_at"] is None or (probe["result"] == "pending" and not _probe_fresh(probe, now)):
+    if probe is None or probe["probed_at"] is None:
+        return None
+    if probe["result"] == "pending" and not _probe_fresh(probe, now, discovery):
         return None
     return probe
+
+
+def _keeps_route_down(probe: dict | None, now: datetime, discovery: dict) -> bool:
+    """A fresh probe that is not a pass: routing rejects the route on it, or holds it while the re-probe is in flight."""
+    return probe is not None and probe["result"] != "pass" and _probe_fresh(probe, now, discovery)
 
 
 def _cooldown_expiries(con, harness: str | None, model: str, effort: str | None) -> list[datetime]:
@@ -357,11 +369,13 @@ def _cooldown_expiries(con, harness: str | None, model: str, effort: str | None)
         f"SELECT expires_at FROM route_cooldowns WHERE route IN ({','.join('?' * len(keys))})", keys).fetchall()]
 
 
-def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tuple[str, datetime] | None:
+def _available_basis(con, run_id: str, row, payload: dict, now: datetime,
+                     discovery: dict) -> tuple[str, datetime] | None:
     """(why, the instant the route became available) when the evidence's route is available again, else None. A route
     the user declared is the user's choice and is never recovered here. Routing rejects a route while any of its
-    cooldown keys is live, so none may be. A runtime failure is then recovered: its demotion lapsed, at the latest
-    expiry. A review change set no cooldown, so it needs a re-probe that passed after it, and that pass is the instant."""
+    cooldown keys is live, or while its exact probe is fresh and not a pass, so neither may be. A runtime failure is then
+    recovered: its demotion lapsed, at the latest expiry. A review change set no cooldown, so it needs a re-probe that
+    passed after it, and that pass is the instant."""
     if payload.get("declared") or payload.get("actor") == "user":  # the user's declaration or re-pin is the decision
         return None
     harness, model, effort = _route_parts(con, run_id, row, payload)
@@ -370,10 +384,10 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
     expiries = _cooldown_expiries(con, harness, model, effort)
     if any(expiry > now for expiry in expiries):
         return None
-    probe = _exact_probe(con, harness, model, effort, now)
+    probe = _exact_probe(con, harness, model, effort, now, discovery)
+    if _keeps_route_down(probe, now, discovery):
+        return None
     if row["kind"] == "route.failed":
-        if probe is not None and probe["result"] != "pass" and _probe_fresh(probe, now):
-            return None  # routing rejects the route on its exact probe
         # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline decides.
         if expiries:
             return "demotion lapsed", max(expiries)
@@ -409,14 +423,14 @@ def _latest_episodes(con, run_id: str) -> dict[str, tuple]:
     return latest
 
 
-def _recoverable(con, run_id: str, now: datetime) -> list[tuple]:
+def _recoverable(con, run: dict, now: datetime) -> list[tuple]:
     """(route, evidence row, payload, (why, instant)) for each route whose newest episode is available and unrecorded.
     Read-only."""
-    found = []
-    for route, (row, payload) in _latest_episodes(con, run_id).items():
-        if _recorded(con, run_id, row["seq"]):
+    found, discovery = [], _discovery(run)
+    for route, (row, payload) in _latest_episodes(con, run["id"]).items():
+        if _recorded(con, run["id"], row["seq"]):
             continue
-        if (basis := _available_basis(con, run_id, row, payload, now)) is not None:
+        if (basis := _available_basis(con, run["id"], row, payload, now, discovery)) is not None:
             found.append((route, row, payload, basis))
     return found
 
@@ -428,14 +442,14 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
     if state.is_terminal(run):
         return []
     now = now or datetime.now(timezone.utc)
-    if not _recoverable(con, run["id"], now):  # read-only: a sweep with nothing to record takes no writer lock
+    if not _recoverable(con, run, now):  # read-only: a sweep with nothing to record takes no writer lock
         return []
     seqs = []
     with db.transaction(con):  # judged again under the writer lock, so a concurrent sweep cannot record the same episode
         current = state.get_run(con, run["id"])  # closed, or gone, since the caller read it
         if current is None or state.is_terminal(current):
             return []
-        for route, row, payload, (basis, at) in _recoverable(con, run["id"], now):
+        for route, row, payload, (basis, at) in _recoverable(con, current, now):
             harness, model, effort = _route_parts(con, run["id"], row, payload)
             seqs.append(state.emit(
                 con, run, RECOVERED_KIND, _available_text(route, basis), task_id=row["task_id"],
@@ -459,11 +473,13 @@ def _considered_since(con, run_id: str, at: str, route: str, role: str | None) -
 
 def recovery_lines(con, run: dict) -> list[str]:
     """`preferred route X is available again` for each recovered route that is still available: no cooldown is live on it
-    now (an in-flight failure sets one, whatever its reason, and a quota wall sets one with no route event), routing has
-    not used or passed over it since it became available, and that episode is still the route's newest evidence."""
+    now (an in-flight failure sets one, whatever its reason, and a quota wall sets one with no route event), its exact
+    probe does not reject it now, routing has not used or passed over it since it became available, and that episode is
+    still the route's newest evidence."""
     if state.is_terminal(run):
         return []
     now = datetime.now(timezone.utc)
+    discovery = _discovery(run)
     newest = _latest_episodes(con, run["id"])
     lines, seen = [], set()
     for row in con.execute("SELECT created_at, payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC",
@@ -475,9 +491,10 @@ def recovery_lines(con, run: dict) -> list[str]:
         seen.add(route)
         if route in newest and newest[route][0]["seq"] != payload.get("episode"):
             continue
-        model = payload.get("model")
-        if model and any(expiry > now for expiry in _cooldown_expiries(con, payload.get("harness"), model,
-                                                                        payload.get("effort"))):
+        harness, model, effort = payload.get("harness"), payload.get("model"), payload.get("effort")
+        if model and any(expiry > now for expiry in _cooldown_expiries(con, harness, model, effort)):
+            continue
+        if model and _keeps_route_down(_exact_probe(con, harness, model, effort, now, discovery), now, discovery):
             continue
         since = payload.get("available_at") or row["created_at"]
         if not _considered_since(con, run["id"], since, route, payload.get("role")):
