@@ -459,15 +459,17 @@ def quota_unknown_record(candidate: dict | None) -> dict | None:
         return None
     quota = quota_for_candidate(candidate)
     harness = candidate.get("adapter_id") or candidate.get("harness")
+    if quota.get("status") != "ok" or quota.get("tightest_remaining_percent") is None:
+        # A family-specific UNKNOWN remains unknown even when the harness has a
+        # last-known successful reading for a different family.
+        return {"harness": harness, "status": quota.get("status") or "unknown",
+                "cause": quota.get("cause") or "quota not probed"}
     if quota.get("source") == "last-known":
-        pct = quota.get("tightest_remaining_percent")
+        pct = quota["tightest_remaining_percent"]
         age = quota.get("last_success_age_seconds")
         return {"harness": harness, "status": "last-known",
                 "cause": f"using {pct}% from {age}s ago after {quota.get('probe_failure', 'probe failed')}"}
-    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
-        return None
-    return {"harness": harness, "status": quota.get("status") or "unknown",
-            "cause": quota.get("cause") or "quota not probed"}
+    return None
 
 
 def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bool:

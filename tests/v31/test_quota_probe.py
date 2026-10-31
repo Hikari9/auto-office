@@ -333,6 +333,10 @@ def test_route_payload_records_unknown_quota_and_status_shows_it():
         "families": {"claude": {"status": "unknown", "tightest_remaining_percent": None,
                                 "cause": "family quota unavailable"}}}}
     assert dispatch._route_payload({"candidate": unknown_family})["quota_unknown"]["cause"] == "family quota unavailable"
+    unknown_family["quota"].update(source="last-known", last_success_age_seconds=301,
+                                    probe_failure="command timed out twice")
+    unknown_notice = dispatch._route_payload({"candidate": unknown_family})["quota_unknown"]
+    assert unknown_notice["status"] == "unknown" and unknown_notice["cause"] == "family quota unavailable"
 
 
 _FAMILIES = {
