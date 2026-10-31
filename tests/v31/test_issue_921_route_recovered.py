@@ -11,7 +11,7 @@ from test_discovery_dispatch import Cold, cold, launched  # noqa: F401 (cold is 
 from test_adaptive_routing import cand, req
 from test_issue_845_user_allow import events, fail, plain  # noqa: F401 (plain is a fixture)
 
-from office import context_snapshot, db, gates, guide, paths, route_policy, root_wake, route_probe, routechange, routing, state
+from office import adapters, context_snapshot, db, gates, guide, paths, route_policy, root_wake, route_probe, routechange, routing, state
 from office.util import now_iso, parse_iso
 
 PAST = "2000-01-01T00:00:00+00:00"
@@ -59,13 +59,24 @@ def review_fallback(env, before, after="codex@1/gpt-6-luna@low", skip_class="quo
                                   "quota", skip_class=skip_class)
 
 
-def probe_pass(env, route, probed_at, invocation=None):
+def put_probe(env, route, result, probed_at, reason=None, *, invocation=None, harness_version=None, profile=None):
+    """A probe row keyed as routing keys it: the route's current harness version and adapter and the default launch
+    profile, unless a test names another. Like a reservation, the write replaces the row for its key."""
     m = routing.CANDIDATE_ID_RE.fullmatch(route)
+    adapter = adapters.load_all()[m["harness"]]
+    effort = None if m["effort"] == "None" else m["effort"]
+    cand = {"harness": m["harness"], "invocation_model_id": invocation or m["model"], "effort": effort,
+            "harness_version": harness_version or adapters.route_version(m["harness"], adapter)}
+    fp = route_probe.fingerprint(cand, adapter, profile or route_probe.PROFILE)
     with db.transaction(env.con):
-        env.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
-                        "VALUES(?,?,?,?,?,?)",
-                        (f"probe:{route}:{probed_at}", m["harness"], invocation or m["model"], m["effort"], "pass",
-                         probed_at))
+        env.con.execute("INSERT OR REPLACE INTO route_probes(key, harness, harness_version, adapter_hash, profile, "
+                        "invocation_model_id, effort, result, reason_class, probed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (route_probe.key(cand, adapter, fp["profile"]), fp["harness"], fp["harness_version"],
+                         fp["adapter_hash"], fp["profile"], fp["invocation_model_id"], effort, result, reason, probed_at))
+
+
+def probe_pass(env, route, probed_at, invocation=None):
+    put_probe(env, route, "pass", probed_at, invocation=invocation)
 
 
 def review_dispatch(env, route, invocation):
@@ -232,7 +243,14 @@ def test_a_review_that_left_its_route_recovers_only_on_a_passing_reprobe_after_i
 ALIAS = "claude@1/sonnet@high"  # model_id sonnet runs as invocation claude-sonnet-5
 
 
-def test_an_aliased_review_route_recovers_under_its_invocation_model(cold):
+def claude_reads_a_version(monkeypatch):
+    """The fixture's claude reports no harness version, so routing cannot key a probe on it. Give it one for the alias tests."""
+    real = adapters.harness_version
+    monkeypatch.setattr(adapters, "harness_version", lambda adapter: "2.1.0" if adapter.get("id") == "claude" else real(adapter))
+
+
+def test_an_aliased_review_route_recovers_under_its_invocation_model(cold, monkeypatch):
+    claude_reads_a_version(monkeypatch)
     review_dispatch(cold, ALIAS, "claude-sonnet-5")
     review_fallback(cold, ALIAS)
     probe_pass(cold, ALIAS, FUTURE, invocation="claude-sonnet-5")
@@ -245,7 +263,8 @@ def canonical_invocation(alias_model):
     return route_probe.catalog_row({"harness": "claude", "model_id": alias_model, "effort": "high"})["invocation_model_id"]
 
 
-def test_an_aliased_skipped_primary_with_no_dispatch_row_resolves_through_the_catalog(cold):
+def test_an_aliased_skipped_primary_with_no_dispatch_row_resolves_through_the_catalog(cold, monkeypatch):
+    claude_reads_a_version(monkeypatch)
     canonical = canonical_invocation("sonnet")
     assert canonical != "sonnet"  # the alias is a real redirection, not the id itself
     review_fallback(cold, ALIAS)  # a skipped primary: the review notice exists, no dispatch of the route
@@ -288,9 +307,7 @@ def test_a_review_route_with_a_live_no_effort_cooldown_is_not_recovered_by_a_pas
 
 def test_a_passing_probe_with_no_probed_at_neither_crashes_nor_recovers(cold):
     review_fallback(cold, CODEX)
-    with db.transaction(cold.con):
-        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
-                         "VALUES('probe:null','codex','gpt-6.1-sol','high','pass',NULL)")
+    put_probe(cold, CODEX, "pass", None)
     assert sweep(cold) == []
 
 
@@ -451,6 +468,43 @@ def test_an_in_flight_dispatch_that_fails_after_the_recovery_supersedes_its_line
     assert routechange.recovery_lines(plain.con, run(plain)) == [line]
 
 
+def test_an_in_flight_timeout_after_the_recovery_hides_its_line_while_its_cooldown_is_live(plain, monkeypatch):
+    """A timeout is not quota or auth evidence, but it still demotes the route: the line goes while that cooldown is live."""
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    plain.dispatch("T2")
+    (inflight,) = [x for x in plain.dispatches() if x["task_id"] == "T2"]
+    d = failed_route(plain)
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+    line = line_for(d["triple"], "demotion lapsed")
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+    fail(plain, inflight, "", "timeout")  # the in-flight dispatch times out on the route after the recovery
+    assert json.loads(events(plain, "route.failed")[-1]["payload_json"])["reason"] == "timeout"
+    assert sweep(plain) == []
+    assert routechange.recovery_lines(plain.con, run(plain)) == []
+    assert line not in guide.status(plain.con, run(plain)).lines
+
+    expire(plain, inflight)  # the timeout's demotion lapses: the route is available again
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+
+def test_a_cooldown_with_no_route_event_supersedes_the_line(plain, monkeypatch):
+    """A quota wall sets its cooldown at the dispatch's end with no route event. Routing rejects the route on it all the same."""
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    d = failed_route(plain)
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+    line = line_for(d["triple"], "demotion lapsed")
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+    with db.transaction(plain.con):
+        plain.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?",
+                          (FUTURE, routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"])))
+    assert routechange.recovery_lines(plain.con, run(plain)) == []
+    assert line not in guide.status(plain.con, run(plain)).lines
+
+
 def test_a_dispatch_between_the_lapse_and_the_first_sweep_clears_the_line(plain, monkeypatch):
     monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
     d = failed_route(plain)
@@ -530,9 +584,7 @@ def test_a_sweep_with_nothing_to_record_takes_no_writer_lock(plain, monkeypatch)
 def test_a_review_route_with_no_effort_recovers_on_a_pass_whose_probe_has_no_effort(cold):
     none_route = "codex@1/gpt-6.1-sol@None"  # candidate_id writes a missing effort as the text None
     review_fallback(cold, none_route)
-    with db.transaction(cold.con):
-        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
-                         "VALUES('probe:no-effort','codex','gpt-6.1-sol',NULL,'pass',?)", (FUTURE,))
+    put_probe(cold, none_route, "pass", FUTURE)
     assert len(sweep(cold)) == 1
     [rec] = recovered(cold)
     assert rec["route"] == none_route and rec["effort"] is None and rec["basis"] == "re-probe passed"
@@ -548,12 +600,9 @@ def test_a_later_review_that_leaves_a_recovered_route_clears_its_line(cold):
     assert routechange.recovery_lines(cold.con, run(cold)) == []
 
 
-def probe_at(env, d, result, reason=None, at=None):
-    """A probe of the failed route's invocation and effort, recorded at `at` (default now)."""
-    with db.transaction(env.con):
-        env.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, reason_class, probed_at) "
-                        "VALUES(?,?,?,?,?,?,?)", (f"probe:{d['triple']}:{at or now_iso()}", d["harness"],
-                                                 d["invocation_model_id"], d["effort"], result, reason, at or now_iso()))
+def probe_at(env, d, result, reason=None, at=None, **fingerprint):
+    """A probe of the failed route's exact fingerprint, recorded at `at` (default now)."""
+    put_probe(env, d["triple"], result, at or now_iso(), reason, invocation=d["invocation_model_id"], **fingerprint)
 
 
 def test_a_fresh_failed_probe_keeps_a_lapsed_route_down_until_a_later_pass(plain):
@@ -575,10 +624,7 @@ def test_a_stale_failed_probe_does_not_keep_a_lapsed_route_down(plain):
 def test_a_newer_failed_probe_supersedes_an_older_pass_for_a_review_route(cold):
     review_fallback(cold, CODEX)
     probe_pass(cold, CODEX, FUTURE)
-    with db.transaction(cold.con):  # the same route fails its probe after the pass
-        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, reason_class, probed_at) "
-                         "VALUES('probe:later-fail','codex','gpt-6.1-sol','high','fail','auth-quota-blocked',"
-                         "'2999-06-01T00:00:00+00:00')")
+    put_probe(cold, CODEX, "fail", "2999-06-01T00:00:00+00:00", "auth-quota-blocked")  # the same route fails its probe after the pass
     assert sweep(cold) == []
 
 
@@ -617,41 +663,52 @@ def test_a_review_change_the_user_recorded_is_never_recovered_even_with_quota_au
     assert sweep(cold) == []  # the evidence qualifies, but the user made the change: the user's decision stands
 
 
-def test_a_cross_fingerprint_re_probe_in_flight_keeps_a_review_route_down_until_orphaned(cold):
-    """Routing reads one exact fingerprint. The route-level view also reads a re-probe of another fingerprint of the same
-    route (the disclosed residual), so a fresh one keeps the route down and an orphaned one no longer does."""
+def test_a_review_route_recovers_only_on_a_pass_of_its_exact_fingerprint(cold):
+    """Routing reads one exact fingerprint. A pass of another launch profile or harness version proves nothing about it."""
     review_fallback(cold, CODEX)
-    probe_pass(cold, CODEX, FUTURE)
-    with db.transaction(cold.con):
-        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
-                         "VALUES('probe:re-probe','codex','gpt-6.1-sol','high','pending','2999-06-01T00:00:00+00:00')")
-    during = parse_iso("2999-06-01T00:00:01+00:00")  # the reservation is fresh: routing rejects the route on it
-    assert routechange.sweep_recovered(cold.con, run(cold), now=during) == []
-    later = parse_iso("3000-01-01T00:00:00+00:00")  # never recorded and past its timeout: the pass stands
-    assert len(routechange.sweep_recovered(cold.con, run(cold), now=later)) == 1
+    put_probe(cold, CODEX, "pass", FUTURE, profile="other")
+    assert sweep(cold) == []
+    put_probe(cold, CODEX, "pass", FUTURE, harness_version="0.0.0-other")
+    assert sweep(cold) == []
+    put_probe(cold, CODEX, "pass", FUTURE)
+    assert len(sweep(cold)) == 1
 
 
-def test_an_orphaned_same_key_reservation_leaves_no_verdict_to_recover_on(cold):
-    """The reservation overwrites the exact-fingerprint row (INSERT OR REPLACE on its key), so the pass is gone. Orphaned,
-    the pending row is no verdict, and the route is not recovered: routing sees no fresh pass either."""
+def test_a_same_key_reservation_overwrites_the_pass_and_leaves_no_verdict_to_recover_on(cold):
+    """The reservation overwrites its exact key's row, so the pass is gone. While it is fresh routing does not use the route;
+    once orphaned, the pending row is no verdict and the route is not recovered."""
     review_fallback(cold, CODEX)
-    probe_pass(cold, CODEX, FUTURE)
-    with db.transaction(cold.con):
-        cold.con.execute("INSERT OR REPLACE INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
-                         "VALUES(?,'codex','gpt-6.1-sol','high','pending','2999-06-01T00:00:00+00:00')",
-                         (f"probe:{CODEX}:{FUTURE}",))
+    put_probe(cold, CODEX, "pass", FUTURE)
+    put_probe(cold, CODEX, "pending", "2999-06-01T00:00:00+00:00")
     assert routechange.sweep_recovered(cold.con, run(cold), now=parse_iso("2999-06-01T00:00:01+00:00")) == []
     assert routechange.sweep_recovered(cold.con, run(cold), now=parse_iso("3000-01-01T00:00:00+00:00")) == []
 
 
-def test_a_stale_pending_probe_does_not_hide_a_fresh_failed_probe_of_a_demoted_route(plain):
+def test_an_orphaned_pending_probe_of_another_profile_does_not_hide_a_fresh_failed_probe(plain):
     d = failed_route(plain)
     expire(plain, d)
     timeout = route_policy.DISCOVERY_DEFAULTS["probe_timeout_s"]
     failed_at = datetime.now(timezone.utc) - timedelta(seconds=timeout + 600)  # fresh: under the temporary TTL
     probe_at(plain, d, "fail", "auth-quota-blocked", at=failed_at.isoformat())
-    probe_at(plain, d, "pending", None, at=(failed_at + timedelta(seconds=1)).isoformat())  # newer, but orphaned
-    assert sweep(plain) == []  # the fresh failed probe still speaks: routing rejects the route on it
+    probe_at(plain, d, "pending", None, at=(failed_at + timedelta(seconds=1)).isoformat(), profile="other")  # newer, orphaned
+    assert sweep(plain) == []  # the exact fresh failed probe still speaks: routing rejects the route on it
+
+
+def test_a_pass_of_another_launch_profile_or_version_does_not_hide_the_exact_fresh_failure(plain):
+    d = failed_route(plain)
+    probe_at(plain, d, "fail", "auth-quota-blocked")  # routing rejects the route on this exact probe
+    expire(plain, d)
+    probe_at(plain, d, "pass", at=FUTURE, profile="other")
+    assert sweep(plain) == []
+    probe_at(plain, d, "pass", at=FUTURE, harness_version="0.0.0-other")
+    assert sweep(plain) == []
+
+
+def test_a_fresh_failure_of_another_harness_version_does_not_keep_the_route_down(plain):
+    d = failed_route(plain)
+    probe_at(plain, d, "fail", "auth-quota-blocked", harness_version="0.0.0-other")  # routing never reads this version
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
 
 
 def skip_decision(category=None):
