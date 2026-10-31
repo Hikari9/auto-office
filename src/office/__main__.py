@@ -12,12 +12,12 @@ def entry() -> int:
     except (ImportError, OSError, SyntaxError):
         try:
             from office import version
-            reason, code, line = version.rebuilding_reason(), version.REBUILD_EXIT_CODE, version.rebuild_line()
+            if version.rebuilding_reason() is None:
+                raise
+            code, line = version.REBUILD_EXIT_CODE, version.rebuild_line()
         except (ImportError, OSError, SyntaxError):
             # version.py imports only the standard library, so when it cannot load, its file is being replaced or damaged.
-            reason, code, line = "version unloadable", 75, "office: install is being rebuilt, retry in 5 s"
-        if reason is None:
-            raise
+            code, line = 75, "office: install is being rebuilt, retry in 5 s"
         print(line, file=sys.stderr)
         return code
     return main()

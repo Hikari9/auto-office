@@ -136,15 +136,19 @@ def test_an_unloadable_version_module_at_startup_exits_with_the_retry_code(monke
     assert capsys.readouterr().err.strip() == RETRY_LINE
 
 
-def test_an_import_failure_with_a_healthy_install_keeps_its_traceback(monkeypatch):
-    """A missing dependency with a healthy install is not a rebuild: the original error propagates."""
+def test_an_import_failure_with_a_healthy_version_still_exits_with_the_retry_code(monkeypatch, capsys):
+    """A failed `office.cli` import at startup is the replacement window even when the version probe resolves.
+
+    The version probe is not consulted: a healthy `current()` must not turn the startup ImportError into a traceback."""
     from office import __main__ as entrypoint
 
     monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
     monkeypatch.setattr(version, "current", lambda: "3.2.0")
 
-    with pytest.raises(ModuleNotFoundError, match="jsonschema"):
-        entrypoint.entry()
+    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
+    captured = capsys.readouterr()
+    assert captured.err.strip() == RETRY_LINE
+    assert "Traceback" not in captured.err
 
 
 def test_console_script_points_at_the_guarded_entry():
