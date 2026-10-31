@@ -196,8 +196,10 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
     except (cli_runtimes.ManifestError, OSError) as exc:
         problems += 1
         res.add(f"CLI runtime TSV: invalid: {exc} (repair the TSV before office harness sync)")
-    visual_status, _ = _visual_capture_status()
+    visual_status, visual_problem = _visual_capture_status()
     res.add(visual_status)
+    if visual_problem:
+        problems += 1
     con = db.connect()
     try:
         proofs = con.execute("SELECT harness, model, effort, result, proved_at FROM capability_proofs WHERE capability='vision' "

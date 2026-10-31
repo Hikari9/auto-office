@@ -30,3 +30,13 @@ Both trees fail `tests/test_checks_stale.py::test_any_other_edit_while_checks_ru
 pytest's summary total is one higher than the collected count on both trees. The cause is not investigated.
 
 Each tree was timed once. Wall time varies between runs: earlier branch runs took 342.87 s, 358.92 s and 400.32 s at earlier HEADs, so treat the wall-time difference as approximate.
+
+
+### Visual capture diagnostic and closeout (#942)
+
+`office doctor` treats a failed headless Chromium launch as a diagnostic failure
+(exit code 1), not a warning. Install Playwright's Chromium headless shell and
+its OS dependencies as indicated by the diagnostic. At closeout, a visual gate
+without comparable completed evidence is disclosed by task ID in the final
+summary and structured `visual_review_disclosures` result; DOM-only tests do
+not count as a visual review.
