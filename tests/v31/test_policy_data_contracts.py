@@ -16,7 +16,20 @@ POLICY = slates.POLICY
 INDEX = POLICY["benchmark_index"]
 SIZES = tuple(POLICY["floors"])
 CLEAR = max(POLICY["floors"].values()) + 10
-HARNESSES = ("claude", "agy", "codex", "opencode")
+HARNESSES = tuple(sorted({"claude", "agy", "codex", "opencode"}
+                         | {h for r in POLICY["model_restrictions"] for h in r.get("allowed_harnesses", ())}))
+
+
+def test_the_policy_data_under_test_is_not_empty():
+    """An emptied table would deselect or vacuously pass the loops below."""
+    assert SIZES and all(POLICY["executor_preferred"].get(size) for size in SIZES)
+    assert POLICY["model_restrictions"] and POLICY["floor_exceptions"] and POLICY["planner_preferred"]
+    assert set(POLICY["planner_preferred"]) <= set(SIZES)
+    rules = route_policy.SEED_ROLE_RULES
+    assert any(r["state"] == "deny" for r in rules) and any(r["state"] == "allow" for r in rules)
+    assert any(r.get("sizes") for r in rules) and any(r.get("sizes") is None for r in rules)
+    assert any(row.get("dispatchable") is False and row.get("discovery") == "eligible"
+               for row in shipped_catalog.load()["models"])
 
 
 def _route(model, effort, harness, score, *, status="available"):
@@ -81,7 +94,7 @@ def test_the_router_follows_the_preferred_slate_order_and_falls_through_it(size)
     seed = slates.ideal_seed(size)
     for tried in range(len(rows)):
         pool = [_route(model, effort, harness, CLEAR, status="untried" if i < tried else "available")
-                for i, (model, effort, harness) in enumerate(rows)]
+                for i, (model, effort, harness) in reversed(list(enumerate(rows)))]
         chosen = _decide(pool, size, seed=seed)
         assert chosen["status"] == "selected", (size, tried, chosen)
         assert _identity(chosen["candidate"]) == rows[tried], (size, tried)
@@ -101,7 +114,8 @@ def test_the_preference_summary_reports_each_slate_route_once(size):
     untried = {**lead, "route_status": "untried"}
     blocked = _decide([untried], size, seed=seed)
     summary = slates.route_summary(seed, [untried], blocked["rejected"], blocked.get("slate", []))
-    assert [row["status"] for row in summary][0] == "unqualified"
+    assert [row["status"] for row in summary] == ["unqualified"] + ["not-in-catalog"] * (len(rows) - 1)
+    assert len(slates.skip_lines(summary)) == len(rows)
 
 
 @pytest.mark.parametrize("gear", [g for g in config.RUN_GEARS if g in POLICY["planner_preferred"]])
@@ -180,11 +194,12 @@ def test_a_floor_exception_waives_only_its_exact_scope(rule):
     if "harness" in rule:
         misses.append(({**exact, "harness": next(h for h in HARNESSES if h != rule["harness"])}, size, role))
     published = floor - 1 if rule["score_evidence"] == "missing" else rule["minimum_score"] - 1
-    misses.append(({**exact, "benchmark_indexes": {INDEX: published}}, size, role))
+    below_minimum = {**exact, "benchmark_indexes": {INDEX: published}}
+    misses.append((below_minimum, size, role))
     misses.append(({**exact, "benchmark_indexes": {INDEX: floor}}, size, role))
     for candidate, where, caller in misses:
         assert slates.floor_exception(candidate, where, caller) is None, (candidate, where, caller)
-    assert _decide([misses[-2][0]], size)["status"] == "no_qualifying_candidate"
+    assert _decide([below_minimum], size)["status"] == "no_qualifying_candidate"
     for malformed in ([], "malformed"):
         assert slates.floor_exception({**exact, "benchmark_indexes": malformed}, size, role) is None
 
@@ -248,7 +263,7 @@ def test_a_shipped_role_rule_never_leaks_into_a_role_it_does_not_name():
     rules = route_policy.SEED_ROLE_RULES
     for rule in rules:
         named = {r["role"] for r in rules if r["route"] == rule["route"]}
-        for role in ("planner", "unlisted-role", *{r["role"] for r in rules} - named):
+        for role in ("unlisted-role", *({"planner"} | {r["role"] for r in rules}) - named):
             for size in (None, *SIZES):
                 assert _state(rule, role, size) == "neutral", (rule["route"], role, size)
 
@@ -285,6 +300,8 @@ def test_the_router_rejects_every_shipped_deny_in_its_role_and_scope():
 def test_built_executor_candidates_never_include_an_unscoped_shipped_deny(tmp_path, monkeypatch):
     from office import db
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     con = db.connect()
     try:
@@ -313,3 +330,52 @@ def test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_ca
         if row.get("discovery") == "eligible":
             assert row["dispatchable"] is False, shipped_catalog.key(row)
             assert row["discovery_reason"] and row["invocation_model_id"], shipped_catalog.key(row)
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception(size):
+    facts = {shipped_catalog.key(row): row for row in shipped_catalog.load()["models"]}
+    checked = 0
+    for entry in POLICY["executor_preferred"][size]:
+        for key in entry["_dispatchable_routes"]:
+            row = facts[key]
+            candidate = {"model_id": row["model_id"], "effort": row["effort"],
+                         "harness": row["invocation_harness"],
+                         "benchmark_indexes": row.get("benchmark_indexes") or {}}
+            assert (slates.benchmark_gate(candidate, size) is None
+                    or slates.floor_exception(candidate, size, "executor")), (size, key)
+            checked += 1
+    assert checked
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_a_user_deny_beats_the_preferred_route_and_emits_no_waiver_for_it(size):
+    rows = _seed_routes(POLICY["executor_preferred"][size])
+    seed = slates.ideal_seed(size)
+    pool = [_route(model, effort, harness, CLEAR) for model, effort, harness in reversed(rows)]
+    model, effort, harness = rows[0]
+    deny = {"role_rules": [{"role": "worker", "route": f"{harness}/{model}@{effort}", "state": "deny",
+                            "sizes": [size]}], "denied": [], "overkill": [], "ceilings": {},
+            "sources": {"role_rules": "user"}}
+    request = {"role": "worker", "playbook": "Change", "allow_free_models": True, "cost_policy": "balanced",
+               "routing_seed": "policy-data-contract", "adaptive_config": {"exploration": {"rate": 0.0}},
+               "policy": {"required_capabilities": ["builder"],
+                          "floor": {"min_effort": "none", "allowed_sources": ["local-evidence:"]}},
+               "context": {"gear": size, "size_class": size}, "preferred_seed": seed, "slate_anchor": True,
+               "candidates": pool, "user_policies": [deny]}
+    decision = routing.route(request)
+    assert decision["status"] == "selected", decision
+    assert _identity(decision["candidate"]) == rows[1], (size, decision["selected"])
+    assert "role-deny" in _categories(decision)
+    assert not [e for e in decision["routing"].get("floor_exceptions", ())
+                if e["candidate"].endswith(f"/{model}@{effort}")]
+
+
+def test_the_lead_of_every_default_preferred_seed_resolves_to_a_shipped_route():
+    roles = config.load_yaml(config.default_config_path())["roles"]
+    rows = [{**r, "harness": r.get("harness") or r.get("invocation_harness")} for r in candidates.catalog_rows()]
+    seeded = {name: role["preferred_seed"] for name, role in roles.items() if role.get("preferred_seed")}
+    assert seeded
+    for name, seed in seeded.items():
+        # Later entries may name routes a user adds (an opencode free model), so only the lead must ship.
+        assert any(routing.preferred_rank(r, [seed[0]]) == 0 for r in rows), (name, seed[0])

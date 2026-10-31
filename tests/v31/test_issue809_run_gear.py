@@ -433,7 +433,7 @@ def test_a_revision_that_drops_the_run_gear_recommendation_clears_it(env):
     assert "planner recommends" not in env.office("inspect", "plan")[1]
 
 
-def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
+def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     from test_issue809_real_routes import candidate, decide
     # Terra out-scores the agy Sonnet, so utility order alone would put it between the two Sonnet harnesses.
     pool = [candidate("claude-sonnet-5-5", "high", 47, harness="claude"),
