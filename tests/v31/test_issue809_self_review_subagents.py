@@ -18,7 +18,7 @@ def _in_process_routing(request):
         request.getfixturevalue("env").hide_agy = True
 
 
-EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "submit": True}]
+EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "office": [["preflight"]], "submit": True}]
 RUN = {"gates": {"gear_model_version": "run-gear-1"}, "risk": {"classification": "low"}}
 
 
@@ -29,21 +29,20 @@ def _run(gear, **risk):
 # ------------------------------------------------------------------ the funding table
 
 @pytest.mark.parametrize("gear, expected", [
-    ("XS", ()), ("S", ("four-lens",)), ("M", ("four-lens",)),
-    ("L", ("edge-cases", "test-strength")), ("XL", ("edge-cases", "test-strength")),
+    ("XS", ()), ("S", ("combined",)), ("M", ("combined",)),
+    ("L", ("combined",)), ("XL", ("combined",)),
 ])
 def test_gear_funds_the_specified_subagents(gear, expected):
     assert srs.rubrics(_run(gear), {"scope": ["calc.py"]}) == expected
 
 
-def test_l_and_xl_add_specialists_for_what_the_task_touches_up_to_four():
-    task = {"scope": ["scripts/auth.sh"]}
+def test_l_and_xl_use_one_combined_audit_with_surface_lenses():
     for gear in ("L", "XL"):
-        picked = srs.rubrics(_run(gear), task)
-        assert set(picked) == {"security", "platform", "edge-cases", "test-strength"} and len(picked) == 4
-    assert srs.rubrics(_run("L", classification="elevated"), {"scope": ["calc.py"]}) == (
-        "security", "edge-cases", "test-strength")
-    assert srs.rubrics(_run("XL"), {"scope": ["pyproject.toml"]}) == ("edge-cases", "platform", "test-strength")
+        assert srs.rubrics(_run(gear), {"scope": ["scripts/auth.sh"]}) == ("combined",)
+    assert srs.platform_relevant(["scripts/auth.sh"])
+    assert not srs.platform_relevant(["src/calc.py"])
+    assert srs.security_relevant(["src/auth/login.py"])
+    assert not srs.security_relevant(["src/calc.py"])
 
 
 @pytest.mark.parametrize("run", [
@@ -79,7 +78,7 @@ def test_an_s_run_launches_one_subagent_before_the_one_convergence_review(env):
     (conv,) = _gates(env, "convergence_review")
     assert conv["verdict"] == "APPROVED" and conv["round"] == 1
     brief = (paths.run_dir(_q(env, "SELECT id FROM runs")[0]["id"]) / "dispatches" / conv["reviewer_dispatch_id"] / "brief.md").read_text()
-    assert "PRE-CONVERGENCE SUBAGENT AUDITS" in brief and "four-lens" in brief
+    assert "PRE-CONVERGENCE SUBAGENT AUDITS" in brief and "combined" in brief
     sub_brief = (paths.run_dir(sub["run_id"]) / "dispatches" / sub["reviewer_dispatch_id"] / "brief.md").read_text()
     assert sub_brief.startswith("ROLE independent code reviewer (runtime self-review subagent")
     assert "is the commit under review" in sub_brief and sub["reviewer_dispatch_id"] != conv["reviewer_dispatch_id"]
@@ -87,10 +86,10 @@ def test_an_s_run_launches_one_subagent_before_the_one_convergence_review(env):
 
 def test_an_l_run_launches_its_specialists_and_keeps_the_initial_plan_review(env):
     _s_run(env, gear="L")
-    assert len(_subagent_gates(env)) == 2
-    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"edge-cases", "test-strength"}
+    assert len(_subagent_gates(env)) == 1
+    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"combined"}
     roles = _roles(env)
-    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 2
+    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 1
     assert roles.count("convergence_reviewer") == 1
 
 

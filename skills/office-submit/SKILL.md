@@ -17,50 +17,39 @@ when it is inside SCOPE. Behavior-preserving only: no contract, auth, validation
 data-semantic change. A higher-level owner outside SCOPE goes in the report, unedited. A real defect
 goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat steps 1-6, including repairs routed to you from review findings.
 
-## 2. Adversarial self-review
+## 2. One-round self-review (#938)
 
-Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
-the tier from the run's gear and risk (unknown risk is never the `inline` tier, and a planner-declared lightweight path does not lower it). You cannot lower it. Do the review as the tier says:
+Follow the brief's single-tier self-review contract, regardless of gear size or blast radius. Run the task's
+targeted deterministic checks and examine the actual diff against its acceptance criteria yourself, once.
+Office funds at most **one separate read-only combined audit**, not a four-specialist swarm.
+Do not start a second executor subagent or repeatedly review the fix diff.
 
-- **`inline`:** no subagents. Make one fresh pass per lens yourself and fix medium+ findings.
-  You may skip a lens that clearly does not apply, with a one-line reason in your report.
-- **`single`:** start exactly one `Agent` subagent, given the diff command, the brief path, all four lenses, and
-  a read-only instruction (no edits).
-- **`deep`:** start four `Agent` subagents in one message, in parallel. Give each the diff command, the brief
-  path, and one lens, and tell it to read only (no edits).
+The mandatory producer lenses are **edge cases** (invalid/empty inputs, error/restart/retry paths) and
+**test strength** (tests that only assert success trivially, missing negative cases, tests that do not reach the
+change). Review **platform/build** only when the changed diff touches scripts, CI, packaging, OS or
+process code. **Security** (auth/permissions, secrets, input parsing, production writes) is no longer a
+producer lens; Office enforces a separate independent **convergence security pass** on sensitive lanes.
 
-If the tier is missing from the line, treat it as `deep`. The lenses are the same in every tier:
+Record findings in untracked OFFICE_SELF_REVIEW.md after the final commit using the brief's format:
+COMMIT full-SHA, ROUND 1, LENS edge-cases reviewed, LENS test-strength reviewed, LENS platform
+reviewed or skipped with reason, LENS security skipped reviewed at convergence, followed by FINDING
+severity lens file:line | summary | disposition lines. Keep the original severity. Fix medium/high
+findings within scope, add or strengthen a test, and record fixed <test path> mutation=failed
+(the fix must make the test fail when reverted); other dispositions are out-of-scope, dismissed <reason>,
+contract-conflict accept=<n> or open. Open medium/high findings stop at ROUND 1; there is no round 2.
 
-- **(a) Security:** secrets, token exposure in workflows or logs (`workflow_dispatch` inputs echoed),
-  auth bypass, missing server-side revalidation, path or symlink escapes.
-- **(b) Edge cases:** parser and lexer ambiguity (regex vs division, apostrophes in JSX), empty or null
-  input, keyboard and interaction paths that bypass an explicit confirmation (Enter past a Select
-  button), offline and restart states.
-- **(c) Platform and build:** macOS vs Linux (BSD `sed -i`, process groups and ancestor shells),
-  signing and notarization order, CI manifest and artifact names, stale build artifacts.
-- **(d) Test strength:** weak assertions, and tests that would still pass with the fix reverted.
+**Automatic main-change proof:** office preflight creates a disposable checkout of the task commit, reverts
+only non-test source changes, runs a targeted test command from the task's checks and requires a failure,
+then restores the commit and requires a pass. The test-strength lens remains mandatory: this proves the
+tests reach the implementation, not that they catch every subtle bug. A missing test command or failed
+red/green proof blocks substantive source submission. Never perform destructive cleanup in the executor
+worktree; Office owns the disposable proof checkout.
 
-Each reviewer (subagent or your own pass) returns only a JSON array:
-
-```json
-[{"severity": "high|medium|low", "location": "file:line", "repro": "concrete input or steps", "fix": "smallest correct change"}]
-```
-
-Fix every `medium` or `high` finding inside SCOPE. For each fix, write or strengthen a test, then prove it.
-Revert the fix, run the test, and confirm it fails. Then restore the fix and confirm the test passes.
-Record that mutation for the report. A finding outside SCOPE goes in the report unfixed.
-
-Record every finding in the ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked; format in the brief's `LEDGER` line:
-`COMMIT <full sha of HEAD>`, `ROUND <1-3>`, a `LENS` line per lens, `FINDING <severity> <lens> <file:line> | <summary> | <disposition>`).
-Dispositions: `fixed <test path> mutation=failed`, `out-of-scope`, `dismissed <reason>`, `contract-conflict accept=<n>`, `open`.
-A medium or high fix names the test file that proves it and `mutation=failed` (you reverted the fix and the test failed);
-a finding of any severity is `out-of-scope` only when its file is outside SCOPE.
-Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium or
-high fix that changes behavior gets one fix-diff re-review, as the next round. At the 3-round cap, a medium or high
-finding still open stops you. Run `office preflight` anyway so it records the stop for the orchestrator, then print
-the status line and stop. `contract-conflict` stops you with the ACCEPT line quoted. Preflight reports a missing,
-stale, or malformed ledger and any open finding as a fix. Submit refuses substantive work unless the ledger's `COMMIT`
-is your HEAD, records it, and consumes it; inline tier only: `office submit --self-review-exempt trivial|mechanical -- "<reason>"`.
+**Budget:** self-review targets 10–15% of task tokens, capped at 15%. If the budget is exhausted, stop
+auditing and add TRUNCATED self-review truncated: budget cap to the ledger. Convergence must scrutinize the
+truncated task. Instrumented per-task spend is a separate future capability; do not claim exact metering.
+An empty or read-only task needs no producer ledger. If in doubt, follow the current brief and preflight
+messages, not instructions from older runs or skill snapshots.
 
 ## 3. Checks
 

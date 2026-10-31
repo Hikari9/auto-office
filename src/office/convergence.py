@@ -307,6 +307,24 @@ def review_required(run: dict) -> bool:
     return bool((run.get("gates") or {}).get("code_review"))
 
 
+def mandatory_security(con, run: dict, scope: dict) -> bool:
+    """A sensitive changed path OR added security logic forces independent convergence review."""
+    from office import self_review_subagents
+    files, snippets = set(), []
+    for tid in scope["tasks"]:
+        task = state.get_task(con, run["id"], tid)
+        files.update(_changed(con, run, task))
+        revision_id = task.get("accepted_revision_id")
+        if revision_id:
+            rev = con.execute("SELECT base_commit, commit_sha FROM revisions WHERE id=?",
+                              (revision_id,)).fetchone()
+            if rev and rev["base_commit"] and rev["commit_sha"]:
+                patch = paths.git(Path(run["repo_root"]), "diff", "--unified=0",
+                                  rev["base_commit"], rev["commit_sha"], check=False)
+                snippets.append(patch[:25000])
+    return self_review_subagents.security_relevant(files, "\n".join(snippets))
+
+
 def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
     """(task, applicability) for each task in a lane whose acceptance is
     user-visible. Planner-declared, runtime-guarded: acceptance that reads
@@ -561,7 +579,7 @@ def job_converge(con, run: dict, job: dict) -> dict:
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
                    hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
         made = []
-        if review_required(run):
+        if review_required(run) or mandatory_security(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
         if visual_tasks(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "visual", round_no, cycle))
@@ -798,9 +816,21 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         if precheck["status"] != contract.COMPLETED:
             outcome = {"status": precheck["status"], "verdict": None, "parsed": None, "summary": precheck["reason"]}
         else:
+            security = self_review_subagents.audit_security(con, run, scope, tasks, checkout, commit, diff)
+            if security["status"] != contract.COMPLETED:
+                outcome = {"status": security["status"], "verdict": None, "parsed": None, "summary": security["reason"]}
+            elif security.get("verdict") in ("RECHECK", "INTAKE_GAP"):
+                # Route mandatory security findings through the ONE authoritative convergence verdict.
+                outcome = security["outcome"]
+                outcome["reviewed_commit"] = commit
+            else:
+                outcome = None
+        if outcome is None:
             if precheck["reports"]:
                 brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify and deduplicate in your one verdict):\n"
                 brief += "\n".join(str(r) for r in precheck["reports"])
+            if security.get("required"):
+                brief += "\nMANDATORY CONVERGENCE SECURITY PASS: APPROVED for this composed commit.\n"
             route_options = _lane_review_options(con, run, job, gate, scope, st, "convergence_review")
             # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
             pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)

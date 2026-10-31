@@ -146,8 +146,8 @@ def test_the_estimate_must_be_a_structured_measurement():
 
 def test_the_executor_brief_states_what_the_runtime_reviews():
     run = {"gear": "S", "gates": {"gear_model_version": "run-gear-1"}}
-    assert "one independent self-review subagent" in " ".join(briefs.runtime_review_lines(run))
-    assert "up to four independent specialist" in " ".join(briefs.runtime_review_lines({**run, "gear": "XL"}))
+    assert "one read-only" in " ".join(briefs.runtime_review_lines(run))
+    assert "one read-only" in " ".join(briefs.runtime_review_lines({**run, "gear": "XL"}))
     assert briefs.runtime_review_lines({**run, "gear": "XS"}) == []
     assert briefs.runtime_review_lines({"gear": "S", "gates": {}}) == []
 

@@ -47,7 +47,7 @@ office start ──> plan ──> initial plan review ────────�
                                                                         │
           approve plan ──> dispatch tasks (parallel / stacked) <────────┘
                                │
-         executor: build in envelope -> checks -> four-lens self-review (<=3 rounds) -> preflight -> submit
+         executor: build in envelope -> checks -> one-round self-review -> preflight red/green -> submit
                                │
                     task accepted on deterministic checks (no per-task independent review)
                                │
@@ -246,9 +246,25 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
   envelope. The seams (declared interfaces, dependencies, `accept:`, requirements, authority, other
   tasks' scope) are not theirs: when doing the work right needs a seam to move, they ask (`QUESTIONS`)
   instead of working around it.
-- Each task runs its deterministic checks and a four-lens self-review (security, edge cases,
-  platform and build, test strength) with a 3-round cap. `office preflight` enforces the ledger and
-  the cap; this mechanism is unchanged from 3.2.
+- Each executor runs deterministic checks and one **single-tier, one-round** self-review:
+  edge cases and test strength always; platform/build only if the changed diff touches CI,
+  scripts, OS/process or packaging. There is at most one Office-funded read-only combined
+  task audit, rather than four specialist subagents. A medium/high finding keeps its
+  mutation=failed test proof, but there is no second self-review round.
+- Preflight automatically proves that the **main change** is covered: in a disposable
+  checkout, revert only the non-test source changes while retaining the tests (they must
+  FAIL), and in an independent clean checkout restore the source changes (tests must PASS).
+  The result is cached against the commit and targeted command. A missing or unsuccessful
+  proof blocks submit; no executor worktree or index is touched by the proof.
+- The 10-15% self-review budget is capped by policy at 15% of task tokens. When exhausted,
+  the producer records TRUNCATED self-review truncated: budget cap in its ledger, and
+  convergence examines that task more closely. Exact token metering is a separate
+  instrumentation dependency, not an authority to skip the evidence requirement.
+- Sensitive lanes (auth, permissions, secrets, input parsing, production writes) receive
+  a **mandatory independent security convergence pass** on the composed commit, even when
+  the gear would otherwise fund no code review. Missing/invalid/wrong-commit evidence
+  blocks convergence; a security RECHECK or INTAKE_GAP routes through the authoritative
+  convergence verdict. Executor reviews are advisory only.
 - A task is accepted on its own deterministic checks. There is no routine per-task independent code
   review and no per-task visual gate; both moved to the lane.
 - **Pre-existing check failures.** When a task check fails, Office runs the same command on a checkout

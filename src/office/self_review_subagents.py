@@ -1,57 +1,66 @@
-"""#809: runtime-funded, independent self-review subagents that precede convergence review.
+"""#938: one read-only, combined task audit before convergence, never a deep swarm.
 
-Office itself launches these as separate reviewer sessions on a task's accepted revision. They
-are advisory audits of the producer's work and its four-lens ledger, never a convergence
-verdict, a substantive round or an approval. The one authoritative acceptance verdict stays the
-convergence review. A missing, invalid or wrong-commit subagent report blocks that review
-(fail closed) and spends no round.
-
-Funding by run gear (pinned `run-gear-1` runs only; legacy-pinned runs keep their contract):
-  XS      none: the executor's inline four-lens self-check is the whole of it
-  S, M    one four-lens subagent per task
-  L, XL   up to four specialists per task (security, edge-cases, platform, test-strength),
-          chosen by what the task touches; edge-cases and test-strength always run
-Each task revision and rubric is reviewed once: a report for the same revision, commit and
-rubric is reused on a later convergence round or a review-only re-run.
+The executor first completes its own single pass. This Office-funded audit is advisory,
+not a convergence verdict. Sensitive lanes receive a distinct mandatory security review
+of the composed result at convergence.
 """
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
 from office import briefs, contract, db, paths, state
 from office.util import now_iso
 
-REVIEW_VERSION = "runtime-self-review-1"
+REVIEW_VERSION = "runtime-self-review-2"
 FUNDED_GEARS = ("S", "M", "L", "XL")
 RUBRICS = {
-    "four-lens": "Review all four lenses independently: security, edge cases, platform/build, and test strength. "
-                 "Try to falsify the producer's claims using the actual checkout, without changing files.",
-    "security": "Security: secrets, token exposure, auth and permission bypass, missing server-side revalidation, "
-                "path or symlink escapes, trust boundaries and irreversible actions.",
-    "edge-cases": "Edge cases: parser ambiguity, empty or null input, crashes, retries, restart and offline states, "
-                  "interaction paths that bypass an explicit confirmation, data integrity on abnormal transitions.",
-    "platform": "Platform and build: macOS vs Linux differences (BSD sed, process groups), packaging, bundled "
-                "resources, scripts, CI manifests and stale build artifacts.",
-    "test-strength": "Test strength: weak assertions, tests that still pass with the fix reverted, missing negative "
-                     "and recovery paths, integration contracts and mutation sensitivity.",
+    "combined": "Inspect edge cases and test strength (including weak assertions) in ONE read-only pass. "
+                "Inspect platform/build only when the changed files touch scripts, CI, packaging, OS/process. "
+                "Do not repeat security here: sensitive lanes receive a mandatory convergence security pass. "
+                "Try to falsify the actual acceptance evidence without changing any source files.",
 }
-_SECURITY_WORDS = ("auth", "security", "permission", "secret", "token", "crypt", "credential")
-_PLATFORM_MARKS = ("scripts/", ".github/", ".githooks/", "dockerfile", "pyproject.toml", "setup.py", "makefile",
-                   ".sh", ".yml", ".yaml", ".toml", "package.json")
+_PLATFORM_MARKS = ("scripts/", ".github/", ".githooks/", "dockerfile", "pyproject.toml",
+                   "setup.py", "makefile", ".sh", ".yml", ".yaml", ".toml", "package.json")
+_PLATFORM_WORDS = ("process", "subprocess", "signal", "thread", "multiprocessing", "os/" )
+_SECURITY_WORDS = ("auth", "permission", "secret", "token", "credential", "password", "access_control",
+                   "input", "parse", "parser", "write", "payment", "billing", "prod", "security")
 
 
-def _security_relevant(run: dict, task: dict) -> bool:
-    risk = run.get("risk") or {}
-    return bool(risk.get("classification") == "elevated" or risk.get("irreversible")
-                or risk.get("blast_radius") in ("production", "production-data")
-                or any(w in str(p).lower() for p in task.get("scope") or [] for w in _SECURITY_WORDS))
+def platform_relevant(files) -> bool:
+    """Diff-surface selection, not run gear or a broad task descriptor."""
+    return any(any(mark in str(path).lower() for mark in _PLATFORM_MARKS)
+               or any(word in str(path).lower().split("/")[-1] for word in _PLATFORM_WORDS)
+               for path in files)
 
 
-def _platform_relevant(task: dict) -> bool:
-    scope = [str(p).lower() for p in task.get("scope") or []]
-    return (any(m in p for p in scope for m in _PLATFORM_MARKS)
-            or (task.get("descriptor") or {}).get("domain") == "infrastructure")
+_SENSITIVE_ADDITION = re.compile(
+    r"\b(?:authenticat\w*|authoriz\w*|permissio\w*|secret\w*|credential\w*|password\w*|"
+    r"tokens?|jwt|oauth|access_control|input_pars\w*|parse_input|deserializ\w*|"
+    r"sql_exec\w*|insert\s+into|delete\s+from|update\s+\w+\s+set|"
+    r"production\s+(?:write|update|delete)|write_production)\b", re.I)
+
+
+def security_relevant(files, diff: str = "") -> bool:
+    """Pick sensitive lanes by actual changed paths AND security-sensitive added code.
+
+    Ignore documentation/tests in diff-scanning; a generic filename like handler.py
+    can still add an authorization check or production write that requires audit.
+    """
+    if any(any(word in str(path).lower() for word in _SECURITY_WORDS) for path in files):
+        return True
+    current = ""
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            current = line.partition(" b/")[2].strip()
+        elif (line.startswith("+") and not line.startswith("+++")
+              and current and not current.startswith(("tests/", "test/", "docs/"))
+              and "/test_" not in current and Path(current).suffix.lower() in
+              (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".kt", ".sql", ".php")
+              and _SENSITIVE_ADDITION.search(line[1:])):
+            return True
+    return False
 
 
 def funded(run: dict) -> bool:
@@ -59,17 +68,8 @@ def funded(run: dict) -> bool:
 
 
 def rubrics(run: dict, task: dict) -> tuple[str, ...]:
-    """The independent subagent reviews this run's gear funds for one task."""
-    if not funded(run):
-        return ()
-    if run["gear"] in ("S", "M"):
-        return ("four-lens",)
-    picked = ["edge-cases", "test-strength"]
-    if _security_relevant(run, task):
-        picked.insert(0, "security")
-    if _platform_relevant(task):
-        picked.insert(-1, "platform")
-    return tuple(picked)
+    """The only funded task self-review is one combined edge/test (+ conditional platform) pass."""
+    return ("combined",) if funded(run) else ()
 
 
 def _valid(outcome: dict, commit: str, run: dict) -> tuple[bool, str]:
@@ -128,12 +128,16 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                 state.emit(con, run, "self_review.subagent.queued",
                            f"{task['id']} {rubric}: independent subagent review before convergence",
                            task_id=task["id"], payload={"revision": rid, "rubric": rubric, "commit": commit})
-            diff = gates.cap_diff(paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"]))
+            diff = gates.cap_diff(paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"]))[:12000]
             checks = con.execute("SELECT summary FROM gates WHERE revision_id=? AND kind='checks' AND status='done' "
                                  "ORDER BY created_at DESC LIMIT 1", (rid,)).fetchone()
+            import json
+            changed = json.loads(rev.get("changed_json") or "[]")
+            surface = ("Platform/build is REQUIRED for changed files: " + ", ".join(changed[:15])
+                       if platform_relevant(changed) else "Platform/build is OUT OF SCOPE for this diff.")
             brief = briefs.self_review_subagent_brief(run, task, rev, commit, diff,
                                                       checks["summary"] if checks else "none declared",
-                                                      str(checkout), rubric, RUBRICS[rubric])
+                                                      str(checkout), rubric, RUBRICS[rubric] + " " + surface)
             try:
                 outcome = reviewer(con, run, audit_gate, "code_reviewer", brief, cwd=checkout,
                                    include_dirs=[checkout], kind="reviewer")
@@ -160,3 +164,66 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                                    findings=[{k: f.get(k) for k in ("code", "severity", "location", "summary",
                                                                     "action", "blocking")} for f in parsed.findings]))
     return {"status": contract.COMPLETED, "reports": reports}
+
+
+def audit_security(con, run: dict, scope: dict, tasks: list[dict], checkout: Path, commit: str,
+                   diff: str, *, reviewer=None) -> dict:
+    """Mandatory, independent, composed-lane security review for sensitive changed paths.
+
+    This is not task self-review and is not a convergence verdict. A RECHECK or
+    INTAKE_GAP result is routed into the authoritative convergence gate unchanged;
+    absence, invalidity and wrong-commit responses block convergence.
+    """
+    from office import convergence, gates
+    files = sorted({path for task in tasks for path in convergence._changed(con, run, task)})
+    if not security_relevant(files, diff):
+        return {"status": contract.COMPLETED, "required": False, "reason": "no sensitive changed surface"}
+    key = f"{scope['id']}:{commit}:security-convergence-1"
+    saved = con.execute("SELECT * FROM gates WHERE run_id=? AND kind='convergence_security' AND input_key=? "
+                        "AND status='done' AND review_status=? ORDER BY finished_at DESC LIMIT 1",
+                        (run["id"], key, contract.COMPLETED)).fetchone()
+    if saved and saved["verdict"] == "APPROVED":
+        return {"status": contract.COMPLETED, "required": True, "verdict": "APPROVED",
+                "reason": saved["summary"], "reused": True}
+    gate = {"id": "G" + uuid.uuid4().hex[:8], "task_id": tasks[0]["id"] if tasks else None,
+            "scope": scope["id"], "revision_id": None, "plan_version": run.get("plan_version")}
+    with db.transaction(con):
+        con.execute("INSERT INTO gates(id, run_id, subject, scope, task_id, plan_version, kind, input_key, status,"
+                    " created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (gate["id"], run["id"], scope["id"], scope["id"], gate["task_id"], run.get("plan_version"),
+                     "convergence_security", key, "queued", now_iso()))
+        state.emit(con, run, "convergence.security.queued",
+                   f"{scope['id']}: mandatory independent security pass on composed commit {commit[:12]}",
+                   payload={"files": files[:25], "commit": commit})
+    brief = ("ROLE independent convergence SECURITY reviewer (mandatory, read-only). Change no source.\n"
+             "Do not trust the producer's self-review. Examine the composed result and cross-task seams for "
+             "auth, permissions, secrets, unsafe input parsing, trust boundaries and unauthorized or repeated "
+             "production writes. Report every security defect, including security issues in code reached by "
+             "the changed paths; stay within the lane acceptance contract.\n"
+             f"SCOPE {scope['id']} tasks: {', '.join(t['id'] for t in tasks)}\n"
+             f"SENSITIVE FILES: {', '.join(files[:40])}\n"
+             f"REVIEWED_COMMIT {commit} is the exact commit under review; state it in your reply.\n"
+             "No tools may edit or delete source and no destructive cleanup commands.\n"
+             + briefs.CONVERGENCE_REVIEW_FORMAT
+             + "\nDIFF (composed lane):\n" + diff[:25000])
+    try:
+        outcome = (reviewer or gates.run_reviewer)(con, run, gate, "code_reviewer", brief,
+                                                    cwd=checkout, include_dirs=[checkout], kind="reviewer")
+    except Exception as exc:
+        outcome = {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
+    good, reason = _valid(outcome, commit, run)
+    parsed = outcome.get("parsed")
+    verdict = parsed.verdict if good else None
+    with db.transaction(con):
+        con.execute("UPDATE gates SET status='done', review_status=?, verdict=?, summary=?, route=?, "
+                    "reviewer_dispatch_id=?, finished_at=? WHERE id=?",
+                    (contract.COMPLETED if good else contract.EVIDENCE_BLOCKED,
+                     verdict, (outcome.get("summary") or reason)[:500], outcome.get("route"),
+                     outcome.get("dispatch_id"), now_iso(), gate["id"]))
+        state.emit(con, run, "convergence.security.completed" if good else "convergence.security.blocked",
+                   f"{scope['id']} security: {verdict or reason}", payload={"commit": commit, "valid": good})
+    if not good:
+        return {"status": contract.EVIDENCE_BLOCKED, "required": True,
+                "reason": f"mandatory security convergence pass: {reason}"}
+    return {"status": contract.COMPLETED, "required": True,
+            "verdict": verdict, "outcome": outcome, "reason": reason}

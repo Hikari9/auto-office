@@ -6,11 +6,11 @@ This is the normative runtime boundary for **new runs**. It complements—not re
 
 | Run gear | Planner | Producer mode | Producer self-review | Independent plan review | Independent convergence | Verification |
 | --- | --- | --- | --- | --- | --- | --- |
-| XS | Minimal inline plan | Orchestrator-inline, bounded low-risk by default | Four-lens inline ledger | Only if risk requires | Only if risk requires | Deterministic and applicable acceptance checks |
-| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Four-lens ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| L | Deeper coordinated plan | Dedicated executor(s) | Ledger plus **up to 4 runtime specialist subagents** per task | One independent reviewer | Yes | Deterministic and applicable integration checks |
-| XL | Dedicated architecture/decomposition | Multiple coordinated waves, independent task sizing | Ledger plus **up to 4 runtime specialist subagents** per task | Independent **lead + 3 mandatory Goldfish**; up to 2 evidence-triggered hazard audits | Yes | Full applicable integration/visual/recovery verification |
+| XS | Minimal inline plan | Orchestrator-inline, bounded low-risk by default | Single-tier, one-round ledger; automatic main-change red/green; no task subagent | Only if risk requires | Only if risk requires | Deterministic and applicable acceptance checks |
+| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Single-tier, one-round ledger; one combined runtime edge/test-strength audit, platform by diff | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Single-tier, one-round ledger; one combined runtime edge/test-strength audit, platform by diff | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| L | Deeper coordinated plan | Dedicated executor(s) | Single-tier, one-round ledger; one combined runtime edge/test-strength audit, platform by diff | One independent reviewer | Yes | Deterministic and applicable integration checks |
+| XL | Dedicated architecture/decomposition | Multiple coordinated waves, independent task sizing | Single-tier, one-round ledger; one combined runtime edge/test-strength audit, platform by diff | Independent **lead + 3 mandatory Goldfish**; up to 2 evidence-triggered hazard audits | Yes | Full applicable integration/visual/recovery verification |
 
 A new run's **complexity** gear is pinned by the orchestrator at intake (or explicit authorized creation) from scope, coupling, uncertainty and multiwave coordination; the **risk** classification and floor remain independent. The planner may recommend size but cannot silently weaken the run's effective gates. Risk amendments need the existing authorization path; any change to accepted user scope needs its existing approval. The plan reviewer is **not** a gear-policy reviewer and has no L-to-XL reviewer-triggered escalation or reviewer-managed swarm.
 
@@ -18,7 +18,16 @@ Historical gear aliases are still accepted only when explicitly selected for com
 
 ### Self-review subagents (`self_review_subagents.py`)
 
-Only pinned `run-gear-1` runs fund them, and each is an independently launched reviewer session on the task's accepted revision, advisory only and never a convergence verdict or round. XS funds none (the executor's inline four-lens ledger is all of it). S and M fund one `four-lens` subagent per task. L and XL fund **up to four specialists per task**: `edge-cases` and `test-strength` always, `security` when the run risk is elevated or irreversible, the blast radius is production, or the task scope names auth, security, permission, secret, token, crypt or credential paths, and `platform` when the scope touches scripts, CI, packaging or manifests or the descriptor domain is infrastructure. A missing, invalid or wrong-commit report blocks convergence review (fail closed) and spends no round. A report for the same revision, commit and rubric is reused.
+Only pinned run-gear-1 runs fund a runtime subagent. XS funds none; S, M, L and XL fund
+**one** combined read-only edge/test-strength audit per task (with platform/build review only
+for relevant actual changed files). No gear funds four parallel task specialists. Missing,
+invalid or wrong-commit reports block convergence without spending a round. Security is a
+mandatory independent convergence pass for sensitive changed paths or newly added auth,
+permission, input-parsing or production-write code. The one-round producer review retains a
+test-strength lens, plus automatic main-change red/green proof in isolated checkouts; see
+docs/review-convergence.md. A 15% self-review token budget is declared but currently not
+precisely metered: the producer marks TRUNCATED when exhausted.
+
 
 ### Real XS inline vs S/M exception
 

@@ -21,7 +21,8 @@ LEDGER_MAX_CHARS = 20_000
 LEDGER_LENSES = ("security", "edge-cases", "platform", "test-strength")
 LEDGER_SEVERITIES = ("high", "medium", "low")
 LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "dismissed", "contract-conflict", "open")
-MAX_REVIEW_ROUNDS = 3
+MAX_REVIEW_ROUNDS = 1
+LEGACY_MAX_REVIEW_ROUNDS = 3
 AMENDMENT_BRIEF_CHARS = 6000
 
 
@@ -426,112 +427,69 @@ def simplify_lines(base: str) -> list[str]:
     ]
 
 
-SELF_REVIEW_TIERS = ("inline", "single", "deep")
-_LOW_RISK_GEARS = ("direct", "direct+review", "light")
-_INLINE_BLAST = ("local", "repo")
-_HIGH_SIZES = ("L", "XL")
+SELF_REVIEW_TIERS = ("inline", "single", "deep")  # historical receipt vocabulary
+SELF_REVIEW_BUDGET_PERCENT = 15
 
 
 def self_review_tier(gear, risk_json) -> str:
-    """How much self-review an executor does, from the run's stored gear and risk record only.
-    Nothing in a packet or executor input reaches this. Every doubt resolves to more review:
-    an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
-    if gear in ("L", "XL", "full"):
-        return "deep"
-    try:
-        risk = json.loads(risk_json) if isinstance(risk_json, (str, bytes)) else risk_json
-    except (ValueError, RecursionError):
-        risk = None
-    if not isinstance(risk, dict):
-        return "single"
-    blast = risk.get("blast_radius")
-    if (risk.get("high") or risk.get("irreversible") or blast in ("production", "production-data")
-            or (not risk.get("complexity_only") and risk.get("size_class") in _HIGH_SIZES)):
-        return "deep"
-    if gear == "XS" and not risk.get("high") and blast in _INLINE_BLAST:
-        return "inline"
-    if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
-        return "inline"
+    """#938: gear/size is not review depth. New executor briefs use one combined pass."""
     return "single"
 
 
 def runtime_review_lines(run: dict) -> list[str]:
-    """What Office itself funds after the executor submits (#809), so the executor never claims it. The
-    executor's own self-review above stays required; the runtime subagents are independent of it."""
+    """Office funds at most one advisory audit per task, never a deep specialist swarm."""
     gear = run.get("gear")
     if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1" or gear not in ("S", "M", "L", "XL"):
         return []
-    funded = ("one independent self-review subagent" if gear in ("S", "M")
-              else "up to four independent specialist self-review subagents")
-    return [f"OFFICE RUNTIME REVIEW (gear {gear}): after deterministic checks Office launches {funded} on the "
-            "immutable accepted revision, then the convergence review. They are separate sessions, not yours: do not "
-            "claim them because your harness lacks nested agents. A missing or invalid report blocks acceptance."]
+    return [f"OFFICE RUNTIME REVIEW (gear {gear}): at most one read-only, combined edge/test-strength "
+            "audit (plus platform only for relevant diffs) precedes convergence. Security is reviewed "
+            "at convergence for sensitive lanes. A missing or invalid report blocks acceptance."]
 
 
-def self_review_lines(base: str, tier: str = "deep") -> list[str]:
-    """The adversarial pass a producer runs on its own diff before it submits. The tier sets how much
-    review that is. It is a pass, never an approval: independent (v3.1: per-task; convergence: per-lane) review
-    still decides."""
-    if tier not in SELF_REVIEW_TIERS:
-        tier = "deep"
-    head = f"SELF-REVIEW before submitting (tier: {tier}), review your whole change adversarially: `git diff {base}` (committed and"
-    lenses = [
-        "    (a) security: secrets, token exposure in workflows or logs, auth bypass, missing server-side",
-        "        revalidation, path or symlink escapes",
-        "    (b) edge cases: parser and lexer ambiguity, empty or null input, keyboard and interaction paths that",
-        "        bypass an explicit confirmation, offline and restart states",
-        "    (c) platform and build: macOS vs Linux (BSD sed, process groups), signing and notarization, CI",
-        "        manifest names, stale build artifacts",
-        "    (d) test strength: weak assertions, tests that still pass with the fix reverted",
-        '    Each lens returns JSON: [{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}].',
-        "    Fix every medium or higher finding inside SCOPE. For each fix, write or strengthen a test and prove it:",
-        "    revert the fix, confirm the test fails, restore it.",
-    ]
-    tail = "    A finding outside SCOPE goes in your report, unfixed."
-    if tier == "inline":
-        intro = ["    uncommitted). Make one fresh pass per lens yourself, with no delegation, one lens at a time:"]
-        skip = ["    You may skip a lens that clearly does not",
-                "    apply, with a one-line reason in your report."]
-    elif tier == "single":
-        intro = ["    uncommitted). Start exactly one subagent if your harness has one, given only the diff and all four",
-                 "    lenses below; otherwise make one fresh pass per lens yourself:"]
-        skip = []
-    else:
-        intro = ["    uncommitted). Start four parallel subagents if your harness has them, each given only the diff and one",
-                 "    lens; otherwise make one fresh pass per lens yourself:"]
-        skip = []
-    return [head] + intro + lenses + skip + [tail] + ledger_lines()
+def self_review_lines(base: str, tier: str = "single") -> list[str]:
+    """One producer pass; one Office-funded independent combined subagent when eligible."""
+    return [
+        f"SELF-REVIEW before submitting (tier: single), inspect git diff {base} including uncommitted work.",
+        "    Run the task checks first and make one compact producer pass yourself. Office independently",
+        "    funds exactly ONE read-only combined audit on the accepted task before convergence.",
+        "    Never spawn parallel specialists or do a fix-diff re-review.",
+        "    Always examine (a) edge cases: input boundaries, error/retry/restart/interaction paths;",
+        "    always examine (b) test strength: weak assertions, missing negative paths, missing coverage.",
+        "    Examine (c) platform/build only when the ACTUAL diff touches CI, scripts, OS/process, packaging.",
+        "    Security is not an executor lens: auth, permissions, secrets, input parsing and production-write",
+        "    changes MUST receive a mandatory independent security pass on the composed convergence lane.",
+        '    Report findings as [{"severity": "high|medium|low", "location": "file:line", "repro": "...", "fix": "..."}].',
+        "    Fix medium/high findings within SCOPE and rerun the affected deterministic tests ONCE.",
+        "    Tests must exercise the MAIN change: office preflight automatically checks that newly changed",
+        "    tests FAIL when non-test source changes are reverted and PASS when the change is restored.",
+        f"    SELF-REVIEW BUDGET: at most {SELF_REVIEW_BUDGET_PERCENT}% of task tokens (target 10-15%).",
+        "    If the budget runs out, stop review and add TRUNCATED self-review truncated: budget cap to",
+        "    the ledger; the convergence reviewer must inspect that task more carefully.",
+        "    A finding outside SCOPE goes in your report, unfixed.",
+    ] + ledger_lines()
 
 
 def ledger_lines() -> list[str]:
-    """The findings ledger every tier writes, initial and fix rounds. `office preflight` refuses to call
-    the task ready until it is current, well formed, and has no open finding."""
     lenses, sev = "|".join(LEDGER_LENSES), "|".join(LEDGER_SEVERITIES)
     return [
-        f"    LEDGER write {LEDGER_FILE} in this worktree root, untracked. Write it after your last commit: it names HEAD,",
-        "    so any later commit makes it stale. Office consumes (deletes) it at each submit: write it fresh every round.",
-        "    One line each, nothing else (blank lines only):",
+        f"    LEDGER write {LEDGER_FILE} in the worktree root, untracked, after the last commit.",
+        "    One line each, blank lines allowed:",
         "        COMMIT <full sha of HEAD>",
-        f"        ROUND <1-{MAX_REVIEW_ROUNDS}>",
-        f"        LENS <{lenses}> reviewed        (one line per lens)",
-        "        LENS <lens> skipped <reason>      (inline tier only; a skipped lens needs a reason)",
-        f"        FINDING <{sev}> <{lenses}> <file:line> | <summary> | <disposition>        (the lens that found it)",
-        "    Dispositions: `fixed <test path> mutation=failed` (a medium or high fix names the test file that proves it and",
-        "    mutation=failed, meaning you reverted the fix and that test failed; a low fix may omit both), `out-of-scope` (a",
-        "    finding only when its file is outside SCOPE, whatever its severity), `dismissed <reason>`, `contract-conflict accept=<n>`",
-        "    (the fix would break ACCEPT line n; Office stops you with that ACCEPT line quoted), `open`.",
-        "    Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium",
-        "    or high fix that changes behavior gets one fix-diff re-review (the same lenses over the fix diff, as the next",
-        "    ROUND, with the findings kept).",
-        f"    At the {MAX_REVIEW_ROUNDS}-round cap, a medium or high finding still open stops you.",
-        "    Run `office preflight` anyway (it records the stop for the orchestrator), then print the status line and stop.",
-        "    Preflight reports a missing, stale, or malformed ledger, a lens with no line, and any open finding as a fix;",
-        "    it never skips a bad line.",
-        "    `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits (uncommitted work",
-        "    the ledger does not cover is refused too). Empty and read-only work is exempt on its own; on the inline tier a",
-        '    trivial or mechanical change may run `office submit --self-review-exempt trivial|mechanical -- "<reason>"`.',
+        "        ROUND 1",
+        "        LENS edge-cases reviewed",
+        "        LENS test-strength reviewed",
+        "        LENS platform reviewed | LENS platform skipped <reason>",
+        "        LENS security skipped reviewed at convergence",
+        f"        FINDING <{sev}> <{lenses}> <file:line> | <summary> | <disposition>",
+        "        TRUNCATED self-review truncated: budget cap  (only if the cap was hit)",
+        "    Dispositions: fixed <test path> mutation=failed for a medium/high fix; low fixes may omit",
+        "    the test; out-of-scope, dismissed <reason>, contract-conflict accept=<n>, or open.",
+        "    A medium/high fix must name a test and its revert/fail proof. No second self-review round.",
+        "    Any remaining medium/high open finding at the one-round cap stops the executor.",
+        "    Run office preflight; it verifies the ledger and automatic main-change red/green proof.",
+        "    A missing/stale ledger or any tracked source/test change without red/green proof blocks submit.",
+        "    Empty and read-only work is exempt; new substantive work requires the one-round ledger.",
     ]
-
 
 def worker_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     """`carried`, when given, receives the delivery ids the brief renders."""
@@ -644,9 +602,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
             "stale and must not be used: review only the checkout above. A reply whose REVIEWED_COMMIT is missing "
             "or is not this commit is rejected unread (no round is spent) and you are asked again.",
             f"DETERMINISTIC CHECKS {checks_summary}",
-            "Each executor already ran its checks and a four-lens self-review (security, edge cases, platform/build, "
-            "test strength). Judge the composed result: does it meet the acceptance and requirements together, are the "
-            "seams between tasks sound, and is anything unsafe."]
+            "Each executor ran targeted checks and a single edge/test-strength self-review (platform conditional). "
+            "Security is audited independently on sensitive composed lanes before this verdict. "
+            "A TRUNCATED ledger needs extra scrutiny. Judge accepted behavior, tests, seams and safety."]
     if carried:
         out.append("OPEN FINDINGS from the previous round (your own when you are the same reviewer) — confirm (repeat the "
                    "FINDING line), RESOLVED, or RETRACT each:")
