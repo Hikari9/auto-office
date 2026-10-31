@@ -52,7 +52,9 @@ _KNOWN_GIT_COMMANDS = frozenset({
 
 _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "command", "time"})
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
-_SEPARATORS = frozenset({";", "&", "|", "(", ")"})
+_SEPARATORS = frozenset({";", "&", "|", "(", ")", "&&", "||", ";;"})
+# Shell options whose following word is an operand, not a script (or -c's argument).
+_SHELL_LONG_WITH_VALUE = frozenset({"--rcfile", "--init-file"})
 # Reserved words and builtins that prefix a simple command without changing its head.
 _PREFIX_WORDS = frozenset({"!", "{", "}", "if", "then", "else", "elif", "do", "while", "until",
                            "exec", "builtin"})
@@ -176,8 +178,10 @@ def _neutralize_substitutions(command: str, depth: int, *, prose: bool = False) 
     i = 0
     while i < len(command):
         if command[i] == "\\":
-            # An escaped character is literal: `\`` and `\$(` do not start a substitution.
-            out.append(command[i:i + 2])
+            # `\<newline>` is a line continuation that sh removes. Any other escaped
+            # character is literal: `\`` and `\$(` do not start a substitution.
+            if command[i + 1:i + 2] != "\n":
+                out.append(command[i:i + 2])
             i += 2
             continue
         if command.startswith("$(", i):
@@ -220,9 +224,10 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
         if prose:
             # Unbalanced quotes are common in descriptions. Only an explicit
             # command signal can justify a fail-closed refusal in plan prose.
+            if "$(" in command or "`" in command:
+                return True  # a substitution that cannot be tokenized is not text
             return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
-        # Shell fields that cannot be tokenized cannot be verified.
-        return True
+        return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
     for token in tokens:
@@ -279,12 +284,18 @@ def _scan_wrappers(tokens: list[str], depth: int, *, prose: bool = False) -> boo
     return False
 
 
+def _is_redirect(token: str) -> bool:
+    return bool(token) and set(token) <= set("<>")
+
+
 def _command_starts(tokens: list[str]) -> list[int]:
+    """Indices that begin a command: after a separator, or after a redirect and its target."""
     starts: list[int] = []
     for i, tok in enumerate(tokens):
-        if tok in _SEPARATORS or tok in ("<", ">"):
+        if tok in _SEPARATORS or _is_redirect(tok):
             continue
-        if i == 0 or tokens[i - 1] in _SEPARATORS or tokens[i - 1] in ("<", ">"):
+        if (i == 0 or tokens[i - 1] in _SEPARATORS or _is_redirect(tokens[i - 1])
+                or (i >= 2 and _is_redirect(tokens[i - 2]))):
             starts.append(i)
     return starts
 
@@ -360,25 +371,29 @@ def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int, *, prose: bool =
     """A shell's -c script is scanned. A shell that reads stdin (no script operand, a
     redirect, a pipe end, or -s) runs input this guard cannot see: unverifiable."""
     stdin_fed = False
-    for k in range(pos + 1, len(tokens)):
+    k = pos + 1
+    while k < len(tokens):
         t = tokens[k]
+        if t in _SEPARATORS or t.startswith(("<", ">")) or t == "-":
+            return True  # no script operand: the shell reads stdin
         if t == "--":
-            continue
-        if t == "-c" or (t.startswith("-") and "c" in t[1:]):
-            if k + 1 < len(tokens):
+            k += 1
+        elif t.startswith("--"):
+            k += 2 if t in _SHELL_LONG_WITH_VALUE else 1
+        elif t[:1] in ("-", "+") and len(t) > 1:
+            flags = t[1:]
+            if t[0] == "-" and "c" in flags:
+                if k + 1 >= len(tokens):
+                    return True
                 script = tokens[k + 1]
                 if _is_dynamic(script) and ("$" in script or "`" in script):
                     return True
-                if _scan(script, depth + 1, prose=prose):
-                    return True
-            return False
-        if t.startswith("-"):
-            stdin_fed = stdin_fed or "s" in t[1:]
-            continue
-        if t in _SEPARATORS or t.startswith(("<", ">")):
-            return True
-        # A script file operand is opaque, unless -s makes the shell read stdin anyway.
-        return stdin_fed
+                return _scan(script, depth + 1, prose=prose)
+            stdin_fed = stdin_fed or (t[0] == "-" and "s" in flags)
+            k += 2 if ("o" in flags or "O" in flags) else 1  # -o/+o/-O/+O take an operand
+        else:
+            # A script file operand is opaque, unless -s makes the shell read stdin anyway.
+            return stdin_fed
     return True
 
 
@@ -427,6 +442,8 @@ def _strip_env(tokens: list[str], pos: int) -> int | None:
                     return None
                 i += 1
             return i
+        if t == "-S" or t.startswith(("-S", "--split-string")):
+            return None  # env runs the split string as a command; it is not scanned here
         if t in ("-u", "--unset"):
             if not _consume_value(tokens, i + 1):
                 return None

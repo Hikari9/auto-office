@@ -20,6 +20,14 @@ CHECKS_LINE = 'checks: python3 -c "import calc; assert calc.add(2, 3) == 5"'
     "echo '$(git status)'",
     # Escaped backticks are literal text: echo prints them and runs nothing.
     "echo \\`git push\\`",
+    "echo \\`; echo ok \\`",
+    # Reading a script file is opaque to the guard, as before; `=` mid-word is not a command.
+    "sh script.sh",
+    "bash -c 'echo hi'",
+    "echo =git",
+    "FOO==x pnpm build",
+    "pnpm test # don't break",
+    "cat <<'EOF'\nit's\nEOF",
 ])
 def test_substitution_without_push_is_permitted(command):
     assert not shell_safety.unsafe_manual_push(command)
@@ -42,8 +50,29 @@ def test_substitution_without_push_is_permitted(command):
     "FOO=\"$(echo ')'; git push)\" pnpm build",
     'FOO="$(echo x" pnpm build',
     "echo $(date",
-    # Unbalanced quote: the line cannot be tokenized, so it cannot be verified.
-    'echo "; g\\it p\\ush o\\rigin m\\ain',
+    # Operators that chain commands, and a redirect before the command word, do not hide it.
+    "true && $(echo g)it $(echo pu)sh origin main",
+    "false || $(echo g)it $(echo pu)sh origin main",
+    "> out $(echo g)it $(echo pu)sh origin main",
+    # env runs its -S value as a command; the value is not scanned here.
+    "env -Sgit push origin main",
+    "env --split-string=g''it push origin main",
+    # Shell options with an operand, and --norc (not -c), do not hide the -c script.
+    "bash -o pipefail -c '{git,push,origin,main}'",
+    "bash --norc -c '{git,push,origin,main}'",
+    "bash +e -c '{git,push,origin,main}'",
+    "sh -xc '$CMD'",
+    "bash --rcfile x -xc '$CMD'",
+    # Line continuation joins the words.
+    "gi\\\nt push origin main",
+    "git pu\\\nsh origin main",
+    # An even run of backslashes leaves the backtick live.
+    "echo \\\\`git push\\\\`",
+    "echo \\\\$(git push origin main)",
+    # A shell that reads stdin, or -s, runs input this guard cannot see.
+    "cat x | sh -",
+    "printf 'git push' | sh -s arg",
+    "sh < script.sh",
     # Newline ends a command: the dynamic word starts a new one.
     "true\n$(echo g)it $(echo pu)sh origin main",
     # Assignment and reserved-word prefixes do not hide a dynamic command head.
@@ -67,6 +96,19 @@ def test_substitution_with_push_is_refused_in_prose():
 
 def test_unclosed_substitution_in_prose_is_text():
     assert not shell_safety.unsafe_manual_push("Replace $( with the name", prose=True)
+
+
+@pytest.mark.parametrize("word", sorted(shell_safety._PREFIX_WORDS))
+def test_every_prefix_word_keeps_a_dynamic_head_refused(word):
+    assert shell_safety.unsafe_manual_push(f"{word} $(echo g)it $(echo pu)sh origin main")
+
+
+@pytest.mark.parametrize("text", [
+    "Run $(git push origin main",
+    "Run $(echo ') ; g\\it p\\ush origin main",
+])
+def test_unclosed_substitution_in_prose_with_push_is_refused(text):
+    assert shell_safety.unsafe_manual_push(text, prose=True)
 
 
 def test_plan_accepts_checks_line_with_command_substitution():
