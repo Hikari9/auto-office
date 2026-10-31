@@ -362,11 +362,13 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(line)
     replies = [] if state.is_terminal(run) else dispatch_mod.reply_pending(con, run)
     hard = dispatch_mod.reply_hard_bound()
+    convergence = contract.is_convergence(run)
+    stuck_reply = None
     for r in replies:
         if r["quiet"] < hard:
             res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
-    convergence = contract.is_convergence(run)
-    stuck_reply = next((n for n in (_stuck_reply_next(r, convergence) for r in replies if r["quiet"] >= hard) if n), None)
+        else:
+            stuck_reply = stuck_reply or _stuck_reply_next(r, convergence)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
