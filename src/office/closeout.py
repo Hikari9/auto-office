@@ -11,7 +11,9 @@ Every `office close` path ends with one `office close done — <summary>` line.
 """
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -24,13 +26,44 @@ _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 
 _VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
-# Terminal escape sequences, C0/C1 controls, bidi overrides and zero-width characters.
-_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
+# Terminal escape sequences, C0/C1 controls, bidi and format characters (zero-width, invisible, tag).
+_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\U000e0000-\U000e007f]")
 
 
 def clean_text(text: str) -> str:
     """One line of text safe to print: unprintable characters become spaces, whitespace collapses."""
     return " ".join(_UNPRINTABLE.sub(" ", text).split())
+
+
+VERIFIED_LIVE = "verified-live"  # exercised against the real system or binary
+VERIFIED_AGAINST_FAKES = "verified-against-fakes"  # met only against test doubles
+NOT_VERIFIED = "not-verified"
+VERIFICATION_KINDS = (VERIFIED_LIVE, VERIFIED_AGAINST_FAKES, NOT_VERIFIED)
+
+
+def criteria_report(criteria: list[tuple[str, str | None]]) -> list[str]:
+    """One line per acceptance criterion as `<kind>: <text>`, then one summary line (#945).
+
+    `criteria` holds (text, verification kind). Fails closed: a criterion without text or a known kind,
+    and an empty list, raise ValueError rather than report the work as met. The summary names the
+    criteria not verified live, faked and unverified together, or says all are verified live.
+    """
+    criteria = list(criteria)  # a generator is truthy even when it yields nothing
+    if not criteria:
+        raise ValueError("acceptance cannot be reported as met without labeled criteria")
+    lines, weak = [], []
+    for item in criteria:
+        text, kind = item if isinstance(item, tuple) and len(item) == 2 else (None, None)
+        label = clean_text(text) if isinstance(text, str) else ""
+        if not label or kind not in VERIFICATION_KINDS:
+            raise ValueError(f"acceptance criterion needs text and one verification kind "
+                             f"({', '.join(VERIFICATION_KINDS)}); got {item!r}")
+        lines.append(f"{kind}: {label}")
+        if kind != VERIFIED_LIVE:
+            weak.append(f"{label} ({kind})")
+    lines.append("not verified live: " + ", ".join(weak) if weak
+                 else f"all {len(lines)} acceptance criteria verified live")
+    return lines
 
 
 def visual_review_disclosures(con, run: dict) -> list[str]:
@@ -39,23 +72,13 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
     A task is covered by its own legacy gate, or by the lane gate whose frozen members include it
     (convergence lane gates have no task_id). A required review with no covering gate never ran.
     """
-    from office import convergence, state, visual
+    from office import state, visual
     required = [t for t in state.tasks(con, run["id"])
                 if t["status"] != "cancelled"
                 and visual.applicability(con, run, t, [])["status"] in ("required", "probe")]
     if not required:
         return []
-    latest: dict[str, dict] = {}
-    newest_unattributed: dict | None = None  # the newest lane gate that predates members_json
-    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
-                           "ORDER BY created_at, id", (run["id"],)).fetchall():
-        gate = dict(row)
-        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
-        if members is None:
-            newest_unattributed = gate
-            continue
-        for tid in members:
-            latest[tid] = gate
+    latest, newest_unattributed = _latest_visual_gates(con, run)
     lines = []
     for task in required:
         tid = task["id"]
@@ -71,6 +94,78 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
             summary = clean_text(gate["summary"] or "")[:180]
             lines.append(f"visual review skipped/degraded for {tid}: {reason}" + (f" ({summary})" if summary else ""))
     return lines
+
+
+def _latest_visual_gates(con, run: dict) -> tuple[dict[str, dict], dict | None]:
+    """The newest non-cancelled visual gate covering each task, and the newest gate with no recorded membership."""
+    from office import convergence
+    latest: dict[str, dict] = {}
+    newest_unattributed: dict | None = None  # the newest lane gate that predates members_json
+    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
+                           "ORDER BY created_at, id", (run["id"],)).fetchall():
+        gate = dict(row)
+        members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
+        if members is None:
+            newest_unattributed = gate
+            continue
+        for tid in members:
+            latest[tid] = gate
+    return latest, newest_unattributed
+
+
+def acceptance_report(con, run: dict, landed: str | None) -> list[str]:
+    """Closeout's per-criterion acceptance lines (#945, A15). Each criterion's kind comes from evidence Office
+    recorded, never from a caller-supplied label: verified-live when a live verification covers its task (a
+    passing prod deploy verify of the landed commit, or the task's latest visual gate is a passing COMPARABLE
+    capture of its accepted revision); verified-against-fakes when the accepted revision's latest checks gate
+    passed; otherwise not-verified. A report that cannot be formed is one line, never a met claim."""
+    from office import state
+    try:
+        tasks = [t for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
+        deployed = _deploy_verified(con, run, landed)
+        latest, newest_unattributed = _latest_visual_gates(con, run)
+        criteria = [(text, _evidence_kind(con, run, task, deployed, latest, newest_unattributed))
+                    for task in tasks for text in task["accept"]]
+        return criteria_report(criteria)
+    except (ValueError, sqlite3.Error) as exc:  # a bad recorded row must not break the close it reports on
+        return [f"acceptance not reported: {exc}"]
+
+
+def _evidence_kind(con, run: dict, task: dict, deployed: bool, latest: dict, newest_unattributed: dict | None) -> str:
+    rev = task.get("accepted_revision_id")
+    if task["status"] != "accepted" or not rev:
+        return NOT_VERIFIED
+    if deployed or _visual_live(task, rev, latest, newest_unattributed):
+        return VERIFIED_LIVE
+    if _checks_passed(con, run, task["id"], rev):
+        return VERIFIED_AGAINST_FAKES
+    return NOT_VERIFIED
+
+
+def _deploy_verified(con, run: dict, landed: str | None) -> bool:
+    """The newest prod verify (land.verify) of the landed commit exited 0. Preview and other-commit verifies
+    do not count: they did not exercise the prod build the closed run landed."""
+    if not landed:
+        return False
+    row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='land.verify' "
+                      "AND json_extract(payload_json, '$.target')='prod' AND json_extract(payload_json, '$.commit')=? "
+                      "ORDER BY seq DESC LIMIT 1", (run["id"], landed)).fetchone()
+    return bool(row) and json.loads(row["payload_json"]).get("exit") == 0
+
+
+def _visual_live(task: dict, rev: str, latest: dict, newest_unattributed: dict | None) -> bool:
+    gate = latest.get(task["id"])
+    if gate is None or (newest_unattributed is not None and _order(gate) < _order(newest_unattributed)):
+        return False  # no covering gate, or an unattributed gate that may be newer
+    if gate["task_id"] and gate["revision_id"] != rev:
+        return False  # a task's own capture must be of its accepted revision
+    return gate["status"] == "done" and gate["evidence_status"] == "COMPARABLE" and gate["verdict"] == "PASS"
+
+
+def _checks_passed(con, run: dict, task_id: str, rev: str) -> bool:
+    row = con.execute("SELECT verdict FROM gates WHERE run_id=? AND task_id=? AND revision_id=? AND kind='checks' "
+                      "AND status='done' ORDER BY created_at DESC, id DESC LIMIT 1", (run["id"], task_id, rev)).fetchone()
+    return bool(row) and row["verdict"] == "PASS"
 
 
 def _order(gate: dict) -> tuple[str, str]:
