@@ -5,7 +5,7 @@ import json
 import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, start_inline
-from office import briefs, config, contract, convergence, executor_slates, greenfield, planfile, routing, self_review_subagents, state, task_sizing
+from office import briefs, candidates, config, contract, convergence, executor_slates, greenfield, planfile, routing, self_review_subagents, state, task_sizing
 
 PHASES = """phases:
 - Establish the foundation and stable application interfaces
@@ -193,3 +193,14 @@ def test_xl_slate_entry_denied_or_disabled_falls_back_to_next_eligible_route_and
     first = [line for line in skipped if line.startswith("#1 claude/claude-opus-5-5@medium")]
     assert len(first) == 1, skipped
     assert ("deny" if denied else "not-in-catalog") in first[0], first[0]
+
+
+def test_greenfield_executor_gets_the_xl_size_slate_and_floor_in_route_context():
+    run = {"gear": "greenfield", "gates": {"gear_model_version": "run-gear-1"}, "risk": {}}
+    assert candidates._uses_size_slate({}, run, "XL", "executor")
+    assert candidates._preferred_seed({}, run, "XL", "executor") == executor_slates.ideal_seed("XL")
+    context = {"gear": candidates._slate_gear(run), "size_class": "XL"}
+    assert executor_slates.new_gear_size({"context": context}) == "XL"
+    legacy = {"gear": "greenfield", "gates": {"gear_model_version": "legacy-pinned"}, "risk": {}}
+    assert not candidates._uses_size_slate({}, legacy, "XL", "executor")
+    assert candidates._slate_gear(legacy) == "greenfield"
