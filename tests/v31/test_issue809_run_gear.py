@@ -437,6 +437,25 @@ SONNET_CLAUDE_MEDIUM = "claude@1/claude-sonnet-5-5@medium"
 SONNET_AGY_MEDIUM = "agy@1/claude-sonnet-5-5@medium"
 
 
+def test_sonnet_fallback_can_be_truncated_at_slate_boundary():
+    from pathlib import Path
+    from test_issue809_real_routes import candidate, decide
+
+    pool = [candidate("gpt-6.1-terra", "high", 50),
+            candidate("gemini-3.8-flash", "medium", 49, harness="agy"),
+            candidate("claude-sonnet-5-5", "medium", 48, harness="claude"),
+            candidate("glm-5.3-flash", "max", 47, harness="opencode"),
+            candidate("claude-sonnet-5-5", "medium", 46, harness="agy")]
+    result = decide("XS", pool, gear="XS", preference=[{"model_id": "nonexistent", "effort": "low"}])
+    slate = [entry["route"] for entry in result["selection_disclosure"]["slate"]]
+    assert slate[-1] == SONNET_CLAUDE_MEDIUM
+    assert SONNET_AGY_MEDIUM not in slate
+    assert [(item["from"], item["to"]) for item in result["routing"]["sonnet_self_fallbacks"]] == [
+        (SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)]
+    doc = (Path(__file__).resolve().parents[2] / "docs/xs-xl-run-gear.md").read_text()
+    assert "The displayed slate can truncate agy when Claude Code occupies its last position." in doc
+
+
 def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     """Sonnet 5.5 Claude Code -> agy is a same-model, same-effort harness fallback on new XS-XL gear runs.
 
