@@ -277,6 +277,32 @@ def test_the_wake_supervisor_skips_the_startup_probe(monkeypatch):
     assert probed == []
 
 
+@pytest.mark.parametrize("argv", [["raw", "status"], ["hook", "PreToolUse"]])
+def test_raw_and_hook_fail_fast_during_a_rebuild_before_their_fast_path(monkeypatch, capsys, argv):
+    """The fast paths skip the command parser, so the rebuild probe runs before them: a hook must not act mid-rebuild (#920)."""
+    from office import compat, hooks
+
+    monkeypatch.setattr(version, "current", _broken)
+    monkeypatch.setattr(compat, "raw", _broken)  # the fast path itself must never start
+    monkeypatch.setattr(hooks, "main", _broken)
+
+    assert cli.main(argv) == version.REBUILD_EXIT_CODE
+    captured = capsys.readouterr()
+    assert captured.err.strip() == retry_line("ImportError: office")
+    assert "Traceback" not in captured.err and captured.out == ""
+
+
+def test_raw_and_hook_still_take_their_fast_paths_when_the_install_is_healthy(monkeypatch):
+    from office import compat, hooks
+
+    monkeypatch.setattr(version, "current", lambda: "3.2.0")
+    monkeypatch.setattr(compat, "raw", lambda argv: ("raw", argv))
+    monkeypatch.setattr(hooks, "main", lambda argv: ("hook", argv))
+
+    assert cli.main(["raw", "status"]) == ("raw", ["status"])
+    assert cli.main(["hook", "PreToolUse"]) == ("hook", ["PreToolUse"])
+
+
 def test_a_healthy_install_is_not_reported_as_rebuilding(monkeypatch):
     monkeypatch.setattr(version, "current", lambda: "3.2.0")
     assert version.rebuilding_reason() is None

@@ -629,17 +629,18 @@ def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> in
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Before the fast paths, so `raw` and `hook` fail fast during a rebuild too (#920). The root-wake supervisor skips
+    # the probe: it is a background process whose ticks already classify a failed import, and the probe would delay
+    # its first wake.
+    if argv[:1] != ["_wake_supervise"] and (reason := version.rebuilding_reason()):
+        print(version.rebuild_line(reason), file=sys.stderr)
+        return version.REBUILD_EXIT_CODE
     if argv and argv[0] == "raw":
         from office import compat
         return compat.raw(argv[1:])
     if argv and argv[0] == "hook":
         from office import hooks
         return hooks.main(argv[1:])
-    # After the hook fast path. The root-wake supervisor skips the probe: it is a background process whose
-    # ticks already classify a failed import, and the probe would delay the first wake (#920).
-    if argv[:1] != ["_wake_supervise"] and (reason := version.rebuilding_reason()):
-        print(version.rebuild_line(reason), file=sys.stderr)
-        return version.REBUILD_EXIT_CODE
     from office.state import OfficeError
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)
