@@ -1749,18 +1749,21 @@ def _reply_complete(run: dict, dispatch: dict, data: bytes) -> bool:
 
 def reply_pending(con, run: dict) -> list[dict]:
     """Reviewer replies written to disk whose dispatch is still open, oldest first: `id`, `task_id`, `kind` (its gate
-    kind) and `quiet` (seconds since the last write). A live watch ingests a reply once it settles (#918); this only reads."""
+    kind), `scope` (its lane or shared scope, else None), `path` (the reply file) and `quiet` (seconds since the last
+    write). A live watch ingests a reply once it settles (#918); this only reads."""
     now = time.time()
     out = []
-    for row in con.execute("SELECT d.id, d.task_id, g.kind FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+    for row in con.execute("SELECT d.id, d.task_id, g.kind, g.scope FROM dispatches d JOIN gates g ON g.id=d.gate_id "
                            "WHERE d.run_id=? AND d.launcher='herdr' AND d.ended_at IS NULL AND d.status='running' "
                            "ORDER BY d.started_at", (run["id"],)).fetchall():
+        path = paths.run_dir(run["id"]) / "dispatches" / row["id"] / "reply.txt"
         try:
-            info = (paths.run_dir(run["id"]) / "dispatches" / row["id"] / "reply.txt").stat()
+            info = path.stat()
         except OSError:
             continue
         if info.st_size:
-            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "quiet": now - info.st_mtime})
+            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "scope": row["scope"],
+                        "path": str(path), "quiet": now - info.st_mtime})
     return out
 
 
@@ -1814,7 +1817,10 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
 
 def _pane_group_wait() -> float:
     """How long a pane launch polls for the agent's foreground group (#507)."""
-    return _env_seconds("OFFICE_PANE_GROUP_WAIT", 3.0)
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_PANE_GROUP_WAIT", "3.0")))
+    except ValueError:
+        return 3.0
 
 
 def _record_pane_agent_group(run: dict, dispatch_id: str, pane: str) -> int | None:
@@ -3694,8 +3700,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     noticed = False
     history: list[dict] = []
     last_size = None
-    last_digest = None
-    settled_since = None
+    last_digest = last_poll = settled_since = None
     busy_settle = _env_seconds("OFFICE_REPLY_BUSY_SETTLE_S", REPLY_BUSY_SETTLE_S)
     unknown = 0
     unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
@@ -3722,11 +3727,15 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
         size = output.stat().st_size if output and output.is_file() else 0
         data = _reply_bytes(output) if size else None
         digest = hashlib.sha256(data).hexdigest() if data else None
+        now = time.time()  # wall clock: a laptop sleep must not hide in monotonic time on macOS
         # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
         unchanged = digest is not None and digest == last_digest
-        if not unchanged:
-            settled_since = time.monotonic()
-        last_digest = digest
+        # A gap far past the poll interval is a suspend or a clock step: the agent was not watched through it, so the
+        # settle window restarts rather than counting the gap as quiet time.
+        gap = None if last_poll is None else now - last_poll
+        if not unchanged or gap is None or not 0 <= gap <= max(5.0, 3 * poll):
+            settled_since = now
+        last_digest, last_poll = digest, now
         sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is not None:
             unknown = unknown + 1 if sample.get("busy") is None else 0
@@ -3746,7 +3755,7 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
             # pane has been unreadable past the limit, a file that stopped
             # changing is the only evidence left, so it bounds the wait.
             return 0, "success"
-        if unchanged and not worker and time.monotonic() - settled_since >= busy_settle \
+        if unchanged and not worker and time.time() - settled_since >= busy_settle \
                 and data is not None and _reply_complete(run, first, data):
             # A reviewer's complete reply has been byte-identical for the settle window while its pane still draws a
             # turn: the agent is not writing it, so the pane's busy text does not hold it back (#918, A6).

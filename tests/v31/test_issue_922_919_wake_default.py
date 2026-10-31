@@ -10,7 +10,7 @@ import pytest
 
 from test_issue_895_false_stalls import _ago, _reviewer_gate
 from test_root_wake_723 import PANE, setup_root
-from test_wait import _go
+from test_wait import EXTERNAL, _go
 
 from office import context_snapshot, db, guide, rerun, root_wake, state, watchdog
 from office import gates as gates_mod
@@ -22,10 +22,10 @@ def _run(con) -> dict:
     return state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
 
 
-def _review_gate(con, run, gate_id, *, kind="lane", status="queued", created_for=0.0, finished_for=None):
+def _review_gate(con, run, gate_id, *, kind="lane", status="queued", created_for=0.0, finished_for=None, task="T1"):
     con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, plan_version, kind, input_key, status, "
                 "verdict, created_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (gate_id, run["id"], "task", "T1", None, run.get("plan_version"), kind, f"k-{gate_id}", status,
+                (gate_id, run["id"], "task", task, None, run.get("plan_version"), kind, f"k-{gate_id}", status,
                  "PASS" if status == "done" else None, _ago(created_for),
                  _ago(finished_for) if finished_for is not None else None))
     con.commit()
@@ -387,3 +387,57 @@ def test_a_queued_live_job_next_is_office_wait_not_status(env, monkeypatch):
     _review_gate(con, _run(con), "GQ9", created_for=600)
     (ep,) = watchdog.review_episodes(con, _run(con), probe=False)
     assert ep["next"].startswith("office wait (review job is alive)"), ep
+
+
+def test_a_queued_review_past_its_bound_wakes_the_wait_once_with_its_next(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_QUEUED_S", "60")
+    monkeypatch.setattr(gates_mod, "owner_state", lambda con, run, g: ("queued", "job J1 is queued"))
+    con = env.con()
+    _review_gate(con, _run(con), "GW1", created_for=600)
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "T1 lane review GW1 queued" in out and "next: office revoke T1, then office review T1" in out, out
+    code, out = env.office("wait", "--timeout", "0.5", "--poll", "0.2", env=EXTERNAL)
+    assert code == 124 and "wait: nothing new" in out, out
+
+
+def test_an_unread_closed_review_wakes_the_wait_with_its_next(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    run = _run(con)
+    _closed_review(con, run)
+    _event(con, run, "gate.pass", "T1", 899)
+    code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
+    assert code == 0, out
+    assert "verdict is unread" in out and "next: office context to read the T1 verdict" in out, out
+
+
+def test_a_verdict_status_showed_before_the_bound_is_not_unread_when_the_bound_passes(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "60")
+    con = env.con()
+    run = _run(con)
+    _closed_review(con, run, finished_for=5)
+    _event(con, run, "gate.pass", "T1", 4)
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})  # shows the verdict while it is young
+    assert "verdict shown: T1 lane review GU1" in out, out
+    con.execute("UPDATE gates SET finished_at=? WHERE id='GU1'", (_ago(1000),))
+    con.commit()
+    assert watchdog.review_episodes(con, _run(con), probe=False) == []
+
+
+def test_status_shows_at_most_three_unread_verdicts_and_leaves_the_rest_unread(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "3600")
+    con = env.con()
+    run = _run(con)
+    for i, task in enumerate(["T1", "T2", "T3", "T4"]):
+        _review_gate(con, run, f"GC{i}", status="done", task=task, created_for=100 - i, finished_for=100 - i)
+        _event(con, run, "gate.pass", task, 99 - i)
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
+    assert out.count("verdict shown:") == 3, out
+    assert "1 more closed verdicts unread" in out, out
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
+    assert out.count("verdict shown:") == 1 and "more closed verdicts unread" not in out, out

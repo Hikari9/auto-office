@@ -696,6 +696,28 @@ def _check_env(run: dict) -> dict:
 
 # ------------------------------------------------------------------ reviewers
 
+def reviewer_route_rejections(decision: dict, *, max_items: int = 6) -> str:
+    """Short, truthful routing rejection detail for gate receipts and office status."""
+    request = decision.get("request") or {}
+    seed = request.get("preferred_seed") or []
+    preferred = {routing.candidate_id(c) for c in request.get("candidates") or []
+                 if routing.preferred_rank(c, seed) is not None}
+    entries = list(decision.get("rejected") or []) + list(decision.get("skipped") or [])
+    entries.sort(key=lambda item: (item.get("candidate") not in preferred,
+                                   str(item.get("candidate") or "")))
+    seen, reasons = set(), []
+    for item in entries:
+        name, why = item.get("candidate"), item.get("reason")
+        if not name or not why or (name, why) in seen:
+            continue
+        seen.add((name, why))
+        reasons.append(f"{name}: {why}")
+    if not reasons:
+        return ""
+    suffix = f"; {len(reasons) - max_items} more rejected" if len(reasons) > max_items else ""
+    return "; rejected: " + "; ".join(reasons[:max_items])[:420] + suffix
+
+
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
@@ -767,12 +789,19 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 soft = set()  # nothing else qualifies: the routes tried before may have recovered
                 decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                                  exclude=excluded)
+        if decision.get("status") != "selected" and role == "visual_reviewer" and not pinned:
+            # A reviewer failure may leave the next preferred route unproven.
+            # Prove further eligible candidates and immediately re-route within
+            # this same gate; a failed/protected primary never ends the chain.
+            from office import conformance
+            conformance.ensure_vision_route(con, run, state.pinned_config(run), exclude=excluded | soft)
+            decision = candidates.route_role(con, state.pinned_config(run), run, role,
+                                             task_id=gate.get("task_id"), exclude=excluded | soft)
         if decision.get("status") != "selected":
             failures.append(f"no qualifying {role} route ({decision.get('status')})"
                             + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
                                if decision.get("status") == "protected_quota_would_be_consumed" else "")
-                            + (f"; other seeded routes were out: {blockers}"
-                               if (blockers := candidates.seeded_fallback_blockers(decision)) else ""))
+                            + reviewer_route_rejections(decision))
             break
         cand = decision["candidate"]
         triple = routing.candidate_id(cand)

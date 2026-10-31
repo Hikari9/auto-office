@@ -283,6 +283,9 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     return None
 
 
+VERDICT_LINES = 3  # closed verdicts one status shows and marks read (#919)
+
+
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
            probe_panes: bool = False) -> Result:
     worker = os.environ.get("OFFICE_DISPATCH_ID")
@@ -366,7 +369,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for r in replies:
         if r["quiet"] < hard:
             res.add(f"{r['id']} reply is written; Office ingests it when it settles, no action needed")
-    stuck_reply = next((n for n in (_stuck_reply_next(r) for r in replies if r["quiet"] >= hard) if n), None)
+    convergence = contract.is_convergence(run)
+    stuck_reply = next((n for n in (_stuck_reply_next(r, convergence) for r in replies if r["quiet"] >= hard) if n), None)
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
@@ -377,15 +381,26 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(f"question: {q}")
     for line in _amendment_stalls(con, run):
         res.add(f"blocker: {line}")
-    episodes = []
+    episodes, verdict_lines = [], []
     if not state.is_terminal(run):
         from office import db, watchdog
-        episodes = watchdog.review_episodes(con, run, probe=probe_panes)
-        with db.transaction(con):
-            watchdog.record_review_episodes(con, run, episodes)
-            watchdog.mark_review_episodes_read(con, run, episodes)
+        verdicts = watchdog.unread_verdicts(con, run)
+        episodes = watchdog.review_episodes(con, run, probe=probe_panes, verdicts=verdicts)
+        # A verdict is read only once its line is printed: an episode line, or one of at most a few verdict lines.
+        # Session hooks cut the output by bytes, so a longer list would lose lines that were marked read.
+        in_episode = {ep["episode"] for ep in episodes if ep["kind"] == "review.closed_unread"}
+        pending = [v for v in verdicts if v["gate"]["id"] not in in_episode]
+        shown = pending[:VERDICT_LINES]
+        verdict_lines = [watchdog.verdict_line(v["gate"]) for v in shown]
+        if len(pending) > len(shown):
+            verdict_lines.append(f"{len(pending) - len(shown)} more closed verdicts unread; the next office status shows them")
+        printed = in_episode | {v["gate"]["id"] for v in shown}
+        if episodes or verdicts:
+            with db.transaction(con):
+                watchdog.record_review_episodes(con, run, episodes)
+                watchdog.mark_review_verdicts_read(con, run, [v for v in verdicts if v["gate"]["id"] in printed])
     # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
-    res.lines[1:1] = [f"blocker: {ep['text']}" for ep in episodes]
+    res.lines[1:1] = [*verdict_lines, *(f"blocker: {ep['text']}" for ep in episodes)]
     if probe_panes:
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.
@@ -422,13 +437,25 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     return res
 
 
-def _stuck_reply_next(reply: dict) -> str | None:
-    """The command that relaunches a task's code review on the same revision once its reply stayed unsettled past the
-    hard bound (#918). None for other reviews, which keep their own `next:`."""
-    if reply["kind"] != "code_review" or not reply["task_id"]:
-        return None
-    return (f"office revoke {reply['id']}, then office review {reply['task_id']} "
-            "to relaunch the review on the same revision")
+LANE_REVIEW_SPEC = {"convergence_review": "convergence", "visual": "visual"}  # gate kind -> `<scope>:<kind>` argument
+
+
+def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
+    """The next command for a stuck reviewer once its reply stayed unsettled past the hard bound (#918). Where a
+    same-revision re-run exists it names that (revoke, then review). A v3.1 plan review and a task visual review have
+    none, so they name the manual step and the reply file the orchestrator reads the verdict from. None otherwise."""
+    did, kind = reply["id"], reply["kind"]
+    if kind == "plan_review" and convergence:
+        return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
+    if reply["scope"] and kind in LANE_REVIEW_SPEC:
+        spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
+        return f"office revoke {spec}, then office review {spec} to re-run the review on the same revision"
+    if kind == "code_review" and reply["task_id"]:
+        return (f"office revoke {did}, then office review {reply['task_id']} "
+                "to relaunch the review on the same revision")
+    if kind == "plan_review" or (kind == "visual" and reply["task_id"]):
+        return f"office revoke {did}, then office resume; the reply is at {reply['path']}"
+    return None
 
 
 def add_bug_hints(con, run: dict, res: Result) -> Result:
@@ -907,9 +934,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
     orchestrator event. Exit 3: a stall, or an already-reported orchestrator
     action with no work in flight to advance it (your move, #735).
     Exit 5: an agent is waiting on a question (a `question:` line names it and
-    the `office answer` command). Exit 124: timeout with nothing new. A watcher
+    the `office answer` command). Exit 124: timeout with nothing new. A review gate
+    queued past its bound or closed unread (#919) is news: exit 0, once per episode. A watcher
     keys on the exit code, never on matching status text."""
-    from office import db, dispatch, jobs, lifecycle, questions
+    from office import db, dispatch, jobs, lifecycle, questions, watchdog
     from office.util import now_iso
     start = _snapshot(con, run)
     started_at = now_iso()  # only a job that fails while waiting is news
@@ -927,8 +955,10 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
         from office import ctx_alert
         ctx_alert.notice(con, run)
         asked, _, acts = questions.scan(con, run)
-        stuck = stalls(con, run, since=started_at, acts=acts) + signals
+        episodes = watchdog.review_episodes(con, run, probe=True)
+        stuck = stalls(con, run, since=started_at, acts=acts, episodes=episodes) + signals
         fresh_stall, stall_signature = _fresh_stall(con, run, stuck)
+        review_news = watchdog.fresh_review_episodes(con, run, episodes)
         changed = _snapshot(con, run) != start
         # Only an *actionable* orchestrator event warrants an exit 0: a task paused on a
         # refused submit, a gate failure, a recheck the orchestrator must route. A pure
@@ -953,7 +983,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                      and not _work_in_flight(con, run))
         first = False
         terminal = state.is_terminal(state.get_run(con, run["id"]))
-        if asked or fresh_stall or changed or news or pending or your_move or terminal or now() >= deadline:
+        if asked or fresh_stall or changed or news or review_news or pending or your_move or terminal or now() >= deadline:
             res = status(con, run)
             if pending:
                 with db.transaction(con):
@@ -984,7 +1014,7 @@ def wait(con, run: dict, *, timeout: float, poll: float = 10.0) -> Result:
                 res.lines = [res.lines[0], *[f"question: {q}" for q in asked],
                              *[ln for ln in res.lines[1:] if ln.removeprefix("question: ") not in asked]]
                 res.exit_code = questions.EXIT
-            elif not (fresh_stall or changed or news or pending or your_move or terminal):
+            elif not (fresh_stall or changed or news or review_news or pending or your_move or terminal):
                 res.lines.insert(1, f"wait: nothing new in {int(timeout)}s")
                 res.exit_code = 124
             return add_bug_hints(con, run, res)

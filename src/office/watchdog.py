@@ -218,7 +218,7 @@ def _age(ts: str, now: str) -> float:
     return (parse_iso(now) - parse_iso(ts)).total_seconds()
 
 
-def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
+def review_episodes(con, run: dict, *, probe: bool, verdicts: list[dict] | None = None) -> list[dict]:
     """Review gates past a bound, one dict per episode: `kind` (its event), `episode` (the dedupe key),
     `text` (the blocker line) and `next` (the concrete step). `probe` adds running reviewers, which
     read panes. A review that is running and within its bounds matches nothing.
@@ -252,13 +252,26 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
             _, sep, action = note.partition("; next: ")
             out.append({"kind": "review.stalled", "episode": f"{dispatch_id}:{since}", "text": note,
                         "next": action if sep else "office status"})
-    for g in con.execute(f"SELECT * FROM gates WHERE run_id=? AND kind IN ({marks}) AND status='done' "
-                         "AND finished_at IS NOT NULL ORDER BY finished_at", (run["id"], *REVIEW_GATE_KINDS)).fetchall():
+    for v in (unread_verdicts(con, run) if verdicts is None else verdicts):
+        g = v["gate"]
         age = _age(g["finished_at"], now)
         if age < threshold("closed_unread"):
             continue
-        # The verdict is the first verdict-kind event for this gate's task after it closed. It is unread
-        # until status has shown this episode (the per-gate read cursor); other events never clear it.
+        scope = g["task_id"] or "plan"
+        out.append({"kind": "review.closed_unread", "episode": g["id"], "read_seq": v["seq"],
+                    "text": f"{scope} {g['kind']} review {g['id']} closed {int(age)}s ago and its verdict is unread",
+                    "next": f"office context to read the {scope} verdict, then act on it"})
+    return out
+
+
+def unread_verdicts(con, run: dict) -> list[dict]:
+    """Closed review gates whose verdict no status has shown yet, as `gate` (its row) and `seq` (the verdict event).
+    The verdict is the first verdict-kind event for the gate's task after it closed. It stays unread until status
+    has shown it, whatever its age: the per-gate read cursor is the only thing that clears it."""
+    marks =",".join("?" for _ in REVIEW_GATE_KINDS)
+    out = []
+    for g in con.execute(f"SELECT * FROM gates WHERE run_id=? AND kind IN ({marks}) AND status='done' "
+                         "AND finished_at IS NOT NULL ORDER BY finished_at", (run["id"], *REVIEW_GATE_KINDS)).fetchall():
         cursor = con.execute("SELECT last_seq FROM cursors WHERE run_id=? AND consumer=?",
                              (run["id"], f"{REVIEW_READ}:{g['id']}")).fetchone()
         # Bounded by the next review of the same task (or plan) closing: its verdict is not this gate's.
@@ -269,21 +282,30 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
                               "AND seq>? AND (kind LIKE 'gate.%' OR kind LIKE 'plan.%' OR kind LIKE 'convergence.%') "
                               "ORDER BY seq LIMIT 1", (run["id"], g["task_id"], g["finished_at"], nxt,
                                                        cursor[0] if cursor else 0)).fetchone()
-        if verdict is None:
-            continue
-        scope = g["task_id"] or "plan"
-        out.append({"kind": "review.closed_unread", "episode": g["id"], "read_seq": verdict[0],
-                    "text": f"{scope} {g['kind']} review {g['id']} closed {int(age)}s ago and its verdict is unread",
-                    "next": f"office context to read the {scope} verdict, then act on it"})
+        if verdict is not None:
+            out.append({"gate": g, "seq": verdict[0]})
     return out
 
 
-def mark_review_episodes_read(con, run: dict, episodes: list[dict]) -> None:
-    """Called once status has shown these episodes: their closed verdicts count as read. Caller holds the transaction."""
+def verdict_line(gate) -> str:
+    """The status line for a closed verdict shown before its episode bound (#919)."""
+    scope = gate["task_id"] or "plan"
+    return (f"verdict shown: {scope} {gate['kind']} review {gate['id']} closed "
+            f"{int(_age(gate['finished_at'], now_iso()))}s ago; `office context` has the detail")
+
+
+def mark_review_verdicts_read(con, run: dict, verdicts: list[dict]) -> None:
+    """Called once status has printed these verdicts, as episode or verdict line: they count as read, so the
+    bound cannot flag one that was shown young (#919). Caller holds the transaction."""
     from office import state
-    for ep in episodes:
-        if ep["kind"] == "review.closed_unread":
-            state.advance_cursor(con, run["id"], f"{REVIEW_READ}:{ep['episode']}", ep["read_seq"])
+    for v in verdicts:
+        state.advance_cursor(con, run["id"], f"{REVIEW_READ}:{v['gate']['id']}", v["seq"])
+
+
+def _recorded(con, run: dict, ep: dict) -> bool:
+    return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? "
+                       "AND json_extract(payload_json, '$.episode')=? LIMIT 1",
+                       (run["id"], ep["kind"], ep["episode"])).fetchone() is not None
 
 
 def record_review_episodes(con, run: dict, episodes: list[dict]) -> None:
@@ -291,9 +313,12 @@ def record_review_episodes(con, run: dict, episodes: list[dict]) -> None:
     Caller holds the transaction."""
     from office import state
     for ep in episodes:
-        seen = con.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? "
-                           "AND json_extract(payload_json, '$.episode')=? LIMIT 1",
-                           (run["id"], ep["kind"], ep["episode"])).fetchone()
-        if not seen:
+        if not _recorded(con, run, ep):
             state.emit(con, run, ep["kind"], f"{ep['text']}; next: {ep['next']}"[:300],
                        audience="orchestrator", payload={"episode": ep["episode"]})
+
+
+def fresh_review_episodes(con, run: dict, episodes: list[dict]) -> list[dict]:
+    """Queued-too-long and closed-unread episodes no orchestrator event has recorded yet. `office wait`
+    wakes on these (exit 0): stalled reviewers are a stall (exit 3) and reach the wait through guide.stalls."""
+    return [ep for ep in episodes if ep["kind"] != "review.stalled" and not _recorded(con, run, ep)]

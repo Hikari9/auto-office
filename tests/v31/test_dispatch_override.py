@@ -226,8 +226,9 @@ def test_default_reviewer_seeds_and_fallbacks():
         assert roles[role]["strict_seed"] is False, role
     visual = roles["visual_reviewer"]["preferred_seed"]
     assert visual == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "low"},
-                      {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"},
-                      {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"}]
+                      {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"},
+                      {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode", "effort": "max"},
+                      {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
 
 
 @pytest.mark.approved

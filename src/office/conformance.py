@@ -126,21 +126,51 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
     return {"result": result, "detail": detail, "triple": routing.candidate_id(cand)}
 
 
-def ensure_vision_route(con, run: dict, config: dict) -> None:
-    """Probe the preferred visual routes in order until one proves image
-    capability. Stops at the first pass; never marks a route without a probe."""
+def ensure_vision_route(con, run: dict, config: dict, *, exclude: set[str] | None = None) -> None:
+    """Qualify an actually routable visual reviewer, including candidates past four.
+
+    Build the same policy-aware slate as route_role (including user/seed allows),
+    and re-route on the same connection after each exact vision proof. A passing
+    probe must be visible to the following selection in this very job. When a
+    preferred route is quota-protected or fails conformance, try the next one;
+    do not spend vision probes on known policy or quota failures.
+    """
     from office import candidates
-    all_adapters = adapters.load_all()
-    cands, _ = candidates.build_candidates(con, "visual_reviewer", probe=False)
-    seed = (candidates.role_policy(config, "visual_reviewer").get("preferred_seed") or [])
-    ordered = sorted(cands, key=lambda c: (routing.preferred_rank(c, seed) if routing.preferred_rank(c, seed) is not None
-                                           else len(seed), routing.candidate_id(c)))
-    for cand in ordered[:4]:
-        adapter = all_adapters[cand["adapter_id"]]
-        status = proof_status(con, cand, adapter, "vision")
-        if status == "pass":
-            return
-        if status == "fail":
+
+    excluded = set(exclude or ())
+
+    def select() -> dict:
+        return candidates.route_role(con, config, run, "visual_reviewer",
+                                     exclude=excluded or None, observe=True)
+
+    decision = select()
+    if decision.get("status") == "selected":
+        return  # a proven or user-allowed route (#845) already qualifies: no probe spent
+    request = decision.get("request") or {}
+    seed = candidates.role_policy(config, "visual_reviewer").get("preferred_seed") or []
+    ordered = sorted(request.get("candidates") or [],
+                     key=lambda c: (routing.preferred_rank(c, seed)
+                                    if routing.preferred_rank(c, seed) is not None else len(seed),
+                                    routing.candidate_id(c)))
+    adapters_by_id = adapters.load_all()
+    reserve = float((request.get("policy") or {}).get("quota_reserve_percent", 0))
+    hard_rejected = {r.get("candidate") for r in decision.get("rejected") or []
+                     if r.get("stage") in (1, 4, 5, 7)}
+
+    for cand in ordered:
+        triple = routing.candidate_id(cand)
+        if (triple in excluded or f"harness:{cand['harness']}" in excluded
+                or f"model:{cand['harness']}/{cand['invocation_model_id']}" in excluded
+                or triple in hard_rejected):
             continue
+        quota = cand.get("quota") or {}
+        remaining = quota.get("tightest_remaining_percent")
+        if (quota.get("status") == "ok" and remaining is not None
+                and float(remaining) - float(quota.get("projected_burn_percent") or 0) < reserve):
+            continue  # never consume the run's protected quota just to prove vision
+        adapter = adapters_by_id.get(cand["adapter_id"])
+        if adapter is None or proof_status(con, cand, adapter, "vision") is not None:
+            continue  # already passed or failed on this exact route; do not re-probe
         if probe_vision(con, run, cand, adapter)["result"] == "pass":
-            return
+            if select().get("status") == "selected":
+                return  # refresh immediately, not in a later job

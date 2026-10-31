@@ -81,6 +81,60 @@ def test_the_run_contract_decides_whether_a_busy_reply_is_complete(env, monkeypa
 
 
 @pytest.mark.approved
+def test_a_same_size_rewrite_of_a_complete_reply_is_not_ingested_while_busy(env, monkeypatch):
+    """Two complete, same-length verdicts alternate: only the byte digest can tell the rewrites apart."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    drafts = ["VERDICT: APPROVED\nNEXT: merge it", "VERDICT: APPROVED\nNEXT: merge IT"]
+    out.write_text(drafts[0])
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0")
+
+    def flip(n):
+        out.write_text(drafts[n % 2])  # same size every poll, bytes differ
+        return dict(BUSY)
+
+    _pane_samples(monkeypatch, flip, limit=40)
+    with pytest.raises(Stop):
+        dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01)
+
+
+class _SleepingClock:
+    """`time` as the watch sees it: `time()` jumps forward by `slept` seconds, as a laptop sleep does between polls.
+    `monotonic()` does not move, matching macOS, where the monotonic clock stops during sleep."""
+    slept = 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def time(self):
+        return time.time() + self.slept
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("jump", [120.0, -3600.0], ids=["sleep", "clock-stepped-back"])
+def test_a_suspend_or_clock_step_restarts_the_settle_window(env, monkeypatch, jump):
+    """Quiet time counts only across polls the watch saw: after a sleep or a backward step the window starts over."""
+    _fake(env, monkeypatch)
+    _, d = _live_dispatch(env, monkeypatch)
+    out = env.tmp / "reply.txt"
+    out.write_text("VERDICT: APPROVED\nNEXT: merge it")
+    clock = _SleepingClock()
+    monkeypatch.setattr(dispatch_mod, "time", clock)
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.2")
+
+    def jump_after_first_poll(n):
+        if n == 1:
+            clock.slept += jump
+        return dict(BUSY)
+
+    calls = _pane_samples(monkeypatch, jump_after_first_poll, limit=2000)
+    assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    # The first poll after the jump only restarts the window: an ingest there would be the bug.
+    assert len(calls) >= 3, calls
+
+
+@pytest.mark.approved
 def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     _fake(env, monkeypatch)
     _, d = _live_dispatch(env, monkeypatch)
@@ -99,10 +153,28 @@ def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     assert len(calls) == 6
 
 
-def test_only_a_code_review_with_a_task_gets_the_relaunch_next():
-    assert guide._stuck_reply_next({"id": "D1", "task_id": "T1", "kind": "code_review"}).startswith("office revoke D1")
-    assert guide._stuck_reply_next({"id": "D1", "task_id": "T1", "kind": "plan_review"}) is None
-    assert guide._stuck_reply_next({"id": "D1", "task_id": None, "kind": "code_review"}) is None
+MANUAL = "office revoke D1, then office resume; the reply is at /runs/r1/dispatches/D1/reply.txt"
+
+
+@pytest.mark.parametrize("reply, convergence, expected", [
+    ({"id": "D1", "task_id": "T1", "kind": "code_review", "scope": None},
+     True, "office revoke D1, then office review T1 to relaunch the review on the same revision"),
+    ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
+     True, "office revoke D1, then office review plan --as <harness>/<model> to re-run the plan review"),
+    ({"id": "D1", "task_id": None, "kind": "convergence_review", "scope": "L-T1"},
+     True, "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
+    ({"id": "D1", "task_id": None, "kind": "visual", "scope": "L-T1"},
+     True, "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
+    # No same-revision re-run for a v3.1 plan review or a task visual review: the manual step and the reply file.
+    ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"}, False, MANUAL),
+    ({"id": "D1", "task_id": "T1", "kind": "visual", "scope": None}, True, MANUAL),
+    ({"id": "D1", "task_id": "T1", "kind": "visual", "scope": None}, False, MANUAL),
+    # A code review with no task has nothing to relaunch.
+    ({"id": "D1", "task_id": None, "kind": "code_review", "scope": None}, True, None),
+])
+def test_past_the_bound_each_reviewer_kind_names_its_next_step_and_never_an_invented_command(reply, convergence, expected):
+    reply = {**reply, "path": "/runs/r1/dispatches/D1/reply.txt"}
+    assert guide._stuck_reply_next(reply, convergence=convergence) == expected
 
 
 @pytest.mark.approved
@@ -130,3 +202,58 @@ def test_status_and_wait_say_a_written_reply_settles_then_past_the_bound_name_th
     res = guide.status(con, run)
     assert res.next == ("office revoke D918, then office review T1 to relaunch the review on the same revision"), res.next
     assert not any("reply is written" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+@pytest.mark.parametrize("gate, role, subject, task_id, scope, expected", [
+    ("plan_review", "plan_reviewer", "plan", None, None,
+     "office revoke D918, then office review plan --as <harness>/<model> to re-run the plan review"),
+    ("visual", "visual_reviewer", "lane", None, "L-T1",
+     "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
+])
+def test_past_the_bound_a_plan_or_lane_reply_gets_its_relaunch_next(env, monkeypatch, gate, role, subject, task_id,
+                                                                    scope, expected):
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, task_id, subject, kind, scope, input_key, status, created_at) "
+                "VALUES('G918', ?, ?, ?, ?, ?, 'k918', 'running', ?)", (run["id"], task_id, subject, gate, scope, d["started_at"]))
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, started_at, kind, status, launcher, pane_id, pid, gate_id) "
+                "VALUES('D918', ?, ?, ?, ?, 'reviewer', 'running', 'herdr', 'w1:p1', ?, 'G918')",
+                (run["id"], task_id, role, d["started_at"], os.getpid()))  # a live supervisor: nothing settles it but the watch
+    con.commit()
+    reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("VERDICT: APPROVED\nFINDING F1 | high | partial")
+    settling = "D918 reply is written; Office ingests it when it settles, no action needed"
+    assert settling in guide.status(con, run).lines
+
+    os.utime(reply, (1, 1))
+    res = guide.status(con, run)
+    assert res.next == expected, res.next
+    assert not any("reply is written" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_past_the_bound_a_task_visual_review_names_the_manual_step_and_the_reply_file(env, monkeypatch):
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, task_id, subject, kind, input_key, status, created_at) "
+                "VALUES('G918', ?, 'T1', 'task', 'visual', 'task:T1:r1', 'running', ?)", (run["id"], d["started_at"]))
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, started_at, kind, status, launcher, pane_id, pid, gate_id) "
+                "VALUES('D918', ?, 'T1', 'visual_reviewer', ?, 'reviewer', 'running', 'herdr', 'w1:p1', ?, 'G918')",
+                (run["id"], d["started_at"], os.getpid()))
+    con.commit()
+    reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("VERDICT: APPROVED")
+    os.utime(reply, (1, 1))
+    res = guide.status(con, run)
+    assert res.next == f"office revoke D918, then office resume; the reply is at {reply}", res.next
+
+
+@pytest.mark.parametrize("value, expected", [("nan", 0.0), ("abc", 3.0), ("-2", 0.0)])
+def test_pane_group_wait_keeps_its_reading_of_bad_values(monkeypatch, value, expected):
+    monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", value)
+    assert dispatch_mod._pane_group_wait() == expected
