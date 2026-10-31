@@ -3,8 +3,9 @@
 What these tests hold to the review's bar: the worker form never grants
 project-resource trust (--approve); provider/model are pinned and validated
 before launch (missing provider/model or credentials fail clearly, never a
-silent wrong-model dispatch); a builder-only pi is not a planner/reviewer route
-at routing, at setup or at dispatch; and the deprecated pi/gpt-5-codex row stays
+silent wrong-model dispatch); pi is not a planner or visual route at routing,
+at setup or at dispatch, and serves code/plan review only through a read-only
+tool allowlist plus Office's worktree-unchanged check; and the deprecated pi/gpt-5-codex row stays
 out of candidate selection. Fake `pi` binaries and scenarios stand in for the
 harness — no test here calls a real model.
 """
@@ -221,11 +222,10 @@ def test_missing_provider_fails_preflight_clearly(pi_on_path, monkeypatch):
 
 # ---------------------------------------------------------------- role and capability gates
 
-def test_a_builder_only_route_is_not_a_reviewer_or_planner_override():
-    with pytest.raises(Refused) as exc:
-        candidates.declared_decision(f"pi/{MIMO_FLASH}@medium", flag="--review-as",
-                                     role="code_reviewer", config=REVIEW_CAPS)
-    assert "declares capabilities ['builder']" in str(exc.value) and "['review']" in str(exc.value), exc.value
+def test_pi_is_a_reviewer_override_but_not_a_planner_override():
+    decision = candidates.declared_decision(f"pi/{MIMO_FLASH}@medium", flag="--review-as",
+                                            role="code_reviewer", config=REVIEW_CAPS)
+    assert decision["candidate"]["invocation_model_id"] == MIMO_FLASH
     with pytest.raises(Refused):
         candidates.declared_decision(f"pi/{MIMO_FLASH}@medium", flag="--as",
                                      role="planner", config=PLANNER_CAPS)
@@ -264,11 +264,9 @@ def test_setup_offers_pi_only_for_roles_it_can_serve():
     enable_decommissioned_mimo("pi", "mimo-v2.6-flash", "medium")
     problems = configcmd.validate_seed(seeds, role="planner", config=PLANNER_CAPS)
     assert problems and "cannot serve role planner" in problems[0], problems
-    problems = configcmd.validate_seed(seeds, role="code_reviewer", config=REVIEW_CAPS)
-    assert problems and "cannot serve role code_reviewer" in problems[0], problems
+    assert configcmd.validate_seed(seeds, role="code_reviewer", config=REVIEW_CAPS) == []
     assert configcmd.validate_seed(seeds, role="executor", config=EXECUTOR_CAPS) == []
-    for role, config in (("planner", PLANNER_CAPS), ("code_reviewer", REVIEW_CAPS)):
-        assert not [r for r in configcmd.known_routes(role, config=config) if r.startswith("pi/")], role
+    assert not [r for r in configcmd.known_routes("planner", config=PLANNER_CAPS) if r.startswith("pi/")]
     assert [r for r in configcmd.known_routes("executor", config=EXECUTOR_CAPS) if r.startswith("pi/mimo-v2.6-flash")]
 
 
@@ -380,3 +378,70 @@ def test_wrong_model_output_is_not_recorded_as_conformance(env):
     finally:
         con.close()
     assert after == before, "no launch outcome may promote route trust"
+
+
+# ---------------------------------------------------------------- reviewer profile (read-only posture)
+
+def test_pi_reviewer_profile_is_a_read_only_allowlist_for_code_and_plan_review_only():
+    adapter = _adapter()
+    assert adapters.profile(adapter, "vision") is None, "pi is never a visual reviewer"
+    prof = adapters.profile(adapter, "reviewer")
+    argv = prof["argv"]
+    assert argv[argv.index("--tools") + 1] == "read,grep,find,ls"
+    assert not {"edit", "write", "bash"} & set(argv[argv.index("--tools") + 1].split(","))
+    for flag in ("--print", "--no-approve", "--no-extensions", "--no-mcp", "--no-session"):
+        assert flag in argv, flag
+    assert "--approve" not in argv
+    assert prof["prompt"] == "stdin" and prof["output"] == "stdout"
+    assert prof["verify_worktree_unchanged"] is True
+    assert "herdr_kind" not in prof, "no pane form: the headless allowlist is the only reviewer launch"
+    assert "review" in adapter["capabilities"] and "planning" not in adapter["capabilities"]
+
+
+def _git_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    (repo / "a.txt").write_text("one\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    return repo
+
+
+@pytest.mark.parametrize("mutate,expected", [
+    (lambda r: None, None),
+    (lambda r: (r / "a.txt").write_text("two\n"), "tracked diff"),
+    (lambda r: (r / "new.txt").write_text("x"), "untracked files"),
+    (lambda r: __import__("subprocess").run(["git", "-C", str(r), "commit", "-qam", "x", "--allow-empty"], check=True)
+     or None, "HEAD"),
+])
+def test_worktree_guard_reports_head_diff_and_untracked_changes(tmp_path, mutate, expected):
+    from office import gates
+    repo = _git_repo(tmp_path)
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", repo)
+    before = guard(None)
+    mutate(repo)
+    changed = guard(before)
+    if expected is None:
+        assert changed is None
+    else:
+        assert expected in changed, changed
+
+
+def test_worktree_guard_sees_an_edit_to_an_already_untracked_file(tmp_path):
+    from office import gates
+    repo = _git_repo(tmp_path)
+    (repo / "scratch.txt").write_text("a")
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", repo)
+    before = guard(None)
+    (repo / "scratch.txt").write_text("b")
+    assert "untracked files" in guard(before)
+
+
+def test_worktree_guard_is_off_for_harnesses_with_their_own_sandbox(tmp_path):
+    from office import gates
+    repo = _git_repo(tmp_path)
+    assert gates._worktree_guard({"harness": "codex"}, "reviewer", repo) is None
+    assert gates._worktree_guard({"harness": "pi"}, "worker", repo) is None
