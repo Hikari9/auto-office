@@ -5,12 +5,13 @@ dispatch, routing and gates modules. No model is called.
 """
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from test_discovery_dispatch import Cold, cold, launched  # noqa: F401 (cold is a fixture)
 from test_adaptive_routing import cand, req
 from test_issue_845_user_allow import events, fail, plain  # noqa: F401 (plain is a fixture)
 
-from office import context_snapshot, db, gates, guide, paths, root_wake, route_probe, routechange, routing, state
+from office import context_snapshot, db, gates, guide, paths, route_policy, root_wake, route_probe, routechange, routing, state
 from office.util import now_iso, parse_iso
 
 PAST = "2000-01-01T00:00:00+00:00"
@@ -616,16 +617,41 @@ def test_a_review_change_the_user_recorded_is_never_recovered_even_with_quota_au
     assert sweep(cold) == []  # the evidence qualifies, but the user made the change: the user's decision stands
 
 
-def test_a_re_probe_in_flight_keeps_a_review_route_down_until_its_reservation_is_orphaned(cold):
+def test_a_cross_fingerprint_re_probe_in_flight_keeps_a_review_route_down_until_orphaned(cold):
+    """Routing reads one exact fingerprint. The route-level view also reads a re-probe of another fingerprint of the same
+    route (the disclosed residual), so a fresh one keeps the route down and an orphaned one no longer does."""
     review_fallback(cold, CODEX)
     probe_pass(cold, CODEX, FUTURE)
-    with db.transaction(cold.con):  # a re-probe of the route is reserved after the pass
+    with db.transaction(cold.con):
         cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
                          "VALUES('probe:re-probe','codex','gpt-6.1-sol','high','pending','2999-06-01T00:00:00+00:00')")
     during = parse_iso("2999-06-01T00:00:01+00:00")  # the reservation is fresh: routing rejects the route on it
     assert routechange.sweep_recovered(cold.con, run(cold), now=during) == []
     later = parse_iso("3000-01-01T00:00:00+00:00")  # never recorded and past its timeout: the pass stands
     assert len(routechange.sweep_recovered(cold.con, run(cold), now=later)) == 1
+
+
+def test_an_orphaned_same_key_reservation_leaves_no_verdict_to_recover_on(cold):
+    """The reservation overwrites the exact-fingerprint row (INSERT OR REPLACE on its key), so the pass is gone. Orphaned,
+    the pending row is no verdict, and the route is not recovered: routing sees no fresh pass either."""
+    review_fallback(cold, CODEX)
+    probe_pass(cold, CODEX, FUTURE)
+    with db.transaction(cold.con):
+        cold.con.execute("INSERT OR REPLACE INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
+                         "VALUES(?,'codex','gpt-6.1-sol','high','pending','2999-06-01T00:00:00+00:00')",
+                         (f"probe:{CODEX}:{FUTURE}",))
+    assert routechange.sweep_recovered(cold.con, run(cold), now=parse_iso("2999-06-01T00:00:01+00:00")) == []
+    assert routechange.sweep_recovered(cold.con, run(cold), now=parse_iso("3000-01-01T00:00:00+00:00")) == []
+
+
+def test_a_stale_pending_probe_does_not_hide_a_fresh_failed_probe_of_a_demoted_route(plain):
+    d = failed_route(plain)
+    expire(plain, d)
+    timeout = route_policy.DISCOVERY_DEFAULTS["probe_timeout_s"]
+    failed_at = datetime.now(timezone.utc) - timedelta(seconds=timeout + 600)  # fresh: under the temporary TTL
+    probe_at(plain, d, "fail", "auth-quota-blocked", at=failed_at.isoformat())
+    probe_at(plain, d, "pending", None, at=(failed_at + timedelta(seconds=1)).isoformat())  # newer, but orphaned
+    assert sweep(plain) == []  # the fresh failed probe still speaks: routing rejects the route on it
 
 
 def skip_decision(category=None):
