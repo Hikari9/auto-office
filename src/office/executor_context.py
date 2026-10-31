@@ -35,7 +35,8 @@ _SAFE_SESSION = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _raw_policy(run: dict):
-    return (run.get("policy") or {}).get("executor_context")
+    policy = run.get("policy")
+    return policy.get("executor_context") if isinstance(policy, dict) else None
 
 
 def _policy(run: dict) -> dict:
@@ -44,6 +45,8 @@ def _policy(run: dict) -> dict:
 
 
 def enabled(run: dict) -> bool:
+    if _raw_policy(run) is False:  # an explicit `executor_context: false` is a disable, not a default
+        return False
     return _policy(run).get("enabled", True) is not False
 
 
@@ -124,7 +127,7 @@ def _git(wt: str | None, *args: str) -> str:
         return ""
     try:
         result = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, timeout=5)
-        return result.stdout[:_MAX_HANDOFF_TEXT] if result.returncode == 0 else ""
+        return result.stdout if result.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -155,7 +158,7 @@ def _handoff(con, run: dict, dispatch: dict, tokens: int | None, cap: int) -> di
     wt = dispatch.get("worktree")
     commits = _git(wt, "log", "--format=%h %s", "-6", (dispatch.get("base_commit") or "HEAD") + "..HEAD")
     work = _git(wt, "status", "--short", "--untracked-files=normal")
-    diff = _git(wt, "diff", "--stat", "HEAD")
+    diff = _git(wt, "diff", "--stat", "HEAD").strip().splitlines()[-1:]  # totals only: no file names
     findings = con.execute(
         "SELECT code, severity, summary, action FROM findings WHERE run_id=? AND task_id=? AND state='open' "
         "ORDER BY created_at LIMIT 20", (run["id"], dispatch["task_id"])).fetchall()
@@ -169,7 +172,7 @@ def _handoff(con, run: dict, dispatch: dict, tokens: int | None, cap: int) -> di
             "plan_version": run.get("plan_version"), "contract_version": task.get("contract_version"),
             "head": _git(wt, "rev-parse", "HEAD").strip(),
             "working_tree": _paths_summary(work),
-            "uncommitted_diff_stat": diff or "(none reported)",
+            "uncommitted_diff_stat": diff[0] if diff else "(none reported)",
         },
         "done": [f"Existing task commits (verify content): {_clip(commits)}"] if commits.strip()
                 else ["No completed acceptance criteria independently verified; inspect the preserved worktree."],
@@ -218,12 +221,13 @@ def check(dispatch_id: str) -> bool:
             if current is None:
                 return False
             run, dispatch, task = current
+            cap = limit(con, run, task["id"]) or 0  # re-read: a decision may have changed it since the check began
             handoff = _load(dispatch)
-            if tokens < cap:
+            if not cap or tokens < cap:
                 if handoff.get("phase") in _EPISODE_PHASES:
                     con.execute("UPDATE dispatches SET context_handoff_json=NULL WHERE id=?", (dispatch_id,))
                 return False
-            if handoff:  # this episode already has a signal, a decision, or a rotation
+            if handoff and handoff.get("phase") != SKIPPED:  # this episode already has a signal, decision, or rotation
                 return False
             signal = {"phase": SIGNALLED, "created_at": now_iso(), "from_dispatch_id": dispatch_id,
                       "task_id": task["id"], "tokens": tokens, "threshold_tokens": cap}
@@ -268,9 +272,22 @@ def _writer(con, run: dict, task_id: str):
     return current
 
 
+def _worker_context(con, run: dict) -> bool:
+    """Advisory: an executor's env (or its worktree as cwd) marks it a worker. The env can be
+    unset, so the worktree check also refuses a decision run from inside an executor worktree."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        return True
+    cwd = Path.cwd().resolve()
+    for row in con.execute("SELECT worktree FROM dispatches WHERE run_id=? AND role='executor' "
+                           "AND worktree IS NOT NULL", (run["id"],)).fetchall():
+        if cwd.is_relative_to(Path(row["worktree"]).resolve()):
+            return True
+    return False
+
+
 def decide(con, run: dict, task_id: str, action: str, value: str | None = None) -> Result:
     """Record the orchestrator's choice for one task's executor context."""
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    if _worker_context(con, run):
         raise Refused("worker-cannot-decide", "an executor cannot choose its own context decision")
     if state.get_task(con, run["id"], task_id) is None:
         raise Refused("no-task", f"{task_id} is not a task of this run", scope=task_id)
@@ -341,7 +358,8 @@ def _rotate(con, run: dict, task_id: str) -> Result:
                    f"{task_id} executor {did} rotation requested by orchestrator; fresh session on the same worktree "
                    "after the old one is verified stopped", task_id=task_id, dispatch_id=did,
                    payload={"tokens": snapshot["tokens"], "threshold": cap})
-        state.enqueue(con, run, "rotate_executor", {"dispatch_id": did}, dedup_key=f"rotate:{did}", max_attempts=1)
+        state.enqueue(con, run, "rotate_executor", {"dispatch_id": did},
+                      dedup_key=f"rotate:{did}:{snapshot['created_at']}", max_attempts=1)
     try:
         path = handoff_path(run, did)
         path.parent.mkdir(parents=True, exist_ok=True)
