@@ -204,6 +204,15 @@ def test_wrong_amend_scope_rejects_option_flags(env):
     assert not _events(env)
 
 
+def test_route_amend_rejects_option_flags(env):
+    env.trust()
+    start_inline(env, extra=('--no-prs',))
+    for flag in ('--prs', '--no-prs', '--confirm'):
+        code, out = env.office('amend', 'route', 'T1', '--as', 'claude/sonnet@high', '--quote', 'yes', flag)
+        assert code == 2 and 'option-scope-required' in out, out
+    assert not _events(env) and not _prs(env)['enabled']
+
+
 def test_pending_pr_job_blocks_disabling_before_pr_recorded(env, monkeypatch):
     """An outbox job may already have made a remote PR Office has not observed."""
     github(env, monkeypatch)
