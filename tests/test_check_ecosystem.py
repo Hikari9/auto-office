@@ -20,22 +20,34 @@ def _write_skill(root, rel, name):
     (path.parent / 'agents/openai.yaml').write_text(f'interface:\n  display_name: "{name}"\n')
 
 
-def _run_main(root):
+_REAL_RUN = subprocess.run
+
+
+def _run_main(root, distribution=(0, '')):
     """Run the production main() against a fixture root.
 
-    Checks that bind the real repository at import time are stubbed, so the result
-    reflects only the fixture tree.
+    Checks that bind the real repository at import time are stubbed. The plugin-distribution
+    subprocess is answered with `distribution` (exit code, stdout) and every other call is real.
+    Returns (exit code, printed output, distribution calls).
     """
     out = io.StringIO()
+    calls = []
+
+    def fake_run(argv, *args, **kwargs):
+        if any(str(part).endswith('build_plugin_distribution.py') for part in argv):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, distribution[0], distribution[1], '')
+        return _REAL_RUN(argv, *args, **kwargs)
+
     with mock.patch.object(ce, 'ROOT', root), \
             mock.patch.object(ce, 'check_skill_budgets', return_value=[]), \
             mock.patch.object(ce, 'check_versions', return_value=[]), \
             mock.patch.object(ce, 'check_plugin_skills', return_value=[]), \
             mock.patch.object(ce, 'check_skill_metadata', return_value=[]), \
-            mock.patch.object(ce.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+            mock.patch.object(ce.subprocess, 'run', side_effect=fake_run), \
             contextlib.redirect_stdout(out):
         code = ce.main()
-    return code, out.getvalue()
+    return code, out.getvalue(), calls
 
 
 class TestDuplicateSkillNames(unittest.TestCase):
@@ -44,7 +56,7 @@ class TestDuplicateSkillNames(unittest.TestCase):
             root = Path(tmp)
             _write_skill(root, 'skills/one/SKILL.md', 'same')
             _write_skill(root, 'skills/two/SKILL.md', 'same')
-            code, out = _run_main(root)
+            code, out, _ = _run_main(root)
             self.assertEqual(code, 1)
             self.assertEqual([line for line in out.splitlines() if line.startswith('- ')],
                              ['- skills/two/SKILL.md: duplicate skill name same'])
@@ -54,9 +66,19 @@ class TestDuplicateSkillNames(unittest.TestCase):
             root = Path(tmp)
             _write_skill(root, 'SKILL.md', 'auto-office')
             _write_skill(root, 'plugin-dist/skills/auto-office/SKILL.md', 'auto-office')
-            code, out = _run_main(root)
+            code, out, calls = _run_main(root)
             self.assertEqual(code, 0, out)
             self.assertTrue(out.startswith('PASS'), out)
+            self.assertEqual(len(calls), 1, 'the distribution build check must run exactly once')
+
+    def test_failed_distribution_check_fails_main(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_skill(root, 'SKILL.md', 'auto-office')
+            code, out, calls = _run_main(root, distribution=(1, 'FAIL: plugin-dist: stale copy x\n'))
+            self.assertEqual(code, 1)
+            self.assertIn('- FAIL: plugin-dist: stale copy x', out)
+            self.assertEqual(len(calls), 1)
 
 
 class TestFrontmatterContract(unittest.TestCase):

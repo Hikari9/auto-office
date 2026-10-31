@@ -19,11 +19,19 @@ SKILL_NAME = re.compile(r"[a-z0-9-]+")
 
 
 def _config_path(root: Path, entry: str) -> Path:
-    """A plugin-distribution.json path must be relative and stay inside the repository."""
+    """A plugin-distribution.json path must name a non-empty relative path inside the repository."""
     rel = PurePosixPath(entry)
-    if not entry or rel.is_absolute() or ".." in rel.parts or "\\" in entry:
-        raise ValueError(f"plugin-distribution.json entry escapes the repository: {entry!r}")
+    if not rel.parts or rel.is_absolute() or ".." in rel.parts or "\\" in entry:
+        raise ValueError(f"plugin-distribution.json entry must be a non-empty relative path inside the repository: {entry!r}")
     return root.joinpath(*rel.parts)
+
+
+def _walk(directory: Path):
+    """Files under a directory, skipping hidden entries (.env, .git, caches) so they never ship."""
+    for path in directory.rglob("*"):
+        if any(part.startswith(".") for part in path.relative_to(directory).parts):
+            continue
+        yield path
 
 
 def _reject_symlinks(root: Path, path: Path) -> None:
@@ -48,7 +56,7 @@ def file_map(root: Path) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
 
     def include(path: Path, destination: str | None = None) -> None:
-        if any(part in {"__pycache__", ".pytest_cache"} for part in path.parts):
+        if any(part in {"__pycache__", ".pytest_cache"} for part in path.relative_to(root).parts):
             return
         if path.suffix in {".pyc", ".pyo"} or path.name == ".DS_Store":
             return
@@ -69,7 +77,7 @@ def file_map(root: Path) -> dict[str, bytes]:
         skill = root / "skills" / name
         if not (skill / "SKILL.md").is_file():
             raise ValueError(f"missing canonical skill: {name}")
-        for path in skill.rglob("*"):
+        for path in _walk(skill):
             include(path)
 
     for name in cfg["support_files"]:
@@ -82,7 +90,7 @@ def file_map(root: Path) -> dict[str, bytes]:
         if not directory.is_dir():
             raise ValueError(f"missing support directory: {name}")
         _reject_symlinks(root, directory)
-        for path in directory.rglob("*"):
+        for path in _walk(directory):
             include(path)
 
     return result
@@ -92,10 +100,15 @@ def retired_reference_errors(dist: Path, retired: list[str]) -> list[str]:
     """Distributed skill docs must not name a retired skill the plugin does not ship."""
     errors = []
     for doc in sorted((dist / "skills").rglob("*.md")):
-        text = doc.read_text(encoding="utf-8")
+        label = doc.relative_to(dist).as_posix()
+        try:
+            text = doc.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            errors.append(f"{label}: not valid UTF-8; cannot check for retired skill references")
+            continue
         for name in retired:
-            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
-                errors.append(f"{doc.relative_to(dist).as_posix()}: references retired skill {name}")
+            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text, re.IGNORECASE):
+                errors.append(f"{label}: references retired skill {name}")
     return errors
 
 
@@ -114,6 +127,10 @@ def check(root: Path = ROOT) -> list[str]:
     except ValueError as exc:
         return [f"plugin-dist: {exc}"]
     dist = root / DIST
+    if dist.is_dir():
+        links = sorted(p.relative_to(dist).as_posix() for p in dist.rglob("*") if p.is_symlink())
+        if links:
+            return [f"plugin-dist: symlinks are not allowed in the generated package: {link}" for link in links]
     actual = {
         p.relative_to(dist).as_posix(): p.read_bytes()
         for p in dist.rglob("*") if p.is_file()
@@ -172,7 +189,11 @@ if __name__ == "__main__":
     group.add_argument("--check", action="store_true")
     options = parser.parse_args()
     if options.sync:
-        count = sync()
+        try:
+            count = sync()
+        except ValueError as exc:
+            print(f"FAIL: {exc}")
+            raise SystemExit(1)
         print(f"Synced {count} canonical files to {DIST}/ (16 public skills)")
     else:
         failures = check()

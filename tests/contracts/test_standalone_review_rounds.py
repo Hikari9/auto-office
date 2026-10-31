@@ -104,7 +104,7 @@ def test_malformed_unavailable_list_is_a_contract_error():
         case({'reviews': [], 'unavailable': None}, verdict='UNAVAILABLE', evidence='no CLI')
 
 
-def test_ledger_keeps_the_callers_spelling_and_compares_normalized():
+def test_ledger_stores_the_callers_spelling_without_padding():
     ledger = case({}, reviewer_session='  Rev-ABC ', invoker_session='coordinator')
     assert ledger['reviews'][0]['reviewer_session'] == 'Rev-ABC'
 
@@ -121,7 +121,11 @@ def test_fix_owner_identity_is_compared_normalized():
         case({}, reviewer_session='Fixer', fix_owner_session=' fixer ')
 
 
+@pytest.mark.parametrize('field', ['reviewer_session', 'invoker_session', 'producer_session', 'fix_owner_session'])
 @pytest.mark.parametrize('lookalike', ['coordinator​', 'coordinаtor'])
-def test_non_ascii_identities_fail_closed(lookalike):
+def test_non_ascii_identities_fail_closed(field, lookalike):
+    overrides = {field: lookalike}
+    if field == 'reviewer_session':
+        overrides['fix_owner_session'] = None
     with pytest.raises(ReviewContractError, match='ASCII'):
-        case({}, invoker_session=lookalike)
+        case({}, **overrides)
