@@ -36,6 +36,8 @@ def test_explicit_opt_in_pins_a_single_final_independent_review_and_does_not_aut
     assert config.resolve_gates("greenfield", elevated, cfg)["plan_review"] is True
     unknown = config.resolve_risk(cfg, None, None, False)
     assert config.resolve_gates("greenfield", unknown, cfg)["plan_review"] is True
+    planner_low = {"classification": "low", "classified_by": "planner", "high": False}
+    assert config.resolve_gates("greenfield", planner_low, cfg)["plan_review"] is True
     assert briefs.self_review_tier("greenfield", low) == "single"
     assert briefs.self_review_tier("greenfield", elevated) == "deep"
     assert not self_review_subagents.funded({"gear": "greenfield", "gates": gates})
@@ -86,7 +88,7 @@ def test_greenfield_workflow_uses_one_executor_and_one_terminal_convergence_revi
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    out = start_inline(env, plan=PLAN, gear="greenfield")
+    out = start_inline(env, plan=PLAN, gear="greenfield", extra=("--blast-radius", "repo"))
     con, run = _run(env)
     assert run["gear"] == "greenfield" and run["gates"]["code_review"]
     assert not run["gates"]["plan_review"]
@@ -129,6 +131,22 @@ def test_elevated_greenfield_build_gets_one_plan_review_and_one_convergence_revi
     calls = [c["role"] for c in env.calls()]
     assert calls.count("plan_reviewer") == 1, calls
     assert calls.count("executor") == 1 and calls.count("convergence_reviewer") == 1, calls
+
+
+@pytest.mark.parametrize("gear, extra, plan_text, expected", [
+    # Greenfield: only a low risk declared at intake skips plan review.
+    ("greenfield", ("--blast-radius", "repo"), PLAN, False),
+    # Unknown intake: the planner's own low classification cannot exempt its plan from review.
+    ("greenfield", (), PLAN, True),
+    ("greenfield", (), PLAN.replace("blast_radius: repo", "blast_radius: production"), True),
+    # Other gears: an intake-required plan review survives a plan that classifies low.
+    ("direct", ("--blast-radius", "production"), PLAN, True),
+])
+def test_plan_review_exemption_needs_intake_declared_low_risk_on_greenfield(env, gear, extra, plan_text, expected):
+    env.trust()
+    start_inline(env, plan=plan_text, gear=gear, extra=extra)
+    con, run = _run(env)
+    assert run["gates"]["plan_review"] is expected, run["gates"]
 
 
 def test_start_accepts_greenfield_as_an_explicit_gear_choice():

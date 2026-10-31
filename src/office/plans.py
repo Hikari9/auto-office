@@ -250,11 +250,8 @@ def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None,
                or bool(run["plan_version"]))  # a plan already went out: its review may be queued without a gate row yet
     if raised:
         keys += ["visual", "visual_review_max_rounds", "code_review_max_rounds", "dedicated_planner"]
-    if not started:
-        # The first plan's classification decides its plan review: intake may have been unknown (#936 greenfield).
-        keys += ["plan_review", "plan_review_depth"]
-        if raised and not old.get("plan_review_rounds_by"):
-            keys += ["plan_review_max_rounds"]
+        if not started:
+            keys += ["plan_review", "plan_review_depth"] + (["plan_review_max_rounds"] if not old.get("plan_review_rounds_by") else [])
     gates = {k: v for k, v in {**old, **{k: base[k] for k in keys}}.items() if k != "lightweight"}
     was = old.get("lightweight") or {}
     if "plan review" in (was.get("dropped") or []) and not started:

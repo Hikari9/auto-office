@@ -366,8 +366,9 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         return bool(risk_high) if v == "risk_forced" else v
 
     plan_review = value(preset.get("plan_review", False))
-    if gear == "greenfield" and risk_mod.classification(record) != risk_mod.LOW:
-        # Greenfield's plan review follows risk, and unknown risk is not low (#420): no doubt resolves to no review.
+    if gear == "greenfield" and not (risk_mod.classification(record) == risk_mod.LOW and record.get("classified_by") == "intake"):
+        # Only a low risk the user declared at intake skips plan review. Unknown risk, and risk the planner
+        # classifies itself, keep one independent review: a planner may not exempt its own plan (#936).
         plan_review = True
     code_review = value(preset.get("independent_code_review", False))
     code_review, floor = risk_mod.floor_gates(record, code_review)

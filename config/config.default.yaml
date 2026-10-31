@@ -267,7 +267,7 @@ gear_presets:
     code_review_max_rounds: 3
   greenfield:
     dedicated_planner: false # inline plan: 2-3 phases in one task, not a serial task chain
-    plan_review: risk_forced # elevated or unknown risk: one independent plan review (config.resolve_gates); known low risk: none
+    plan_review: risk_forced # one independent plan review unless the intake declares low risk (config.resolve_gates)
     independent_code_review: true # one end-of-build convergence; risk floor stays in force
     funded_browser_verification: acceptance_forced
     allow_advisory_undercut: true
