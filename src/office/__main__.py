@@ -12,8 +12,6 @@ def entry() -> int:
     except (ImportError, OSError, SyntaxError):
         try:
             from office import version
-            if version.rebuilding_reason() is None:
-                raise
             code, line = version.REBUILD_EXIT_CODE, version.rebuild_line()
         except (ImportError, OSError, SyntaxError):
             # version.py imports only the standard library, so when it cannot load, its file is being replaced or damaged.

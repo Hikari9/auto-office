@@ -151,6 +151,40 @@ def test_an_import_failure_with_a_healthy_version_still_exits_with_the_retry_cod
     assert "Traceback" not in captured.err
 
 
+def test_a_startup_import_failure_never_traces_back_even_when_the_version_probe_raises(monkeypatch, capsys):
+    """The entry does not probe the version, so a bad OFFICE_VERSION_OVERRIDE cannot escape it as a traceback."""
+    from office import __main__ as entrypoint
+
+    def bad_override():
+        raise RuntimeError("OFFICE_VERSION_OVERRIDE='dev' is not an exact PEP 440 version")
+
+    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
+    monkeypatch.setattr(version, "current", bad_override)
+
+    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
+    captured = capsys.readouterr()
+    assert captured.err.strip() == RETRY_LINE
+    assert "Traceback" not in captured.err
+
+
+def test_python_dash_m_office_exits_with_the_retry_code_when_the_probe_is_healthy(tmp_path):
+    """Real interpreter: `office.cli` cannot import while the version probe resolves, the case the entry must not trace back."""
+    script = tmp_path / "healthy_probe.py"
+    script.write_text(
+        "import runpy, sys\n"
+        "import office.version as v\n"
+        "v.current = lambda: '3.2.0'\n"
+        "sys.modules['office.cli'] = None\n"
+        "runpy.run_module('office', run_name='__main__', alter_sys=True)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(version.SOURCE_ROOT) / "src")}
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30, env=env)
+
+    assert proc.returncode == version.REBUILD_EXIT_CODE, proc.stderr
+    assert proc.stderr.strip() == RETRY_LINE
+    assert "Traceback" not in proc.stderr
+
+
 def test_console_script_points_at_the_guarded_entry():
     import tomllib
 
