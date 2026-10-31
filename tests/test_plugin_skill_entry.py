@@ -257,11 +257,15 @@ def test_ecosystem_check_rejects_non_list_skills(tmp_path):
     assert check_plugin_skills(tmp_path) == [".claude-plugin/plugin.json: skills must be a list of paths"]
 
 
+# The only bare-name installs allowed are the README's two "never" warnings, matched by exact preceding text.
+ALLOWED_WARNINGS = {("README.md", "unrelated project, so never `"), ("README.md", "never `uv tool install auto-office` or `")}
+
+
 def test_nothing_installs_or_checks_the_unrelated_pypi_auto_office():
     """`auto-office` on PyPI is an unrelated project: no install command or update check may point at it (#924)."""
     import re
     # An install of the bare distribution name, with any flags, that is not a `name @ <source>` direct reference.
-    bare = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)(?: --?(?!-)(?!reinstall-package\b)[\w-]+)* ['\"]?auto-office(?:\[\w+\])?['\"]?(?! @)(?=[\s`)'\",.;]|$)")
+    bare = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)(?: --?(?!-)(?!reinstall-package\b)[\w-]+(?:[ =](?!-)(?!['\"]?auto-office)[^\s'\"`]+)?)* ['\"]?auto-office(?:\[\w+\])?['\"]?(?! @)(?=[\s`)'\",.;]|$)")
     roots = [ROOT / "SKILL.md", ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
     for folder, pattern in (("docs", "*.md"), ("skills", "*.md"), ("scripts", "*"), ("src", "*.py"), ("config", "*")):
         roots += [p for p in (ROOT / folder).rglob(pattern) if p.is_file()]
@@ -269,7 +273,7 @@ def test_nothing_installs_or_checks_the_unrelated_pypi_auto_office():
     for path in roots:
         text = path.read_text(encoding="utf-8", errors="ignore")
         offenders += [f"{path.relative_to(ROOT)}: {m.group(0)}" for m in bare.finditer(text)
-                      if "never" not in text[max(0, m.start() - 40):m.start()]]
+                      if not any(path.name == name and text[:m.start()].endswith(before) for name, before in ALLOWED_WARNINGS)]
         if "pypi.org/pypi/auto-office" in text:
             offenders.append(f"{path.relative_to(ROOT)}: pypi.org/pypi/auto-office")
     assert not offenders
@@ -278,6 +282,9 @@ def test_nothing_installs_or_checks_the_unrelated_pypi_auto_office():
                     "uv tool install 'auto-office[visual]'", "pipx install auto-office."):
         assert bare.search(shipped), shipped
     assert not bare.search('uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"')
+    for adversarial in ("uv tool install --python 3.12 auto-office", "uv tool install --python=3.12 auto-office",
+                        "uv tool install --with playwright 'auto-office[visual]'", "uv pip install -U auto-office"):
+        assert bare.search(adversarial), adversarial
 
 
 def test_update_check_reads_the_release_from_github_main(monkeypatch):
