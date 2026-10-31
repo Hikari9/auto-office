@@ -164,9 +164,11 @@ def test_disable_before_dispatch_stops_future_prs(env, monkeypatch):
     _ready(env)
     start_inline(env)
     assert _prs(env)['enabled'] is True
+    before_prs = {k: _prs(env)[k] for k in ('repo', 'base_branch', 'merge_method')}
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
     assert code == 0 and 'disabled' in out, out
-    assert _prs(env)['base_branch'] == 'main'
+    kept = ('repo', 'base_branch', 'merge_method')
+    assert {k: _prs(env)[k] for k in kept} == before_prs and before_prs['base_branch'] == 'main'
     code, out = env.office('status')
     assert code == 0 and 'run option amendment: task PRs off' in out, out
     env.office('approve', 'plan', '--quote', 'go', check=0)
@@ -293,7 +295,11 @@ class _Tty(io.StringIO):
 
 
 @pytest.mark.parametrize('flags', [
-    ('--contract',), ('--requirements',), ('--reason', 'why'), ('--add-accept', 'calc.add(0, 0) == 0'),
+    ('--contract',), ('--requirements',), ('--no-review',), ('--reason', 'why'),
+    ('--add-accept', 'calc.add(0, 0) == 0'), ('--drop-accept', 'calc.add(2, 3) == 5'),
+    ('--add-check', 'true'), ('--drop-check', 'true'), ('--set', 'depends=none'),
+    ('--add-criterion', 'x'), ('--drop-criterion', 'x'), ('--add-non-goal', 'x'), ('--drop-non-goal', 'x'),
+    ('--redirect', 'P1'), ('--root-cause', 'x'), ('--requirement', 'x'), ('--reviewer', 'same'),
 ])
 def test_options_amend_refuses_plan_flags_it_would_drop(env, flags):
     env.trust()
@@ -318,10 +324,11 @@ def test_interactive_option_change_needs_an_explicit_yes(env, monkeypatch):
     _ready(env)
     start_inline(env)
     monkeypatch.setattr(sys, 'stdin', _Tty())
-    monkeypatch.setattr('builtins.input', lambda prompt='': 'n')
-    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local')
-    assert code == 4 and 'confirmation-declined' in out, out
-    assert _prs(env)['enabled'] is True and not _events(env)
+    for answer in ('n', ''):
+        monkeypatch.setattr('builtins.input', lambda prompt='', answer=answer: answer)
+        code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local')
+        assert code == 4 and 'confirmation-declined' in out, out
+        assert _prs(env)['enabled'] is True and not _events(env)
     monkeypatch.setattr('builtins.input', lambda prompt='': 'y')
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local')
     assert code == 0 and 'disabled' in out, out
@@ -369,7 +376,8 @@ def test_option_change_refused_when_pr_settings_move_mid_confirm(env, monkeypatc
     assert _prs(env)['reason'] == 'moved mid-confirm' and not _events(env)
 
 
-def test_settled_pr_job_without_a_pr_does_not_block_disable(env, monkeypatch):
+@pytest.mark.parametrize('status', ['done', 'failed'])
+def test_pr_job_with_unrecorded_outcome_blocks_disable(env, monkeypatch, status):
     github(env, monkeypatch)
     _ready(env)
     start_inline(env)
@@ -380,10 +388,10 @@ def test_settled_pr_job_without_a_pr_does_not_block_disable(env, monkeypatch):
         run_id = con.execute('SELECT id FROM runs').fetchone()[0]
         with db.transaction(con):
             con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, error, "
-                        "created_at) VALUES('settled-sync', ?, 'pr_sync', 'settled-sync', '{\"task_id\": \"T1\"}', "
-                        "'test', 'done', 'gh pr create failed', ?)", (run_id, now_iso()))
+                        "created_at) VALUES(?, ?, 'pr_sync', ?, '{\"task_id\": \"T1\"}', "
+                        "'test', ?, 'gh pr create failed', ?)", (status, run_id, status, status, now_iso()))
     finally:
         con.close()
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
-    assert code == 0 and 'disabled' in out, out
-    assert _prs(env)['enabled'] is False
+    assert code == 4 and 'prs-in-use' in out and 'may already have pushed' in out, out
+    assert _prs(env)['enabled'] is True and not _events(env)
