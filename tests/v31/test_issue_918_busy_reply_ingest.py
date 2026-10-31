@@ -112,21 +112,26 @@ class _SleepingClock:
 
 
 @pytest.mark.approved
-def test_a_busy_reply_settles_across_a_sleep_because_the_settle_clock_is_wall_time(env, monkeypatch):
+@pytest.mark.parametrize("jump", [120.0, -3600.0], ids=["sleep", "clock-stepped-back"])
+def test_a_suspend_or_clock_step_restarts_the_settle_window(env, monkeypatch, jump):
+    """Quiet time counts only across polls the watch saw: after a sleep or a backward step the window starts over."""
     _fake(env, monkeypatch)
     _, d = _live_dispatch(env, monkeypatch)
     out = env.tmp / "reply.txt"
     out.write_text("VERDICT: APPROVED\nNEXT: merge it")
     clock = _SleepingClock()
     monkeypatch.setattr(dispatch_mod, "time", clock)
-    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "60")
+    monkeypatch.setenv("OFFICE_REPLY_BUSY_SETTLE_S", "0.2")
 
-    def sleep_then_look(n):
-        clock.slept += 120  # the laptop sleeps for two minutes after the first poll
+    def jump_after_first_poll(n):
+        if n == 1:
+            clock.slept += jump
         return dict(BUSY)
 
-    _pane_samples(monkeypatch, sleep_then_look, limit=40)
+    calls = _pane_samples(monkeypatch, jump_after_first_poll, limit=2000)
     assert dispatch_mod.watch_herdr_agent(d["id"], _spec(env.tmp, out), poll=0.01) == (0, "success")
+    # The first poll after the jump only restarts the window: an ingest there would be the bug.
+    assert len(calls) >= 3, calls
 
 
 @pytest.mark.approved
