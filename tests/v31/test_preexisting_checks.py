@@ -228,3 +228,23 @@ def test_v31_a_new_error_higher_up_with_the_same_tail_is_not_preexisting(env):
     assert not _preexisting_events(env)
     assert json.loads(_base_evidence(env)[0]["meta_json"])["preexisting"] is False
     assert "code_reviewer" not in _roles(env) and task_row(env)["status"] == "changes_required"
+
+
+# ------------------------------------------------------------------ office status (#629 note beside acceptance)
+
+@V31
+def test_status_names_the_preexisting_check_beside_the_accepted_task(env):
+    _start(env, OLD_PLAN, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert f"T1 accepted with 1 pre-existing check failure (also fails on base): {OLD}" in out
+
+
+@V31
+def test_status_prints_no_preexisting_line_for_a_task_accepted_with_clean_checks(env):
+    _start(env, PLAN_ONE, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert "(also fails on base)" not in out
