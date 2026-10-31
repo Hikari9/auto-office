@@ -437,13 +437,11 @@ LANE_REVIEW_SPEC = {"convergence_review": "convergence", "visual": "visual"}  # 
 
 
 def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
-    """The command that re-runs a stuck reviewer on the same revision once its reply stayed unsettled past the hard
-    bound (#918): revoke the reviewer, then review again. A plan review re-runs only under convergence-v1
-    (`office review plan --as`); a task visual review has no same-revision re-run. Both get None otherwise."""
+    """The next command for a stuck reviewer once its reply stayed unsettled past the hard bound (#918). Where a
+    same-revision re-run exists it names that (revoke, then review). A v3.1 plan review and a task visual review have
+    none, so they name the manual step and the reply file the orchestrator reads the verdict from. None otherwise."""
     did, kind = reply["id"], reply["kind"]
-    if kind == "plan_review":
-        if not convergence:
-            return None
+    if kind == "plan_review" and convergence:
         return f"office revoke {did}, then office review plan --as <harness>/<model> to re-run the plan review"
     if reply["scope"] and kind in LANE_REVIEW_SPEC:
         spec = f"{reply['scope']}:{LANE_REVIEW_SPEC[kind]}"
@@ -451,6 +449,8 @@ def _stuck_reply_next(reply: dict, convergence: bool) -> str | None:
     if kind == "code_review" and reply["task_id"]:
         return (f"office revoke {did}, then office review {reply['task_id']} "
                 "to relaunch the review on the same revision")
+    if kind == "plan_review" or (kind == "visual" and reply["task_id"]):
+        return f"office revoke {did}, then office resume; the reply is at {reply['path']}"
     return None
 
 

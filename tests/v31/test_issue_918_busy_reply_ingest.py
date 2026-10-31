@@ -153,27 +153,28 @@ def test_a_reply_still_changing_is_not_ingested_while_busy(env, monkeypatch):
     assert len(calls) == 6
 
 
-@pytest.mark.parametrize("reply, expected", [
+MANUAL = "office revoke D1, then office resume; the reply is at /runs/r1/dispatches/D1/reply.txt"
+
+
+@pytest.mark.parametrize("reply, convergence, expected", [
     ({"id": "D1", "task_id": "T1", "kind": "code_review", "scope": None},
-     "office revoke D1, then office review T1 to relaunch the review on the same revision"),
+     True, "office revoke D1, then office review T1 to relaunch the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
-     "office revoke D1, then office review plan --as <harness>/<model> to re-run the plan review"),
+     True, "office revoke D1, then office review plan --as <harness>/<model> to re-run the plan review"),
     ({"id": "D1", "task_id": None, "kind": "convergence_review", "scope": "L-T1"},
-     "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
+     True, "office revoke L-T1:convergence, then office review L-T1:convergence to re-run the review on the same revision"),
     ({"id": "D1", "task_id": None, "kind": "visual", "scope": "L-T1"},
-     "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
-    # A task visual review has no same-revision re-run, and a code review with no task has nothing to relaunch.
-    ({"id": "D1", "task_id": "T1", "kind": "visual", "scope": None}, None),
-    ({"id": "D1", "task_id": None, "kind": "code_review", "scope": None}, None),
+     True, "office revoke L-T1:visual, then office review L-T1:visual to re-run the review on the same revision"),
+    # No same-revision re-run for a v3.1 plan review or a task visual review: the manual step and the reply file.
+    ({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"}, False, MANUAL),
+    ({"id": "D1", "task_id": "T1", "kind": "visual", "scope": None}, True, MANUAL),
+    ({"id": "D1", "task_id": "T1", "kind": "visual", "scope": None}, False, MANUAL),
+    # A code review with no task has nothing to relaunch.
+    ({"id": "D1", "task_id": None, "kind": "code_review", "scope": None}, True, None),
 ])
-def test_past_the_bound_each_reviewer_kind_names_a_same_revision_relaunch(reply, expected):
-    assert guide._stuck_reply_next(reply, convergence=True) == expected
-
-
-def test_a_plan_review_under_v31_has_no_relaunch_because_plan_repin_is_convergence_only():
-    # `office review plan --as` is refused for a v3.1 run (legacy-contract), so naming it there would send the user to an error.
-    assert guide._stuck_reply_next({"id": "D1", "task_id": None, "kind": "plan_review", "scope": "plan"},
-                                   convergence=False) is None
+def test_past_the_bound_each_reviewer_kind_names_its_next_step_and_never_an_invented_command(reply, convergence, expected):
+    reply = {**reply, "path": "/runs/r1/dispatches/D1/reply.txt"}
+    assert guide._stuck_reply_next(reply, convergence=convergence) == expected
 
 
 @pytest.mark.approved
@@ -231,3 +232,22 @@ def test_past_the_bound_a_plan_or_lane_reply_gets_its_relaunch_next(env, monkeyp
     res = guide.status(con, run)
     assert res.next == expected, res.next
     assert not any("reply is written" in ln for ln in res.lines), res.lines
+
+
+@pytest.mark.approved
+def test_past_the_bound_a_task_visual_review_names_the_manual_step_and_the_reply_file(env, monkeypatch):
+    _fake(env, monkeypatch)
+    run, d = _live_dispatch(env, monkeypatch)
+    con = env.con()
+    con.execute("INSERT INTO gates(id, run_id, task_id, subject, kind, input_key, status, created_at) "
+                "VALUES('G918', ?, 'T1', 'task', 'visual', 'task:T1:r1', 'running', ?)", (run["id"], d["started_at"]))
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, started_at, kind, status, launcher, pane_id, pid, gate_id) "
+                "VALUES('D918', ?, 'T1', 'visual_reviewer', ?, 'reviewer', 'running', 'herdr', 'w1:p1', ?, 'G918')",
+                (run["id"], d["started_at"], os.getpid()))
+    con.commit()
+    reply = paths.run_dir(run["id"]) / "dispatches" / "D918" / "reply.txt"
+    reply.parent.mkdir(parents=True, exist_ok=True)
+    reply.write_text("VERDICT: APPROVED")
+    os.utime(reply, (1, 1))
+    res = guide.status(con, run)
+    assert res.next == f"office revoke D918, then office resume; the reply is at {reply}", res.next
