@@ -160,7 +160,11 @@ def test_a_stack_opens_one_acceptance_at_a_time(env):
 
 
 def _next_lines(env) -> dict:
-    """The `next:` each command prints for the same canonical state."""
+    """The `next:` each command prints for the same canonical state.
+
+    With work running and no root wake, status and resume lead with #922's `office wait` prefix; `office wait` is
+    itself the wait, so it does not. The guide's decision after that prefix must still agree."""
+    from office.guide import NO_WAKE_WAIT
     out = {}
     _, data = env.ojson("status")
     out["status"] = data["next"]
@@ -168,7 +172,7 @@ def _next_lines(env) -> dict:
     out["resume"] = re.search(r"^next: (.*)$", text, re.M).group(1)
     _, text = env.office("wait", "--timeout", "0", "--poll", "0")
     out["wait"] = re.search(r"^next: (.*)$", text, re.M).group(1)
-    return out
+    return {k: v.removeprefix(f"{NO_WAKE_WAIT}: ") for k, v in out.items()}
 
 
 def test_status_resume_and_wait_agree_while_t1_checks_then_has_findings_then_is_accepted(env, monkeypatch):

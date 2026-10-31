@@ -9,10 +9,18 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
 
 from office import db, dispatch
 from office.util import now_iso, parse_iso, pid_alive, sha256_obj
+
+
+def _at(value: str) -> datetime:
+    """A stored timestamp as an aware datetime: a naive (or date-only) value is read as UTC."""
+    t = parse_iso(value)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
 
 EXCLUDED = {".git", ".venv", "node_modules", ".next", "dist", "build", "__pycache__"}
 MAX_PATHS = 4000
@@ -154,7 +162,7 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
     if d.get("ended_at") or d.get("status") != "running":
         return None
     now = now_iso()
-    age = (parse_iso(now) - parse_iso(d["started_at"])).total_seconds() if d.get("started_at") else 0
+    age = (_at(now) - _at(d["started_at"])).total_seconds() if d.get("started_at") else 0
     if role == "reviewer" and age >= threshold("review_wall"):
         if budget_only:
             return (f"self-review subagent {d['id']} is still running {int(age)}s past review wall budget "
@@ -173,7 +181,7 @@ def check(con, run: dict, d: dict, *, role: str, activity: dict | None = None, b
                         "WHERE id=? AND status='running' AND ended_at IS NULL",
                         (sample, now, d["id"]))
         since = now
-    seconds = (parse_iso(now) - parse_iso(since)).total_seconds()
+    seconds = (_at(now) - _at(since)).total_seconds()
     if seconds < threshold(role):
         return None
     if role == "executor" and child_state(d) is not False:
@@ -215,7 +223,7 @@ def reviewer_stalls(con, run: dict) -> list[str]:
 
 
 def _age(ts: str, now: str) -> float:
-    return (parse_iso(now) - parse_iso(ts)).total_seconds()
+    return (_at(now) - _at(ts)).total_seconds()
 
 
 def review_episodes(con, run: dict, *, probe: bool, verdicts: list[dict] | None = None) -> list[dict]:
