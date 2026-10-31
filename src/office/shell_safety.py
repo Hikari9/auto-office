@@ -133,13 +133,68 @@ def _negated_prose_unsafe(command: str) -> bool:
     return not _is_prohibition(text)
 
 
+_ASSIGNMENT_VALUE_END = re.compile(r'(?:^|[\s;&|()])[A-Za-z_][A-Za-z0-9_]*="?$')
+
+
+def _close_paren(command: str, start: int) -> int | None:
+    """Index of the `)` closing a `$(` whose body begins at `start`; quotes are honoured."""
+    depth, quote, i = 1, None, start
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _neutralize_substitutions(command: str, depth: int, *, prose: bool = False) -> str | None:
+    """Scan each `$(...)` and backtick body as a command, then replace it with a placeholder.
+
+    Returns None when a body is unsafe or a `$(` never closes. An assignment value
+    (`NAME=$(...)`) becomes a plain word, which cannot run. Any other substitution
+    keeps its `$`, so it stays dynamic and is refused if it reaches command position.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(command):
+        if command.startswith("$(", i):
+            end = _close_paren(command, i + 2)
+            if end is None:
+                return None
+            body, i = command[i + 2:end], end + 1
+        elif command[i] == "`" and (end := command.find("`", i + 1)) >= 0:
+            body, i = command[i + 1:end], end + 1
+        else:
+            out.append(command[i])
+            i += 1
+            continue
+        if _scan(body, depth + 1, prose=prose):
+            return None
+        out.append("SUBST" if _ASSIGNMENT_VALUE_END.search("".join(out)) else "$SUBST")
+    return "".join(out)
+
+
 def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
     if depth > 5:
         return True
-    # For executable shell fields, scan backtick substitution bodies before
-    # shlex tokenizes them; a non-leading substitution can otherwise be missed.
-    if any(_scan(span.group(2), depth + 1, prose=prose) for span in _INLINE_CODE.finditer(command)):
+    # Substitution bodies are scanned before shlex tokenizes the line; a
+    # non-leading substitution can otherwise be missed.
+    rewritten = _neutralize_substitutions(command, depth, prose=prose)
+    if rewritten is None:
         return True
+    command = rewritten
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
         lexer.whitespace_split = True
