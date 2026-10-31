@@ -18,7 +18,7 @@ def test_skill_checks_for_the_cli_before_anything_else():
     assert check < text.index('## Start')
     section = text[check:text.index('## Start')]
     assert '`office --version`' in section
-    assert 'ask the user to approve installing it; never install' in section
+    assert 'only after the user picks **Install the CLI**' in section  # consent is the native choice since #924
     assert '`office install`' in section and '`src/office/_version.py`' in section
 
 
