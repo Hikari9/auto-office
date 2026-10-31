@@ -198,6 +198,13 @@
         "type": "string"
       },
       "description": "Capabilities the adapter asserts for routing. 'vision' is never asserted here; it is granted only by a passing conformance probe."
+    },
+    "reviewer_readonly_args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Harness flags that leave a reviewer only read tools. With a worker profile and no reviewer profile, Office derives a headless reviewer profile (worker argv prefixed with these flags, verify_worktree_unchanged on, no vision). Declare it only for a harness with no verified read-only sandbox."
     }
   }
 }
