@@ -9,7 +9,7 @@ import json
 import pytest
 
 from conftest import BAD_ADD, GOOD_ADD, PLAN_ONE, approved_run, start_inline, task_row
-from office import gates
+from office import db, gates, state
 
 OLD = "python3 -c \"print('FAILED legacy::test_old'); raise SystemExit(1)\""
 OLD_PLAN = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {OLD}")
@@ -248,3 +248,33 @@ def test_status_prints_no_preexisting_line_for_a_task_accepted_with_clean_checks
     assert task_row(env)["status"] == "accepted"
     _, out = env.office("status", check=0)
     assert "(also fails on base)" not in out
+
+
+@V31
+def test_status_ignores_a_preexisting_note_for_a_revision_that_is_not_the_accepted_one(env):
+    _start(env, PLAN_ONE, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    run = _q(env, "SELECT * FROM runs")[-1]
+    con = env.con()
+    try:
+        with db.transaction(con):
+            state.emit(con, run, "gate.preexisting", "superseded revision note", task_id="T1",
+                       payload={"gate": "g-old", "revision": "superseded-rev",
+                                "preexisting": [{"code": "C1", "command": OLD, "exit": 1, "base_commit": "x"}]})
+    finally:
+        con.close()
+    _, out = env.office("status", check=0)
+    assert "(also fails on base)" not in out
+
+
+@V31
+def test_status_lists_every_preexisting_command_of_an_accepted_task(env):
+    OLD2 = "python3 -c \"print('FAILED legacy::test_other'); raise SystemExit(1)\""
+    plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"',
+                            f"checks:\n- {OLD}\n- {OLD2}")
+    _start(env, plan, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert f"T1 accepted with 2 pre-existing check failures (also fails on base): {OLD}; {OLD2}" in out
