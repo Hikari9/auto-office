@@ -37,8 +37,9 @@ def _disable_blocker(con, run: dict) -> str | None:
     for task in state.tasks(con, run["id"]):
         if task.get("pr"):
             return f"{task['id']} already has a recorded PR; changing --no-prs would abandon its lifecycle"
+    # Done jobs are settled: a failed PR sync records no PR and must not block the disable forever.
     job = con.execute("SELECT id, status FROM outbox WHERE run_id=? AND kind IN ('pr', 'pr_sync') "
-                      "ORDER BY created_at LIMIT 1", (run["id"],)).fetchone()
+                      "AND status IN ('queued', 'claimed', 'failed') ORDER BY created_at LIMIT 1", (run["id"],)).fetchone()
     if job:
         return f"PR job {job['id']} ({job['status']}) may already have pushed or created a PR"
     dispatch = con.execute("SELECT id, task_id FROM dispatches WHERE run_id=? AND role='executor' "
@@ -52,7 +53,7 @@ def _disable_blocker(con, run: dict) -> str | None:
 
 def amend(con, run: dict, *, enable_prs: bool | None, quote: str | None,
           confirm: bool, extra: list[str] | None = None) -> Result:
-    if os.environ.get("OFFICE_DISPATCH_ID"):
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-not-authorized", "a worker cannot amend run options")
     if extra:
         raise Refused("immutable-run-option", f"run option {extra[0]!r} is not safe to amend: "
@@ -80,7 +81,9 @@ def amend(con, run: dict, *, enable_prs: bool | None, quote: str | None,
             raise Refused("prs-unavailable", f"cannot enable task PRs: {detected.get('reason') or 'GitHub unavailable'}",
                           next_step="fix GitHub/origin access and retry " + USAGE)
     else:
-        detected = {"enabled": False, "reason": "disabled by confirmed run option amendment"}
+        # Keep the repo and base branch: integrate and land read base_branch from this record.
+        kept = {k: before[k] for k in ("repo", "base_branch", "merge_method") if k in before}
+        detected = {**kept, "enabled": False, "reason": "disabled by confirmed run option amendment"}
     queued = 0
     with db.transaction(con):
         latest = state.get_run(con, run["id"])

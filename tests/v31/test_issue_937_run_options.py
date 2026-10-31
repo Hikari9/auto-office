@@ -1,6 +1,10 @@
 """#937: confirmed live run option amendments persist, reject unsafe changes and affect PR jobs."""
+import io
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from conftest import GOOD_ADD, start_inline
 from test_task_prs import github, gh
@@ -22,6 +26,14 @@ def _prs(env):
         con.close()
 
 
+def _pr_jobs(env):
+    con = env.con()
+    try:
+        return con.execute("SELECT count(*) FROM outbox WHERE kind IN ('pr', 'pr_sync')").fetchone()[0]
+    finally:
+        con.close()
+
+
 def _enable(env):
     return env.office('amend', 'options', '--prs', '--quote', 'User approved enabling PRs', '--confirm')
 
@@ -36,12 +48,12 @@ def test_worker_and_short_quotes_cannot_amend(env, monkeypatch):
     github(env, monkeypatch)
     _ready(env)
     start_inline(env, extra=('--no-prs',))
-    for quote in ('x', '  x \t'):
+    for quote in ('', '   ', 'x', '  x \t'):
         code, out = env.office('amend', 'options', '--prs', '--quote', quote, '--confirm')
         assert code == 4 and 'user-authorization-required' in out
-    code, out = env.office('amend', 'options', '--prs', '--quote', 'yes', '--confirm',
-                           env={'OFFICE_DISPATCH_ID': 'worker'})
-    assert code == 4 and 'worker-not-authorized' in out
+    for worker_env in ({'OFFICE_DISPATCH_ID': 'worker'}, {'OFFICE_ROLE': 'reviewer'}):
+        code, out = env.office('amend', 'options', '--prs', '--quote', 'yes', '--confirm', env=worker_env)
+        assert code == 4 and 'worker-not-authorized' in out, out
     assert not _prs(env)['enabled'] and not _events(env)
 
 
@@ -154,9 +166,12 @@ def test_disable_before_dispatch_stops_future_prs(env, monkeypatch):
     assert _prs(env)['enabled'] is True
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
     assert code == 0 and 'disabled' in out, out
+    assert _prs(env)['base_branch'] == 'main'
+    code, out = env.office('status')
+    assert code == 0 and 'run option amendment: task PRs off' in out, out
     env.office('approve', 'plan', '--quote', 'go', check=0)
     env.office('dispatch', 'T1', check=0)
-    assert not (env.tmp / 'gh.json').exists() or not gh(env)['prs']
+    assert _pr_jobs(env) == 0
     assert _prs(env)['enabled'] is False
     assert _events(env)[0]['before']['enabled'] is True
 
@@ -170,7 +185,7 @@ def test_disable_after_pr_is_refused_and_atomic(env, monkeypatch):
     assert gh(env)['prs']
     before = _prs(env)
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Stop PRs', '--confirm')
-    assert code == 4 and 'prs-in-use' in out, out
+    assert code == 4 and 'prs-in-use' in out and 'already has a recorded PR' in out, out
     assert _prs(env) == before and not _events(env)
 
 
@@ -181,7 +196,7 @@ def test_disable_during_live_executor_is_refused(env, monkeypatch):
     env.office('approve', 'plan', '--quote', 'go', check=0)
     env.office('dispatch', 'T1', env={'OFFICE_WORKER_LAUNCHER': 'external'}, check=0)
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Stop PRs', '--confirm')
-    assert code == 4 and 'prs-in-use' in out, out
+    assert code == 4 and 'prs-in-use' in out and 'still live' in out, out
     assert _prs(env)['enabled'] is True
 
 
@@ -255,13 +270,13 @@ def test_pr_sync_queue_uses_current_mode_not_stale_run_snapshot(env, monkeypatch
 
 def test_confirmed_disable_pins_off_after_transient_github_failure(env, monkeypatch):
     """A temporary gh error cannot later override explicit --no-prs (#479)."""
-    github(env, monkeypatch, repo_view_failures=1)
+    github(env, monkeypatch, repo_view_failures=2)
     env.trust()
     start_inline(env)
     assert _prs(env)['enabled'] is False and _prs(env)['transient'] is True
     code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep PRs off', '--confirm')
     assert code == 0 and 'disabled' in out, out
-    assert _prs(env)['enabled'] is False and 'transient' not in _prs(env)
+    assert _prs(env)['enabled'] is False and 'transient' not in _prs(env) and _prs(env)['amended_at']
     from office import prs, state
     con = env.con()
     try:
@@ -270,3 +285,105 @@ def test_confirmed_disable_pins_off_after_transient_github_failure(env, monkeypa
     finally:
         con.close()
     assert len(_events(env)) == 1
+
+
+class _Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+@pytest.mark.parametrize('flags', [
+    ('--contract',), ('--requirements',), ('--reason', 'why'), ('--add-accept', 'calc.add(0, 0) == 0'),
+])
+def test_options_amend_refuses_plan_flags_it_would_drop(env, flags):
+    env.trust()
+    start_inline(env, extra=('--no-prs',))
+    code, out = env.office('amend', 'options', '--prs', *flags, '--quote', 'yes', '--confirm')
+    assert code == 4 and 'immutable-run-option' in out, out
+    assert _prs(env)['enabled'] is False and not _events(env)
+
+
+def test_options_amend_mode_flag_is_required_and_exclusive(env):
+    env.trust()
+    start_inline(env, extra=('--no-prs',))
+    code, out = env.office('amend', 'options', '--quote', 'yes', '--confirm')
+    assert code == 2 and 'missing-run-option' in out, out
+    code, out = env.office('amend', 'options', '--prs', '--no-prs', '--quote', 'yes', '--confirm')
+    assert code == 2 and 'not allowed with' in out, out
+    assert _prs(env)['enabled'] is False and not _events(env)
+
+
+def test_interactive_option_change_needs_an_explicit_yes(env, monkeypatch):
+    github(env, monkeypatch)
+    _ready(env)
+    start_inline(env)
+    monkeypatch.setattr(sys, 'stdin', _Tty())
+    monkeypatch.setattr('builtins.input', lambda prompt='': 'n')
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local')
+    assert code == 4 and 'confirmation-declined' in out, out
+    assert _prs(env)['enabled'] is True and not _events(env)
+    monkeypatch.setattr('builtins.input', lambda prompt='': 'y')
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local')
+    assert code == 0 and 'disabled' in out, out
+    assert _prs(env)['enabled'] is False and len(_events(env)) == 1
+
+
+def test_run_closing_mid_confirm_refuses_option_change(env, monkeypatch):
+    # A closed run is not active, so the only reachable terminal check is the one inside the transaction.
+    github(env, monkeypatch)
+    _ready(env)
+    start_inline(env)
+    from office import db, prs, state
+    real_settings = prs.settings
+
+    def settle_then_close(con, run):
+        seen = real_settings(con, run)
+        with db.transaction(con):
+            state.update_run(con, run['id'], phase='closed')
+        return seen
+
+    monkeypatch.setattr(prs, 'settings', settle_then_close)
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
+    assert code == 4 and 'run-terminal' in out, out
+    assert _prs(env)['enabled'] is True and not _events(env)
+
+
+def test_option_change_refused_when_pr_settings_move_mid_confirm(env, monkeypatch):
+    github(env, monkeypatch)
+    _ready(env)
+    start_inline(env)
+    from office import db, prs, state
+    real_settings = prs.settings
+
+    def settle_then_move(con, run):
+        seen = real_settings(con, run)
+        with db.transaction(con):
+            landing = dict(state.get_run(con, run['id'])['landing'])
+            landing['prs'] = {**seen, 'reason': 'moved mid-confirm'}
+            state.update_run(con, run['id'], landing=landing)
+        return seen
+
+    monkeypatch.setattr(prs, 'settings', settle_then_move)
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
+    assert code == 4 and 'run-options-stale' in out, out
+    assert _prs(env)['reason'] == 'moved mid-confirm' and not _events(env)
+
+
+def test_settled_pr_job_without_a_pr_does_not_block_disable(env, monkeypatch):
+    github(env, monkeypatch)
+    _ready(env)
+    start_inline(env)
+    from office import db
+    from office.util import now_iso
+    con = env.con()
+    try:
+        run_id = con.execute('SELECT id FROM runs').fetchone()[0]
+        with db.transaction(con):
+            con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, error, "
+                        "created_at) VALUES('settled-sync', ?, 'pr_sync', 'settled-sync', '{\"task_id\": \"T1\"}', "
+                        "'test', 'done', 'gh pr create failed', ?)", (run_id, now_iso()))
+    finally:
+        con.close()
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Keep it local', '--confirm')
+    assert code == 0 and 'disabled' in out, out
+    assert _prs(env)['enabled'] is False
