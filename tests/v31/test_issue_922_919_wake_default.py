@@ -421,7 +421,8 @@ def test_a_verdict_status_showed_before_the_bound_is_not_unread_when_the_bound_p
     run = _run(con)
     _closed_review(con, run, finished_for=5)
     _event(con, run, "gate.pass", "T1", 4)
-    env.office("status", check=0, env={"HERDR_PANE_ID": ""})  # shows the verdict while it is young
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})  # shows the verdict while it is young
+    assert "verdict shown: T1 lane review GU1" in out, out
     con.execute("UPDATE gates SET finished_at=? WHERE id='GU1'", (_ago(1000),))
     con.commit()
     assert watchdog.review_episodes(con, _run(con), probe=False) == []

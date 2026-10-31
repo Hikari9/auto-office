@@ -218,7 +218,7 @@ def _age(ts: str, now: str) -> float:
     return (parse_iso(now) - parse_iso(ts)).total_seconds()
 
 
-def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
+def review_episodes(con, run: dict, *, probe: bool, verdicts: list[dict] | None = None) -> list[dict]:
     """Review gates past a bound, one dict per episode: `kind` (its event), `episode` (the dedupe key),
     `text` (the blocker line) and `next` (the concrete step). `probe` adds running reviewers, which
     read panes. A review that is running and within its bounds matches nothing.
@@ -252,7 +252,7 @@ def review_episodes(con, run: dict, *, probe: bool) -> list[dict]:
             _, sep, action = note.partition("; next: ")
             out.append({"kind": "review.stalled", "episode": f"{dispatch_id}:{since}", "text": note,
                         "next": action if sep else "office status"})
-    for v in unread_verdicts(con, run):
+    for v in (unread_verdicts(con, run) if verdicts is None else verdicts):
         g = v["gate"]
         age = _age(g["finished_at"], now)
         if age < threshold("closed_unread"):
@@ -287,9 +287,16 @@ def unread_verdicts(con, run: dict) -> list[dict]:
     return out
 
 
+def verdict_line(gate) -> str:
+    """The status line for a closed verdict shown before its episode bound (#919)."""
+    scope = gate["task_id"] or "plan"
+    return (f"verdict shown: {scope} {gate['kind']} review {gate['id']} closed "
+            f"{int(_age(gate['finished_at'], now_iso()))}s ago; `office context` has the detail")
+
+
 def mark_review_verdicts_read(con, run: dict, verdicts: list[dict]) -> None:
-    """Called once status has run: every verdict it could show is read, including one whose episode had not
-    aged past its bound yet, so the bound cannot flag it later (#919). Caller holds the transaction."""
+    """Called once status has printed these verdicts, as episode or verdict line: they count as read, so the
+    bound cannot flag one that was shown young (#919). Caller holds the transaction."""
     from office import state
     for v in verdicts:
         state.advance_cursor(con, run["id"], f"{REVIEW_READ}:{v['gate']['id']}", v["seq"])

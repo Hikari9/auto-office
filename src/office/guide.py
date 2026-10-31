@@ -367,17 +367,20 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(f"question: {q}")
     for line in _amendment_stalls(con, run):
         res.add(f"blocker: {line}")
-    episodes = []
+    episodes, verdict_lines = [], []
     if not state.is_terminal(run):
         from office import db, watchdog
-        episodes = watchdog.review_episodes(con, run, probe=probe_panes)
         verdicts = watchdog.unread_verdicts(con, run)
+        episodes = watchdog.review_episodes(con, run, probe=probe_panes, verdicts=verdicts)
+        # Every unread verdict is printed here, as its episode line or as a verdict line; only then is it read.
+        in_episode = {ep["episode"] for ep in episodes if ep["kind"] == "review.closed_unread"}
+        verdict_lines = [watchdog.verdict_line(v["gate"]) for v in verdicts if v["gate"]["id"] not in in_episode]
         if episodes or verdicts:
             with db.transaction(con):
                 watchdog.record_review_episodes(con, run, episodes)
                 watchdog.mark_review_verdicts_read(con, run, verdicts)
     # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
-    res.lines[1:1] = [f"blocker: {ep['text']}" for ep in episodes]
+    res.lines[1:1] = [*verdict_lines, *(f"blocker: {ep['text']}" for ep in episodes)]
     if probe_panes:
         # One `herdr agent list` call, made only by `office status` itself: never from hooks
         # (session start) or `office wait`, which scans panes on its own.
