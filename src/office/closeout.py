@@ -33,6 +33,35 @@ def clean_text(text: str) -> str:
     return " ".join(_UNPRINTABLE.sub(" ", text).split())
 
 
+VERIFIED_LIVE = "verified-live"  # exercised against the real system or binary
+VERIFIED_AGAINST_FAKES = "verified-against-fakes"  # met only against test doubles
+NOT_VERIFIED = "not-verified"
+VERIFICATION_KINDS = (VERIFIED_LIVE, VERIFIED_AGAINST_FAKES, NOT_VERIFIED)
+
+
+def criteria_report(criteria: list[tuple[str, str | None]]) -> list[str]:
+    """One line per acceptance criterion as `<kind>: <text>`, then one summary line (#945).
+
+    `criteria` holds (text, verification kind). Fails closed: a criterion without text or a known kind,
+    and an empty list, raise ValueError rather than report the work as met. The summary names the
+    criteria not verified live, faked and unverified together, or says all are verified live.
+    """
+    if not criteria:
+        raise ValueError("acceptance cannot be reported as met without labeled criteria")
+    lines, weak = [], []
+    for text, kind in criteria:
+        label = clean_text(text) if isinstance(text, str) else ""
+        if not label or kind not in VERIFICATION_KINDS:
+            raise ValueError(f"acceptance criterion needs text and one verification kind "
+                             f"({', '.join(VERIFICATION_KINDS)}); got {text!r} as {kind!r}")
+        lines.append(f"{kind}: {label}")
+        if kind != VERIFIED_LIVE:
+            weak.append(f"{label} ({kind})")
+    lines.append("not verified live: " + ", ".join(weak) if weak
+                 else f"all {len(lines)} acceptance criteria verified live")
+    return lines
+
+
 def visual_review_disclosures(con, run: dict) -> list[str]:
     """One line per task whose required visual review did not finish with comparable evidence (#942).
 
