@@ -22,10 +22,10 @@ def _run(con) -> dict:
     return state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
 
 
-def _review_gate(con, run, gate_id, *, kind="lane", status="queued", created_for=0.0, finished_for=None):
+def _review_gate(con, run, gate_id, *, kind="lane", status="queued", created_for=0.0, finished_for=None, task="T1"):
     con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, plan_version, kind, input_key, status, "
                 "verdict, created_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (gate_id, run["id"], "task", "T1", None, run.get("plan_version"), kind, f"k-{gate_id}", status,
+                (gate_id, run["id"], "task", task, None, run.get("plan_version"), kind, f"k-{gate_id}", status,
                  "PASS" if status == "done" else None, _ago(created_for),
                  _ago(finished_for) if finished_for is not None else None))
     con.commit()
@@ -426,3 +426,18 @@ def test_a_verdict_status_showed_before_the_bound_is_not_unread_when_the_bound_p
     con.execute("UPDATE gates SET finished_at=? WHERE id='GU1'", (_ago(1000),))
     con.commit()
     assert watchdog.review_episodes(con, _run(con), probe=False) == []
+
+
+def test_status_shows_at_most_three_unread_verdicts_and_leaves_the_rest_unread(env, monkeypatch):
+    _go(env)
+    monkeypatch.setenv("OFFICE_REVIEW_UNREAD_S", "3600")
+    con = env.con()
+    run = _run(con)
+    for i, task in enumerate(["T1", "T2", "T3", "T4"]):
+        _review_gate(con, run, f"GC{i}", status="done", task=task, created_for=100 - i, finished_for=100 - i)
+        _event(con, run, "gate.pass", task, 99 - i)
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
+    assert out.count("verdict shown:") == 3, out
+    assert "1 more closed verdicts unread" in out, out
+    code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
+    assert out.count("verdict shown:") == 1 and "more closed verdicts unread" not in out, out

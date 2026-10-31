@@ -283,6 +283,9 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
     return None
 
 
+VERDICT_LINES = 3  # closed verdicts one status shows and marks read (#919)
+
+
 def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
            probe_panes: bool = False) -> Result:
     worker = os.environ.get("OFFICE_DISPATCH_ID")
@@ -372,13 +375,19 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         from office import db, watchdog
         verdicts = watchdog.unread_verdicts(con, run)
         episodes = watchdog.review_episodes(con, run, probe=probe_panes, verdicts=verdicts)
-        # Every unread verdict is printed here, as its episode line or as a verdict line; only then is it read.
+        # A verdict is read only once its line is printed: an episode line, or one of at most a few verdict lines.
+        # Session hooks cut the output by bytes, so a longer list would lose lines that were marked read.
         in_episode = {ep["episode"] for ep in episodes if ep["kind"] == "review.closed_unread"}
-        verdict_lines = [watchdog.verdict_line(v["gate"]) for v in verdicts if v["gate"]["id"] not in in_episode]
+        pending = [v for v in verdicts if v["gate"]["id"] not in in_episode]
+        shown = pending[:VERDICT_LINES]
+        verdict_lines = [watchdog.verdict_line(v["gate"]) for v in shown]
+        if len(pending) > len(shown):
+            verdict_lines.append(f"{len(pending) - len(shown)} more closed verdicts unread; the next office status shows them")
+        printed = in_episode | {v["gate"]["id"] for v in shown}
         if episodes or verdicts:
             with db.transaction(con):
                 watchdog.record_review_episodes(con, run, episodes)
-                watchdog.mark_review_verdicts_read(con, run, verdicts)
+                watchdog.mark_review_verdicts_read(con, run, [v for v in verdicts if v["gate"]["id"] in printed])
     # Right after the header: a caller that truncates the output (session hooks) never loses a marked-read verdict.
     res.lines[1:1] = [*verdict_lines, *(f"blocker: {ep['text']}" for ep in episodes)]
     if probe_panes:
