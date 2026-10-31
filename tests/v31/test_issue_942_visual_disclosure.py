@@ -6,7 +6,7 @@ from types import ModuleType
 
 import pytest
 
-from office import closeout, config as cfg, convergence, db, doctor, lifecycle, state
+from office import closeout, config as cfg, db, doctor, lifecycle, state
 from office import visual
 from office.result import Result
 
@@ -47,15 +47,37 @@ def test_unlaunchable_chromium_is_not_a_failure_when_visual_review_is_disabled(i
     assert f"{FAILING[0]} (visual review is not enabled; not a failure)" in res.lines
 
 
+def test_unreadable_config_fails_closed_so_the_launch_failure_counts(isolated_state, monkeypatch):
+    baseline, _ = _doctor_problems(monkeypatch, PASSING, None)
+    failed, res = _doctor_problems(monkeypatch, FAILING, None)
+    assert failed == baseline + 1
+    assert FAILING[0] in res.lines
+
+
 def test_default_config_enables_visual_review(isolated_state, monkeypatch):
+    empty = isolated_state / "empty.yaml"
+    empty.write_text("")
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(empty))
+    monkeypatch.chdir(isolated_state)  # outside any repository: only the packaged defaults and the empty user file
     assert doctor._visual_review_enabled(doctor._effective_config()) is True
 
 
-def test_unreadable_user_config_yields_no_config_instead_of_a_crash(isolated_state, monkeypatch):
+def test_unreadable_user_config_yields_no_config(isolated_state, monkeypatch):
     user = isolated_state / "user.yaml"
     user.write_text("gear_presets: [\n")
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
-    assert doctor._effective_config() == {}
+    assert doctor._effective_config() is None
+
+
+def test_user_config_that_cannot_be_read_yields_no_config(isolated_state, monkeypatch):
+    user = isolated_state / "user.yaml"
+    user.write_text("gear_presets: {}\n")
+    user.chmod(0)
+    try:
+        monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
+        assert doctor._effective_config() is None
+    finally:
+        user.chmod(0o600)
 
 
 def test_config_resolve_error_yields_no_config(isolated_state, monkeypatch):
@@ -63,7 +85,7 @@ def test_config_resolve_error_yields_no_config(isolated_state, monkeypatch):
         raise ValueError("review.contract must be one of v3.1, convergence-v1")
 
     monkeypatch.setattr(cfg, "resolve", refuse)
-    assert doctor._effective_config() == {}
+    assert doctor._effective_config() is None
 
 
 @pytest.mark.parametrize("config", [
@@ -72,9 +94,18 @@ def test_config_resolve_error_yields_no_config(isolated_state, monkeypatch):
     {"gear_presets": {"L": None}},
     {"gear_presets": {"L": "yes"}},
     {"gear_presets": {"L": {"funded_browser_verification": False}}},
+    {"gear_presets": {"L": {"funded_browser_verification": False}, "XL": {"funded_browser_verification": False}}},
 ])
-def test_visual_review_enabled_needs_a_preset_that_funds_browser_verification(config):
+def test_visual_review_disabled_when_no_preset_funds_browser_verification(config):
     assert doctor._visual_review_enabled(config) is False
+
+
+@pytest.mark.parametrize("presets", [
+    {"L": {"funded_browser_verification": False}, "S": {"funded_browser_verification": "acceptance_forced"}},
+    {"S": {"funded_browser_verification": "acceptance_forced"}, "L": {"funded_browser_verification": False}},
+])
+def test_visual_review_enabled_when_any_one_preset_funds_it(presets):
+    assert doctor._visual_review_enabled({"gear_presets": presets}) is True
 
 
 def _fake_playwright(monkeypatch, failure: str) -> None:
@@ -98,17 +129,25 @@ def _fake_playwright(monkeypatch, failure: str) -> None:
 
 def test_missing_headless_shell_is_a_problem_and_names_the_install_fix(monkeypatch):
     _fake_playwright(monkeypatch, "BrowserType.launch: Executable doesn't exist at /cache/chrome-headless-shell")
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
     message, problem = doctor._visual_capture_status()
     assert problem and "headless shell missing" in message
     assert "-m playwright install chromium-headless-shell" in message
-    assert "--with-deps" in message
+    assert "--with-deps" not in message
 
 
-def test_other_launch_failure_is_a_problem_and_names_the_fix(monkeypatch):
+def test_linux_fix_includes_with_deps_as_a_runnable_flag(monkeypatch):
     _fake_playwright(monkeypatch, "Host is missing required shared libraries")
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
     message, problem = doctor._visual_capture_status()
-    assert problem and "cannot launch" in message and "shared libraries" in message
-    assert "-m playwright install chromium-headless-shell" in message
+    assert problem and "cannot launch" in message
+    assert "-m playwright install --with-deps chromium-headless-shell" in message
+
+
+def test_first_non_blank_line_of_the_launch_error_is_the_reason(monkeypatch):
+    _fake_playwright(monkeypatch, "\n  Host is missing required shared libraries\nmore detail")
+    message, problem = doctor._visual_capture_status()
+    assert problem and "(Host is missing required shared libraries)" in message
 
 
 def test_missing_optional_playwright_package_is_not_a_problem(monkeypatch):
@@ -174,16 +213,41 @@ def test_closeout_discloses_each_required_visual_review_that_did_not_complete(tm
     ]
 
 
+def test_latest_visual_gate_decides_when_insertion_order_differs_from_creation_order(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def newer_first_inserted(con):
+        _gate(con, "G-new", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:01")
+        _gate(con, "G-old", task_id="T1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:00")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, newer_first_inserted) == []
+
+
+def test_latest_visual_gate_that_is_blocked_is_disclosed_even_after_an_older_comparable_one(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"})]
+
+    def older_first_inserted(con):
+        _gate(con, "G-old", task_id="T1", evidence="COMPARABLE", created_at="2026-10-31T00:00:00")
+        _gate(con, "G-new", task_id="T1", evidence="CAPTURE_BLOCKED", created_at="2026-10-31T00:00:01")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, older_first_inserted) == [
+        "visual review skipped/degraded for T1: CAPTURE_BLOCKED"]
+
+
 def test_closeout_discloses_a_review_still_running(tmp_path, monkeypatch):
     lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
                          lambda con: _gate(con, "G1", task_id="T1", status="running", evidence="COMPARABLE"))
     assert lines == ["visual review skipped/degraded for T1: running"]
 
 
-def test_closeout_reason_falls_back_to_review_status_when_evidence_is_absent(tmp_path, monkeypatch):
-    lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
-                         lambda con: _gate(con, "G1", task_id="T1", evidence=None, review_status="UNAVAILABLE"))
-    assert lines == ["visual review skipped/degraded for T1: UNAVAILABLE"]
+def test_closeout_reason_falls_back_to_review_status_then_to_no_evidence(tmp_path, monkeypatch):
+    with_review = _disclosures(monkeypatch, tmp_path / "a", [_task("T1", visual_spec={"url": "/a"})],
+                               lambda con: _gate(con, "G1", task_id="T1", evidence=None, review_status="UNAVAILABLE"))
+    assert with_review == ["visual review skipped/degraded for T1: UNAVAILABLE"]
+    (tmp_path / "b").mkdir()
+    bare = _disclosures(monkeypatch, tmp_path / "b", [_task("T1", visual_spec={"url": "/a"})],
+                        lambda con: _gate(con, "G1", task_id="T1", evidence=None))
+    assert bare == ["visual review skipped/degraded for T1: no comparable evidence"]
 
 
 def test_closeout_accepts_not_applicable_evidence(tmp_path, monkeypatch):
@@ -192,25 +256,36 @@ def test_closeout_accepts_not_applicable_evidence(tmp_path, monkeypatch):
     assert lines == []
 
 
-def test_closeout_truncates_a_long_gate_summary(tmp_path, monkeypatch):
+def test_closeout_truncates_the_summary_after_collapsing_whitespace(tmp_path, monkeypatch):
+    summary = "a" * 170 + "  " + "b" * 50  # collapsed first: 170 a, one space, 50 b
     lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
-                         lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED", summary="x" * 200))
-    assert lines == [f"visual review skipped/degraded for T1: CAPTURE_BLOCKED ({'x' * 180})"]
+                         lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED", summary=summary))
+    assert lines == [f"visual review skipped/degraded for T1: CAPTURE_BLOCKED ({'a' * 170} {'b' * 9})"]
 
 
-def test_lane_gate_without_membership_covers_its_scopes_current_tasks(tmp_path, monkeypatch):
-    monkeypatch.setattr(convergence, "find_scope",
-                        lambda _con, _run, scope_id: {"id": scope_id, "tasks": ["T1"]} if scope_id == "L1" else None)
+def test_whitespace_only_summary_adds_no_empty_detail(tmp_path, monkeypatch):
     lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
-                         lambda con: _gate(con, "G1", scope="L1", evidence="COMPARABLE"))
-    assert lines == []
+                         lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED", summary=" \n  "))
+    assert lines == ["visual review skipped/degraded for T1: CAPTURE_BLOCKED"]
 
 
-def test_lane_gate_without_membership_or_known_scope_covers_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(convergence, "find_scope", lambda *_args: None)
+def test_control_characters_in_a_summary_do_not_reach_the_report(tmp_path, monkeypatch):
     lines = _disclosures(monkeypatch, tmp_path, [_task("T1", visual_spec={"url": "/a"})],
-                         lambda con: _gate(con, "G1", scope="L9", evidence="COMPARABLE"))
-    assert lines == ["visual review required for T1 but never ran"]
+                         lambda con: _gate(con, "G1", task_id="T1", evidence="CAPTURE_BLOCKED",
+                                           summary="\x1b[2Kcleared\x07 now"))
+    assert lines == ["visual review skipped/degraded for T1: CAPTURE_BLOCKED ([2Kcleared now)"]
+    assert "\x1b" not in lines[0] and "\x07" not in lines[0]
+
+
+def test_lane_gate_with_no_recorded_membership_makes_its_required_reviews_unverifiable(tmp_path, monkeypatch):
+    tasks = [_task("T1", visual_spec={"url": "/a"}), _task("T2", visual_spec={"url": "/b"})]
+
+    def legacy_lane(con):
+        _gate(con, "G-legacy", scope="L1", evidence="COMPARABLE")
+        _gate(con, "G2", task_id="T2", evidence="COMPARABLE")
+
+    assert _disclosures(monkeypatch, tmp_path, tasks, legacy_lane) == [
+        "visual review for T1 unverifiable: gate G-legacy has no recorded membership"]
 
 
 @pytest.mark.parametrize("path", ["merged", "handoff", "unmerged"])

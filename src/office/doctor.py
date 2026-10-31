@@ -36,7 +36,7 @@ def _visual_capture_status() -> tuple[str, bool]:
             browser = playwright.chromium.launch(**{**args, "timeout": 10000})
             browser.close()
     except Exception as error:
-        reason = (str(error).splitlines() or [type(error).__name__])[0][:240]
+        reason = next((line.strip() for line in str(error).splitlines() if line.strip()), type(error).__name__)[:240]
         if args.get("executable_path"):
             # The launch used this binary, so the playwright install command would not fix it.
             return (f"visual capture: Chrome at {args['executable_path']} cannot launch ({reason}); fix: check "
@@ -47,23 +47,28 @@ def _visual_capture_status() -> tuple[str, bool]:
 
 
 def _playwright_fix_hint() -> str:
-    return (f"fix: {shlex.quote(sys.executable)} -m playwright install chromium-headless-shell "
-            "(on Linux, add --with-deps)")
+    deps = " --with-deps" if sys.platform.startswith("linux") else ""
+    return f"fix: {shlex.quote(sys.executable)} -m playwright install{deps} chromium-headless-shell"
 
 
-def _visual_review_enabled(config: dict) -> bool:
-    """Visual review is enabled when some gear preset funds browser verification (#942)."""
-    presets = (config or {}).get("gear_presets") or {}
+def _visual_review_enabled(config: dict | None) -> bool:
+    """Visual review is enabled when some gear preset funds browser verification (#942).
+
+    An unreadable config (None) fails closed: the launch failure counts.
+    """
+    if config is None:
+        return True
+    presets = config.get("gear_presets") or {}
     return any(isinstance(p, dict) and bool(p.get("funded_browser_verification")) for p in presets.values())
 
 
-def _effective_config() -> dict:
+def _effective_config() -> dict | None:
     from office import config as cfg
     repo = paths.repo_identity()
     try:
         return cfg.resolve(repo[0] if repo else None)[0]
     except (ValueError, yaml.YAMLError, OSError):
-        return {}
+        return None
 
 
 def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | None = None,

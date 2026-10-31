@@ -39,26 +39,29 @@ def visual_review_disclosures(con, run: dict) -> list[str]:
     if not required:
         return []
     latest: dict[str, dict] = {}
+    unattributed: list[str] = []  # lane gates that predate members_json: their coverage is not recorded
     for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
                            "ORDER BY created_at, id", (run["id"],)).fetchall():
         gate = dict(row)
         members = [gate["task_id"]] if gate["task_id"] else convergence.gate_members(gate)
-        if members is None:  # a lane gate that predates members_json: the scope's current tasks
-            scope = convergence.find_scope(con, run, gate["scope"] or "")
-            members = scope["tasks"] if scope else []
+        if members is None:
+            unattributed.append(gate["id"])
+            continue
         for tid in members:
             latest[tid] = gate
     lines = []
     for task in required:
         tid = task["id"]
         gate = latest.get(tid)
-        if gate is None:
+        if gate is None and unattributed:
+            lines.append(f"visual review for {tid} unverifiable: gate {unattributed[0]} has no recorded membership")
+        elif gate is None:
             lines.append(f"visual review required for {tid} but never ran")
         elif gate["status"] != "done" or gate["evidence_status"] not in _VISUAL_SATISFIED:
             reason = (gate["status"] if gate["status"] != "done"
-                      else gate["evidence_status"] or gate["review_status"] or gate["status"])
-            detail = f" ({' '.join(gate['summary'].split())[:180]})" if gate["summary"] else ""
-            lines.append(f"visual review skipped/degraded for {tid}: {reason}{detail}")
+                      else gate["evidence_status"] or gate["review_status"] or "no comparable evidence")
+            summary = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", gate["summary"] or "").split())[:180]
+            lines.append(f"visual review skipped/degraded for {tid}: {reason}" + (f" ({summary})" if summary else ""))
     return lines
 
 
