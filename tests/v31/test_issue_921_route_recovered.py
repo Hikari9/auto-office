@@ -160,8 +160,37 @@ def test_a_review_skip_is_not_recovered_by_a_lapsed_demotion_of_its_route(cold):
     review_fallback(cold, CODEX)
     cooldown(cold, routing.demotion_key("codex", "gpt-6.1-sol", "high"), FUTURE)
     with db.transaction(cold.con):
-        cold.con.execute("UPDATE route_cooldowns SET expires_at=?", (now_iso(),))
+        cold.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?",
+                         (now_iso(), routing.demotion_key("codex", "gpt-6.1-sol", "high")))
     assert sweep(cold) == []  # no re-probe passed
+
+
+def test_a_rate_limit_refreshed_after_the_skip_does_not_recover_it(cold):
+    key = routing.cooldown_key("codex", "gpt-6.1-sol")
+    cooldown(cold, key, FUTURE)
+    review_fallback(cold, CODEX)
+    with db.transaction(cold.con):  # a later limit hit refreshes the row: whether it was live at the skip is unknown
+        cold.con.execute("UPDATE route_cooldowns SET expires_at=?, updated_at=? WHERE route=?", (now_iso(), now_iso(), key))
+    assert sweep(cold) == []
+
+
+def test_a_lapsed_demotion_does_not_hide_a_rate_limit_that_lapsed_before_the_notice(cold):
+    """The rate limit's own row decides: a lapsed demotion beside it recovers nothing, and a rate limit that lapsed
+    before the skip does not recover it either."""
+    cooldown(cold, routing.cooldown_key("codex", "gpt-6.1-sol"), PAST)
+    cooldown(cold, routing.demotion_key("codex", "gpt-6.1-sol", "high"), PAST)
+    review_fallback(cold, CODEX)
+    assert sweep(cold) == []
+
+
+def test_a_run_gone_since_the_caller_read_it_records_nothing(plain, monkeypatch):
+    d = failed_route(plain)
+    expire(plain, d)
+    stale = run(plain)
+    monkeypatch.setattr(state, "get_run", lambda con, run_id: None)  # the run row is gone at the writer lock
+    assert routechange.sweep_recovered(plain.con, stale) == []
+    monkeypatch.undo()
+    assert recovered(plain) == []
 
 
 def test_a_new_failure_after_a_recovery_is_a_new_episode(plain):

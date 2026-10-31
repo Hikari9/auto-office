@@ -350,9 +350,10 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
         deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
         return None if deadline > now else ("demotion lapsed", deadline)
     created = parse_iso(row["created_at"])
-    limit = con.execute("SELECT expires_at FROM route_cooldowns WHERE route=?",
+    limit = con.execute("SELECT expires_at, updated_at FROM route_cooldowns WHERE route=?",
                         (routing.cooldown_key(harness, model),)).fetchone()  # the rate limit routing keys on the route
-    if limit and parse_iso(limit[0]) > created:  # the rate limit that skipped the route was live then, and has lapsed
+    # Live at the notice: set before it and not refreshed since (a refresh after it leaves the skip's cause unknown).
+    if limit and parse_iso(limit[1]) <= created < parse_iso(limit[0]):
         return "cooldown lapsed", parse_iso(limit[0])
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
