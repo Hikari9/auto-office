@@ -48,15 +48,16 @@ def _using_executor_policy(policy: dict):
         _executor_policy_context.reset(token)
 
 
-# Rejections that mean a route was avoided for quota or auth (#921). Others (trust, capability, concurrency, a runtime
-# demotion whose reason is not quota or auth) are not recovered when their route becomes available again.
+# Rejections that mean a route was avoided for a hard quota or auth failure (#921). Others (trust, capability, concurrency,
+# a projected quota reserve, a runtime demotion whose reason is not quota or auth) are not recovered when their route becomes
+# available again: a reserve skip clears only when the reserve gate admits the route, which a probe pass does not show.
 QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited"})
-QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked", "quota-reserve"})
+QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked"})
 
 
 def quota_auth_rejection(rejection: dict) -> bool:
     """Whether a rejection avoided its route for quota or auth (#921): a quota or auth cooldown category, or a
-    reason class of a failed exact probe or a projected quota reserve."""
+    reason class of a failed exact probe. A projected quota reserve is not one."""
     return rejection.get("category") in QUOTA_AUTH_CATEGORIES or rejection.get("reason_class") in QUOTA_AUTH_REASON_CLASSES
 
 
