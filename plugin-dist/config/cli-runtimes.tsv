@@ -1,0 +1,9 @@
+key	skill_path	models_path
+claude	skills/claude-cli/SKILL.md	models/claude.json
+codex	skills/codex-cli/SKILL.md	models/codex.json
+agy	skills/agy-cli/SKILL.md	models/agy.json
+pi	skills/pi-cli/SKILL.md	models/pi.json
+hermes	skills/hermes-cli/SKILL.md	models/hermes.json
+kilo	skills/kilo-cli/SKILL.md	models/kilo.json
+opencode	skills/opencode-cli/SKILL.md	models/opencode.json
+gemini	skills/gemini-cli/SKILL.md	models/gemini.json

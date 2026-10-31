@@ -1,36 +1,44 @@
 ---
 name: auto-review
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 independent review spoke. Use for plan review, code review, accepted-material/minor/rejected/pending finding disposition, pointed blast-radius and bypass analysis, repeated review rounds, or validating PLAN DEFECT and BRIEF DEFECT exits.
+description: Explicit standalone independent review of a specific commit, PR, diff or plan. Dispatch a distinct read-only reviewer in a fresh Herdr pane or fresh CLI session, return SHA-bound APPROVED, RECHECK or INTAKE_GAP, and let the invoking agent coordinate up to three substantive rounds. Never auto-activate or start an Office run.
 ---
 
-# Auto Review
+# Auto Review — standalone, explicit only
 
-> **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
-> New runs review under `convergence-v1` (`docs/review-convergence.md`): APPROVED | RECHECK | INTAKE_GAP, one review per lane (plus one integrated review of the composed scope when lanes share an interface, a cross-lane acceptance dependency, a shared registry or outcome, or high integration risk and no prior independent review covers the exact result; `office inspect convergence` states why it was required or skipped), a round cap (3 by default), then the orchestrator waives with a recorded reason or escalates to the user.
+This skill is a review primitive, NOT another Office lifecycle, hidden gate or repair orchestrator. Invoke only when the caller explicitly requests /auto-review. It works without the office CLI. Require: repository + immutable revision/base, acceptance criteria, relevant AGENTS.md, prior findings if rechecking, and an identified invoking/coordinating agent. For a plan, use an immutable plan digest instead of a code SHA. Missing decisive requirements produce INTAKE_GAP; do not invent a spec.
 
-Every gate is held by an agent that did not produce the work — never self-approve. Use a fresh/different reviewer session from the producer whenever the harness permits it. When `HERDR_ENV=1` and `herdr` is reachable, that fresh session is a Herdr pane, not an in-process subagent tool (see the top-level `SKILL.md`'s Dispatch and mutation section) — check this before dispatching, not after defaulting to whatever tool is already loaded. Before invoking a plan reviewer or code reviewer, publish the router's `selection_disclosure` to the user and preserve it in the dispatch record/readback: exact invocation model identifier when available, canonical model ID, effort, harness/version, and the evidence-backed reason this reviewer route won. Reviewer routes follow the planner/reviewer order in `protocol/routing.md` (qualification, then the `preferred_seed` advisory anchor and cost policy); the #300 executor slate does not apply to them.
+## Select an independent reviewer
 
-Focus prompts on concrete bypass paths, blast radius, protected paths, wrong-but-passing implementations, state/version mismatch, authority violations, and missing acceptance evidence rather than generic "review correctness." Findings use exactly: `accepted-material`, `accepted-minor`, `rejected-on-evidence`, `pending`. Full gate credit belongs only to accepted-material findings.
+Read the current effective reviewer-role policy if available (office route policy --effective --role code_reviewer), including source and user pins; a missing Office CLI is NOT a reason to invoke or install the Office lifecycle. Determine eligibility from current harness/model/effort capability, factual invocation contract, explicit allow/neutral/deny and override receipts, free-model opt-in, quota, availability, and independence from the producer/fixer. A user pin controls within remaining hard gates. Never bypass a deny or technical incompatibility to obtain the preferred model.
 
-Review is local first (`review_mode: independent_adversary`) or inline for cheap/reversible/low-risk work (`labeled-inline`, never claimed as independent). A final `integration_adversary` is triggered only when dependent/merging landings from two or more executors must compose — never by executor count alone. `disposition_owner` stays with the executor (or planner for a plan-scoped finding) except a genuine, unresolved evidence conflict, which escalates through the orchestrator to the user rather than being decided by the reviewer.
+Preferred eligible chain, re-evaluated at each launch:
+1. Codex GPT-6 Luna High.
+2. OpenCode DeepSeek V4.1 Flash Max (only if actually available and opted in when classified free).
+3. Claude Code Opus 5.5 Low.
+4. AGY Opus 5.5 Low.
 
-Resume the same reviewer session across rounds when possible so it retains prior uncertainty/findings, but never resume into a producer identity. A defect exit earns gate-like credit only when it names a contradicted assumption and proves the current artifact was tested enough to expose it.
+Disclose actual harness, exact invocation-model identifier, canonical model, effort, current role policy result and why earlier candidates were skipped. Do not assert launch capability on the basis of a catalog row alone.
 
-## A review describes one tree state
+## Launch and inspect
 
-A review is a statement about a specific tree state. If the producer is still editing that tree, the reviewer's findings, line numbers, and contamination check all describe something that no longer exists, and afterward nobody can tell which findings survived. Give a concurrent repair its own worktree, or wait for the in-flight review to land; combining several partial repair rounds into one tends to cost less than paying for a full re-review per round.
+- If Herdr is healthy and a new pane can be safely registered, start a FRESH reviewer pane in the correct checkout/cwd, with the pinned immutable revision and read-only scope. Verify pane identity and launch/readback; do not reuse a producer pane.
+- Otherwise start a FRESH independent reviewer CLI session using the verified harness adapter invocation form and enforced read-only permissions. Use only verified review-capable profiles, e.g. OpenCode's restricted office-reviewer agent. Do not use unrestricted worker flags or a non-isolated subagent of the requester as "independent".
+- The reviewer may read files, diff, issue, tests and supplied evidence, and may write its isolated review report if needed. It must NEVER modify producer source files, push commits, approve its own changes, or invoke a repair worker. If no supported read-only reviewer can actually launch, report UNAVAILABLE with the concrete failure and preserve the review requirement.
+- Compare the REAL base-to-revision diff, relevant standards and acceptance criteria. Check correctness, architecture, safety, integration, tests, versioning, risk, regressions, and evidence rather than trusting the producer summary. Detect changes to the reviewed SHA during execution and rebind review to an immutable revision before any verdict.
 
-Scope the contamination check to what changed between the review's start and end snapshot that falls outside the declared review scope — not to file authorship. A reviewer who never writes producer files will otherwise flag nearly every review as contaminated; the signal that actually matters is unscoped drift during the review window, regardless of who wrote it.
+## Result contract
 
-## Review round caps (3.0 runs only)
+Output exactly one of APPROVED / RECHECK / INTAKE_GAP for a completed substantive review. Include reviewed immutable SHA or plan digest, reviewer identity/effort/harness, independence evidence, test evidence versus missing checks, and each finding as:
+FINDING ID | severity (critical/high/medium/low) | blocking yes/no | file:line or concrete evidence | smallest actionable correction | suggested owner.
 
-Read caps from `config.default.yaml`'s `gear_presets.<gear>.plan_review_max_rounds` / `code_review_max_rounds` (`full`: 5/5, `express`: 2/2) via `office_runtime.py resolve-gates --state-dir <dir>` or `start`'s own `gates` output — never hardcode them here. `direct+review`/`light`/`quick` carry a literal `plan_review: false`: no plan-review budget of their own, by design. `direct` carries `plan_review: risk_forced`, resolving to a funded review (drawing `ad_hoc_review_max_rounds`, 2 by default) whenever `start` was given `--blast-radius production[-data]`, `--size-class L|XL`, or `--irreversible` — even with the named gear pinned to `direct`. Unset risk inputs are never read as low risk. The cap counts PLAN-DEFECT-triggered re-reviews only — a normal review with no defect stays at one round regardless of the configured ceiling: `ACCEPTED` ends review immediately, `CHANGES REQUIRED` is the producer's to fix without sending the plan back to the reviewer, and neither authorizes another round. Only an accepted `PLAN DEFECT` does — it contradicts an assumption the plan was built on, so the fix needs a fresh independent look, not "a round left in the budget." `BRIEF DEFECT` follows the same rule for the task brief. Check `office_runtime.py plan-review-round-authorized --verdict <verdict>` rather than reasoning about the verdict yourself.
+APPROVED is permitted only when no blocking finding remains on that same revision. RECHECK means the coordinator must resolve blockers and request another independent look. INTAKE_GAP means requirements/authority are genuinely missing; escalate that exact decision to the owner and do not infer consent. A reviewer that cannot launch, lacks source access, fails readback or produces an invalid reply gives UNAVAILABLE, not APPROVED, and consumes no substantive round.
 
-**A second CHANGES REQUIRED on the same task is a hard stop, not a checkpoint to notice and keep going past.** The moment a second consecutive CHANGES REQUIRED lands on the same artifact: stop. Do not draft the next plan/code version. Do not requeue the reviewer. Write down one explicit disposition — to the user, or in the run record if the user isn't present yet:
+## Invoker-controlled remediation; at most three substantive rounds
 
-- **escalate** — put the unresolved tension in front of the user and wait;
-- **accept with named gaps** — proceed, but state exactly which findings are being carried forward unresolved and why that's acceptable now; or
-- **re-scope** — the findings show the task/brief itself was wrong, so the fix is upstream of another revise-and-resubmit cycle.
+The agent that invoked /auto-review COORDINATES remediation; it need NOT personally fix anything. It can fix inline (executor invoker), delegate one or more fixes to separate executors (orchestrator invoker), or coordinate a specifically assigned other owner. Preserve explicit assignments. The reviewer remains independent, read-only and separate from the actual producer/fixer in every case.
 
-Producing v3 and immediately sending it back to the same reviewer is not a disposition, it is the exact behavior this stop exists to interrupt — "accept with named gaps: none, proceeding" is a legitimate one-line disposition when the fix is obviously correct and small; the requirement is that you stop and say which one, not that every second CHANGES REQUIRED must escalate.
+Keep one durable invoker-owned ledger across caller/fixer changes. Optionally use the pure `scripts/standalone_review_rounds.py:record` guard to check the three-round counter, unavailable attempts, independence receipts, and INTAKE_GAP pauses; it does not launch reviewers, verify permissions or authorize APPROVED. A missing ledger is a blocker, never an excuse to reset the cap.
+
+Count only completed, valid substantive reviewer verdicts. The INITIAL review is round 1; repairs may earn round 2 and round 3, never round 4. Failed launches, unavailable routes, bad transcripts and invalid reviews do not consume rounds. Prefer the same independent reviewer context on a corrected SHA when safe, but never compromise independence. Maintain an invoker-owned ledger with round, reviewer identity, immutable SHA, verdict, findings, fix owner, and resolution. Changing fixer, caller or review surface never resets the cap.
+
+After round 3, if blockers remain, STOP with RECHECK and outstanding evidence; no hidden waiver, self-approval, reset or manufactured APPROVED. INTAKE_GAP pauses for the owner's real decision and is not an authorization to continue. Report an unresolved review as blocked, not accepted.

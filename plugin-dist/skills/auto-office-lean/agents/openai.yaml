@@ -1,0 +1,3 @@
+interface:
+  display_name: "auto-office-lean"
+  short_description: "Lean autonomous engineering with CLI and Herdr agents"
