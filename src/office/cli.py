@@ -33,6 +33,8 @@ Auto Office {ver}
   office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
                                     executor: stop for a decision or a blocker without submitting (office raise --help)
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend options --prs|--no-prs --quote "<user approval>" --confirm
+                                    amend live task PR publishing with user confirmation
   office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
                                     (only matters while plan review is open; a closed review never reopens)
@@ -212,6 +214,7 @@ _ROUTE_AMEND_ONLY_FLAGS = {
     "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
     "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
     "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+    "prs": "--prs", "no_prs": "--no-prs", "confirm": "--confirm",
 }
 
 
@@ -327,6 +330,11 @@ def _parser() -> argparse.ArgumentParser:
                    help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
                    help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
+    prs_mode = s.add_mutually_exclusive_group()
+    prs_mode.add_argument("--prs", action="store_true", help="amend options: enable task PR publishing")
+    prs_mode.add_argument("--no-prs", action="store_true", help="amend options: disable task PR publishing")
+    s.add_argument("--confirm", action="store_true",
+                   help="amend options: confirm the quoted user authorization (required without a TTY)")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -1053,6 +1061,21 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope, exempt=args.self_review_exempt,
                              reason=" ".join(args.reason or []).strip())
+    if cmd == "amend" and args.scope == "options":
+        from office import run_options
+        unsupported = [*(args.delta or []), *[u for u in unknown if u != "--"]]
+        if (args.contract or args.requirements or args.no_review or args.reason or args.route_as or args.restart
+                or args.drop_criterion or args.add_criterion or args.drop_non_goal or args.add_non_goal
+                or args.add_accept or args.drop_accept or args.add_check or args.drop_check or args.set_fields
+                or args.redirect or args.root_cause or args.requirement or args.reviewer):
+            unsupported.append("contract/requirements/route/task flag")
+        mode = True if args.prs else False if args.no_prs else None
+        return run_options.amend(con, run, enable_prs=mode, quote=args.quote, confirm=args.confirm,
+                                 extra=unsupported)
+    if cmd == "amend" and (args.prs or args.no_prs or args.confirm):
+        from office.state import Usage
+        raise Usage("option-scope-required", "--prs, --no-prs and --confirm require office amend options",
+                    next_step="office amend options --prs|--no-prs --quote '<user approval>' --confirm")
     if cmd == "amend" and args.scope == "route":
         from office import routechange
         from office.state import Refused

@@ -119,6 +119,14 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours: `office amend <T2|plan> -- "<delta>"`. Plan review
   reviews the initial plan only: once it closes (APPROVED, its round cap, or a waiver) no amendment is reviewed again; you own them. While
   it is still open a revision is its next round; to skip that for a trivial one, `office amend plan --no-review --reason "<why>" -- "<delta>"`.
+- Live task-PR publishing is the **only** start option that can be changed after launch:
+  `office amend options --prs --quote "<user's exact approval>" --confirm` turns it on when GitHub is available;
+  `office amend options --no-prs --quote "<user's exact approval>" --confirm` turns it off only before any
+  PR sync work or recorded PR and with no executor still running with PR instructions. `--confirm` explicitly
+  confirms the quoted authorization for headless use; an interactive terminal can confirm with `y` instead.
+  The new setting is written to `runs.db` with a `run.options_amended` before/after event and persists on resume.
+  Turning PRs on queues sync for earlier submitted/accepted work. It does **not** alter the run's base,
+  gear, requirements, review gates or deployment authorization; unsafe/unsupported changes are refused with a reason.
 - A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"` (also
   `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`). It versions the contract, runs the new check at the gate (an accepted
   task reruns it and reopens only on failure), records old and effective contract plus rationale (`office inspect amendments`), and never

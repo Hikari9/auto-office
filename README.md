@@ -723,6 +723,7 @@ office submit                         planner/executor: submit a plan or work
 office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
 office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend options --prs|--no-prs --quote "<user approval>" --confirm   amend live task PR publishing
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
@@ -741,6 +742,16 @@ office doctor [--fix]
 office prune [-f]
 office cleanup --older|--run <id> [--apply|--decline]
 ```
+
+The `--no-prs` choice at `office start` is no longer permanent. If write access arrives while
+an Office run is in progress, the user can explicitly authorize
+`office amend options --prs --quote "<user's exact approval>" --confirm` (omit `--confirm` on an interactive
+terminal to accept the `y/N` prompt). Office records the old/new settings and authorization in `runs.db`
+(`office inspect events` / `office inspect run`), and queues PR synchronization for work already submitted.
+To switch **off**, use `office amend options --no-prs` with the same confirmation: Office refuses if an
+executor is still working with PR instructions or any PR/PR-sync operation already exists. Other start-only
+options remain frozen; a refused amendment explains why without changing the run. GitHub availability is
+checked before enabling, but a later push can still fail if repository write permissions are missing.
 
 Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
 
