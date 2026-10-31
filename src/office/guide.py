@@ -325,6 +325,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
             if ids:
                 parts.append(f"{label} {','.join(ids)}")
         res.add(" | ".join(parts))
+        for line in _preexisting_accept_lines(con, run, tasks):
+            res.add(line)
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
@@ -488,6 +490,31 @@ def _quota_unknown_note(con, task: dict) -> str | None:
         return None
     return (f"{task['id']} routed on {unknown.get('status', 'unknown')} quota: {unknown.get('harness')}: "
             f"{unknown.get('cause')}")
+
+
+def _preexisting_accept_lines(con, run: dict, tasks: list[dict]) -> list[str]:
+    """An accepted task whose accepted revision passed with pre-existing check failures (#629): the
+    gate.preexisting event for that revision names the commands that also fail on base."""
+    accepted = {t["id"]: t["accepted_revision_id"] for t in tasks
+                if t["status"] == "accepted" and t.get("accepted_revision_id")}
+    if not accepted:
+        return []
+    commands: dict[str, list[str]] = {}
+    for row in con.execute("SELECT task_id, payload_json FROM events WHERE run_id=? AND kind='gate.preexisting' "
+                           "ORDER BY seq", (run["id"],)).fetchall():
+        payload = json.loads(row["payload_json"] or "{}")
+        if row["task_id"] in accepted and payload.get("revision") == accepted[row["task_id"]]:
+            commands[row["task_id"]] = [p.get("command", "") for p in payload.get("preexisting") or []]
+    lines = []
+    for t in tasks:
+        cmds = commands.get(t["id"])
+        if cmds:
+            noun = "failure" if len(cmds) == 1 else "failures"
+            lines.append(f"{t['id']} accepted with {len(cmds)} pre-existing check {noun} "
+                         f"(also fails on base): {'; '.join(cmds)}")
+    return lines
+
+
 def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
     """Each unfinished task's effective route (#426): the one recorded on the
     task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
