@@ -8,12 +8,14 @@ import subprocess
 import pytest
 import yaml
 
-from office import adapters, candidates, routecmd, scoring, state
+from office import adapters, candidates, config, routecmd, scoring, state
 
 INSTALLED_CLAUDE = "2.1.311"
 
 SEED_SONNET = [{"harness": "claude", "model_id": "sonnet", "effort": "high"}]
 
+# Every scenario here is one the view and `--as` must answer the same way. A seeded route on denied_models is
+# not here: see test_a_preferred_seed_cannot_override_a_legacy_deny_in_dispatch and the strict xfail below.
 SCENARIOS = {
     "shipped-only": {},
     "exact-deny": {"role_rules": [{"role": "executor", "route": "claude/claude-opus-5-5@low", "state": "deny"}]},
@@ -22,7 +24,8 @@ SCENARIOS = {
     "instance-allow": {"role_rules": [{"role": "executor", "route": "claude@2/sonnet@high", "state": "allow"}]},
     "harness-deny": {"role_rules": [{"role": "executor", "route": "harness:claude", "state": "deny", "wildcard": True}]},
     "legacy-deny": {"denied": ["claude/sonnet@high"]},
-    "seed-over-legacy-deny": {"denied": ["claude/sonnet@high"], "seed": SEED_SONNET},
+    "seed-under-role-deny": {"role_rules": [{"role": "executor", "route": "claude/sonnet@high", "state": "deny"}],
+                             "seed": SEED_SONNET},
     "allow-canonical-over-alias-deny": {"role_rules": [
         {"role": "executor", "route": "claude/sonnet@high", "state": "deny"},
         {"role": "executor", "route": "claude/claude-sonnet-5-5@high", "state": "allow"}]},
@@ -65,9 +68,11 @@ def view_state(route):
 def dispatch_refusal(text, repo):
     """The refusal `office dispatch --as <text>` gives the executor, or None when it is accepted.
 
-    This is the declared-route gate `named_executor_route` runs for an orchestrator choice."""
+    This is the declared-route gate `named_executor_route` runs for an orchestrator choice, with the
+    live config the view reads."""
+    live, _ = config.resolve(repo)
     try:
-        candidates.declared_decision(text, flag="--as", role="executor", config={}, repo_root=str(repo))
+        candidates.declared_decision(text, flag="--as", role="executor", config=live, repo_root=str(repo))
     except state.OfficeError as exc:
         return exc
     return None
@@ -81,41 +86,68 @@ def spellings(route):
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
-def test_every_route_and_spelling_gets_the_same_allow_deny_answer(isolated, name):
+def test_every_route_and_spelling_gets_the_same_answer_from_the_view_and_dispatch(isolated, name):
     target, repo = isolated
     write_policy(target, **SCENARIOS[name])
+    routes = view_routes()
+    claude_routes = [r for r in routes if r["route"].startswith("claude/")]
+    assert routes and claude_routes
+    assert all(len(spellings(r["route"])) == 2 for r in claude_routes)  # every claude route has its pinned spelling
     disagreements = []
-    for row in view_routes():
+    for row in routes:
         for text in spellings(row["route"]):
             refusal = dispatch_refusal(text, repo)
-            dispatch_denies = refusal is not None and refusal.category == "route-denied"
-            if (row["state"] == "deny") != dispatch_denies:
-                disagreements.append((text, row["state"], row["source"], refusal and refusal.category))
+            category = refusal.category if refusal else "accept"
+            if row["state"] == "allow":
+                expected = category == "accept"
+            elif row["state"] == "deny":
+                expected = category == "route-denied"
+            else:
+                expected = category != "route-denied"
+            if not expected:
+                disagreements.append((text, row["state"], row["source"], category))
     assert disagreements == []
 
 
-def test_a_preferred_seed_allow_is_the_same_answer_in_both_places(isolated):
+def test_a_preferred_seed_cannot_override_a_legacy_deny_in_dispatch(isolated):
+    """Production routing refuses a seeded route on denied_models; `--as` must refuse it too."""
     target, repo = isolated
-    write_policy(target, **SCENARIOS["seed-over-legacy-deny"])
-    row = view_state("claude/sonnet@high")
-    assert row["state"] == "allow" and row["source"] == "preferred_seed"
-    assert dispatch_refusal("claude/sonnet@high", repo) is None
-
-
-def test_a_pinned_major_that_is_not_installed_is_refused_with_a_command_that_shows_the_verdict(isolated):
-    _, repo = isolated
-    refusal = dispatch_refusal("claude@3/sonnet@high", repo)
-    assert refusal is not None and refusal.category == "harness-major-mismatch"
-    assert "installed claude major is 2" in refusal.message
+    write_policy(target, denied=["claude/sonnet@high"], seed=SEED_SONNET)
+    refusal = dispatch_refusal("claude/sonnet@high", repo)
+    assert refusal is not None and refusal.category == "route-denied"
     assert "office route policy --effective --role executor" in refusal.next_step
 
 
-def test_an_unknown_installed_major_cannot_satisfy_a_pin(isolated, monkeypatch):
+@pytest.mark.xfail(strict=True, reason="#899 scope: routecmd.py lets a preferred_seed allow beat denied_models "
+                                       "in the view; dispatch and production routing deny it")
+def test_the_effective_view_shows_a_seeded_legacy_deny_as_denied(isolated):
+    target, _ = isolated
+    write_policy(target, denied=["claude/sonnet@high"], seed=SEED_SONNET)
+    assert view_state("claude/sonnet@high")["state"] == "deny"
+
+
+@pytest.mark.parametrize("pin", ["claude@3", "claude@", "claude@unknown", "claude@2@3"])
+def test_a_pin_that_is_not_the_installed_major_is_refused_with_a_command_that_shows_the_verdict(isolated, pin):
+    _, repo = isolated
+    refusal = dispatch_refusal(f"{pin}/sonnet@high", repo)
+    assert refusal is not None and refusal.category == "harness-major-mismatch"
+    assert "the installed claude major is 2" in refusal.message
+    assert "office route policy --effective --role executor" in refusal.next_step
+
+
+@pytest.mark.parametrize("pin", ["claude@2", "claude@02"])
+def test_a_pin_names_the_installed_major(isolated, pin):
+    _, repo = isolated
+    assert dispatch_refusal(f"{pin}/sonnet@high", repo) is None
+
+
+@pytest.mark.parametrize("pin", ["claude@2", "claude@unknown"])
+def test_an_unknown_installed_major_cannot_satisfy_a_pin(isolated, monkeypatch, pin):
     _, repo = isolated
     monkeypatch.setattr(adapters, "route_version", lambda harness, adapter, sources=None: "unknown")
-    refusal = dispatch_refusal("claude@2/sonnet@high", repo)
+    refusal = dispatch_refusal(f"{pin}/sonnet@high", repo)
     assert refusal is not None and refusal.category == "harness-major-mismatch"
-    assert "unknown" in refusal.message
+    assert "the installed claude major is unknown" in refusal.message
 
 
 def test_a_denied_route_refusal_names_the_command_that_shows_the_verdict(isolated):
@@ -124,6 +156,14 @@ def test_a_denied_route_refusal_names_the_command_that_shows_the_verdict(isolate
     refusal = dispatch_refusal("claude/sonnet@high", repo)
     assert refusal is not None and refusal.category == "route-denied"
     assert "office route policy --effective --role executor" in refusal.next_step
+
+
+def test_dispatch_applies_the_role_capability_gate_from_the_live_config(isolated):
+    """The sweep above passes the live config, so a role's required capability is checked the way dispatch checks it."""
+    target, repo = isolated
+    target.write_text(yaml.safe_dump({"roles": {"executor": {"required_capabilities": ["teleport"]}}}))
+    refusal = dispatch_refusal("claude/sonnet@high", repo)
+    assert refusal is not None and refusal.category == "capability-missing"
 
 
 def test_a_pinned_instance_allow_is_accepted_and_shown_as_allowed(isolated):

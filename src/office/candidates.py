@@ -679,26 +679,16 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     return family_result if isinstance(family_result, dict) else result
 
 
-def role_judgment_policies(role: str, repo_root=None) -> list[dict]:
-    """The policies `office route policy --effective` judges a route by: the role's preferred list (#845)
-    ahead of the live user policy. A declared route reads the same list, so both give one answer."""
-    from office import config as cfg
-    policies = required_user_policies(repo_root)
-    effective, _ = cfg.resolve(repo_root if repo_root is not None else _repo_root_here())
-    seed = route_policy.preferred_seed_policy(role, role_policy(effective, role).get("preferred_seed"))
-    return [seed, *policies]
-
-
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
                        run_id: str | None = None, scope: str | None = None, claim: bool = False) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
     `gemini-3.8-flash-medium` the harness actually accepts. `harness@2` pins the
-    installed major the way `office route policy` prints it."""
+    installed major the way Office status prints it."""
     from office import onboarding, scoring
     from office.state import Refused, Usage
-    harness, _, pinned_major = harness.partition("@")
+    harness, pin_sep, pinned_major = harness.partition("@")
     adapter = adapters.load_all().get(harness)
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
@@ -725,9 +715,9 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
     version = adapters.route_version(harness, adapter)
     installed = scoring.harness_major(version)
-    if pinned_major and installed != pinned_major:
+    if pin_sep and (not pinned_major.isdigit() or installed != str(int(pinned_major))):
         raise Refused("harness-major-mismatch",
-                      f"{harness}@{pinned_major} names major {pinned_major}, but the installed {harness} major is {installed}",
+                      f"{harness}@{pinned_major} pins a major, but the installed {harness} major is {installed}",
                       next_step=f"office route policy --effective --role {role} shows each route under the installed {harness}")
     named = {"harness": harness, "harness_version": version, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
@@ -735,7 +725,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
-    active_policy = route_policy.effective_role_state(named, role, role_judgment_policies(role, repo_root))
+    active_policy = route_policy.effective_role_state(named, role, required_user_policies(repo_root))
     policy_override = None
     if active_policy["state"] == "deny":
         from office import route_override
