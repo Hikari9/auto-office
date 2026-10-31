@@ -164,7 +164,7 @@ def test_a_dependency_import_failure_exits_1_with_its_cause_and_a_reinstall_hint
     assert entrypoint.entry() == 1
     err = capsys.readouterr().err
     assert "ModuleNotFoundError: jsonschema" in err
-    assert "uv tool install --force auto-office" in err and "--editable" in err and "retry after" in err
+    assert "uv tool install --force git+https://github.com/Hikari9/auto-office" in err and "--editable" in err and "retry after" in err
     assert "rebuilt" not in err and "Traceback" not in err
     assert probed == []
 
@@ -225,7 +225,7 @@ def test_python_dash_m_office_exits_1_for_a_dependency_failure(tmp_path):
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30, env=env)
 
     assert proc.returncode == 1, proc.stderr
-    assert "ModuleNotFoundError: jsonschema" in proc.stderr and "uv tool install --force auto-office" in proc.stderr
+    assert "ModuleNotFoundError: jsonschema" in proc.stderr and "uv tool install --force git+https://github.com/Hikari9/auto-office" in proc.stderr
     assert "rebuilt" not in proc.stderr and "Traceback" not in proc.stderr
 
 

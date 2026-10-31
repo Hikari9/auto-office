@@ -260,11 +260,24 @@ def test_ecosystem_check_rejects_non_list_skills(tmp_path):
 def test_nothing_installs_or_checks_the_unrelated_pypi_auto_office():
     """`auto-office` on PyPI is an unrelated project: no install command or update check may point at it (#924)."""
     import re
-    bare = re.compile(r"(uv tool install|pipx install|pip install) '?auto-office(\[visual\])?'?(?! @)(?=[\s`)'\"]|$)")
-    for path in [ROOT / "SKILL.md", ROOT / "README.md", *(ROOT / "docs").glob("*.md"), *(ROOT / "src" / "office").rglob("*.py")]:
-        text = path.read_text(encoding="utf-8")
-        assert not [m.group(0) for m in bare.finditer(text) if "never" not in text[max(0, m.start() - 40):m.start()]], path
-        assert "pypi.org/pypi/auto-office" not in text, path
+    # An install of the bare distribution name, with any flags, that is not a `name @ <source>` direct reference.
+    bare = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)(?: --?(?!-)(?!reinstall-package\b)[\w-]+)* ['\"]?auto-office(?:\[\w+\])?['\"]?(?! @)(?=[\s`)'\",.;]|$)")
+    roots = [ROOT / "SKILL.md", ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
+    for folder, pattern in (("docs", "*.md"), ("skills", "*.md"), ("scripts", "*"), ("src", "*.py"), ("config", "*")):
+        roots += [p for p in (ROOT / folder).rglob(pattern) if p.is_file()]
+    offenders = []
+    for path in roots:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        offenders += [f"{path.relative_to(ROOT)}: {m.group(0)}" for m in bare.finditer(text)
+                      if "never" not in text[max(0, m.start() - 40):m.start()]]
+        if "pypi.org/pypi/auto-office" in text:
+            offenders.append(f"{path.relative_to(ROOT)}: pypi.org/pypi/auto-office")
+    assert not offenders
+    # The guard itself must catch the shapes that shipped before.
+    for shipped in ("run `uv tool install auto-office` and", "`uv tool install --force auto-office` for a release",
+                    "uv tool install 'auto-office[visual]'", "pipx install auto-office."):
+        assert bare.search(shipped), shipped
+    assert not bare.search('uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"')
 
 
 def test_update_check_reads_the_release_from_github_main(monkeypatch):
