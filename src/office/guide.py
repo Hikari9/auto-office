@@ -427,8 +427,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.next = stuck_reply
     elif (res.next.startswith(WAITING_ACTIONS) and not state.is_terminal(run) and _work_in_flight(con, run)
           and not root_wake.armed(con, run) and not wait_in_flight(run["id"])):
-        # Nothing for the root to do and no one will wake it: it must block on `office wait`.
-        res.next = "office wait (work is running and no root wake is armed)"
+        # Nothing for the root to do and no one will wake it: it must block on `office wait`. Keep the guide's own
+        # line after the prefix so the trial, hold or dependency it names is not lost.
+        res.next = f"{NO_WAKE_WAIT}: {res.next}"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
@@ -1126,6 +1127,8 @@ _URGENT_KINDS = frozenset({
 _SEEN = "orchestrator:seen:"
 # next: prefixes that leave the root nothing to do until an event or a running task moves on.
 WAITING_ACTIONS = ("exceptions only", "no action", "none;")
+# #922: the root has nothing to do and nothing will wake it, so it must block on `office wait`.
+NO_WAKE_WAIT = "office wait (work is running and no root wake is armed)"
 
 
 def _urgent(event: dict) -> bool:

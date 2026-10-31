@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from conftest import GOOD_ADD, approved_run
-from office import cli
+from office import cli, version
 
 pytestmark = pytest.mark.approved
 
@@ -65,7 +65,10 @@ def test_self_improve_writes_no_rows_and_spawns_nothing(env, spawns):
     for _ in range(2):
         assert env.office("self-improve", check=0)
     assert _row_counts(env) == dict.fromkeys(SELF_IMPROVE_TABLES, 0)
-    assert len(spawns) == before, spawns[before:]
+    # The CLI's #920 rebuild probe resolves the install identity before any command; in a source checkout that reads
+    # `git rev-parse HEAD`. That is version plumbing, not self-improve work: every other process stays forbidden.
+    probe = ["git", "-C", str(version.SOURCE_ROOT), "rev-parse", "HEAD"]
+    assert [a for a in spawns[before:] if a != probe] == [], spawns[before:]
 
 
 def test_self_improve_leaves_existing_rows_alone(env, spawns):
