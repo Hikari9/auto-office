@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from test_discovery_dispatch import Cold, cold, launched  # noqa: F401 (cold is a fixture)
+from test_adaptive_dispatch import PLANNED, _approve, _quota
 from test_adaptive_routing import cand, req
 from test_issue_845_user_allow import events, fail, plain  # noqa: F401 (plain is a fixture)
 
@@ -861,3 +862,65 @@ def test_a_review_notice_without_a_skip_class_is_not_evidence(cold):
                                   "codex@1/gpt-6-luna@low", f"{CODEX} was rejected: trust floor")
     probe_pass(cold, CODEX, FUTURE)
     assert sweep(cold) == [] and recovered(cold) == []
+
+
+
+def test_a_usage_limit_rerun_fallback_alone_recovers_and_shows_in_status(env, monkeypatch):
+    """#921 F6: a rerun after a usage_limit records `route.fallback` (source usage_limit) naming the blocked route. With no
+    `route.failed` for that route, the fallback is the only evidence, so its recovery and status line must come from it."""
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    _approve(env, plan=PLANNED)
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0, out
+    con = env.con()
+    rid = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    parent = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC LIMIT 1").fetchone())
+    limit_key = routing.cooldown_key(parent["harness"], parent["invocation_model_id"])
+    with db.transaction(con):  # the stalled dispatch and its quota wall, as dispatch records them
+        con.execute("UPDATE dispatches SET status='exited', ended_at=started_at, stall_kind='usage_limit' WHERE id=?",
+                    (parent["id"],))
+        con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)", (limit_key, FUTURE, now_iso()))
+
+    code, out = env.office("rerun", "T1", "--fresh", "--reroute", env=_quota(env, claude=1))
+    assert code == 0, out
+    latest = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC LIMIT 1").fetchone())
+    assert latest["triple"] != parent["triple"], out
+    fallback = con.execute("SELECT seq, payload_json FROM events WHERE kind='route.fallback' AND dispatch_id=?",
+                           (latest["id"],)).fetchone()
+    assert json.loads(fallback["payload_json"])["before"] == parent["triple"]
+    assert con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='route.failed'", (rid,)).fetchone() is None
+
+    run_row = state.get_run(con, rid)
+    assert routechange.sweep_recovered(con, run_row) == []  # the quota wall is live
+    with db.transaction(con):
+        con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (now_iso(), limit_key))
+    assert len(routechange.sweep_recovered(con, run_row)) == 1
+    [rec] = recovered_in(con, rid)
+    assert rec["route"] == parent["triple"] and rec["episode"] == fallback["seq"] and rec["evidence"] == "route.fallback"
+    assert rec["role"] == "executor" and rec["basis"] == "demotion lapsed"
+    assert rec["harness"] == parent["harness"] and rec["model"] == parent["invocation_model_id"]
+
+    line = line_for(parent["triple"], "demotion lapsed")
+    assert any(l.endswith(line) for l in guide.status(con, run_row).lines)
+    assert len(recovered_in(con, rid)) == 1  # the status read does not record it again
+
+
+def recovered_in(con, run_id):
+    return [json.loads(r[0]) for r in con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind=? "
+                                                  "ORDER BY seq", (run_id, RECOVERED)).fetchall()]
+
+
+def test_an_auth_fallback_recovers_once_its_route_demotion_lapses_and_a_sourceless_one_is_not_evidence(plain):
+    with db.transaction(plain.con):  # a rerun that left an auth-blocked route, and a runtime fallback with no source
+        state.emit(plain.con, run(plain), "route.fallback", "T1 rerouted after auth", task_id="T1",
+                   payload={"before": CODEX, "after": "codex@1/gpt-6-luna@low", "source": "auth", "actor": "orchestrator"})
+        state.emit(plain.con, run(plain), "route.fallback", "T2 fell back", task_id="T2",
+                   payload={"before": "codex@1/gpt-6-luna@low", "after": CODEX, "reason": "auth"})
+    demoted = routing.demotion_key("codex", "gpt-6.1-sol", "high")
+    cooldown(plain, demoted, FUTURE)
+    assert sweep(plain) == []
+    with db.transaction(plain.con):
+        plain.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (now_iso(), demoted))
+    assert len(sweep(plain)) == 1
+    [rec] = recovered(plain)
+    assert rec["route"] == CODEX and rec["evidence"] == "route.fallback" and rec["basis"] == "demotion lapsed"

@@ -278,17 +278,19 @@ def _resume_spec(d: dict, cand: dict) -> dict | None:
 # ------------------------------------------------------------------ route available again (#921)
 
 RECOVERED_KIND = "route.recovered"
-# Evidence that a run fell back from or avoided a route: a runtime failure (its demotion) and a review that left its route.
-# A review notice is evidence only when it says the route was avoided for quota or auth. Unclassified notices (before
-# #921, or a reviewer that fell back from a failed route, which its route.failed covers) are not.
+# Evidence that a run fell back from or avoided a route: a runtime failure (its demotion), a rerun that left a route
+# after its quota wall (`route.fallback` with a quota or auth source), and a review that left its route. A review notice is
+# evidence only when it says the route was avoided for quota or auth. Unclassified notices (before #921, or a reviewer
+# that fell back from a failed route, which its route.failed covers) are not.
 _EVIDENCE_SQL = ("SELECT seq, kind, task_id, dispatch_id, created_at, payload_json FROM events WHERE run_id=? AND "
                  "((kind='route.failed' AND json_extract(payload_json,'$.reason') IN ('auth','usage_limit')) "
+                 "OR (kind='route.fallback' AND json_extract(payload_json,'$.source') IN ('auth','usage_limit')) "
                  "OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
                  "AND json_extract(payload_json,'$.skip_class')='quota-auth')) ORDER BY seq")
 
 
 def _route_of(row, payload: dict) -> str | None:
-    """The route triple a piece of evidence is about: the failed route, or the route a review left."""
+    """The route triple a piece of evidence is about: the failed route, or the route a fallback or review left (`before`)."""
     return payload.get("route") if row["kind"] == "route.failed" else payload.get("before")
 
 
@@ -307,7 +309,7 @@ def _invocation_model(con, run_id: str, route: str, harness: str, model_id: str,
 
 def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str | None, str | None]:
     """(harness, invocation model, effort) of the route the evidence names. A runtime failure carries its invocation
-    model; a review change carries only a candidate id, resolved through the route's dispatches."""
+    model; a review or fallback carries only a candidate id, resolved through the route's dispatches."""
     if row["kind"] == "route.failed":
         return payload.get("harness"), payload.get("model"), payload.get("effort")
     route = _route_of(row, payload) or ""
@@ -320,7 +322,7 @@ def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str 
 
 
 def _role(con, row, payload: dict) -> str | None:
-    """The role whose routing decided the evidence's route: the review stage, or the failed dispatch's role."""
+    """The role whose routing decided the evidence's route: the review stage, or the role of the dispatch the event names."""
     if row["kind"] == "route.changed":
         return payload.get("stage")
     d = con.execute("SELECT role FROM dispatches WHERE id=?", (row["dispatch_id"],)).fetchone()
@@ -384,9 +386,9 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime,
                      discovery: dict) -> tuple[str, datetime] | None:
     """(why, the instant the route became available) when the evidence's route is available again, else None. A route
     the user declared is the user's choice and is never recovered here. Routing rejects a route while any of its
-    cooldown keys is live, or while its exact probe is fresh and not a pass, so neither may be. A runtime failure is then
-    recovered: its demotion lapsed, at the latest expiry. A review change set no cooldown, so it needs a re-probe that
-    passed after it, and that pass is the instant."""
+    cooldown keys is live, or while its exact probe is fresh and not a pass, so neither may be. A runtime failure, or a
+    rerun that left a usage-limited route, is then recovered: its demotion lapsed, at the latest expiry. A review change set
+    no cooldown, so it needs a re-probe that passed after it, and that pass is the instant."""
     if payload.get("declared") or payload.get("actor") == "user":  # the user's declaration or re-pin is the decision
         return None
     harness, model, effort = _route_parts(con, run_id, row, payload)
@@ -398,7 +400,7 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime,
     probe = _exact_probe(con, harness, model, effort, now, discovery)
     if _keeps_route_down(harness, model, effort, _role(con, row, payload), probe, now, discovery):
         return None
-    if row["kind"] == "route.failed":
+    if row["kind"] in ("route.failed", "route.fallback"):
         # The cooldown rows are the lapse. A successful dispatch deletes them, so then the demotion's own deadline decides.
         if expiries:
             return "demotion lapsed", max(expiries)
