@@ -251,3 +251,9 @@ def test_past_the_bound_a_task_visual_review_names_the_manual_step_and_the_reply
     os.utime(reply, (1, 1))
     res = guide.status(con, run)
     assert res.next == f"office revoke D918, then office resume; the reply is at {reply}", res.next
+
+
+@pytest.mark.parametrize("value, expected", [("nan", 0.0), ("abc", 3.0), ("-2", 0.0)])
+def test_pane_group_wait_keeps_its_reading_of_bad_values(monkeypatch, value, expected):
+    monkeypatch.setenv("OFFICE_PANE_GROUP_WAIT", value)
+    assert dispatch_mod._pane_group_wait() == expected
