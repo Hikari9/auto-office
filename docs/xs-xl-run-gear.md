@@ -77,8 +77,9 @@ office route policy --effective --role executor
 These preferences do not guarantee that a route is eligible or available.
 
 **Required guardrails:** For new gears, when eligible Claude Code and agy Sonnet 5.5
-routes have the same effort, the adaptive slate places agy immediately after Claude
+routes have the same effort, the adaptive ordering places agy immediately after Claude
 Code if Claude Code is within the displayed slate and agy does not already precede it.
+The displayed slate can truncate agy when Claude Code occupies its last position.
 Adaptive selection may still choose another model for task fit; legacy runs retain
 their ordering. This applies to M and L as well as other new-gear task sizes.
 Reserve Opus 5.5 automatic executor routing for **genuinely XL subtasks**, even inside
