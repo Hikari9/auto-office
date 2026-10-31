@@ -126,6 +126,8 @@ def _read(con, run_id: str, since: int | None) -> dict:
 
 
 def snapshot(con, run: dict, *, since: int | None = None) -> dict:
+    from office import routechange
+    routechange.sweep_recovered(con, run)  # before the read, so a recovery is in this snapshot's seq and events
     if con.in_transaction:
         raw = _read(con, run["id"], since)
     else:
@@ -168,8 +170,6 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
                               "status": status})
             if status in ("missing", "stale"):
                 stale.append(f"{kind} {row['id']} {status}: {row['path']}")
-    from office import routechange
-    routechange.sweep_recovered(con, r)  # same record as `office status`: a recovery is shown whichever runs first
     recovered = routechange.recovery_lines(con, r)
     open_tasks, done_tasks = raw["tasks"]["open"], raw["tasks"]["done"]
     req = raw["req"]

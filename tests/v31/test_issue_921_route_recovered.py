@@ -32,13 +32,16 @@ def recovered(env):
 
 
 def expire(env, d, when=None):
-    """Lapse the route's demotion. Default: now, after the failed dispatch started, as a real 30-minute cooldown does."""
-    key = routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"])
+    """Lapse the route's demotion (and an auth failure's harness demotion). Default: now, after the failed dispatch
+    started, as a real 30-minute cooldown does."""
+    keys = (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),
+            routing.harness_demotion_key(d["harness"]))
     with db.transaction(env.con):
-        env.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (when or now_iso(), key))
+        env.con.execute(f"UPDATE route_cooldowns SET expires_at=? WHERE route IN ({','.join('?' * len(keys))})",
+                        (when or now_iso(), *keys))
 
 
-def failed_route(env, text="error: unknown model"):
+def failed_route(env, text="not logged in"):  # an auth failure: a quota or auth route failure, recoverable
     env.dispatch("T1")
     (d,) = env.dispatches()
     fail(env, d, text)
@@ -52,7 +55,7 @@ def review_fallback(env, before, after="codex@1/gpt-6-luna@low", skip_class="quo
 
 
 def probe_pass(env, route, probed_at, invocation=None):
-    m = routechange._CANDIDATE.fullmatch(route)
+    m = routing.CANDIDATE_ID_RE.fullmatch(route)
     with db.transaction(env.con):
         env.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, probed_at) "
                         "VALUES(?,?,?,?,?,?)",
@@ -97,6 +100,37 @@ def test_a_live_demotion_records_nothing_and_a_lapsed_one_records_once(plain):
                    "episode": failed["seq"], "evidence": "route.failed"}
     assert [e["seq"] for e in events(plain, RECOVERED)] == [seq]
     assert f"preferred route {d['triple']} is available again" in events(plain, RECOVERED)[0]["summary"]
+
+
+def test_an_unsupported_model_demotion_never_records_a_recovery(plain):
+    """Only quota or auth failures are recovered. A lapsed demotion for an unsupported model stays unrecorded: its
+    exact probe still fails, so routing keeps rejecting the route."""
+    d = failed_route(plain, "error: unknown model")
+    expire(plain, d)
+    assert sweep(plain) == []
+    assert recovered(plain) == []
+
+
+def test_a_closed_run_records_no_recovery_even_when_the_caller_read_it_open(plain):
+    d = failed_route(plain)
+    expire(plain, d)
+    stale = run(plain)  # read before the run closed
+    with db.transaction(plain.con):
+        plain.con.execute("UPDATE runs SET phase='closed' WHERE id='run-A'")
+    assert routechange.sweep_recovered(plain.con, stale) == []
+    assert recovered(plain) == []
+
+
+def test_a_review_skip_whose_rate_limit_lapsed_recovers_without_a_reprobe(cold):
+    cooldown(cold, routing.cooldown_key("codex", "gpt-6.1-sol"), FUTURE)  # the rate limit that skipped the route
+    review_fallback(cold, CODEX)
+    (evidence,) = events(cold, "route.changed")
+    assert sweep(cold) == []  # still live
+    with db.transaction(cold.con):
+        cold.con.execute("UPDATE route_cooldowns SET expires_at=?", (now_iso(),))
+    [seq] = sweep(cold)
+    [rec] = recovered(cold)
+    assert rec["route"] == CODEX and rec["basis"] == "cooldown lapsed" and rec["episode"] == evidence["seq"]
 
 
 def test_a_new_failure_after_a_recovery_is_a_new_episode(plain):
@@ -214,8 +248,9 @@ def test_a_stale_line_is_not_shown_after_a_successful_dispatch_deleted_the_coold
     with db.transaction(plain.con):
         plain.con.execute("UPDATE events SET payload_json=json_set(payload_json,'$.demoted_until',?) "
                           "WHERE run_id='run-A' AND kind='route.failed'", (PAST,))
-        plain.con.execute("DELETE FROM route_cooldowns WHERE route=?",
-                          (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),))
+        plain.con.execute("DELETE FROM route_cooldowns WHERE route IN (?,?)",
+                          (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),
+                           routing.harness_demotion_key(d["harness"])))
         plain.con.execute("INSERT INTO dispatches(id, run_id, role, triple, invocation_model_id, started_at) "
                           "VALUES('ok','run-A','executor',?,?,?)", (d["triple"], d["invocation_model_id"], now_iso()))
     assert len(sweep(plain)) == 1
@@ -225,8 +260,9 @@ def test_a_stale_line_is_not_shown_after_a_successful_dispatch_deleted_the_coold
 def test_a_success_that_deletes_a_live_demotion_does_not_recover_it_before_its_deadline(plain):
     d = failed_route(plain)  # demoted until 30 minutes from now
     with db.transaction(plain.con):  # a dispatch of the route succeeded and deleted its cooldown rows
-        plain.con.execute("DELETE FROM route_cooldowns WHERE route=?",
-                          (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),))
+        plain.con.execute("DELETE FROM route_cooldowns WHERE route IN (?,?)",
+                          (routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"]),
+                           routing.harness_demotion_key(d["harness"])))
     assert sweep(plain) == []
     with db.transaction(plain.con):  # the deadline passes: the demotion has lapsed
         plain.con.execute("UPDATE events SET payload_json=json_set(payload_json,'$.demoted_until',?) "
@@ -275,9 +311,9 @@ def test_a_live_no_effort_cooldown_blocks_a_lapsed_demotion_until_it_lapses(plai
 
 def test_a_recovery_touches_no_in_flight_dispatch_task_or_route(plain):
     d = failed_route(plain)
-    plain.dispatch("T2")  # in flight while the route is still demoted
-    before = (plain.dispatches(), [dict(r) for r in plain.con.execute("SELECT * FROM tasks ORDER BY id")])
     expire(plain, d)
+    plain.dispatch("T2")  # in flight when the route becomes available again
+    before = (plain.dispatches(), [dict(r) for r in plain.con.execute("SELECT * FROM tasks ORDER BY id")])
 
     assert len(sweep(plain)) == 1
     after = (plain.dispatches(), [dict(r) for r in plain.con.execute("SELECT * FROM tasks ORDER BY id")])

@@ -48,21 +48,26 @@ def _using_executor_policy(policy: dict):
         _executor_policy_context.reset(token)
 
 
-# Rejection categories that mean a route was avoided for quota or auth (#921). Others (trust, capability, concurrency)
-# are not recovered when their route becomes available again.
-QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited", "route-demoted", "quota"})
+# Rejections that mean a route was avoided for quota or auth (#921). Others (trust, capability, concurrency, a runtime
+# demotion whose reason is not quota or auth) are not recovered when their route becomes available again.
+QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited"})
+QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked", "quota-reserve"})
 
 
 def quota_auth_rejection(rejection: dict) -> bool:
-    """Whether a rejection avoided its route for quota or auth (#921): a quota category, or an exact probe that failed
-    on an auth or quota block."""
-    return rejection.get("category") in QUOTA_AUTH_CATEGORIES or rejection.get("reason_class") == "auth-quota-blocked"
+    """Whether a rejection avoided its route for quota or auth (#921): a quota or auth cooldown category, or a
+    reason class of a failed exact probe or a projected quota reserve."""
+    return rejection.get("category") in QUOTA_AUTH_CATEGORIES or rejection.get("reason_class") in QUOTA_AUTH_REASON_CLASSES
 
 
 def candidate_id(c):
     """Route identity `harness@major/model_id@effort`. Trust keys on the harness major,
     so a point release never resets it; the full `harness_version` stays in disclosure."""
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
+
+
+# Parses a candidate id back into its harness, model id and effort (#921).
+CANDIDATE_ID_RE = re.compile(r"(?P<harness>[^@/]+)@[^/]*/(?P<model>[^@]+)@(?P<effort>.+)\Z")
 
 
 def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
@@ -588,12 +593,12 @@ def route(request: dict, discovery_input: dict | None = None, *,
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "quota",
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
                                  "reason": "projected quota crosses reserve while safe alternative exists"})
             stage = safe + unknown
         elif unknown:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "category": "quota",
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
                                  "reason": "known quota crosses reserve; only unknown candidates remain"})
             stage = unknown
         else:

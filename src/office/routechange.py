@@ -9,7 +9,6 @@ the new model/effort, resuming its session where the harness can.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -283,10 +282,9 @@ RECOVERED_KIND = "route.recovered"
 # A review notice is evidence only when it says the route was avoided for quota or auth. Unclassified notices (before
 # #921, or a reviewer that fell back from a failed route, which its route.failed covers) are not.
 _EVIDENCE_SQL = ("SELECT seq, kind, task_id, dispatch_id, created_at, payload_json FROM events WHERE run_id=? AND "
-                 "(kind='route.failed' OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
+                 "((kind='route.failed' AND json_extract(payload_json,'$.reason') IN ('auth','usage_limit')) "
+                 "OR (kind='route.changed' AND json_extract(payload_json,'$.notice')='review' "
                  "AND json_extract(payload_json,'$.skip_class')='quota-auth')) ORDER BY seq")
-# A candidate id, `harness@major/model_id@effort` (routing.candidate_id).
-_CANDIDATE = re.compile(r"(?P<harness>[^@/]+)@[^/]*/(?P<model>[^@]+)@(?P<effort>.+)\Z")
 
 
 def _route_of(row, payload: dict) -> str | None:
@@ -313,7 +311,7 @@ def _route_parts(con, run_id: str, row, payload: dict) -> tuple[str | None, str 
     if row["kind"] == "route.failed":
         return payload.get("harness"), payload.get("model"), payload.get("effort")
     route = _route_of(row, payload) or ""
-    match = _CANDIDATE.fullmatch(route)
+    match = routing.CANDIDATE_ID_RE.fullmatch(route)
     if not match:
         return None, None, None
     harness = match["harness"]
@@ -351,11 +349,14 @@ def _available_basis(con, run_id: str, row, payload: dict, now: datetime) -> tup
             return "demotion lapsed", max(expiries)
         deadline = parse_iso(payload["demoted_until"]) if payload.get("demoted_until") else parse_iso(row["created_at"])
         return None if deadline > now else ("demotion lapsed", deadline)
+    created = parse_iso(row["created_at"])
+    if expiries and max(expiries) > created:  # the rate limit that skipped the route was live then, and has lapsed
+        return "cooldown lapsed", max(expiries)
     passed = con.execute("SELECT probed_at FROM route_probes WHERE COALESCE(harness,'')=? "
                          "AND COALESCE(invocation_model_id,'')=? AND COALESCE(effort,'')=? AND result='pass' "
                          "AND probed_at IS NOT NULL ORDER BY probed_at DESC LIMIT 1",
                          (harness or "", model, effort or "")).fetchone()
-    if not passed or parse_iso(passed[0]) <= parse_iso(row["created_at"]):
+    if not passed or parse_iso(passed[0]) <= created:
         return None
     return "re-probe passed", max([parse_iso(passed[0])] + expiries)
 
@@ -402,6 +403,8 @@ def sweep_recovered(con, run: dict, *, now: datetime | None = None) -> list[int]
         return []
     seqs = []
     with db.transaction(con):  # judged again under the writer lock, so a concurrent sweep cannot record the same episode
+        if state.is_terminal(state.get_run(con, run["id"])):  # closed since the caller read it
+            return []
         for route, row, payload, (basis, at) in _recoverable(con, run["id"], now):
             harness, model, effort = _route_parts(con, run["id"], row, payload)
             seqs.append(state.emit(
