@@ -19,7 +19,8 @@ from test_root_wake_723 import setup_root
 
 from office import cli, root_wake, state, version
 
-RETRY_LINE = "office: install is being rebuilt, retry in 5 s"
+def retry_line(cause: str) -> str:
+    return f"office: install is being rebuilt, retry in 5 s ({cause})"
 
 
 def _broken(*_args, **_kwargs):
@@ -53,8 +54,11 @@ class _ReplacedModule:
 # --- the CLI fails fast with a dedicated code while the install is being rebuilt -------------------------------
 
 
-@pytest.mark.parametrize("failure", [ImportError("partially written"), OSError("No such file or directory")])
-def test_main_exits_with_retry_code_when_the_install_cannot_resolve(monkeypatch, capsys, failure):
+@pytest.mark.parametrize(("failure", "cause"), [
+    (ImportError("partially written"), "ImportError: office"),
+    (OSError("No such file or directory"), "OSError: office"),
+])
+def test_main_exits_with_retry_code_when_the_install_cannot_resolve(monkeypatch, capsys, failure, cause):
     def fail():
         raise failure
     monkeypatch.setattr(version, "current", fail)
@@ -63,7 +67,7 @@ def test_main_exits_with_retry_code_when_the_install_cannot_resolve(monkeypatch,
     assert cli.main(["status"]) == version.REBUILD_EXIT_CODE
 
     captured = capsys.readouterr()
-    assert captured.err.strip() == RETRY_LINE
+    assert captured.err.strip() == retry_line(cause)
     assert "Traceback" not in captured.err and captured.out == ""
 
 
@@ -95,7 +99,7 @@ def test_python_dash_m_office_fails_fast_when_the_cli_import_is_mid_rebuild(tmp_
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30, env=env)
 
     assert proc.returncode == version.REBUILD_EXIT_CODE, proc.stderr
-    assert proc.stderr.strip() == RETRY_LINE
+    assert proc.stderr.strip() == retry_line("ModuleNotFoundError: office.cli")
     assert "Traceback" not in proc.stderr
 
 
@@ -108,12 +112,15 @@ def test_console_script_entry_fails_fast_when_the_cli_import_is_mid_rebuild(monk
 
     assert entrypoint.entry() == version.REBUILD_EXIT_CODE
     captured = capsys.readouterr()
-    assert captured.err.strip() == RETRY_LINE
+    assert captured.err.strip() == retry_line("ModuleNotFoundError: office.cli")
     assert "Traceback" not in captured.err
 
 
-@pytest.mark.parametrize("failure", [OSError("replaced"), SyntaxError("truncated version.py")])
-def test_a_replaced_cli_module_exits_with_the_retry_code(monkeypatch, capsys, failure):
+@pytest.mark.parametrize(("failure", "cause"), [
+    (OSError("replaced"), "OSError: office.cli"),
+    (SyntaxError("truncated version.py"), "SyntaxError: office.cli"),
+])
+def test_a_replaced_cli_module_exits_with_the_retry_code(monkeypatch, capsys, failure, cause):
     """An OSError or SyntaxError while the CLI module loads is the same replacement, not a traceback."""
     from office import __main__ as entrypoint
 
@@ -121,7 +128,7 @@ def test_a_replaced_cli_module_exits_with_the_retry_code(monkeypatch, capsys, fa
     monkeypatch.setattr(version, "current", _broken)
 
     assert entrypoint.entry() == version.REBUILD_EXIT_CODE
-    assert capsys.readouterr().err.strip() == RETRY_LINE
+    assert capsys.readouterr().err.strip() == retry_line(cause)
 
 
 def test_an_unloadable_version_module_at_startup_exits_with_the_retry_code(monkeypatch, capsys):
@@ -133,44 +140,68 @@ def test_an_unloadable_version_module_at_startup_exits_with_the_retry_code(monke
     monkeypatch.setattr(office, "version", _ReplacedModule(SyntaxError("truncated version.py")))
 
     assert entrypoint.entry() == 75
-    assert capsys.readouterr().err.strip() == RETRY_LINE
+    assert capsys.readouterr().err.strip() == retry_line("ModuleNotFoundError: office.cli")
 
 
-def test_an_import_failure_with_a_healthy_version_still_exits_with_the_retry_code(monkeypatch, capsys):
-    """A failed `office.cli` import at startup is the replacement window even when the version probe resolves.
-
-    The version probe is not consulted: a healthy `current()` must not turn the startup ImportError into a traceback."""
+def test_a_dependency_import_failure_exits_1_with_its_cause_and_a_reinstall_hint(monkeypatch, capsys):
+    """A module outside the office package does not heal by retrying: exit 1, not the retry code (A15)."""
     from office import __main__ as entrypoint
 
-    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
+    missing = ModuleNotFoundError("No module named 'jsonschema'", name="jsonschema")
+    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(missing))
     probed = []
     monkeypatch.setattr(version, "current", lambda: probed.append("probe") or "3.2.0")
 
-    assert entrypoint.entry() == version.REBUILD_EXIT_CODE
-    captured = capsys.readouterr()
-    assert captured.err.strip() == RETRY_LINE
-    assert "Traceback" not in captured.err
+    assert entrypoint.entry() == 1
+    err = capsys.readouterr().err
+    assert "ModuleNotFoundError: jsonschema" in err
+    assert "uv tool install --force auto-office" in err
+    assert "rebuilt" not in err and "Traceback" not in err
     assert probed == []
+
+
+def test_python_dash_m_office_exits_1_for_a_dependency_failure(tmp_path):
+    """Real interpreter: a dependency outside office fails inside `office.cli`, so the process exits 1 with its cause."""
+    script = tmp_path / "missing_dependency.py"
+    script.write_text(
+        "import runpy, sys\n"
+        "class Broken:\n"
+        "    def __getattr__(self, name):\n"
+        "        raise ModuleNotFoundError(\"No module named 'jsonschema'\", name='jsonschema')\n"
+        "sys.modules['office.cli'] = Broken()\n"
+        "runpy.run_module('office', run_name='__main__', alter_sys=True)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(version.SOURCE_ROOT) / "src")}
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30, env=env)
+
+    assert proc.returncode == 1, proc.stderr
+    assert "ModuleNotFoundError: jsonschema" in proc.stderr and "uv tool install --force auto-office" in proc.stderr
+    assert "rebuilt" not in proc.stderr and "Traceback" not in proc.stderr
 
 
 def test_a_startup_import_failure_never_traces_back_even_when_the_version_probe_raises(monkeypatch, capsys):
     """The entry does not probe the version, so a bad OFFICE_VERSION_OVERRIDE cannot escape it as a traceback."""
     from office import __main__ as entrypoint
 
+    probed = []
+
     def bad_override():
+        probed.append("probe")
         raise RuntimeError("OFFICE_VERSION_OVERRIDE='dev' is not an exact PEP 440 version")
 
-    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
+    partial = ImportError("partially initialized module", name="office.cli")
+    monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(partial))
     monkeypatch.setattr(version, "current", bad_override)
 
     assert entrypoint.entry() == version.REBUILD_EXIT_CODE
     captured = capsys.readouterr()
-    assert captured.err.strip() == RETRY_LINE
+    assert captured.err.strip() == retry_line("ImportError: office.cli")
     assert "Traceback" not in captured.err
+    assert probed == []
 
 
 def test_python_dash_m_office_exits_with_the_retry_code_when_the_probe_is_healthy(tmp_path):
-    """Real interpreter: `office.cli` cannot import while the version probe resolves, the case the entry must not trace back."""
+    """Real interpreter: `office.cli` cannot import inside the office package while the version probe resolves."""
     script = tmp_path / "healthy_probe.py"
     script.write_text(
         "import runpy, sys\n"
@@ -183,7 +214,7 @@ def test_python_dash_m_office_exits_with_the_retry_code_when_the_probe_is_health
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30, env=env)
 
     assert proc.returncode == version.REBUILD_EXIT_CODE, proc.stderr
-    assert proc.stderr.strip() == RETRY_LINE
+    assert proc.stderr.strip() == retry_line("ModuleNotFoundError: office.cli")
     assert "Traceback" not in proc.stderr
 
 
