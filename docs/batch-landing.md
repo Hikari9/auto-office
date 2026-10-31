@@ -66,27 +66,33 @@ timeout_seconds defaults to 7200 and is capped at 14400.
 
 ## Order of operations
 
-1. **Preflight (read-only).** Resolve every lane, check PR state, bases,
-   drafts, and the version owner. `--dry-run` stops here.
+1. **Preflight.** Resolve every lane, check PR state, bases, drafts, and the
+   version owner. `--dry-run` stops here. Preflight writes no PR, branch or
+   default-branch state; it may apply pending runs.db schema migrations.
 2. **Compose (local only).** Merge each lane's pinned PR head, in lane order,
    onto the current default branch in a throwaway checkout. A conflict refuses
    the batch with nothing merged. The composed commit is recorded.
 3. **Verify version (local only).** Check the version and changelog on the
    composed tree.
 4. **Full suite, once, on the composed SHA.** It runs in a detached checkout
-   of that commit. The log lands under Git's common directory at
-   office/batches/<id>/full-<sha>.log.
+   of that commit, with GH_*, GITHUB_*, token, secret, password, key, AWS_*,
+   SSH_AUTH_SOCK and OFFICE_* variables removed, in its own process group. A
+   timeout kills the whole group. Each attempt's log is kept under Git's common
+   directory at office/batches/<id>/full-<sha>-<attempt>.log.
 5. **Merge, only after a green suite.** For each lane in order, Office checks
    that main has not moved, checks that each PR head still equals the head the
-   suite validated, waits for required checks, then merges with
+   suite validated, waits for required checks, re-checks main, then merges with
    `--match-head-commit <validated head>`. Every merge, run lanes included,
-   uses that flag and never `--admin`.
-6. **Tree proof.** After the last lane, the default branch tree must equal the
-   composed tree. Any difference blocks the batch. Only then do Office runs
-   record their landing, and the batch becomes **green**.
+   uses that flag and never `--admin`. Office records main after each PR, so a
+   restart inside a multi-PR lane resumes instead of refusing.
+6. **Tree proof.** After each lane, the default branch tree must equal that
+   lane's composed tree. A mismatch blocks the batch before the next lane. After
+   the last lane, Office runs record their landing, and the batch becomes
+   **green**.
 
 If the suite fails, nothing has merged. If a merge fails, the batch is
-**blocked** with the lanes already merged recorded.
+**blocked** with the lanes already merged recorded. A blocked batch that merged
+nothing recomposes on rerun, so a PR whose head changed is revalidated.
 
 ## Stop, recover, iterate to green
 
@@ -109,12 +115,13 @@ moved. A green batch will not merge anything more; create a new batch for
 another release. It does not close Office runs, publish to PyPI, deploy
 production, or close GitHub issues automatically.
 
-If the default branch moves while the suite runs, the composition is stale.
-Nothing merges, and the next run recomposes and revalidates.
+If the default branch moves while the suite runs, or a run's integration
+changes during it, the composition is stale. Nothing merges, and the next run
+recomposes and revalidates.
 
 The state and logs are local to the repository's Git common directory.
-Back them up with the release evidence when moving the lander to another
-machine. If an external push changes main while a batch is in progress, Office
+Review them before copying them into release evidence when moving the lander
+to another machine; suite output can contain anything the tests print. If an external push changes main while a batch is in progress, Office
 refuses rather than silently treating it as part of this release.
 
 ## Limits
@@ -125,6 +132,14 @@ implements the failing fix PR and re-enters the batch loop. Merge and
 version validation failures remain real blockers and require an authorized
 resolution. Single-run office land retains its existing deploy behavior.
 Stacked run PRs are retargeted and merged on their pinned heads, which only
-the merge method supports. A branch that is behind main, and needs an update
+the merge method supports. A stacked PR must rest on the batch base or on
+another PR of the same run.
+
+GitHub does not pin the base branch. Office re-checks main before each merge
+and after each lane, so an external push can land once before the batch stops.
+Require branch protection that blocks direct pushes to the default branch.
+
+The worker guard (OFFICE_DISPATCH_ID) is advisory. Withhold direct merge rights
+from worker sessions. A branch that is behind main, and needs an update
 before GitHub accepts the merge, blocks the batch; Office does not update the
 branch because that would change the pinned head.

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,9 +45,17 @@ def _path(value: object, field: str) -> str:
     return value
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    keys = [k for k, _ in pairs]
+    repeated = sorted({k for k in keys if keys.count(k) > 1})
+    if repeated:
+        raise Usage("batch-invalid", f"duplicate manifest keys: {', '.join(repeated)}")
+    return dict(pairs)
+
+
 def _manifest(path: Path) -> dict:
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError) as exc:
         raise Usage("batch-invalid", f"cannot read batch manifest {path}: {exc}") from exc
     if not isinstance(manifest, dict):
@@ -142,7 +151,7 @@ def _github(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedP
 
 def _pr_info(repo: Path, number: int, base: str, *, allow_merged: bool, stacked: bool = False) -> dict:
     proc = _github(repo, "pr", "view", str(number), "--json",
-                   "number,state,baseRefName,headRefOid,isDraft,files")
+                   "number,state,baseRefName,headRefName,headRefOid,isDraft,files")
     if proc.returncode:
         raise Refused("batch-pr-unavailable", f"#{number}: {(proc.stderr or proc.stdout).strip()[:200]}")
     try:
@@ -156,7 +165,7 @@ def _pr_info(repo: Path, number: int, base: str, *, allow_merged: bool, stacked:
         raise Refused("batch-pr-state", f"#{number} is {status}, expected an open PR")
     if status == "OPEN" and info.get("isDraft"):
         raise Refused("batch-pr-draft", f"#{number} is a draft")
-    if status == "OPEN" and not info.get("headRefOid"):
+    if status == "OPEN" and not re.fullmatch(r"[0-9a-f]{40}", info.get("headRefOid") or ""):
         raise Refused("batch-pr-head", f"#{number} has no readable head SHA")
     files = info.get("files")
     if not isinstance(files, list):
@@ -203,7 +212,10 @@ def _state_path(repo: Path, ident: str) -> Path:
 def _save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     target = path.with_suffix(".tmp")
-    target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(target, path)
 
 
@@ -248,6 +260,14 @@ def _entries(manifest: dict, con, repo: Path) -> tuple[list[dict], dict[int, dic
                               f"#{number} is stacked on {info['baseRefName']}; stacked run PRs need merge_method "
                               "merge, because squash or rebase would rewrite the pinned head")
             infos[number] = info
+        # A stacked run PR may only rest on the batch base or on another PR of the same run.
+        # Otherwise its pinned head would carry history the run never accepted.
+        run_branches = {infos[n]["headRefName"] for n in numbers}
+        for number in numbers:
+            info = infos[number]
+            if info["state"] == "OPEN" and info["baseRefName"] not in run_branches | {manifest["base"]}:
+                raise Refused("batch-stacked-base",
+                              f"#{number} is stacked on {info['baseRefName']}, which is not part of run lane {lane['id']}")
         entries.append({"lane": lane, "run": run, "prs": numbers, "tasks": tasks})
     version_owners = [(e["lane"]["id"], number) for e in entries for number in e["prs"]
                       if manifest["version_file"] in infos[number]["paths"]]
@@ -269,13 +289,15 @@ def _fetch_pr_head(repo: Path, number: int, sha: str) -> None:
                       f"#{number}: cannot inspect the pinned head {sha[:12]} before merging")
 
 
-def _compose(repo: Path, base_sha: str, entries: list[dict], infos: dict[int, dict]) -> tuple[str, dict[str, str]]:
+def _compose(repo: Path, base_sha: str, entries: list[dict], infos: dict[int, dict]) -> tuple[str, dict, dict]:
     """Merge each pinned PR head, in lane order, onto base_sha in a throwaway checkout.
 
-    Returns the composed commit and the head merged for each PR number.
+    Returns the composed commit, the head merged for each PR number, and the
+    tree after each lane (the proof a default branch must match after that lane).
     """
     env = {**os.environ, **paths.commit_identity_env(repo)}
     heads: dict[str, str] = {}
+    trees: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="office-batch-compose-") as temporary:
         checkout = Path(temporary) / "compose"
         _git(repo, "worktree", "add", "--detach", str(checkout), base_sha)
@@ -285,16 +307,26 @@ def _compose(repo: Path, base_sha: str, entries: list[dict], infos: dict[int, di
                     head = infos[number]["headRefOid"]
                     _fetch_pr_head(repo, number, head)
                     heads[str(number)] = head
-                    if land._git(checkout, "merge", "--no-ff", "--no-edit", head, env=env).returncode:
+                    # Signing and hooks belong to the operator's commits, not this throwaway merge.
+                    proc = land._git(checkout, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                                     "merge", "--no-ff", "--no-edit", head, env=env)
+                    if proc.returncode:
+                        conflicted = land._git(checkout, "diff", "--name-only", "--diff-filter=U").stdout.strip()
                         land._git(checkout, "merge", "--abort", env=env)
+                        if not conflicted:
+                            raise Refused("batch-compose-failed",
+                                          f"{entry['lane']['id']}: merging #{number} failed: "
+                                          f"{(proc.stderr or proc.stdout).strip()[:200]}",
+                                          preserved="no PRs merged by this attempt")
                         raise Refused("batch-compose-conflict",
                                       f"{entry['lane']['id']}: #{number} does not merge cleanly into {base_sha[:12]}",
                                       preserved="no PRs merged by this attempt",
                                       next_step="reconcile the conflicting lanes in a reviewed PR, then rerun office land --batch")
+                trees[entry["lane"]["id"]] = _git(checkout, "rev-parse", "HEAD^{tree}")
             composed = _git(checkout, "rev-parse", "HEAD")
         finally:
             _git(repo, "worktree", "remove", "--force", str(checkout))
-    return composed, heads
+    return composed, heads, trees
 
 
 def _version_text(repo: Path, commit: str, file: str) -> str:
@@ -325,7 +357,8 @@ def _verify_version(repo: Path, start: str, current: str, manifest: dict) -> Non
     changelog = manifest.get("changelog_file")
     if changelog:
         content = _version_text(repo, current, changelog)
-        headers = re.findall(r"(?m)^##\s+(\S+)\s*$", content)
+        # Accept "## 3.15.0", "## 3.15.0 (2026-10-31)" and "## [3.15.0] - date".
+        headers = re.findall(r"(?m)^##\s+\[?v?(\d[^\s\]]*)\]?(?=\s|$)", content)
         if headers.count(manifest["version"]) != 1:
             raise Refused("batch-changelog-mismatch", f"{changelog} needs exactly one {manifest['version']} header")
 
@@ -350,6 +383,9 @@ def _resume(record: dict | None, manifest: dict, current: str) -> dict:
             raise Refused("batch-manifest-changed",
                           "lanes were already validated or merged; fix lanes can be appended only after a red suite")
         # Nothing merged after a red suite, so the fix lanes compose onto the current default branch.
+        record["status"] = "pending"
+    if record.get("status") == "blocked" and not record.get("last_head"):
+        # No PR merged yet, so nothing is stale: recompose, so a PR whose head changed is revalidated.
         record["status"] = "pending"
     return record
 
@@ -379,25 +415,55 @@ def _mark_task_merged(con, run: dict, task_id: str, number: int, base: str, meth
         state.emit(con, run, "pr.merged", f"{task_id} #{number} merged into {base} ({method})", task_id=task_id)
 
 
-def _merge_pr(repo: Path, number: int, info: dict, method: str, base: str) -> None:
+def _merge_pr(repo: Path, number: int, info: dict, method: str, base: str, expected: str) -> None:
+    """Merge one PR on its pinned head. `expected` is the default-branch head this batch last recorded."""
     if info["state"] == "MERGED":
         return
-    if info["baseRefName"] != base:
-        # A stacked run PR. Retargeting does not move its head, and the
-        # composed tree already carries the parent commits.
-        proc = _github(repo, "pr", "edit", str(number), "--base", base)
-        if proc.returncode:
-            raise Refused("batch-retarget-failed", f"#{number}: cannot retarget to {base}: {(proc.stderr or proc.stdout).strip()[:200]}")
     land._wait_checks({"repo_root": str(repo)}, number)
     latest = _pr_info(repo, number, base, allow_merged=True, stacked=True)
     if latest["state"] == "MERGED":
         return
     if latest["headRefOid"] != info["headRefOid"]:
         raise Refused("batch-head-moved", f"#{number} changed head since preflight")
+    # GitHub does not pin the base branch. Re-check it after the checks wait, right before the merge.
+    _git(repo, "fetch", "-q", "origin", base)
+    if _git(repo, "rev-parse", f"origin/{base}") != expected:
+        raise Refused("batch-main-moved", f"{base} moved while #{number} waited for its checks")
+    if info["baseRefName"] != base:
+        # A stacked run PR: retarget only once its checks and head have passed. The head does not move.
+        proc = _github(repo, "pr", "edit", str(number), "--base", base)
+        if proc.returncode:
+            raise Refused("batch-retarget-failed",
+                          f"#{number}: cannot retarget to {base}: {(proc.stderr or proc.stdout).strip()[:200]}")
     proc = _github(repo, "pr", "merge", str(number), prs.MERGE_FLAGS[method],
                    "--match-head-commit", info["headRefOid"])
     if proc.returncode:
         raise Refused("batch-merge-failed", f"#{number}: {(proc.stderr or proc.stdout).strip()[:200]}")
+
+
+# Credentials must not reach the suite: its checkout holds unmerged PR code.
+_SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|(?:^|_)KEY$|^GH_|^GITHUB_|^OFFICE_|^SSH_AUTH_SOCK$|^AWS_")
+
+
+def _execute(argv: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
+    """Run the suite in its own process group, without credentials in its environment.
+
+    A timeout kills the whole group, so pytest workers cannot outlive the checkout.
+    """
+    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, errors="replace", start_new_session=True)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            return proc.returncode, out + err
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate()
+            return 124, f"full suite timed out after {timeout}s\n" + out + err
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _run_full(repo: Path, sha: str, manifest: dict, folder: Path) -> tuple[int, Path]:
@@ -405,40 +471,48 @@ def _run_full(repo: Path, sha: str, manifest: dict, folder: Path) -> tuple[int, 
     argv = manifest["full_suite"]
     if shell_safety.unsafe_manual_push(" ".join(shlex.quote(arg) for arg in argv)):
         raise Refused("batch-unsafe-suite", "full_suite must not push or mutate a remote")
-    log = folder / f"full-{sha[:12]}.log"
+    logs = folder / manifest["id"]
+    logs.mkdir(parents=True, exist_ok=True)
+    # Every attempt keeps its log, including a --retry-full on the same SHA.
+    log = logs / f"full-{sha}-{1 + len(list(logs.glob(f'full-{sha}-*.log')))}.log"
     with tempfile.TemporaryDirectory(prefix="office-batch-") as temporary:
         checkout = Path(temporary) / "checkout"
         _git(repo, "worktree", "add", "--detach", str(checkout), sha)
         try:
-            try:
-                proc = subprocess.run(argv, cwd=checkout, capture_output=True, text=True,
-                                      timeout=manifest["timeout_seconds"])
-                code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-            except subprocess.TimeoutExpired as exc:
-                code = 124
-                output = f"full suite timed out after {manifest['timeout_seconds']}s\n"
-                output += str(exc.stdout or "") + str(exc.stderr or "")
+            code, output = _execute(argv, checkout, manifest["timeout_seconds"])
             log.write_text(f"batch {manifest['id']}\ncommit {sha}\ncommand {argv!r}\n\n" + output, encoding="utf-8")
         finally:
             _git(repo, "worktree", "remove", "--force", str(checkout))
     return code, log
 
 
-def _validate(repo: Path, record: dict, manifest: dict, record_path: Path) -> None:
+def _plain(value):
+    """A snapshot as JSON would store it, so a stored and a fresh snapshot compare equal."""
+    return json.loads(json.dumps(value))
+
+
+def _run_snapshots(con, entries: list[dict]) -> dict[str, dict]:
+    return {e["lane"]["id"]: _plain(land._snapshot(con, e["run"])) for e in entries if e["run"] is not None}
+
+
+def _validate(repo: Path, record: dict, manifest: dict, record_path: Path, con, entries: list[dict]) -> None:
     """Run the full suite on the composed SHA. Nothing merges unless it passes."""
     base, sha = manifest["base"], record["composed"]
+    before = _run_snapshots(con, entries)
     code, log = _run_full(repo, sha, manifest, record_path.parent)
     _git(repo, "fetch", "-q", "origin", base)
-    if _git(repo, "rev-parse", f"origin/{base}") != record["start"]:
-        # The composition was built on the old default branch. Attest nothing about the new one.
+    moved = _git(repo, "rev-parse", f"origin/{base}") != record["start"]
+    if moved or _run_snapshots(con, entries) != before:
+        # The composition was built on older state. Attest nothing about the new state.
         record.update(status="pending", validated=None)
         _save(record_path, record)
-        raise Refused("batch-main-moved",
-                      f"{base} moved while the full suite ran on {sha[:12]}; the composition is stale and nothing merged",
+        what = f"{base} moved" if moved else "a run's integration changed"
+        raise Refused("batch-stale", f"{what} while the full suite ran on {sha[:12]}; the composition is stale "
+                                     "and nothing merged",
                       preserved="no PRs merged by this attempt",
                       next_step="rerun office land --batch to recompose and revalidate")
-    record["validated"] = {"sha": sha, "exit_code": code, "log": str(log)}
-    record["status"] = "validated" if code == 0 else "red"
+    record.update(run_snapshots=before, validated={"sha": sha, "exit_code": code, "log": str(log)},
+                  status="validated" if code == 0 else "red")
     _save(record_path, record)
     if code:
         raise Refused("batch-full-suite-red", f"full suite exited {code} on {sha[:12]}; log: {log}",
@@ -448,31 +522,34 @@ def _validate(repo: Path, record: dict, manifest: dict, record_path: Path) -> No
 
 
 def _compose_and_validate(repo: Path, record: dict, record_path: Path, manifest: dict,
-                          entries: list[dict], infos: dict[int, dict], current: str) -> None:
+                          entries: list[dict], infos: dict[int, dict], current: str, con) -> None:
     record.update(start=current, lanes=manifest["lanes"], completed=[], last_head=None, validated=None)
-    composed, heads = _compose(repo, current, entries, infos)
+    composed, heads, trees = _compose(repo, current, entries, infos)
     _verify_version(repo, current, composed, manifest)
-    record.update(composed=composed, heads=heads)
-    _validate(repo, record, manifest, record_path)
+    record.update(composed=composed, heads=heads, trees=trees)
+    _validate(repo, record, manifest, record_path, con, entries)
 
 
 def _merge_lanes(con, repo: Path, record: dict, record_path: Path, manifest: dict,
                  entries: list[dict], infos: dict[int, dict], result: Result) -> None:
-    """Merge the validated lanes in order, then prove the default branch tree is the composed tree."""
+    """Merge the validated lanes in order. After each lane, the default branch must carry that lane's composed tree."""
     base, method = manifest["base"], manifest["merge_method"]
     completed = set(record["completed"])
 
     def preserved() -> str:
         return f"merged lanes: {', '.join(record['completed']) or 'none'}"
 
+    def main_head() -> str:
+        _git(repo, "fetch", "-q", "origin", base)
+        return _git(repo, "rev-parse", f"origin/{base}")
+
     for entry in entries:
         ident = entry["lane"]["id"]
         if ident in completed:
             result.add(f"{ident}: already merged; skipped")
             continue
-        _git(repo, "fetch", "-q", "origin", base)
-        observed = _git(repo, "rev-parse", f"origin/{base}")
         expected = record.get("last_head") or record["start"]
+        observed = main_head()
         if observed != expected:
             raise Refused("batch-main-moved",
                           f"{base} moved outside this batch ({expected[:12]} -> {observed[:12]}); stop before another merge",
@@ -482,19 +559,28 @@ def _merge_lanes(con, repo: Path, record: dict, record_path: Path, manifest: dic
                 raise Refused("batch-head-moved",
                               f"#{number} changed head after the suite validated {record['composed'][:12]}",
                               preserved=preserved())
+
+        def merge(number: int) -> None:
+            _merge_pr(repo, number, infos[number], method, base, record.get("last_head") or record["start"])
+            # Record main after every PR, so a restart inside a multi-PR lane resumes instead of refusing.
+            record["last_head"] = main_head()
+            _save(record_path, record)
+
         try:
             if entry["run"]:
                 run = entry["run"]
-                snap = land._snapshot(con, run)
                 with land._land_lock(run):
-                    land._require_unchanged(con, run, snap, "before batch merge")
+                    if _plain(land._snapshot(con, run)) != record["run_snapshots"][ident]:
+                        raise Refused("integration-changed",
+                                      f"{ident}: the run's integration changed after the suite validated it",
+                                      preserved=preserved())
                     for number in entry["prs"]:
-                        _merge_pr(repo, number, infos[number], method, base)
+                        merge(number)
                         _mark_task_merged(con, run, entry["tasks"][number], number, base, method)
                         result.add(f"{ident}: #{number} merged ({method})")
             else:
                 for number in entry["prs"]:
-                    _merge_pr(repo, number, infos[number], method, base)
+                    merge(number)
                     result.add(f"{ident}: #{number} merged")
         except (Refused, subprocess.TimeoutExpired) as exc:
             reason = getattr(exc, "reason", str(exc))
@@ -504,30 +590,36 @@ def _merge_lanes(con, repo: Path, record: dict, record_path: Path, manifest: dic
             raise Refused("batch-lane-failed", f"{ident}: {reason}: {exc}",
                           preserved=preserved(),
                           next_step=f"fix {ident}, then rerun office land --batch with the same manifest") from exc
-        _git(repo, "fetch", "-q", "origin", base)
+        if _git(repo, "rev-parse", f"{record['last_head']}^{{tree}}") != record["trees"][ident]:
+            record.update(status="blocked", failed_lane={"id": ident, "reason": "tree"})
+            _save(record_path, record)
+            raise Refused("batch-tree-mismatch",
+                          f"{base} after lane {ident} does not carry the suite-validated tree",
+                          preserved=preserved(),
+                          next_step="reconcile the default branch by hand, then rerun office land --batch")
         record["completed"].append(ident)
-        record["last_head"] = _git(repo, "rev-parse", f"origin/{base}")
         record["status"] = "merging"
         completed.add(ident)
         _save(record_path, record)
-    _git(repo, "fetch", "-q", "origin", base)
-    final = _git(repo, "rev-parse", f"origin/{base}")
-    composed = record["composed"]
-    if _git(repo, "rev-parse", f"{final}^{{tree}}") != _git(repo, "rev-parse", f"{composed}^{{tree}}"):
-        record.update(status="blocked",
-                      failed_lane={"id": "tree", "reason": f"{base} tree differs from composed {composed[:12]}"})
-        _save(record_path, record)
-        raise Refused("batch-tree-mismatch",
-                      f"{base} at {final[:12]} does not carry the suite-validated tree of {composed[:12]}",
-                      preserved=preserved(),
-                      next_step="reconcile the default branch by hand, then rerun office land --batch")
+    final = record["last_head"]
     _record_run_landings(con, entries, record, final)
     record.update(status="green", landed_head=final)
     _save(record_path, record)
-    result.add(f"full suite PASS on {composed[:12]} before any merge; {base} is {final[:12]} with the validated tree")
+    result.add(f"full suite PASS on {record['composed'][:12]} before any merge; {base} is {final[:12]} "
+               "with the validated tree")
     result.add(f"log: {record['validated']['log']}")
     result.next = "batch is green; review release and perform closeout"
     result.data = {"batch": record}
+
+
+def _load_record(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refused("batch-record-corrupt", f"batch record {path} is unreadable: {exc}",
+                      next_step="inspect it by hand; do not delete it while batch PRs may be merged") from exc
 
 
 def land_batch(manifest_file: str, *, cwd: Path, dry_run: bool = False, retry_full: bool = False) -> Result:
@@ -540,7 +632,7 @@ def land_batch(manifest_file: str, *, cwd: Path, dry_run: bool = False, retry_fu
     with _lock(record_path):
         _git(repo, "fetch", "-q", "origin", base)
         current = _git(repo, "rev-parse", f"origin/{base}")
-        saved = json.loads(record_path.read_text()) if record_path.exists() else None
+        saved = _load_record(record_path)
         record = _resume(saved, manifest, current)
         if record["status"] == "green":
             landed = record["landed_head"]
@@ -569,7 +661,7 @@ def land_batch(manifest_file: str, *, cwd: Path, dry_run: bool = False, retry_fu
                 return Result(lines=[f"batch {manifest['id']}: {' -> '.join(ordered)}",
                                      f"version {manifest['version']} owned by {owner}",
                                      "dry run: would compose the lanes, run the full suite once on the composed SHA, "
-                                     "then merge; no changes made"],
+                                     "then merge; no PR, branch or default-branch changes made"],
                               data={"ordered_lanes": ordered, "status": record["status"]})
             if record["status"] == "red":
                 if not retry_full:
@@ -580,9 +672,9 @@ def land_batch(manifest_file: str, *, cwd: Path, dry_run: bool = False, retry_fu
                     raise Refused("batch-main-moved",
                                   f"{base} moved outside this batch ({record['start'][:12]} -> {current[:12]})",
                                   preserved="no PRs merged by this batch")
-                _validate(repo, record, manifest, record_path)
+                _validate(repo, record, manifest, record_path, con, entries)
             elif record["status"] == "pending":
-                _compose_and_validate(repo, record, record_path, manifest, entries, infos, current)
+                _compose_and_validate(repo, record, record_path, manifest, entries, infos, current, con)
             result = Result(lines=[f"batch {manifest['id']}: {' -> '.join(ordered)}"])
             _merge_lanes(con, repo, record, record_path, manifest, entries, infos, result)
             return result
