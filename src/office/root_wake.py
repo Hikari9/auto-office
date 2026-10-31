@@ -125,12 +125,17 @@ def _recorded(con, run_id: str, token: str) -> bool:
 _HEALTH_PROBE = "import office.cli; from office import version; version.current()"
 
 
+class InstallUnhealthy(OSError):
+    """The install is not healthy yet. Raised inside a supervisor tick, so the tick counts as failed and backs off (#920)."""
+
+
 def _install_healthy() -> bool:
     """True when a fresh interpreter imports the CLI and resolves the version from disk (#920).
 
-    A fresh process is required: this one already holds the modules it loaded before the replacement."""
+    A fresh process is required: this one already holds the modules it loaded before the replacement. `-I` keeps the
+    working directory and PYTHONPATH off sys.path, so a stray `office/` there cannot pass or fail the probe."""
     try:
-        proc = subprocess.run([sys.executable, "-c", _HEALTH_PROBE], capture_output=True, timeout=30)
+        proc = subprocess.run([sys.executable, "-I", "-c", _HEALTH_PROBE], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
@@ -140,19 +145,22 @@ def _retry_delay(failures: int) -> float:
     """Seconds to sleep before the next supervisor tick: MIN_POLL when healthy, else doubling per consecutive failure."""
     if failures == 0:
         return MIN_POLL
-    return min(MIN_POLL * 2 ** failures, FAILURE_BACKOFF_CAP)
+    return min(MIN_POLL * 2 ** min(failures, 16), FAILURE_BACKOFF_CAP)  # 2**16 * MIN_POLL already exceeds the cap
 
 
 def _recover_reinstall(con, run: dict) -> bool:
     """Record one `office.reinstalled` event after a healthy tick ends an episode opened by `_tick_failed` (#920).
 
-    The event needs a positive health probe. Until it passes the mark stays, so the next healthy tick retries.
-    The event carries the mark's token, and the mark is removed only after the event commits. A crash or a
-    failed unlink after commit leaves the token recorded, so the retry removes the mark without recording
-    again. A run that has ended gets no wake. The run lock serializes the supervisor and the watchdog thread."""
+    The event needs a positive health probe. Until it passes the mark stays, and the tick that tried raises
+    InstallUnhealthy so it backs off. The event carries the mark's token, and the mark is removed only after the
+    event commits. A crash or a failed unlink after commit leaves the token recorded, so the retry removes the mark
+    without recording again. A run that has ended gets no wake. The run lock serializes the supervisor and the
+    watchdog thread."""
     mark = _reinstall_mark(run["id"])
-    if not mark.exists() or not _install_healthy():
+    if not mark.exists():
         return False
+    if not _install_healthy():
+        raise InstallUnhealthy("install is not healthy yet; the recovery waits for a passing probe")
     with _flock(f"reinstall:{run['id']}", paths.run_dir(run["id"]) / "root-wake.reinstall.lock"):
         if not mark.exists():
             return False

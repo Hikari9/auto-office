@@ -393,7 +393,8 @@ def test_recovery_waits_for_a_positive_health_probe(env, monkeypatch):
     root_wake._mark_reinstall(run["id"])
     monkeypatch.setattr(root_wake, "_install_healthy", lambda: False)
 
-    assert root_wake._recover_reinstall(con, run) is False
+    with pytest.raises(root_wake.InstallUnhealthy):
+        root_wake._recover_reinstall(con, run)
     assert root_wake._reinstall_mark(run["id"]).exists()
     assert _reinstalled(con, run) == []
 
@@ -402,12 +403,45 @@ def test_recovery_waits_for_a_positive_health_probe(env, monkeypatch):
     assert len(_reinstalled(con, run)) == 1
 
 
+def test_an_unhealthy_probe_after_a_healthy_poll_backs_off_like_a_failed_tick(env, monkeypatch):
+    """A poll that succeeds does not reset the backoff while the probe keeps failing (#920)."""
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    monkeypatch.setattr(root_wake, "ensure", lambda run: None)
+    monkeypatch.setattr(root_wake, "_watchdog_loop", lambda run_id: None)
+    monkeypatch.setattr(root_wake, "poll", lambda con, run: "no-action")
+    monkeypatch.setattr(root_wake, "_install_healthy", lambda: False)
+    root_wake._mark_reinstall(run["id"])
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 4:
+            raise _Stop()
+    monkeypatch.setattr(root_wake.time, "sleep", fake_sleep)
+
+    with pytest.raises(_Stop):
+        root_wake.supervise(run["id"])
+
+    assert sleeps == [min(root_wake.MIN_POLL * 2 ** n, root_wake.FAILURE_BACKOFF_CAP) for n in range(1, 5)]
+    assert _reinstalled(con, run) == []
+    assert root_wake._reinstall_mark(run["id"]).exists()
+
+
+def test_retry_delay_doubles_to_the_cap_and_never_overflows():
+    assert root_wake._retry_delay(0) == root_wake.MIN_POLL
+    assert root_wake._retry_delay(1) == 2 * root_wake.MIN_POLL
+    assert root_wake._retry_delay(5000) == root_wake.FAILURE_BACKOFF_CAP
+
+
 def test_the_health_probe_passes_on_a_healthy_install():
     assert _REAL_INSTALL_HEALTHY() is True
 
 
-def test_the_health_probe_fails_when_its_interpreter_cannot_run_the_probe(monkeypatch):
-    monkeypatch.setattr(root_wake.sys, "executable", "/usr/bin/false")
+@pytest.mark.parametrize("interpreter", ["/usr/bin/false", "/nonexistent/office-python"])
+def test_the_health_probe_fails_when_its_interpreter_cannot_run_the_probe(monkeypatch, interpreter):
+    """A non-zero exit and a missing interpreter both read as an unhealthy install."""
+    monkeypatch.setattr(root_wake.sys, "executable", interpreter)
     assert _REAL_INSTALL_HEALTHY() is False
 
 
