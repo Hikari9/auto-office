@@ -92,6 +92,14 @@ def _reusable(con, run: dict, key: str):
                        (run["id"], key, contract.COMPLETED)).fetchone()
 
 
+def running_dispatch_ids(con, run_id: str) -> set[str]:
+    """Open reviewer dispatches that are self-review subagents. Each one owns its gate (#895)."""
+    return {row[0] for row in con.execute("SELECT d.id FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+                                          "WHERE d.run_id=? AND g.kind='self_review_subagent' AND g.status IN ('queued','running') "
+                                          "AND d.ended_at IS NULL",
+                                          (run_id,))}
+
+
 def _report(task_id: str, rubric: str, rid: str, **extra) -> dict:
     return {"task": task_id, "rubric": rubric, "revision": rid, **extra}
 
