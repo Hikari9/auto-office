@@ -37,9 +37,25 @@ def _visual_capture_status() -> tuple[str, bool]:
         if install:
             return (f"visual capture: Chromium headless shell missing ({reason}); "
                     f"{install}", True)
-        return (f"visual capture: Chromium headless shell cannot launch ({reason}); "
-                "check Playwright browser installation and system dependencies", True)
+        return (f"visual capture: Chromium headless shell cannot launch ({reason}); fix: "
+                f"{shlex.quote(sys.executable)} -m playwright install chromium-headless-shell "
+                "(on Linux also install system dependencies with --with-deps)", True)
     return "visual capture: playwright and Chromium headless shell available", False
+
+
+def _visual_review_enabled(config: dict) -> bool:
+    """Visual review is enabled when some gear preset funds browser verification (#942)."""
+    presets = (config or {}).get("gear_presets") or {}
+    return any(isinstance(p, dict) and bool(p.get("funded_browser_verification")) for p in presets.values())
+
+
+def _effective_config() -> dict:
+    from office import config as cfg
+    repo = paths.repo_identity()
+    try:
+        return cfg.resolve(repo[0] if repo else None)[0]
+    except ValueError:
+        return {}
 
 
 def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | None = None,
@@ -196,7 +212,12 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
     except (cli_runtimes.ManifestError, OSError) as exc:
         problems += 1
         res.add(f"CLI runtime TSV: invalid: {exc} (repair the TSV before office harness sync)")
-    visual_status, _ = _visual_capture_status()
+    visual_status, visual_problem = _visual_capture_status()
+    if visual_problem:
+        if _visual_review_enabled(_effective_config()):
+            problems += 1
+        else:
+            visual_status += " (visual review is not enabled; not a failure)"
     res.add(visual_status)
     con = db.connect()
     try:

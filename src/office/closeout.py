@@ -23,6 +23,40 @@ _DOC = re.compile(r"(^|/)(CHANGELOG|README)[^/]*$", re.IGNORECASE)
 _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 
+_VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
+
+
+def visual_review_disclosures(con, run: dict) -> list[str]:
+    """One line per task whose required visual review did not finish with comparable evidence (#942).
+
+    A task is covered by its own legacy gate, or by the lane gate whose frozen members include it
+    (convergence lane gates have no task_id). A required review with no covering gate never ran.
+    """
+    from office import convergence, state, visual
+    required = [t for t in state.tasks(con, run["id"])
+                if t["status"] != "cancelled"
+                and visual.applicability(con, run, t, [])["status"] in ("required", "probe")]
+    if not required:
+        return []
+    latest: dict[str, dict] = {}
+    for row in con.execute("SELECT * FROM gates WHERE run_id=? AND kind='visual' AND status!='cancelled' "
+                           "ORDER BY created_at, id", (run["id"],)).fetchall():
+        gate = dict(row)
+        for tid in ([gate["task_id"]] if gate["task_id"] else (convergence.gate_members(gate) or [])):
+            latest[tid] = gate
+    lines = []
+    for task in required:
+        tid = task["id"]
+        gate = latest.get(tid)
+        if gate is None:
+            lines.append(f"visual review required for {tid} but never ran")
+        elif gate["status"] != "done" or gate["evidence_status"] not in _VISUAL_SATISFIED:
+            reason = gate["evidence_status"] or gate["review_status"] or gate["status"]
+            detail = f" ({gate['summary'][:180]})" if gate["summary"] else ""
+            lines.append(f"visual review skipped/degraded for {tid}: {reason}{detail}")
+    return lines
+
+
 def done(summary: str) -> str:
     return f"office close done — {summary}"
 

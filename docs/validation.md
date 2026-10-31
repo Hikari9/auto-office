@@ -18,6 +18,12 @@ Office runs the full suite under `verification.full_suite_timeout_seconds` (defa
 
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
 
+## Visual review diagnostics (#942)
+
+`office doctor` launches headless Chromium when visual review is enabled, meaning some gear preset in the effective config sets `funded_browser_verification`. If the launch fails, doctor counts one problem and exits 1, and the message names the install command, `<python> -m playwright install chromium-headless-shell`. On Linux, add `--with-deps`. A missing optional `playwright` package is reported but is not a failure. When visual review is disabled, a failed launch is reported as not a failure.
+
+At closeout, each task whose visual review is required (planner-declared `visual:` block, or acceptance that reads as user-visible) is checked against its latest visual gate. A task is disclosed by ID when the review never ran (no covering gate) or finished without comparable evidence (`evidence_status` other than `COMPARABLE` or `NOT_APPLICABLE`, or a gate that is not `done`). Convergence lane gates cover the tasks frozen in their membership. DOM-only tests do not count as visual review. Disclosures appear as lines in the close report, in the final `office close done` line, and in the structured result as `visual_review_disclosures`.
+
 ## Default pytest measurement
 
 On 2026-10-29, `.venv/bin/python -m pytest -n 2` ran from the repository root with pytest's default marker selection, one sequential run per tree on the same machine. The baseline is `origin/main` (`986e9d8d`), run from a git worktree. The branch is `854ca15f`, this PR's HEAD. It sits on T1 R14 (`60a46a5c`).
