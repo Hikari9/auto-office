@@ -202,6 +202,26 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
 
+## Executor context cap and fresh-session handoff
+
+Office independently measures each executor's current session, not the run total.
+The default cap is 200,000 input-context tokens (executor_context.threshold_tokens: 200000);
+set executor_context.threshold_tokens: 0 or executor_context.enabled: false to disable it.
+Claude and Codex sessions with attributable transcripts are monitored by the supervisor
+(Claude also at installed post-tool hooks). Other harnesses with no trustworthy session
+usage telemetry are **unmeasured**, not assumed under budget; never claim a cap ran for
+them. The root's /compactable guidance is separate and does not rotate executors.
+
+At the cap, Office records a bounded state/commits/uncommitted-diff/remaining-acceptance/open-findings
+handoff in runs.db and a private dispatches/<old-id>/context-handoff.json artifact.
+Office's outbox then **stops and verifies the old writer is gone before launching**
+a new executor session, with the same task, branch, worktree and versioned contract.
+The new brief carries the report but the executor must verify its claims and preserve
+uncommitted work, not rerun old work or assume ACCEPT is complete.
+office status (and --json executor_handoffs) shows requested, restarted, or blocked
+handoffs with old/new dispatch IDs and measured tokens. If process shutdown cannot be
+verified, Office blocks the task; it never launches overlapping writers.
+
 ## Diagnostics
 
 `office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).

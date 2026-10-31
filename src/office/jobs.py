@@ -58,13 +58,14 @@ LOCK_WAIT_SECONDS = 2.0
 
 
 def _handlers():
-    from office import convergence, dispatch, gates, plans, prs, visual, integration, land, landing_recovery
+    from office import convergence, dispatch, executor_context, gates, plans, prs, visual, integration, land, landing_recovery
     return {
         "converge": convergence.job_converge,
         "convergence_review": convergence.job_convergence_review,
         "lane_visual": convergence.job_lane_visual,
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
+        "rotate_executor": executor_context.job_rotate,
         "trial_recovery": dispatch.job_trial_recovery,
         "route_fallback": dispatch.job_route_fallback,
         "notify_worker": dispatch.job_notify_worker,
@@ -325,6 +326,22 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
         state.update_task(con, run["id"], task_id, status="blocked", pause_reason=f"route fallback failed: {err[:200]}")
         state.emit(con, run, "task.blocked", f"{task_id} route fallback could not run: {err[:120]}; "
                    f"office dispatch {task_id} --reroute", task_id=task_id)
+        return
+    if job["kind"] == "rotate_executor":
+        did = job["payload"].get("dispatch_id")
+        d = state.get_dispatch(con, did) if did else None
+        task = state.get_task(con, run["id"], d["task_id"]) if d else None
+        if task and task["current_dispatch_id"] == did and task["status"] in ("running", "launching"):
+            state.update_task(con, run["id"], task["id"], status="blocked",
+                              pause_reason=f"context rotation failed: {err[:180]}")
+            handoff = json.loads(d.get("context_handoff_json") or "{}")
+            if handoff:
+                handoff["phase"], handoff["error"] = "blocked", err[:300]
+                con.execute("UPDATE dispatches SET context_handoff_json=? WHERE id=?",
+                            (dumps(handoff), did))
+            state.emit(con, run, "executor.handoff_blocked",
+                       f"{task['id']} context rotation failed: {err[:120]}; no replacement launched",
+                       task_id=task["id"], dispatch_id=did)
         return
     if job["kind"] == "launch_agent" and task_id:
         from office import dispatch

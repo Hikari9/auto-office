@@ -414,3 +414,7 @@ orchestrator_context:
   enabled: true
   # Set to 0 to disable context-high notices.
   threshold_tokens: 272000
+executor_context:
+  enabled: true
+  # Per-executor measured context; 0 disables automatic fresh-session handoff.
+  threshold_tokens: 200000

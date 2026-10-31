@@ -197,6 +197,12 @@ def _bound(event: str, harness: str, payload: dict, bound_files: list[Path], wor
             if lines:
                 _say(harness, event, _budget(lines + ["office status --verbose"]))
             return 0
+        if event in ("tool.post", "turn.stop") and worker and dispatch_id:
+            from office import executor_context
+            if executor_context.check(dispatch_id):
+                _say(harness, event, "Office: executor context cap reached. Your work is preserved; "
+                     "a fresh executor is starting on this task. Stop here; do not submit or start new work.")
+            return 0
         if event == "tool.pre" and worker:
             return _guard_write(harness, payload, run, con)
         return 0

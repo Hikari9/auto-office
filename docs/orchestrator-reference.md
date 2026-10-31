@@ -248,3 +248,38 @@ Every dispatch of multiple tasks now writes a compact `delegation.shadow` **oper
 `office inspect efficiency` reads observed Office-attributed usage and recent shadow events on demand. Economics collection remains opt-in and off by default (`economics.collect: false`); neither this command nor shadow dispatch reads transcripts, scans sessions, estimates billed dollars or enables telemetry. A root percentage is the share **of observed token components**, never proof of entire-run cost. Missing fields, outside-Office turns, actual USD, nominal estimates and subscription quota remain distinct. Unknown review/rework/admin costs are not silently zero.
 
 For controlled comparisons, `python eval/v31/compare_economics.py cases.json` accepts a JSON array with matched `pair_id` and `arm` (`baseline` or `treatment`), identical `task_shape`, `harness` and `billing_mode`, `verified_completion: true`, non-negative `integrated_defects`, measured values in `metrics`, and explicitly verified `complete_metrics`. Metrics are withheld unless both arms complete; reported actual USD comparisons require API billing and `cost_kind: actual`. It needs at least three complete, matched pairs with non-worse verified defects before identifying an improvement as claim-ready. **No real matched run dataset has been supplied in #502; no efficiency improvement is claimed yet.**
+
+## Executor context rotation (#939)
+
+Executors use a distinct per-dispatch context cap from the orchestrator's ctx-high
+notice. The pinned executor_context.enabled (default true) and
+executor_context.threshold_tokens (default 200000; 0 disables) are in
+config/config.default.yaml and may be overridden by ordinary run config.
+
+The supervisor checks attributable Claude and Codex session transcripts every 15 seconds;
+the installed Claude PostToolUse hook also checks at tool boundaries. Claude uses the
+last assistant message's input plus cached-input usage, excluding sidechains. Codex uses
+the last turn input/output count, never cumulative lifetime totals. Unobserved or
+unsupported harnesses are not guessed and cannot claim an enforced cap.
+
+On reaching the threshold, one transaction writes the pending handoff to runs.db
+and enqueues a deduplicated rotate_executor job. The handoff snapshots the task's
+canonical contract and open findings, worktree HEAD, git status/diff stat, and existing
+task commits. The done section deliberately reports commits as evidence to inspect;
+it does not assert that acceptance criteria were completed. The report also lives
+under the run's private dispatches/<old-id>/context-handoff.json (0600).
+
+The rotation job first verifies the former executor and any remaining processes
+have stopped. If it cannot prove the worktree has no competing writer, it blocks the
+task with a visible reason instead of starting a replacement. Otherwise it creates a
+fresh dispatch on the same task, worktree and branch, carries the handoff in its
+new brief, and skips dependency restacking to preserve uncommitted WIP. It never
+resumes the exhausted harness session, counts the stop as a failed route, or silently
+accepts work. Normal tests, acceptance, leases, version boundaries and review still
+apply. office status exposes a durable executor handoff line, and --json data includes
+executor_handoffs with state and dispatch IDs.
+
+An executor that submits or is superseded before rotation is not restarted;
+a failed/ambiguous shutdown blocks rather than launches overlapping work. The
+report file is only a projection: the DB is authoritative, and a file-write failure
+after replacement must never cause a duplicate launch.
