@@ -154,12 +154,18 @@ def rebuilding_reason() -> str | None:
     try:
         current()
     except (ImportError, OSError) as exc:
-        return f"{type(exc).__name__}: {exc}"
+        return failure_cause(exc)
     return None
 
 
-def rebuild_line() -> str:
-    return f"office: install is being rebuilt, retry in {REBUILD_RETRY_SECONDS} s"
+def failure_cause(exc: BaseException) -> str:
+    """The exception type and the module it names. `office/__main__.py` keeps the same form for a startup failure."""
+    module = getattr(exc, "name", None) or getattr(exc, "filename", None) or "office"
+    return f"{type(exc).__name__}: {module}"
+
+
+def rebuild_line(cause: str) -> str:
+    return f"office: install is being rebuilt, retry in {REBUILD_RETRY_SECONDS} s ({cause})"
 
 
 # A wheel carries these source paths under office/_resources (pyproject force-include).

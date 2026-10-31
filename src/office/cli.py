@@ -637,8 +637,8 @@ def main(argv: list[str] | None = None) -> int:
         return hooks.main(argv[1:])
     # After the hook fast path. The root-wake supervisor skips the probe: it is a background process whose
     # ticks already classify a failed import, and the probe would delay the first wake (#920).
-    if argv[:1] != ["_wake_supervise"] and version.rebuilding_reason():
-        print(version.rebuild_line(), file=sys.stderr)
+    if argv[:1] != ["_wake_supervise"] and (reason := version.rebuilding_reason()):
+        print(version.rebuild_line(reason), file=sys.stderr)
         return version.REBUILD_EXIT_CODE
     from office.state import OfficeError
     parser = _parser()
