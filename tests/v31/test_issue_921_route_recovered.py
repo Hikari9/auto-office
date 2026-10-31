@@ -75,6 +75,12 @@ def put_probe(env, route, result, probed_at, reason=None, *, invocation=None, ha
                          fp["adapter_hash"], fp["profile"], fp["invocation_model_id"], effort, result, reason, probed_at))
 
 
+def discovery_route(monkeypatch):
+    """Routing reads a probe only for a discovery-eligible route, a catalog row that is not dispatchable. The plain
+    fixture's route is dispatchable, so a test whose probe must hold a route makes that route eligible first."""
+    monkeypatch.setattr(route_probe, "catalog_row", lambda cand: {"dispatchable": False})
+
+
 def probe_pass(env, route, probed_at, invocation=None):
     put_probe(env, route, "pass", probed_at, invocation=invocation)
 
@@ -369,9 +375,10 @@ def test_a_routine_review_that_stayed_on_its_route_is_not_evidence(cold):
 
 def test_a_declared_route_failure_is_never_recovered(plain):
     d = {"route": "codex@1/gpt-6.1-sol@medium", "harness": "codex", "model": "gpt-6.1-sol", "effort": "medium"}
-    with db.transaction(plain.con):
-        state.emit(plain.con, run(plain), "route.failed", "declared route failed", task_id="T1",
-                   payload={**d, "reason": "auth", "declared": True, "demoted_until": PAST})
+    for reason in ("auth", "unsupported-model-effort"):  # the second is no evidence at all: the SQL filter drops it
+        with db.transaction(plain.con):
+            state.emit(plain.con, run(plain), "route.failed", "declared route failed", task_id="T1",
+                       payload={**d, "reason": reason, "declared": True, "demoted_until": PAST})
     assert sweep(plain) == []  # no cooldown is live, but the user declared this route: it is not swapped or recovered
 
 
@@ -615,7 +622,8 @@ def probe_at(env, d, result, reason=None, at=None, **fingerprint):
     put_probe(env, d["triple"], result, at or now_iso(), reason, invocation=d["invocation_model_id"], **fingerprint)
 
 
-def test_a_fresh_failed_probe_keeps_a_lapsed_route_down_until_a_later_pass(plain):
+def test_a_fresh_failed_probe_keeps_a_lapsed_route_down_until_a_later_pass(plain, monkeypatch):
+    discovery_route(monkeypatch)
     d = failed_route(plain)
     probe_at(plain, d, "fail", "auth-quota-blocked")  # routing still rejects the route on this probe
     expire(plain, d)
@@ -694,7 +702,8 @@ def test_a_same_key_reservation_overwrites_the_pass_and_leaves_no_verdict_to_rec
     assert routechange.sweep_recovered(cold.con, run(cold), now=parse_iso("3000-01-01T00:00:00+00:00")) == []
 
 
-def test_an_orphaned_pending_probe_of_another_profile_does_not_hide_a_fresh_failed_probe(plain):
+def test_an_orphaned_pending_probe_of_another_profile_does_not_hide_a_fresh_failed_probe(plain, monkeypatch):
+    discovery_route(monkeypatch)
     d = failed_route(plain)
     expire(plain, d)
     timeout = route_policy.DISCOVERY_DEFAULTS["probe_timeout_s"]
@@ -704,7 +713,8 @@ def test_an_orphaned_pending_probe_of_another_profile_does_not_hide_a_fresh_fail
     assert sweep(plain) == []  # the exact fresh failed probe still speaks: routing rejects the route on it
 
 
-def test_a_pass_of_another_launch_profile_or_version_does_not_hide_the_exact_fresh_failure(plain):
+def test_a_pass_of_another_launch_profile_or_version_does_not_hide_the_exact_fresh_failure(plain, monkeypatch):
+    discovery_route(monkeypatch)
     d = failed_route(plain)
     probe_at(plain, d, "fail", "auth-quota-blocked")  # routing rejects the route on this exact probe
     expire(plain, d)
@@ -722,6 +732,7 @@ def test_a_fresh_failure_of_another_harness_version_does_not_keep_the_route_down
 
 
 def test_a_fresh_failed_probe_after_the_recovery_hides_its_line(plain, monkeypatch):
+    discovery_route(monkeypatch)
     monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
     d = failed_route(plain)
     expire(plain, d)
@@ -734,7 +745,17 @@ def test_a_fresh_failed_probe_after_the_recovery_hides_its_line(plain, monkeypat
     assert line not in guide.status(plain.con, run(plain)).lines
 
 
-def test_a_configured_probe_timeout_judges_an_orphaned_reservation_by_the_run_policy(plain):
+def test_a_fresh_failed_probe_does_not_hold_a_dispatchable_route(plain, monkeypatch):
+    """Routing reads a probe only for a discovery-eligible route. A dispatchable one is available whatever its probe."""
+    monkeypatch.setattr(route_probe, "catalog_row", lambda cand: {"dispatchable": True})
+    d = failed_route(plain)
+    probe_at(plain, d, "fail", "auth-quota-blocked")
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+
+
+def test_a_configured_probe_timeout_judges_an_orphaned_reservation_by_the_run_policy(plain, monkeypatch):
+    discovery_route(monkeypatch)
     d = failed_route(plain)
     expire(plain, d)
     with db.transaction(plain.con):  # this run's policy raises the probe timeout past the default
