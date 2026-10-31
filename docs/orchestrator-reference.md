@@ -58,6 +58,7 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 `dispatch --as` and `rerun --as` record orchestrator choices with ordinary routing safety gates. Add `--quote "<user's words>"` only for actual user authority. `amend route` can record an accepted task's future route without rewriting its submitted producer; its next legal reopen uses that route. Revoking new acceptance work does not mark the new criteria satisfied.
 
 - `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
+- An `office` command exits 75 (EX_TEMPFAIL) and prints `office: install is being rebuilt, retry in 5 s (<ExceptionType>: <module>)` on stderr, with no traceback, when the install is replaced as the command starts (for example during `uv tool install --force`). Retry the same command after a few seconds, because nothing ran. A failure whose origin is outside the office package (a dependency that fails to import) is not a rebuild: the command exits 1 and prints its cause with a reinstall hint, naming `uv tool install --force --editable <checkout>` for a checkout or `uv tool install --force auto-office` for a release. If a reinstall is already running, the hint says to retry after it finishes. A replacement that breaks a command after it has started still raises a traceback; check the run before retrying it. The root wake supervisor records one `office.reinstalled` event once the install is healthy again, and that event wakes the root to resume the run.
 - Exit 5 prints a `question:` line (dispatch, pane, question, options, answer command). Decide planning, scope, ordering and
   test detail yourself: amend the contract first if the answer changes it, then `office answer <task|dispatch> <n>` (a number
   presses that option in a selection widget; `office prompt` types text, which a widget ignores) or
@@ -65,6 +66,37 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   irreversible or external action.
 - `office status` makes one `herdr agent list` call and prints a `blocker:` line for a live pane herdr reports `blocked` with no
   recorded question. `office wait` records it; status records nothing.
+- Root wake (#922) is on by default. `office resume` from a bound, verified Claude Herdr root pane arms it; `--wake-off` turns it
+  off for the run and it stays off across later plain resumes; `office resume --auto-wake` re-arms it. `--auto-wake` is still accepted. Outside Herdr, or when Herdr cannot verify the pane, resume prints a notice
+  and arms nothing. `office status` prints `wake: armed`, `wake: off` or `wake: unavailable (<reason>)` on every non-terminal run.
+  A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
+  event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
+- **Outside Herdr, a Claude Code root can now be woken natively (#940):** `office install --only claude --item turn.stop`
+  installs the managed `Stop` command hook with `asyncRewake: true` (Claude Code must load/approve this hook), alongside
+  the existing session-start and prompt-submit hooks. After `office resume` inside a *verified Claude process*,
+  the root's normal Stop event starts a background, one-per-run listener to the Office event ledger; when a new
+  authoritative action arrives it exits **2**, providing a scoped system reminder to the **existing** idle Claude session.
+  No Herdr pane, agent restart, synthetic user prompt or model polling is used. `office status` reports
+  `wake: armed (Claude native Stop/asyncRewake; arms on next Claude Stop)` or `listener active`; `--wake-off`
+  disarms both transports. If the hook is not installed, this is a detached shell, the session is not bound,
+  or the caller is an executor/subagent, wake remains unavailable and `next: office wait` is the fallback.
+  The listener ends on a new user prompt, session rebind, run closure or hook timeout (24 hours); a later Stop
+  re-arms it. A terminal/closed Claude session cannot be reawakened. Check `office status` if a host disables hooks.
+  Native exit 2 means *notification issued*, not action completed; the root must read `office context` and obey
+  all permission/review gates. See [root-wake](root-wake.md) for the safety contract and manual fallback.
+- Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
+  record each episode as an orchestrator event, which wakes an armed root. `office wait` exits 0 on `review.queued_too_long`
+  and `review.closed_unread`, and exits 3 on `review.stalled`:
+  - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900). Task reviews only; plan
+    reviews show on the plan review status line. A queue nothing drains (owner `queued`) gets `office revoke <task>`, then
+    `office review <task>` on the same revision. A live or unknown job gets `office wait` first.
+  - `review.stalled`: a running reviewer past `OFFICE_REVIEW_NO_PROGRESS_S` (default 900) or `OFFICE_REVIEW_WALL_S` (default 3600).
+    Next: as the stall line says.
+  - `review.closed_unread`: a review closed past `OFFICE_REVIEW_UNREAD_S` (default 900) whose verdict has not been shown to the
+    orchestrator. Next: `office context`, then act on the verdict. Every status (the root's `office status`, `office resume`, the
+    session-start hook, and an `office wait` wake) prints up to three unread closed verdicts as `verdict shown:` lines, or the
+    episode line past the bound, and marks only those read. The rest print on a later status. `office context` marks nothing read.
+  - A healthy running review emits nothing.
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3, and the stall line names the
   dispatch, any refused-submit reason, its `pane-tail.txt` and the next command. Fix the blocker, then
   `office prompt T2 -- "<message>"` or follow that command. A worker refused as lease-lost, superseded-dispatch or

@@ -93,11 +93,21 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Office types into a pane only once Herdr's own record shows it is that dispatch's (cwd, agent kind and name, session) and no other dispatch holds it.
   A mismatch sends nothing, starts no headless copy and prints a `pane-mismatch` notice: inspect the pane, then `office revoke <task>`. Revoke
   restores a task to accepted only when an amendment alone demoted it; one reopened for owed work (RECHECK or cleanup findings, a restack, a hold) stays reopened.
+- Root auto-wake: in a verified Claude Herdr pane, `office resume` arms Herdr's event notifier. In a verified
+  **non-Herdr Claude Code root** with the installed managed Stop/`asyncRewake` hook, `office resume` arms native
+  event-driven re-entry at the next Stop event (#940); no duplicate polling turns or detached model sessions.
+  To configure: `office install --only claude --item turn.stop`, reload/approve Claude hooks, then `office resume`.
+  `office status` names armed, off, and unavailable cases. `office resume --wake-off` is sticky; explicit
+  `--auto-wake` re-arms. The notifier never authorizes, approves, merges or bypasses independent review. If it
+  cannot be armed or Claude's host does not support `asyncRewake`, use `office wait` while work is in flight.
 - `office wait`: exit 0 means act, 3 a stall or your already-reported action with no work in flight, 5 an agent asked a question, 124 nothing new. On 3, follow `next:` before waiting again. Key on the exit code, never on status text.
   Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
   it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
   Take it to the user (native question tool) on requirements, authority (trust, login, update), irreversible or external actions; never answer those.
+- Root wake is on by default: `office resume` from a bound, verified Claude Herdr root pane arms it with no flag. `--wake-off` disables it until `office resume --auto-wake` re-arms it; `--auto-wake` is still accepted. Outside Herdr, or when Herdr cannot verify the pane, resume succeeds with a notice and no wake; use `office wait`. `office status` prints `wake: armed|off|unavailable` for every non-terminal run.
+- Turn rule: arm `office wait` instead of ending the turn on an event-dependent step. When `office status` ends `next: office wait`, wake is not armed and work is running.
 - `office status` prints a `blocker:` line for a live pane herdr reports `blocked` with no recorded question; `office wait` records it.
+- Review gates past a bound print one event each: `review.queued_too_long`, `review.stalled`, `review.closed_unread`. The `next:` names the step (`office revoke <task>` then `office review <task>` on the same revision, or read the verdict with `office context`).
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its parent's),
   posts review results, and marks it ready on acceptance. Reviewers are read only from their reply files, never pane text. A bad reply re-prompts
   the same reviewer (no round spent); after three it needs you.

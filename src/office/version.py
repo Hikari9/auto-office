@@ -140,6 +140,34 @@ def current() -> str:
     return identity
 
 
+# `uv tool install --force` replaces the package files in place. A process that starts during that
+# replacement fails its imports or its version probe. EX_TEMPFAIL: the caller should retry.
+REBUILD_EXIT_CODE = 75
+REBUILD_RETRY_SECONDS = 5
+
+
+def rebuilding_reason() -> str | None:
+    """Why this process cannot resolve its install right now, else None.
+
+    Only an import or read failure counts as a rebuild. A bad OFFICE_VERSION_OVERRIDE
+    stays a RuntimeError: that is configuration, and retrying it cannot help."""
+    try:
+        current()
+    except (ImportError, OSError) as exc:
+        return failure_cause(exc)
+    return None
+
+
+def failure_cause(exc: BaseException) -> str:
+    """The exception type and the module it names. `office/__main__.py` keeps the same form for a startup failure."""
+    module = getattr(exc, "name", None) or getattr(exc, "filename", None) or "office"
+    return f"{type(exc).__name__}: {module}"
+
+
+def rebuild_line(cause: str) -> str:
+    return f"office: install is being rebuilt, retry in {REBUILD_RETRY_SECONDS} s ({cause})"
+
+
 # A wheel carries these source paths under office/_resources (pyproject force-include).
 _RESOURCE_PATHS = ("config", "schemas", "catalog", "adapters", "skills", "SKILL.md")
 
