@@ -197,7 +197,7 @@ def capture_backend_missing() -> str | None:
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
     except ImportError:
-        return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual]')"
+        return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office')"
     return None
 
 

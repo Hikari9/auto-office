@@ -7,7 +7,7 @@ refuses something this page allows, the runtime is right; fix this page.
 ## Install and update
 
 - `office --version` not found: follow SKILL.md's Install check. Install only after the user picks **Install the CLI**
-  (never install silently): `uv tool install auto-office` (`pipx install` if `uv` is missing), then `office install` (managed harness hooks and
+  (never install silently): `uv tool install git+https://github.com/Hikari9/auto-office` (`pipx install` if `uv` is missing), then `office install` (managed harness hooks and
   runtime registration, with a backup of each config) and `office doctor`.
 - Release (the part before any `+`) differs from the directory's `src/office/_version.py`: tell the user and offer
   `uv tool install --force --reinstall "<skill directory>"`, then `office install`. Runs already started keep their pinned runtime.

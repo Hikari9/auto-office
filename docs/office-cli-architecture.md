@@ -4,7 +4,7 @@
 > implementation notes in [`v31-implementation.md`](v31-implementation.md)). Where this document disagrees, 3.1 wins:
 >
 > - **Distribution**: the package is `auto-office` (import `office`, command `office`), installed with
->   `uv tool install auto-office`, not `office-skills`.
+>   `uv tool install git+https://github.com/Hikari9/auto-office`, not `office-skills`.
 > - **State authority**: `runs.db` is the only authority for 3.1 runs. Session bindings, events, cursors,
 >   amendments and deliveries are tables in it; `.office/sessions/*.json`, `state.json` and `events.jsonl` are not
 >   written for 3.1 runs.
@@ -288,8 +288,8 @@ Runtime resources (schemas, catalog seeds, protocol documentation) and skills sh
 
 ### 5.2 Installation and Upgrade Sequences
 - **Canonical Installation (D142-1)**:
-  `uv tool install auto-office`
-  Installs into an isolated virtual environment with pinned dependencies (`jsonschema`, `PyYAML`). Alternative: `pipx install auto-office`.
+  `uv tool install git+https://github.com/Hikari9/auto-office`
+  Installs into an isolated virtual environment with pinned dependencies (`jsonschema`, `PyYAML`). Alternative: `pipx install git+https://github.com/Hikari9/auto-office`. Not from PyPI: `auto-office` there is an unrelated project.
   The root `auto-office` plugin skill runs this when `office` is missing, after the user chooses it (`docs/onboarding.md`).
 - **Developer / Editable Installation**:
   `uv tool install --editable <path/to/auto-office checkout>`

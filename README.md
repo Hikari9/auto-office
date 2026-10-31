@@ -84,7 +84,7 @@ Auto Office turns those into runtime behavior rather than hoping every agent rem
 
 ### Install the skills as a plugin
 
-This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills, including the root `auto-office` entry skill. If `office` is missing, that skill asks once per session whether to install the CLI from PyPI (`uv tool install auto-office`) or use `auto-office-lean`, until a choice is saved. Section 1 is the manual CLI install.
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills, including the root `auto-office` entry skill. If `office` is missing, that skill asks once per session whether to install the CLI from GitHub (`uv tool install git+https://github.com/Hikari9/auto-office`) or use `auto-office-lean`, until a choice is saved. Section 1 is the manual CLI install.
 
 ```bash
 # Claude Code
@@ -102,13 +102,15 @@ Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude
 For normal use:
 
 ```bash
-uv tool install auto-office
+uv tool install git+https://github.com/Hikari9/auto-office
 ```
+
+Auto Office is not on PyPI: the `auto-office` name there belongs to an unrelated project, so never `uv tool install auto-office` or `pip install auto-office`.
 
 For browser capture and visual gates:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 ```
 
 The visual extra installs Playwright support and uses the local Chrome. Without it, a visual gate that requires capture reports `CAPTURE_BLOCKED`; it does not quietly pass.
@@ -171,7 +173,7 @@ checks remain authoritative. See `skills/auto-adapter/SKILL.md` for registration
 
 `office doctor` verifies the installed runtime, hook state, pinned runtimes, visual prerequisites, and known harness defects. If it reports `install: STALE`, reinstall the checkout rather than trusting the version string alone. `office doctor --fix` repairs Office-managed integration drift while preserving and backing up unrelated configuration.
 
-`office update --check` checks PyPI and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from PyPI, then refreshes the runtime registration and runs `office doctor`.
+`office update --check` checks the release on GitHub `main` and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from GitHub, then refreshes the runtime registration and runs `office doctor`.
 
 > **For coding agents:** do not silently install or rewrite global harness configuration. If `office` is missing, ask the human before running `uv tool install ...` or `office install`; once installed, use the CLI contract below.
 
@@ -668,7 +670,7 @@ failing subroutes still produce application findings.
 Install the visual extra when you expect browser/UI work:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 office doctor --probe-vision
 ```
 
