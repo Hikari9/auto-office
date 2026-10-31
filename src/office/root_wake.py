@@ -683,8 +683,7 @@ def _watchdog_loop(run_id: str) -> None:
             run = state.get_run(con, run_id)
             if not run or state.is_terminal(run) or not _binding(con, run_id):
                 return
-            watchdog_tick(con, run)
-            _recover_reinstall(con, run)
+            watchdog_tick(con, run)  # no recovery here: a healthy watchdog does not show the supervisor is healthy (#920)
         except Exception as exc:
             if isinstance(exc, (ImportError, OSError)):
                 _tick_failed(run_id, exc)

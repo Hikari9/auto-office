@@ -17,7 +17,7 @@ import pytest
 from conftest import approved_run
 from test_root_wake_723 import setup_root
 
-from office import cli, root_wake, state, version
+from office import cli, dispatch, root_wake, state, version
 
 def retry_line(cause: str) -> str:
     return f"office: install is being rebuilt, retry in 5 s ({cause})"
@@ -303,6 +303,20 @@ def test_raw_and_hook_still_take_their_fast_paths_when_the_install_is_healthy(mo
     assert cli.main(["hook", "PreToolUse"]) == ("hook", ["PreToolUse"])
 
 
+def test_raw_and_hook_keep_their_fast_path_under_a_bad_version_override(monkeypatch):
+    """A bad OFFICE_VERSION_OVERRIDE is configuration, not a rebuild: hooks keep running as they did before (#920)."""
+    from office import compat, hooks
+
+    def bad():
+        raise RuntimeError("OFFICE_VERSION_OVERRIDE='dev' is not an exact PEP 440 version")
+    monkeypatch.setattr(version, "current", bad)
+    monkeypatch.setattr(compat, "raw", lambda argv: ("raw", argv))
+    monkeypatch.setattr(hooks, "main", lambda argv: ("hook", argv))
+
+    assert cli.main(["raw", "status"]) == ("raw", ["status"])
+    assert cli.main(["hook", "PreToolUse"]) == ("hook", ["PreToolUse"])
+
+
 def test_a_healthy_install_is_not_reported_as_rebuilding(monkeypatch):
     monkeypatch.setattr(version, "current", lambda: "3.2.0")
     assert version.rebuilding_reason() is None
@@ -370,7 +384,10 @@ def test_a_failed_mark_write_never_stops_the_supervisor(env, monkeypatch):
     assert list(root_wake._reinstall_mark(run["id"]).parent.glob("*.tmp")) == []
 
 
-def test_watchdog_thread_marks_the_failure_and_records_the_recovery(env, monkeypatch):
+def test_watchdog_thread_marks_the_failure_and_leaves_the_recovery_to_the_supervisor(env, monkeypatch):
+    """A healthy watchdog tick does not record the recovery: the supervisor's healthy poll does (#920).
+
+    A supervisor whose poll still fails while the watchdog is healthy must not produce `office.reinstalled`."""
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
     ticks = iter([ImportError("partially written module"), None])
@@ -390,6 +407,9 @@ def test_watchdog_thread_marks_the_failure_and_records_the_recovery(env, monkeyp
         root_wake._watchdog_loop(run["id"])
 
     assert len(sleeps) == 2
+    assert root_wake._reinstall_mark(run["id"]).exists()
+    assert _reinstalled(con, run) == []
+    assert root_wake._recover_reinstall(con, run)  # the supervisor's healthy tick
     assert len(_reinstalled(con, run)) == 1
     assert not root_wake._reinstall_mark(run["id"]).exists()
 
@@ -412,7 +432,8 @@ def test_watchdog_thread_treats_an_os_error_as_a_failed_tick(env, monkeypatch):
     with pytest.raises(_Stop):
         root_wake._watchdog_loop(run["id"])
 
-    assert len(_reinstalled(con, run)) == 1
+    assert root_wake._reinstall_mark(run["id"]).exists()
+    assert _reinstalled(con, run) == []
 
 
 def test_repeat_recovery_calls_record_one_event(env, monkeypatch):
@@ -517,6 +538,19 @@ def test_office_reinstalled_is_actionable_and_its_wake_text_says_to_resume(env, 
     assert "resume" in text
     assert f"office --run {run['id']} context" in text
     assert signature
+
+
+def test_office_reinstalled_reaches_the_root_as_a_wake_prompt_with_its_action_line(env, monkeypatch):
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    sent = []
+    monkeypatch.setattr(dispatch, "submit_prompt", lambda *a, **kw: sent.append(a) or "landed")
+    root_wake._mark_reinstall(run["id"])
+    root_wake._recover_reinstall(con, run)
+
+    assert root_wake.poll(con, run) == "delivered"
+    assert len(sent) == 1
+    assert "\n\noffice.reinstalled: Office install was unavailable" in sent[0][1]
 
 
 def test_each_recovery_has_its_own_actionable_signature(env, monkeypatch):
