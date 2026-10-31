@@ -85,7 +85,8 @@ def test_disable_before_dispatch_stops_future_prs(env, monkeypatch):
     assert code == 0 and 'disabled' in out, out
     env.office('approve', 'plan', '--quote', 'go', check=0)
     env.office('dispatch', 'T1', check=0)
-    assert not (env.tmp / 'gh.json').exists() or not gh(env)['prs'] and _prs(env)['enabled'] is False
+    assert not (env.tmp / 'gh.json').exists() or not gh(env)['prs']
+    assert _prs(env)['enabled'] is False
     assert _events(env)[0]['before']['enabled'] is True
 
 
@@ -130,3 +131,43 @@ def test_wrong_amend_scope_rejects_option_flags(env):
     code, out = env.office('amend', 'plan', '--prs', '--quote', 'yes', '--confirm', '--', 'note')
     assert code == 2 and 'option-scope-required' in out, out
     assert not _events(env)
+
+
+def test_pending_pr_job_blocks_disabling_before_pr_recorded(env, monkeypatch):
+    """An outbox job may already have made a remote PR Office has not observed."""
+    github(env, monkeypatch)
+    env.trust()
+    start_inline(env)
+    from office import db, state
+    con = env.con()
+    try:
+        with db.transaction(con):
+            run = state.get_run(con, con.execute('SELECT id FROM runs').fetchone()[0])
+            state.enqueue(con, run, 'pr_sync', {'task_id': 'T1', 'event': 'revision', 'ref': 'unknown'},
+                          dedup_key='test-pending-pr-job')
+    finally:
+        con.close()
+    before = _prs(env)
+    code, out = env.office('amend', 'options', '--no-prs', '--quote', 'Stop PRs', '--confirm')
+    assert code == 4 and 'prs-in-use' in out and 'PR job' in out, out
+    assert _prs(env) == before and not _events(env)
+
+
+def test_pr_sync_queue_uses_current_mode_not_stale_run_snapshot(env, monkeypatch):
+    """A worker may have read run state before the user enabled PRs (#937)."""
+    github(env, monkeypatch)
+    env.trust()
+    start_inline(env, extra=('--no-prs',))
+    from office import db, prs, state
+    con = env.con()
+    try:
+        run_id = con.execute('SELECT id FROM runs').fetchone()[0]
+        stale_off = state.get_run(con, run_id)
+        assert not prs.enabled(stale_off)
+        assert _enable(env)[0] == 0
+        with db.transaction(con):
+            prs.queue(con, stale_off, 'T1', 'verdict', 'G-stale')
+        rows = con.execute("SELECT payload_json FROM outbox WHERE kind='pr_sync'").fetchall()
+        assert len(rows) == 1 and json.loads(rows[0][0])['ref'] == 'G-stale'
+    finally:
+        con.close()

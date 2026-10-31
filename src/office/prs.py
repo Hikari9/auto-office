@@ -199,8 +199,11 @@ def pr_blocker(con, run: dict, task: dict) -> str | None:
 
 
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
-    if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
-        state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
+    # Live run options can change after a worker loaded `run`. Use the state
+    # visible in this transaction, not that worker's stale snapshot (#937).
+    current = state.get_run(con, run["id"])
+    if enabled(current) and has_pr(state.get_task(con, run["id"], task_id)):
+        state.enqueue(con, current, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
                       dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
 
 
