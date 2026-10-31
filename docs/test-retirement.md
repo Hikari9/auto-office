@@ -459,7 +459,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 266, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 267, 'historical-diagnostic': 21, 'consolidate': 7, 'retire': 3}.
 
 ## Left alone on purpose
 

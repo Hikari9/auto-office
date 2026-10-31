@@ -172,7 +172,7 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 | `tests/v31/test_issue809_real_routes.py` | consolidate |
 | `tests/v31/test_issue809_regression.py` | consolidate |
 | `tests/v31/test_issue809_rollout_metrics.py` | keep |
-| `tests/v31/test_issue809_run_gear.py` | consolidate |
+| `tests/v31/test_issue809_run_gear.py` | keep |
 | `tests/v31/test_issue809_self_review_subagents.py` | keep |
 | `tests/v31/test_issue809_xl_review.py` | keep |
 | `tests/v31/test_issue811_terra_supersession.py` | consolidate |

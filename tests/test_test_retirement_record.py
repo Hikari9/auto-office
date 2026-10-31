@@ -1,6 +1,8 @@
 """Check that the contract suite's legacy table and the retirement inventory hold the same path-disposition rows."""
 
+import ast
 import re
+from collections import Counter
 from pathlib import Path
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
@@ -27,3 +29,11 @@ def test_legacy_table_and_inventory_hold_the_same_path_dispositions():
     assert len({path for path, _ in inventory}) == len(inventory), "duplicate path in the retirement inventory"
     assert len({path for path, _ in legacy}) == len(legacy), "duplicate path in the legacy table"
     assert set(legacy) == set(inventory)
+
+
+def test_inventory_totals_match_the_inventory_rows():
+    text = (DOCS / "test-retirement.md").read_text(encoding="utf-8")
+    match = re.search(r"^Totals: (\{.*\})\.$", text, re.MULTILINE)
+    assert match, "the module inventory has no Totals line"
+    counts = Counter(disposition for _, disposition in _rows("test-retirement.md", "## Module inventory"))
+    assert ast.literal_eval(match.group(1)) == dict(counts)
