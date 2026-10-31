@@ -427,6 +427,29 @@ def test_a_later_recovery_of_the_same_route_shows_again_after_a_dispatch(plain):
     assert len(routechange.recovery_lines(plain.con, run(plain))) == 1
 
 
+def test_an_in_flight_dispatch_that_fails_after_the_recovery_supersedes_its_line(plain, monkeypatch):
+    """A dispatch started before the recovery was never considered by routing, so it clears nothing. When it then fails
+    on the route, its failure installs a live cooldown: the route is down again and the line must go."""
+    monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
+    plain.dispatch("T2")  # in flight on the route while it is healthy
+    (inflight,) = [x for x in plain.dispatches() if x["task_id"] == "T2"]
+    d = failed_route(plain)
+    assert inflight["triple"] == d["triple"]
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+    line = line_for(d["triple"], "demotion lapsed")
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+    fail(plain, inflight, "not logged in")  # the in-flight dispatch fails on the route after the recovery
+    assert sweep(plain) == []  # its new cooldown is live
+    assert routechange.recovery_lines(plain.con, run(plain)) == []
+    assert line not in guide.status(plain.con, run(plain)).lines
+
+    expire(plain, inflight)  # the new failure lapses: a new episode, recovered once more
+    assert len(sweep(plain)) == 1
+    assert routechange.recovery_lines(plain.con, run(plain)) == [line]
+
+
 def test_a_dispatch_between_the_lapse_and_the_first_sweep_clears_the_line(plain, monkeypatch):
     monkeypatch.setattr(guide, "next_action", lambda con, r: "office status")  # the fixture has no plan row
     d = failed_route(plain)

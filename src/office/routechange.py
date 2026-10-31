@@ -433,9 +433,11 @@ def _considered_since(con, run_id: str, at: str, route: str, role: str | None) -
 
 def recovery_lines(con, run: dict) -> list[str]:
     """`preferred route X is available again` for each recovered route that routing has not used or passed over since
-    it became available. A route's newest recovery alone decides its line."""
+    it became available. A route's newest recovery alone decides its line, and only while that recovered episode is
+    still the route's newest evidence: a failure after it (an in-flight dispatch hitting the limit) supersedes it."""
     if state.is_terminal(run):
         return []
+    newest = _latest_episodes(con, run["id"])
     lines, seen = [], set()
     for row in con.execute("SELECT created_at, payload_json FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC",
                            (run["id"], RECOVERED_KIND)).fetchall():
@@ -444,6 +446,8 @@ def recovery_lines(con, run: dict) -> list[str]:
         if route in seen:
             continue
         seen.add(route)
+        if route in newest and newest[route][0]["seq"] != payload.get("episode"):
+            continue
         since = payload.get("available_at") or row["created_at"]
         if not _considered_since(con, run["id"], since, route, payload.get("role")):
             lines.append(_available_text(route, payload.get("basis")))
