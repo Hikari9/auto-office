@@ -241,8 +241,8 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("start", parents=[common], add_help=True)
     s.add_argument("goal", nargs="?")
-    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "direct", "direct+review", "light", "quick", "express", "full"], metavar="{XS,S,M,L,XL}",
-                   help="New run gear (XS-XL); historical aliases are explicit compatibility presets")
+    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "greenfield", "direct", "direct+review", "light", "quick", "express", "full"], metavar="{XS,S,M,L,XL}",
+                   help="New run gear (XS-XL); greenfield is explicit opt-in for one cohesive build; historical aliases are compatibility presets")
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
     s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])

@@ -65,7 +65,7 @@ END_STATES = ("ask", "preview", "merge", "e2e")
 # endpoint list, a mock table). Two shared entries never overlap: leases and
 # plan review do not serialize them, and the compose step merges the appends.
 SHARED = "+"
-LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "questions"}
+LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "phases", "questions"}
 VISUAL_KEYS = {"url", "start", "reference", "viewports", "states", "selectors", "strict", "affects", "ready", "auth",
                "deviations"}
 
@@ -215,6 +215,9 @@ def parse(text: str) -> ParsedPlan:
             elif key == "integration_risk":
                 # #422: the planner marks the composed outcome high risk to integrate.
                 task["integration_risk"] = value.strip().lower()
+            elif key == "phases":
+                if value:
+                    task.setdefault("phases", []).append(value)
             elif key == "notes":
                 if value:
                     task["notes"].append(value)
@@ -252,6 +255,8 @@ def _append(task: dict, key: str, item: str) -> None:
         task["accept"].append(item)
     elif key == "interfaces":
         task["interfaces"].append(item)
+    elif key == "phases":
+        task.setdefault("phases", []).append(item)
     else:
         task["notes"].append(item)
 

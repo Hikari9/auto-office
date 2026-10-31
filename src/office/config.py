@@ -19,11 +19,13 @@ from office.util import sha256_file, sha256_obj
 NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
                          route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
 RUN_GEARS = ("XS", "S", "M", "L", "XL")
+# Explicit opt-in for a new or near-empty repository. Never selected by size auto-fit.
+SPECIAL_GEARS = ("greenfield",)
 # Existing runs pin the old representation and its gates; never rewrite their stored gear.
 LEGACY_GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
 # The XS-XL gear whose funding each legacy name is closest to, shown when a legacy name starts a run.
 LEGACY_EQUIVALENT = {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M", "express": "M", "full": "XL"}
-GEARS = (*RUN_GEARS, *LEGACY_GEARS)
+GEARS = (*RUN_GEARS, *SPECIAL_GEARS, *LEGACY_GEARS)
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
 SIZE_CLASSES = RUN_GEARS
@@ -336,6 +338,9 @@ def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview:
 def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bool = False,
                    adversarial: bool = False) -> str:
     """Human-readable, immutable at intake. Risk is explained by separate gates."""
+    if gear == "greenfield":
+        return ("explicit greenfield build: one strong executor owns 2-3 large phases in one task; "
+                "one independent end-of-build convergence review, with risk and release gates intact")
     if gear in LEGACY_GEARS:
         return (f"explicit legacy preset {gear} (closest to {LEGACY_EQUIVALENT[gear]}): "
                 "its pinned review and release semantics are preserved")
@@ -361,6 +366,10 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         return bool(risk_high) if v == "risk_forced" else v
 
     plan_review = value(preset.get("plan_review", False))
+    if gear == "greenfield" and not (risk_mod.classification(record) == risk_mod.LOW and record.get("classified_by") == "intake"):
+        # Only a low risk the user declared at intake skips plan review. Unknown risk, and risk the planner
+        # classifies itself, keep one independent review: a planner may not exempt its own plan (#936).
+        plan_review = True
     code_review = value(preset.get("independent_code_review", False))
     code_review, floor = risk_mod.floor_gates(record, code_review)
     plan_rounds = preset.get("plan_review_max_rounds")
@@ -373,12 +382,14 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
     verification = config.get("verification") or {}
     from office import contract
     review_contract = contract.default_for(config)
+    if gear == "greenfield" and review_contract != contract.CONVERGENCE:
+        raise ValueError("greenfield requires the convergence-v1 review contract; do not use v3.1 per-task review")
     if review_contract == contract.CONVERGENCE:
         # #337: every RECHECK sequence stops at three substantive rounds.
         plan_rounds = code_rounds = contract.MAX_ROUNDS
     gates = {
         "run_gear": gear,
-        "gear_model_version": "run-gear-1" if gear in RUN_GEARS else "legacy-pinned",
+        "gear_model_version": "run-gear-1" if gear in (*RUN_GEARS, *SPECIAL_GEARS) else "legacy-pinned",
         # Pinned per run (#337): the review contract this run keeps for its life.
         "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they
