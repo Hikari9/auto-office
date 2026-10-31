@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -112,29 +113,27 @@ def _latest_visual_gates(con, run: dict) -> tuple[dict[str, dict], dict | None]:
     return latest, newest_unattributed
 
 
-def acceptance_report(con, run: dict) -> list[str]:
+def acceptance_report(con, run: dict, landed: str | None) -> list[str]:
     """Closeout's per-criterion acceptance lines (#945, A15). Each criterion's kind comes from evidence Office
-    recorded, never from a caller-supplied label: verified-live when a live verification covers its task (the
-    run's last deploy verify passed, or the task's latest visual gate is a COMPARABLE capture of its accepted
-    revision); verified-against-fakes when the accepted revision's latest checks gate passed; otherwise
-    not-verified. A report that cannot be formed is one line, never a met claim."""
+    recorded, never from a caller-supplied label: verified-live when a live verification covers its task (a
+    passing prod deploy verify of the landed commit, or the task's latest visual gate is a passing COMPARABLE
+    capture of its accepted revision); verified-against-fakes when the accepted revision's latest checks gate
+    passed; otherwise not-verified. A report that cannot be formed is one line, never a met claim."""
     from office import state
-    tasks = [t for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
-    deployed = _deploy_verified(con, run)
-    latest, newest_unattributed = _latest_visual_gates(con, run)
-    criteria = []
-    for task in tasks:
-        kind = _evidence_kind(con, run, task, deployed, latest, newest_unattributed)
-        criteria.extend((text, kind) for text in task["accept"])
     try:
+        tasks = [t for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
+        deployed = _deploy_verified(con, run, landed)
+        latest, newest_unattributed = _latest_visual_gates(con, run)
+        criteria = [(text, _evidence_kind(con, run, task, deployed, latest, newest_unattributed))
+                    for task in tasks for text in task["accept"]]
         return criteria_report(criteria)
-    except ValueError as exc:
+    except (ValueError, sqlite3.Error) as exc:  # a bad recorded row must not break the close it reports on
         return [f"acceptance not reported: {exc}"]
 
 
 def _evidence_kind(con, run: dict, task: dict, deployed: bool, latest: dict, newest_unattributed: dict | None) -> str:
     rev = task.get("accepted_revision_id")
-    if not rev:
+    if task["status"] != "accepted" or not rev:
         return NOT_VERIFIED
     if deployed or _visual_live(task, rev, latest, newest_unattributed):
         return VERIFIED_LIVE
@@ -143,11 +142,15 @@ def _evidence_kind(con, run: dict, task: dict, deployed: bool, latest: dict, new
     return NOT_VERIFIED
 
 
-def _deploy_verified(con, run: dict) -> bool:
-    """The run's last deploy verify (land.verify) exited 0."""
+def _deploy_verified(con, run: dict, landed: str | None) -> bool:
+    """The newest prod verify (land.verify) of the landed commit exited 0. Preview and other-commit verifies
+    do not count: they did not exercise the prod build the closed run landed."""
+    if not landed:
+        return False
     row = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='land.verify' "
-                      "ORDER BY seq DESC LIMIT 1", (run["id"],)).fetchone()
-    return bool(row) and json.loads(row["payload_json"] or "{}").get("exit") == 0
+                      "AND json_extract(payload_json, '$.target')='prod' AND json_extract(payload_json, '$.commit')=? "
+                      "ORDER BY seq DESC LIMIT 1", (run["id"], landed)).fetchone()
+    return bool(row) and json.loads(row["payload_json"]).get("exit") == 0
 
 
 def _visual_live(task: dict, rev: str, latest: dict, newest_unattributed: dict | None) -> bool:
@@ -156,7 +159,7 @@ def _visual_live(task: dict, rev: str, latest: dict, newest_unattributed: dict |
         return False  # no covering gate, or an unattributed gate that may be newer
     if gate["task_id"] and gate["revision_id"] != rev:
         return False  # a task's own capture must be of its accepted revision
-    return gate["status"] == "done" and gate["evidence_status"] == "COMPARABLE"
+    return gate["status"] == "done" and gate["evidence_status"] == "COMPARABLE" and gate["verdict"] == "PASS"
 
 
 def _checks_passed(con, run: dict, task_id: str, rev: str) -> bool:

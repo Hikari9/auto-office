@@ -50,10 +50,38 @@ def test_malformed_criterion_entry_is_rejected_as_a_value_error(item):
         closeout.criteria_report([item])
 
 
-@pytest.mark.parametrize("cp", [0x00, 0x1F, 0x7F, 0x80, 0x9F, 0xAD, 0x61C, 0x180E, 0x200B, 0x200F, 0x202A, 0x202E,
-                                0x2060, 0x2064, 0x2066, 0x2069, 0xFEFF, 0xFFF9, 0xFFFB, 0xE0001, 0xE007F])
+UNPRINTABLE = [*range(0x00, 0x20), *range(0x7F, 0xA0), 0xAD, 0x61C, 0x180E, *range(0x200B, 0x2010),
+               *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF,
+               *range(0xFFF9, 0xFFFC), *range(0xE0000, 0xE0080)]
+
+
+@pytest.mark.parametrize("cp", UNPRINTABLE, ids=lambda cp: f"U+{cp:04X}")
 def test_every_unprintable_code_point_is_stripped(cp):
     assert closeout.clean_text(f"a{chr(cp)}b") == "a b"
+
+
+def test_a_task_that_is_not_accepted_is_not_verified_whatever_was_recorded(isolated, monkeypatch):
+    def setup(con):
+        _gate(con, "K1", task_id="T1", revision=REV, kind="checks", verdict="PASS")
+        _gate(con, "V1", task_id="T1", revision=REV, evidence="COMPARABLE")
+        _deploy_verify(con, 0)
+    assert _report(isolated, monkeypatch, [_task("T1", status="changes_required")], setup) == NOT_RUN
+
+
+def test_every_criterion_of_a_task_gets_its_own_line(isolated, monkeypatch):
+    def setup(con):
+        _gate(con, "K1", task_id="T1", revision=REV, kind="checks", verdict="PASS")
+    assert _report(isolated, monkeypatch, [_task("T1", accept=("a works", "b works"))], setup) == [
+        "verified-against-fakes: a works", "verified-against-fakes: b works",
+        "not verified live: a works (verified-against-fakes), b works (verified-against-fakes)"]
+
+
+def test_a_malformed_recorded_row_is_one_not_reported_line_instead_of_a_crash(isolated, monkeypatch):
+    def setup(con):
+        _gate(con, "L1", kind="visual", revision=None, members=["T1"], evidence="COMPARABLE")
+        con.execute("UPDATE gates SET members_json='{' WHERE id='L1'")
+    report = _report(isolated, monkeypatch, [_task("T1")], setup)
+    assert len(report) == 1 and report[0].startswith("acceptance not reported: ")
 
 
 def test_visible_neighbours_of_the_unprintable_ranges_are_kept():
@@ -90,6 +118,7 @@ def test_criterion_text_is_cleaned_before_it_is_printed():
 
 RUN = {"id": "R1", "repo_root": "/nonexistent", "base_sha": None}
 REV = "rev-accepted"
+LANDED = "landed-sha"
 
 
 @pytest.fixture
@@ -104,7 +133,7 @@ def _task(tid, accept=("the button saves",), rev=REV, status="accepted") -> dict
     return {"id": tid, "status": status, "accept": list(accept), "accepted_revision_id": rev, "visual": None}
 
 
-def _gate(con, gid, *, task_id=None, revision=None, kind="visual", status="done", evidence=None, verdict=None,
+def _gate(con, gid, *, task_id=None, revision=None, kind="visual", status="done", evidence=None, verdict="PASS",
           members=None, created_at="2026-10-31T00:00:00"):
     con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, kind, input_key, status, verdict, "
                 "evidence_status, created_at, scope, members_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -112,18 +141,19 @@ def _gate(con, gid, *, task_id=None, revision=None, kind="visual", status="done"
                  created_at, None, json.dumps(members) if members is not None else None))
 
 
-def _deploy_verify(con, exit_code: int) -> None:
+def _deploy_verify(con, exit_code: int | None, *, run="R1", target="prod", commit=LANDED, kind="land.verify",
+                   payload=None) -> None:
+    body = {"target": target, "commit": commit, "exit": exit_code} if payload is None else payload
     con.execute("INSERT INTO events(run_id, kind, audience, task_id, dispatch_id, summary, payload_json, "
                 "office_version, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                ("R1", "land.verify", "runtime", None, None, "prod verify", json.dumps({"exit": exit_code}),
-                 "3.15.1", "2026-10-31T00:00:00"))
+                (run, kind, "runtime", None, None, "verify", json.dumps(body), "3.15.1", "2026-10-31T00:00:00"))
 
 
 def _report(isolated, monkeypatch, tasks, setup=lambda con: None) -> list[str]:
     con = db.connect(isolated / "runs.db")
     setup(con)
     monkeypatch.setattr(state, "tasks", lambda _con, _run_id, **_kw: tasks)
-    return closeout.acceptance_report(con, RUN)
+    return closeout.acceptance_report(con, RUN, LANDED)
 
 
 FAKES_ONLY = ["verified-against-fakes: the button saves",
@@ -170,6 +200,31 @@ NOT_RUN = ["not-verified: the button saves", "not verified live: the button save
     ("a failing deploy verify", lambda con: _deploy_verify(con, 1), NOT_RUN),
     ("a deploy verify that failed after an earlier pass", lambda con: (
         _deploy_verify(con, 0), _deploy_verify(con, 1)), NOT_RUN),
+    ("a passing preview verify", lambda con: _deploy_verify(con, 0, target="preview"), NOT_RUN),
+    ("a passing prod verify of another commit", lambda con: _deploy_verify(con, 0, commit="other-sha"), NOT_RUN),
+    ("a passing prod verify of another run", lambda con: _deploy_verify(con, 0, run="R2"), NOT_RUN),
+    ("a passing deploy event that is not a verify", lambda con: _deploy_verify(con, 0, kind="land.deploy"), NOT_RUN),
+    ("a prod verify with no exit recorded", lambda con: _deploy_verify(
+        con, None, payload={"target": "prod", "commit": LANDED}), NOT_RUN),
+    ("a newer passing prod verify after a failing one", lambda con: (
+        _deploy_verify(con, 1), _deploy_verify(con, 0)), LIVE_ONLY),
+    ("a NOT_APPLICABLE visual capture", lambda con: _gate(
+        con, "V1", task_id="T1", revision=REV, evidence="NOT_APPLICABLE"), NOT_RUN),
+    ("a COMPARABLE capture that failed review", lambda con: _gate(
+        con, "V1", task_id="T1", revision=REV, evidence="COMPARABLE", verdict="CHANGES_REQUIRED"), NOT_RUN),
+    ("a running COMPARABLE capture", lambda con: _gate(
+        con, "V1", task_id="T1", revision=REV, status="running", evidence="COMPARABLE"), NOT_RUN),
+    ("a visual PASS verdict on a blocked capture, no checks", lambda con: _gate(
+        con, "V1", task_id="T1", revision=REV, evidence="CAPTURE_BLOCKED", verdict="PASS"), NOT_RUN),
+    ("a passing checks gate newer than a COMPARABLE capture", lambda con: (
+        _gate(con, "V1", task_id="T1", revision=REV, evidence="COMPARABLE", created_at="2026-10-31T00:00:00"),
+        _gate(con, "K1", task_id="T1", revision=REV, kind="checks", verdict="PASS",
+              created_at="2026-10-31T00:00:01")), LIVE_ONLY),
+    ("an older unattributed lane capture before a COMPARABLE task capture", lambda con: (
+        _gate(con, "L0", kind="visual", revision=None, members=None, evidence="COMPARABLE",
+              created_at="2026-10-31T00:00:00"),
+        _gate(con, "V1", task_id="T1", revision=REV, evidence="COMPARABLE",
+              created_at="2026-10-31T00:00:01")), LIVE_ONLY),
     ("nothing recorded", lambda con: None, NOT_RUN),
 ])
 def test_kind_is_derived_from_recorded_evidence(isolated, monkeypatch, name, setup, expected):
@@ -199,6 +254,16 @@ def test_each_task_takes_its_own_kind_and_cancelled_tasks_are_left_out(isolated,
 def test_run_without_criteria_is_reported_as_not_reported(isolated, monkeypatch):
     assert _report(isolated, monkeypatch, [_task("T1", accept=())]) == [
         "acceptance not reported: acceptance cannot be reported as met without labeled criteria"]
+
+
+def test_closeout_wiring_passes_the_landed_commit_to_the_deploy_rule(isolated, monkeypatch):
+    con = db.connect(isolated / "runs.db")
+    _deploy_verify(con, 0)
+    monkeypatch.setattr(state, "tasks", lambda _con, _run_id, **_kw: [_task("T1")])
+    monkeypatch.setattr(closeout, "mark_ready", lambda *_a, **_k: None)
+    res = Result()
+    lifecycle._closeout(con, dict(RUN), {"commit": LANDED}, res, handoff="https://github.com/o/r/pull/1")
+    assert res.data["acceptance"] == LIVE_ONLY
 
 
 def test_closeout_wiring_puts_each_derived_criterion_in_the_final_report(isolated, monkeypatch):
