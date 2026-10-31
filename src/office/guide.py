@@ -411,8 +411,7 @@ def add_bug_hints(con, run: dict, res: Result) -> Result:
 
 
 def _quota_unknown_note(con, task: dict) -> str | None:
-    """A live task whose current dispatch was routed while its harness quota was
-    unknown: unknown is scored conservatively, never as unlimited (#450)."""
+    """Warn when a live dispatch used unknown or explicitly last-known quota (#941)."""
     did = task.get("current_dispatch_id")
     row = con.execute("SELECT route_json FROM dispatches WHERE id=?", (did,)).fetchone() if did else None
     try:

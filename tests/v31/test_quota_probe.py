@@ -28,7 +28,7 @@ def _adapter(command=None, harness="codex"):
     (_adapter(["probe"]), {"OFFICE_QUOTA_PROBE": "off"}, None, "probe disabled"),
     (_adapter(["probe"]), {"OFFICE_QUOTA_FIXTURE": '{"codex": null}'}, None, "fixture returned null"),
     (_adapter(["probe"]), {}, SimpleNamespace(returncode=7, stdout="secret probe output"), "command exited with code 7"),
-    (_adapter(["probe"]), {}, subprocess.TimeoutExpired(["probe"], 20), "command timed out after 20 seconds"),
+    (_adapter(["probe"]), {}, subprocess.TimeoutExpired(["probe"], 20), "command timed out twice after 20 seconds"),
     (_adapter(["probe"]), {}, SimpleNamespace(returncode=0, stdout="secret probe output"), "command returned invalid JSON"),
     (_adapter(["probe"]), {}, SimpleNamespace(returncode=0, stdout='{"other": 20}'),
      "command response missing tightest_remaining_percent"),
@@ -42,6 +42,8 @@ def test_unknown_probe_paths_have_safe_causes(adapter, env, proc, expected, monk
                 raise proc
             return proc
         monkeypatch.setattr(candidates.subprocess, "run", fake_run)
+        if isinstance(proc, subprocess.TimeoutExpired):
+            monkeypatch.setattr(candidates.time, "sleep", lambda seconds: None)
 
     result = candidates.probe_quota(adapter)
 
@@ -120,12 +122,16 @@ def _timeout_run(calls):
     return fake_run
 
 
-def test_timeout_on_quiet_host_is_unknown_without_retry(monkeypatch):
-    calls = []
+def test_timeout_on_quiet_host_retries_once_before_unknown(monkeypatch):
+    calls, sleeps = [], []
     monkeypatch.setattr(candidates.subprocess, "run", _timeout_run(calls))
+    monkeypatch.setattr(candidates.time, "sleep", sleeps.append)
     monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
     result = candidates.probe_quota(_adapter(["probe"]))
-    assert result["status"] == "unknown" and len(calls) == 1
+    assert result["status"] == "unknown" and len(calls) == 2
+    assert sleeps == [candidates.PROBE_RETRY_BACKOFF_S]
+    assert result["failure_kind"] == "timeout"
+    assert result["cause"] == "command timed out twice after 20 seconds"
 
 
 def test_timeout_under_load_retries_once_then_unavailable(monkeypatch):
@@ -152,6 +158,115 @@ def test_retry_after_loaded_timeout_can_succeed(monkeypatch):
     monkeypatch.setattr(candidates.time, "sleep", lambda s: None)
     monkeypatch.setattr("office.gates.host_overloaded", lambda: "loaded")
     assert candidates.probe_quota(_adapter(["probe"])) == {"status": "ok", "tightest_remaining_percent": 55.0}
+
+
+def test_quiet_timeout_then_success_on_retry(monkeypatch):
+    calls, sleeps = [], []
+    answers = [subprocess.TimeoutExpired(["probe"], 20),
+               SimpleNamespace(returncode=0, stdout='{"tightest_remaining_percent": 62}')]
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        answer = answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(candidates.subprocess, "run", fake_run)
+    monkeypatch.setattr(candidates.time, "sleep", sleeps.append)
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
+    result = candidates.probe_quota(_adapter(["probe"]))
+    assert result == {"status": "ok", "tightest_remaining_percent": 62.0}
+    assert len(calls) == 2 and sleeps == [candidates.PROBE_RETRY_BACKOFF_S]
+
+
+def test_last_success_survives_timeout_across_processes_then_expires(monkeypatch):
+    now = [1000.0]
+    probe_fails = [False]
+    calls = []
+    monkeypatch.setattr(candidates.time, "time", lambda: now[0])
+    monkeypatch.setattr(candidates.time, "sleep", lambda _: None)
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        if probe_fails[0]:
+            raise subprocess.TimeoutExpired(["probe"], 20)
+        return SimpleNamespace(returncode=0, stdout='{"tightest_remaining_percent": 42}')
+
+    monkeypatch.setattr(candidates.subprocess, "run", fake_run)
+    success = candidates.probe_quota(_adapter(["probe"], "claude"))
+    assert success == {"status": "ok", "tightest_remaining_percent": 42.0}
+    now[0] += 301  # The normal 5-minute cache expires; the last-good 10-minute window has not.
+    probe_fails[0] = True
+    candidates._QUOTA_CACHE.clear()  # Simulate another office process.
+    fallback = candidates.probe_quota(_adapter(["probe"], "claude"))
+    assert len(calls) == 3  # initial success, then two timed-out attempts
+    assert fallback["status"] == "ok" and fallback["tightest_remaining_percent"] == 42.0
+    assert fallback["source"] == "last-known"
+    assert fallback["last_success_age_seconds"] == 301
+    assert "timed out twice" in fallback["probe_failure"]
+
+    from office import dispatch, guide
+    import sqlite3
+    route = dispatch._route_payload({"candidate": {"adapter_id": "claude", "quota": fallback}})
+    assert route["quota_unknown"]["status"] == "last-known"
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE dispatches(id TEXT, route_json TEXT)")
+    con.execute("INSERT INTO dispatches VALUES('D1', ?)", (json.dumps(route),))
+    note = guide._quota_unknown_note(con, {"id": "T1", "current_dispatch_id": "D1"})
+    assert "T1 routed on last-known quota: claude:" in note
+    assert "42.0% from 301s ago" in note
+
+    now[0] += 300  # A saved reading must not be treated as eternally available.
+    candidates._QUOTA_CACHE.clear()
+    expired = candidates.probe_quota(_adapter(["probe"], "claude"))
+    assert expired["status"] == "unknown" and expired.get("source") is None
+    assert len(calls) == 5  # two fresh attempts after fallback expired
+
+
+def test_last_good_not_used_for_auth_errors_or_when_cache_disabled(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(candidates.time, "time", lambda: now[0])
+    monkeypatch.setattr(candidates.time, "sleep", lambda _: None)
+    monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
+    candidates._shared_cache_put("claude", {"status": "ok", "tightest_remaining_percent": 37.0})
+    now[0] += 301
+    candidates._QUOTA_CACHE.clear()
+
+    monkeypatch.setattr(candidates.subprocess, "run",
+                        lambda *a, **kw: SimpleNamespace(returncode=2, stdout="private token"))
+    failed_auth = candidates.probe_quota(_adapter(["probe"], "claude"))
+    assert failed_auth["status"] == "unknown"
+    assert failed_auth.get("source") is None
+    assert failed_auth["cause"] == "command exited with code 2"
+
+    now[0] += 61
+    candidates._QUOTA_CACHE.clear()
+    monkeypatch.setenv("OFFICE_QUOTA_LAST_GOOD_TTL", "0")
+    monkeypatch.setattr(candidates.subprocess, "run", _timeout_run([]))
+    denied_fallback = candidates.probe_quota(_adapter(["probe"], "claude"))
+    assert denied_fallback["status"] == "unknown" and denied_fallback.get("source") is None
+
+
+def test_last_good_fallback_preserves_agy_family_limits(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(candidates.time, "time", lambda: now[0])
+    family = {"gemini": {"status": "ok", "tightest_remaining_percent": 0.0},
+              "claude": {"status": "ok", "tightest_remaining_percent": 80.0}}
+    candidates._shared_cache_put("agy", {
+        "status": "ok", "tightest_remaining_percent": 0.0, "families": family})
+    now[0] += 301
+    candidates._shared_cache_put("agy", {
+        "status": "unknown", "tightest_remaining_percent": None,
+        "cause": "command timed out twice after 20 seconds", "failure_kind": "timeout"})
+    fallback = candidates._shared_cache_get("agy")
+    assert fallback["source"] == "last-known" and fallback["families"] == family
+    claude = candidates.quota_for_candidate({"adapter_id": "agy", "model_id": "claude-sonnet-5-5"}, fallback)
+    assert claude["source"] == "last-known" and claude["tightest_remaining_percent"] == 80.0
+    gemini = candidates.quota_for_candidate({"adapter_id": "agy", "model_id": "gemini-3.8-flash"}, fallback)
+    assert gemini["tightest_remaining_percent"] == 0.0
 
 
 def test_successful_probe_is_cached_across_processes_and_failure_never_becomes_ok(monkeypatch):
@@ -208,6 +323,16 @@ def test_route_payload_records_unknown_quota_and_status_shows_it():
     note = guide._quota_unknown_note(con, {"id": "T1", "current_dispatch_id": "D1"})
     assert note == "T1 routed on unknown quota: claude: command timed out after 20 seconds"
     assert guide._quota_unknown_note(con, {"id": "T2", "current_dispatch_id": None}) is None
+    for cause in ("no command configured", "probe disabled"):
+        unprobed = {"adapter_id": "claude", "quota": {"status": "unknown", "cause": cause}}
+        assert dispatch._route_payload({"candidate": unprobed})["quota_unknown"]["cause"] == cause
+    not_sampled = {"adapter_id": "claude"}
+    assert dispatch._route_payload({"candidate": not_sampled})["quota_unknown"]["cause"] == "quota not probed"
+    unknown_family = {"adapter_id": "agy", "model_id": "claude-sonnet-5-5", "quota": {
+        "status": "ok", "tightest_remaining_percent": 60.0,
+        "families": {"claude": {"status": "unknown", "tightest_remaining_percent": None,
+                                "cause": "family quota unavailable"}}}}
+    assert dispatch._route_payload({"candidate": unknown_family})["quota_unknown"]["cause"] == "family quota unavailable"
 
 
 _FAMILIES = {

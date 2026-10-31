@@ -248,14 +248,16 @@ def role_policy(config: dict, role: str) -> dict:
 def probe_quota(adapter: dict) -> dict:
     """Tightest remaining quota percent, or unknown/unavailable with a safe cause.
 
-    A successful result is cached per harness (`quota_cache_ttl`); a failed one is
-    cached only briefly and stays unknown/unavailable, never ok (#450)."""
+    Fresh successful readings are cached per harness. If a live probe times out
+    twice, an older success may be used within the bounded last-good TTL and is
+    explicitly marked in the persisted route/status record (#941)."""
     harness = adapter.get("id")
     fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
     disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
     shared = _shared_cache_get(harness) if not fixed and not disabled else None
     if shared is not None:
-        _QUOTA_CACHE[harness] = (time.time(), shared)
+        if shared.get("source") != "last-known":
+            _QUOTA_CACHE[harness] = (time.time(), shared)
         return shared
     cached = _QUOTA_CACHE.get(harness)
     if not fixed and not disabled and cached and time.time() - cached[0] < _QUOTA_TTL:
@@ -284,7 +286,11 @@ def probe_quota(adapter: dict) -> dict:
         argv = [str(paths.resources_root() / c) if c.startswith("scripts/") else c for c in command]
         result = _run_probe(argv, unknown)
         _shared_cache_put(harness, result)
-    _QUOTA_CACHE[harness] = (time.time(), result)
+        # The shared cache preserves last_good across process boundaries, even
+        # when this attempt failed. Do not treat the fallback as a new success.
+        result = _shared_cache_get(harness) or result
+    if result.get("source") != "last-known":
+        _QUOTA_CACHE[harness] = (time.time(), result)
     return result
 
 
@@ -293,24 +299,23 @@ PROBE_RETRY_BACKOFF_S = 2.0
 
 
 def _run_probe(argv: list[str], unknown) -> dict:
-    """Run one probe command. A timeout while the host is overloaded is the
-    environment, not the harness (the rule checks use, gates.host_overloaded):
-    it is retried once after a backoff, and if it times out again the result is
-    `unavailable` with the load as its cause. A timeout on a quiet host stays a
-    plain unknown with no retry, since a retry would only cost another 20s."""
+    """Retry any timed-out probe once after backoff, including on a quiet host.
+    Never reinterpret two failed attempts as a healthy quota reading."""
     from office import gates
     for attempt in (1, 2):
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            loaded = gates.host_overloaded()
-            if not loaded:
-                return unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds")
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
                 continue
-            return {"status": "unavailable", "tightest_remaining_percent": None,
-                    "cause": f"command timed out twice after {PROBE_TIMEOUT_S} seconds; {loaded}"}
+            loaded = gates.host_overloaded()
+            cause = f"command timed out twice after {PROBE_TIMEOUT_S} seconds"
+            if loaded:
+                cause += f"; {loaded}"
+            return {"status": "unavailable" if loaded else "unknown",
+                    "tightest_remaining_percent": None, "cause": cause,
+                    "failure_kind": "timeout"}
         except (OSError, subprocess.SubprocessError, TypeError, ValueError):
             return unknown("command could not be run or parsed")
         if proc.returncode != 0:
@@ -357,9 +362,12 @@ def _normalize_family(family: str, raw) -> dict:
 # Quota moves slowly relative to a dispatch; one successful probe result serves every
 # short-lived office process for a few minutes (some probes take ~20s). OFFICE_QUOTA_CACHE_TTL
 # (seconds) overrides it. A failed probe is remembered only for a short while, so a harness
-# whose probe always times out does not cost every launch 20s; it is never reported as ok.
+# whose probe always times out does not cost every launch 40s. A timed-out
+# recheck can use the previous successful reading for at most 10 minutes, never
+# indefinitely, and the status explicitly identifies that fallback.
 _SHARED_TTL = 300.0
 _FAILED_TTL = 60.0
+_LAST_GOOD_TTL = 600.0
 
 
 def _shared_ttl() -> float:
@@ -369,6 +377,13 @@ def _shared_ttl() -> float:
         return _SHARED_TTL
 
 
+def _last_good_ttl() -> float:
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_QUOTA_LAST_GOOD_TTL", _LAST_GOOD_TTL)))
+    except ValueError:
+        return _LAST_GOOD_TTL
+
+
 def _shared_cache_path() -> Path:
     return paths.state_home() / "quota-cache.json"
 
@@ -376,15 +391,30 @@ def _shared_cache_path() -> Path:
 def _shared_cache_get(harness: str) -> dict | None:
     try:
         entry = json.loads(_shared_cache_path().read_text()).get(harness)
-    except (OSError, ValueError, AttributeError):
+        result = entry["result"]
+        age = time.time() - float(entry["at"])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
-    if not entry or not isinstance(entry.get("result"), dict):
+    if not isinstance(result, dict):
         return None
-    ok = entry["result"].get("status") == "ok"
+    ok = result.get("status") == "ok" and result.get("tightest_remaining_percent") is not None
     ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
-    if time.time() - float(entry.get("at", 0)) < ttl:
-        return entry["result"]
-    return None
+    if not 0 <= age < ttl:
+        return None
+    if not ok and result.get("failure_kind") == "timeout" and _shared_ttl() > 0:
+        last_good = entry.get("last_good")
+        if isinstance(last_good, dict):
+            try:
+                good_age = time.time() - float(last_good["at"])
+                good = last_good["result"]
+            except (KeyError, TypeError, ValueError):
+                good_age, good = -1, None
+            if (isinstance(good, dict) and good.get("status") == "ok"
+                    and good.get("tightest_remaining_percent") is not None
+                    and 0 <= good_age < _last_good_ttl()):
+                return {**good, "source": "last-known", "last_success_age_seconds": int(good_age),
+                        "probe_failure": result.get("cause") or "probe timed out"}
+    return result
 
 
 def _shared_cache_put(harness: str, result: dict) -> None:
@@ -402,7 +432,19 @@ def _shared_cache_put(harness: str, result: dict) -> None:
                     data = {}
             except (OSError, ValueError):
                 data = {}
-            data[harness] = {"at": time.time(), "result": result}
+            now = time.time()
+            previous = data.get(harness)
+            previous = previous if isinstance(previous, dict) else {}
+            last_good = previous.get("last_good")
+            prior_result = previous.get("result")
+            if isinstance(prior_result, dict) and prior_result.get("status") == "ok":
+                last_good = {"at": previous.get("at"), "result": prior_result}
+            if result.get("status") == "ok":
+                last_good = {"at": now, "result": result}
+            entry = {"at": now, "result": result}
+            if isinstance(last_good, dict):
+                entry["last_good"] = last_good
+            data[harness] = entry
             tmp = path.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data))
             os.replace(tmp, path)
@@ -410,19 +452,22 @@ def _shared_cache_put(harness: str, result: dict) -> None:
         pass
 
 
-_NOT_PROBED = (None, "no command configured", "probe disabled")
-
-
 def quota_unknown_record(candidate: dict | None) -> dict | None:
-    """Why a chosen route's quota was not read, or None when it was. Kept on the
-    dispatch's route record and shown in `office status` (#450)."""
-    quota = (candidate or {}).get("quota") or {}
+    """A dispatch-level notice for unknown or fallback quota, shown by office status.
+    Even an explicitly disabled or unconfigured probe must not be silently omitted."""
+    if not candidate:
+        return None
+    quota = quota_for_candidate(candidate)
+    harness = candidate.get("adapter_id") or candidate.get("harness")
+    if quota.get("source") == "last-known":
+        pct = quota.get("tightest_remaining_percent")
+        age = quota.get("last_success_age_seconds")
+        return {"harness": harness, "status": "last-known",
+                "cause": f"using {pct}% from {age}s ago after {quota.get('probe_failure', 'probe failed')}"}
     if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
         return None
-    if quota.get("cause") in _NOT_PROBED:
-        return None  # no probe ran: nothing failed, so nothing to flag on every live task
-    return {"harness": (candidate or {}).get("adapter_id") or (candidate or {}).get("harness"),
-            "status": quota.get("status") or "unknown", "cause": quota.get("cause") or "quota not probed"}
+    return {"harness": harness, "status": quota.get("status") or "unknown",
+            "cause": quota.get("cause") or "quota not probed"}
 
 
 def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bool:
@@ -676,7 +721,13 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     family = model_family(candidate.get("model_id"))
     family = _AGY_QUOTA_FAMILY.get(family, family)
     family_result = families.get(family) if isinstance(families, dict) else None
-    return family_result if isinstance(family_result, dict) else result
+    if isinstance(family_result, dict):
+        if result.get("source") == "last-known":
+            return {**family_result, "source": "last-known",
+                    "last_success_age_seconds": result.get("last_success_age_seconds"),
+                    "probe_failure": result.get("probe_failure")}
+        return family_result
+    return result
 
 
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
