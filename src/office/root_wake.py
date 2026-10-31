@@ -45,6 +45,11 @@ ACTIONABLE = frozenset({
     "route.recovered",
 })
 MIN_POLL = 0.5
+# A delivered wake the root has not yet observed (`office context`) holds back a newer wake this long. The root reads
+# fresh Office state when it handles the first wake, so a second prompt is redundant. If the root never observes, the
+# held receipts are delivered once, with the latest event id, when the window ends: the at-least-once guarantee of
+# #723 is kept as a timer, not a drop.
+COALESCE_SECONDS = 180.0
 FAILURE_BACKOFF_CAP = 30.0  # a supervisor tick that keeps failing retries no faster than this (#920)
 MAX_ATTEMPTS = 4
 WATCHDOG_POLL_SECONDS = 15.0  # separate from completion wake
@@ -220,9 +225,11 @@ def _authoritative_action_signature(con, run: dict) -> str | None:
     if action is None:
         return None
     rid = run["id"]
+    # A queued or running gate is progress, not a result: its status flips must not re-wake a root whose next
+    # action did not change. Every finished gate (a verdict, stale, cancelled) still changes the signature.
     gates = tuple(tuple(r) for r in con.execute(
         "SELECT id, task_id, revision_id, kind, status, verdict, round, attempt, summary "
-        "FROM gates WHERE run_id=? ORDER BY id", (rid,)).fetchall())
+        "FROM gates WHERE run_id=? AND status NOT IN ('queued','running') ORDER BY id", (rid,)).fetchall())
     findings = tuple(tuple(r) for r in con.execute(
         "SELECT id, task_id, revision_id, state, severity, blocking, disposition, summary "
         "FROM findings WHERE run_id=? ORDER BY id", (rid,)).fetchall())
@@ -437,6 +444,20 @@ def _actionable_now(con, run: dict, seqs: list[int]) -> tuple[str, str, bool] | 
     return sig, action, human
 
 
+def _coalesce_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("OFFICE_WAKE_COALESCE_SECONDS", COALESCE_SECONDS)))
+    except ValueError:
+        return COALESCE_SECONDS
+
+
+def _unobserved_delivery(con, run_id: str, now: str) -> bool:
+    """True while a wake delivered inside the coalesce window has not been observed by the root."""
+    cutoff = (parse_iso(now) - timedelta(seconds=_coalesce_seconds())).isoformat()
+    return con.execute("SELECT 1 FROM root_wake_intents WHERE run_id=? AND state='delivered' "
+                       "AND delivered_at>? LIMIT 1", (run_id, cutoff)).fetchone() is not None
+
+
 def _claim(con, run: dict) -> tuple[dict, list[int], str, str, str, bool] | None:
     binding = _binding(con, run["id"])
     if not binding:
@@ -461,6 +482,13 @@ def _claim(con, run: dict) -> tuple[dict, list[int], str, str, str, bool] | None
                 "UPDATE root_wake_intents SET state='settled', last_error=? "
                 "WHERE run_id=? AND event_seq=? AND state IN ('pending','retry')",
                 [("no new authoritative next action", run["id"], seq) for seq in seqs])
+            return None
+        urgent = actionable[0] != _authoritative_action_signature(con, state.get_run(con, run["id"]))
+        # Coalesce: the actionable receipts stay pending (not settled) and go out as one wake when the root
+        # observes the earlier one or the window ends. Settling above already dropped non-actionable ones.
+        # A confirmed stall, worker stop signal, context alert or reinstall is its own state, never the same
+        # guidance again, so it is never held.
+        if not urgent and _unobserved_delivery(con, run["id"], now):
             return None
         # One claimed batch per run. One other supervisor cannot deliver a competing prompt.
         held = con.execute("SELECT 1 FROM root_wake_intents WHERE run_id=? AND state='claimed' "

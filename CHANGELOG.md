@@ -4,6 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.15.1
 
+- fix(wake): stop duplicate "new lifecycle transitions" wakes. A newer actionable wake is held (default 180s, `OFFICE_WAKE_COALESCE_SECONDS`) while the previous one is delivered but unobserved, then one wake carries the latest event id when the root observes or the window ends; queued/running gate progress no longer changes the wake signature. #723's at-least-once delivery is kept (docs/root-wake.md).
 - fix(install): Auto Office is not on PyPI, and the `auto-office` name there is an unrelated project. The install check, README, docs and CLI hints install from `git+https://github.com/Hikari9/auto-office`, and `office update --check` reads the release from GitHub main instead of PyPI.
 - docs: point run gear executor slates to policy and clarify the truncated Sonnet fallback (#963).
 - fix(skill): the install check's consent stays the native **Install the CLI** choice (#924), not a separate approval stop; the legacy release-identity test and the orchestrator reference follow it.
