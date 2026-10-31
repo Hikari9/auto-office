@@ -192,6 +192,16 @@ recovered once when its head is one Office reviewed or pushed and folding the op
 early; `--landed-externally <merged-pr-url>` verifies external or owned squash landing, then closes. Rebase, `--no-prs`, recovery and PR-body detail:
 `docs/orchestrator-reference.md`.
 
+## Batch landing
+
+For a multi-run or multi-PR release, use office land --batch <manifest.json> from
+the target repo, first with --dry-run. Each run or PR lane declares
+land_after dependencies; exactly one lane owns the version bump. The
+batch runs the full suite only after the last ordered merge, and resumes a
+red batch after an appended fix PR (or an explicit --retry-full for a
+transient failure). See docs/batch-landing.md. Do not confuse this
+cross-run release operation with a single-run office land or deploy.
+
 ## Takeover
 
 When the runtime itself is the bottleneck, suggest `auto-takeover` with the evidence. Only the user starts
