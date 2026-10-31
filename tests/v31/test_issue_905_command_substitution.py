@@ -98,7 +98,8 @@ def test_unclosed_substitution_in_prose_is_text():
     assert not shell_safety.unsafe_manual_push("Replace $( with the name", prose=True)
 
 
-@pytest.mark.parametrize("word", sorted(shell_safety._PREFIX_WORDS))
+@pytest.mark.parametrize("word", ["!", "{", "}", "if", "then", "else", "elif", "do", "while",
+                                  "until", "exec", "builtin"])
 def test_every_prefix_word_keeps_a_dynamic_head_refused(word):
     assert shell_safety.unsafe_manual_push(f"{word} $(echo g)it $(echo pu)sh origin main")
 
@@ -140,3 +141,57 @@ def test_run_level_requirement_substitution_without_push_is_permitted():
     plan = PLAN_ONE.replace("blast_radius: repo",
                             'blast_radius: repo\nchecks: FOO="$(which node)" pnpm build')
     assert not any("run-level Requirements" in e for e in planfile.parse(plan).errors)
+
+
+@pytest.mark.parametrize("word", ["push", "git", "eval"])
+def test_untokenizable_line_with_each_listed_word_is_refused(word):
+    assert shell_safety.unsafe_manual_push(f'echo "unbalanced {word}')
+
+
+@pytest.mark.xfail(strict=True, reason="ledger line 20: an untokenizable line whose heads are closed "
+                                       "substitutions passes the literal fallback; tracked as #989")
+def test_untokenizable_line_with_closed_substitution_heads_is_refused():
+    assert shell_safety.unsafe_manual_push('echo "x $(echo g)it $(echo pu)sh origin main')
+
+
+def test_prose_unpaired_backtick_with_unbalanced_quote_is_refused():
+    assert shell_safety.unsafe_manual_push("Run ` echo ') ; g\\it p\\ush origin main", prose=True)
+
+
+@pytest.mark.parametrize("command", ["echo \\\\\ngit push origin main",
+                                     "echo \\\\\n$(echo g)it $(echo pu)sh origin main"])
+def test_even_backslash_run_before_a_newline_still_ends_the_command(command):
+    assert shell_safety.unsafe_manual_push(command)
+
+
+@pytest.mark.parametrize("command", ["bash -c", "sh -xc"])
+def test_shell_c_without_a_script_is_refused(command):
+    assert shell_safety.unsafe_manual_push(command)
+
+
+def test_init_file_operand_does_not_hide_the_c_script():
+    assert shell_safety.unsafe_manual_push("bash --init-file x -c '{git,push,origin,main}'")
+
+
+def test_double_semicolon_starts_a_new_command():
+    assert shell_safety.unsafe_manual_push("case x in a) true ;; $(echo g)it $(echo pu)sh origin main")
+
+
+@pytest.mark.parametrize("command", ["env -S g\\it p\\ush o\\rigin m\\ain",
+                                     "env --split-string g\\it p\\ush o\\rigin m\\ain"])
+def test_env_split_string_with_a_separate_value_is_refused(command):
+    assert shell_safety.unsafe_manual_push(command)
+
+
+@pytest.mark.parametrize("flag", ["-O extglob", "+o pipefail", "+O extglob"])
+def test_operand_taking_shell_options_do_not_hide_the_c_script(flag):
+    assert shell_safety.unsafe_manual_push(f"bash {flag} -c '{{git,push,origin,main}}'")
+
+
+@pytest.mark.parametrize("redirect", ["<", ">>"])
+def test_redirect_then_dynamic_head_is_refused(redirect):
+    assert shell_safety.unsafe_manual_push(f"{redirect} out $(echo g)it $(echo pu)sh origin main")
+
+
+def test_line_continuation_in_a_non_git_command_is_permitted():
+    assert not shell_safety.unsafe_manual_push("pnpm bu\\\nild")
