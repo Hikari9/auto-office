@@ -25,12 +25,43 @@ _PR_REF = re.compile(r"^(https://github\.com/[^/]+/[^/]+/pull/\d+|#?\d+)$")
 
 _VISUAL_SATISFIED = ("COMPARABLE", "NOT_APPLICABLE")
 # Terminal escape sequences, C0/C1 controls, bidi overrides and zero-width characters.
-_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
+_UNPRINTABLE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x1f\x7f-\x9f؜​-‏‪-‮⁦-⁩﻿]")
 
 
 def clean_text(text: str) -> str:
     """One line of text safe to print: unprintable characters become spaces, whitespace collapses."""
     return " ".join(_UNPRINTABLE.sub(" ", text).split())
+
+
+VERIFIED_LIVE = "verified-live"  # exercised against the real system or binary
+VERIFIED_AGAINST_FAKES = "verified-against-fakes"  # met only against test doubles
+NOT_VERIFIED = "not-verified"
+VERIFICATION_KINDS = (VERIFIED_LIVE, VERIFIED_AGAINST_FAKES, NOT_VERIFIED)
+
+
+def criteria_report(criteria: list[tuple[str, str | None]]) -> list[str]:
+    """One line per acceptance criterion as `<kind>: <text>`, then one summary line (#945).
+
+    `criteria` holds (text, verification kind). Fails closed: a criterion without text or a known kind,
+    and an empty list, raise ValueError rather than report the work as met. The summary names the
+    criteria not verified live, faked and unverified together, or says all are verified live.
+    """
+    criteria = list(criteria)  # a generator is truthy even when it yields nothing
+    if not criteria:
+        raise ValueError("acceptance cannot be reported as met without labeled criteria")
+    lines, weak = [], []
+    for item in criteria:
+        text, kind = item if isinstance(item, tuple) and len(item) == 2 else (None, None)
+        label = clean_text(text) if isinstance(text, str) else ""
+        if not label or kind not in VERIFICATION_KINDS:
+            raise ValueError(f"acceptance criterion needs text and one verification kind "
+                             f"({', '.join(VERIFICATION_KINDS)}); got {item!r}")
+        lines.append(f"{kind}: {label}")
+        if kind != VERIFIED_LIVE:
+            weak.append(f"{label} ({kind})")
+    lines.append("not verified live: " + ", ".join(weak) if weak
+                 else f"all {len(lines)} acceptance criteria verified live")
+    return lines
 
 
 def visual_review_disclosures(con, run: dict) -> list[str]:
