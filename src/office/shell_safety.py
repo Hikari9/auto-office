@@ -53,6 +53,9 @@ _KNOWN_GIT_COMMANDS = frozenset({
 _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "command", "time"})
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SEPARATORS = frozenset({";", "&", "|", "(", ")"})
+# Reserved words and builtins that prefix a simple command without changing its head.
+_PREFIX_WORDS = frozenset({"!", "{", "}", "if", "then", "else", "elif", "do", "while", "until",
+                           "exec", "builtin"})
 
 # Prose words that make a following `git` read as the English noun ("from git
 # for one SHA", "a temp git repo"). Only these relax the unknown-subcommand
@@ -73,6 +76,9 @@ def _is_dynamic(token: str) -> bool:
     still rejected as dynamic rather than trusted as a safe literal.
     """
     if "$" in token or "`" in token:
+        return True
+    # zsh (EQUALS option) expands `=cmd` to the path of cmd.
+    if re.match(r"=[A-Za-z_]", token):
         return True
     for ch in "*?[]{}~":
         if ch in token:
@@ -169,9 +175,18 @@ def _neutralize_substitutions(command: str, depth: int, *, prose: bool = False) 
     out: list[str] = []
     i = 0
     while i < len(command):
+        if command[i] == "\\":
+            # An escaped character is literal: `\`` and `\$(` do not start a substitution.
+            out.append(command[i:i + 2])
+            i += 2
+            continue
         if command.startswith("$(", i):
             end = _close_paren(command, i + 2)
             if end is None:
+                if prose:  # an unclosed `$(` in prose is text, not a substitution
+                    out.append("$(")
+                    i += 2
+                    continue
                 return None
             body, i = command[i + 2:end], end + 1
         elif command[i] == "`" and (end := command.find("`", i + 1)) >= 0:
@@ -194,7 +209,8 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
     rewritten = _neutralize_substitutions(command, depth, prose=prose)
     if rewritten is None:
         return True
-    command = rewritten
+    # A newline ends a command in sh; shlex would read it as a plain space.
+    command = rewritten.replace("\n", ";")
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
         lexer.whitespace_split = True
@@ -205,7 +221,8 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             # Unbalanced quotes are common in descriptions. Only an explicit
             # command signal can justify a fail-closed refusal in plan prose.
             return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
-        return bool(re.search(r"push|git|eval", command, re.I))
+        # Shell fields that cannot be tokenized cannot be verified.
+        return True
     if not tokens:
         return False
     for token in tokens:
@@ -272,9 +289,17 @@ def _command_starts(tokens: list[str]) -> list[int]:
     return starts
 
 
+def _is_prefix_word(token: str) -> bool:
+    """Reserved words and static assignments that may precede the command word."""
+    return token in _PREFIX_WORDS or (bool(_ASSIGN.match(token)) and not _is_dynamic(token))
+
+
 def _resolve_at(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
     """Return True if the command at pos is an unsafe (unverifiable/push) one."""
     seen_wrappers = 0
+    # The word after prefixes is the real head: `NAME=v $(echo g)it` must be verified.
+    while pos < len(tokens) and _is_prefix_word(tokens[pos]):
+        pos += 1
     while pos < len(tokens):
         name = PurePosixPath(tokens[pos]).name
         if name in _SHELLS:
@@ -332,11 +357,14 @@ def _git_is_push(tokens: list[str], pos: int) -> bool:
 
 
 def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
-    for k in range(pos + 1, min(pos + 4, len(tokens))):
+    """A shell's -c script is scanned. A shell that reads stdin (no script operand, a
+    redirect, a pipe end, or -s) runs input this guard cannot see: unverifiable."""
+    stdin_fed = False
+    for k in range(pos + 1, len(tokens)):
         t = tokens[k]
         if t == "--":
             continue
-        if t == "-c" or (t.startswith("-") and "c" in t[1:] and t not in ("--",)):
+        if t == "-c" or (t.startswith("-") and "c" in t[1:]):
             if k + 1 < len(tokens):
                 script = tokens[k + 1]
                 if _is_dynamic(script) and ("$" in script or "`" in script):
@@ -344,9 +372,14 @@ def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int, *, prose: bool =
                 if _scan(script, depth + 1, prose=prose):
                     return True
             return False
-        if not t.startswith("-"):
-            return False
-    return False
+        if t.startswith("-"):
+            stdin_fed = stdin_fed or "s" in t[1:]
+            continue
+        if t in _SEPARATORS or t.startswith(("<", ">")):
+            return True
+        # A script file operand is opaque, unless -s makes the shell read stdin anyway.
+        return stdin_fed
+    return True
 
 
 def _consume_value(tokens: list[str], pos: int) -> bool:
