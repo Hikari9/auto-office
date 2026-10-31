@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -305,3 +308,15 @@ def test_checkout_under_a_cache_named_ancestor_still_ships_its_skills(tmp_path):
     keys = set(file_map(root))
     assert "skills/auto-office/SKILL.md" in keys
     assert "skills/agy-cli/SKILL.md" in keys
+
+
+def test_sync_cli_reports_a_symlink_as_fail_not_traceback(tmp_path):
+    """The --sync entry point prints a FAIL line and exits 1, instead of raising."""
+    root = _fixture_root(tmp_path / "cli")
+    shutil.copy(ROOT / "scripts/build_plugin_distribution.py", root / "scripts/build_plugin_distribution.py")
+    (root / "skills/agy-cli/zz-link.md").symlink_to(root / "README.md")
+    proc = subprocess.run([sys.executable, str(root / "scripts/build_plugin_distribution.py"), "--sync"],
+                          capture_output=True, text=True, cwd=root)
+    assert proc.returncode == 1, proc.stderr
+    assert "FAIL: symlinks are not allowed" in proc.stdout
+    assert "Traceback" not in proc.stderr

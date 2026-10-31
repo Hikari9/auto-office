@@ -135,7 +135,7 @@ _SCOPED_GATE_SHA256 = {
     "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
     "tests/contracts/test_plugin_distribution.py": "352d4eeca582a336ef5502042ab3a7a2316edc7ba8894f25383a7b9105573139",
     "tests/contracts/test_route_parity.py": "abbfc5288b84e1a9af689e971f2e325902b01af1aae2f5a78d12331f613aa689",
-    "tests/contracts/test_standalone_review_rounds.py": "9d4c684b618ff912ef2280a156a9865c9db97f5266db4ee7c9fc51ad557bed53",
+    "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
     "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",

@@ -104,9 +104,11 @@ def test_malformed_unavailable_list_is_a_contract_error():
         case({'reviews': [], 'unavailable': None}, verdict='UNAVAILABLE', evidence='no CLI')
 
 
-def test_ledger_stores_the_callers_spelling_without_padding():
+def test_ledger_stores_the_callers_spelling_and_compares_case_insensitively():
     ledger = case({}, reviewer_session='  Rev-ABC ', invoker_session='coordinator')
     assert ledger['reviews'][0]['reviewer_session'] == 'Rev-ABC'
+    with pytest.raises(ReviewContractError, match='distinct session'):
+        case({}, reviewer_session='COORDINATOR', invoker_session='coordinator')
 
 
 def test_fix_owner_must_be_a_string_and_blank_means_no_owner():
