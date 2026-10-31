@@ -71,15 +71,17 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
 - Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
-  record each episode as an orchestrator event, which wakes an armed root:
+  record each episode as an orchestrator event, which wakes an armed root. `office wait` exits 0 on `review.queued_too_long`
+  and `review.closed_unread`, and exits 3 on `review.stalled`:
   - `review.queued_too_long`: a task review still queued past `OFFICE_REVIEW_QUEUED_S` (default 900). Task reviews only; plan
     reviews show on the plan review status line. A queue nothing drains (owner `queued`) gets `office revoke <task>`, then
     `office review <task>` on the same revision. A live or unknown job gets `office wait` first.
   - `review.stalled`: a running reviewer past `OFFICE_REVIEW_NO_PROGRESS_S` (default 900) or `OFFICE_REVIEW_WALL_S` (default 3600).
     Next: as the stall line says.
   - `review.closed_unread`: a review closed past `OFFICE_REVIEW_UNREAD_S` (default 900) whose verdict has not been shown to the
-    orchestrator. Next: `office context`, then act on the verdict. `office status` or `office wait` showing the episode marks
-    that verdict read; `office context` is read-only and does not.
+    orchestrator. Next: `office context`, then act on the verdict. Every status (the root's `office status`, `office resume`, the
+    session-start hook, and an `office wait` wake) prints up to three unread closed verdicts as `verdict shown:` lines, or the
+    episode line past the bound, and marks only those read. The rest print on a later status. `office context` marks nothing read.
   - A healthy running review emits nothing.
 - An executor idle 60s without submitting (or whose process died) is a stall: `office wait` exits 3, and the stall line names the
   dispatch, any refused-submit reason, its `pane-tail.txt` and the next command. Fix the blocker, then
