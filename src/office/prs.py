@@ -10,7 +10,7 @@ evidence), and a PR leaves draft when its task is accepted.
 Everything here runs as outbox jobs (`pr_sync`): GitHub is never called inside
 a transaction, and a GitHub failure is a notice, never a lifecycle failure.
 PRs are off when the run is local, the repository has no `origin`, `gh` is
-missing, or `office start --no-prs` was given; the 3.1 flow then applies.
+missing, or live run options currently have `--no-prs` set; the 3.1 flow then applies.
 """
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ def _detect(con, run: dict) -> dict:
 
 
 def settings(con, run: dict) -> dict:
-    """The run's PR settings, detected once (outside any transaction) and pinned.
+    """The run's PR settings, detected outside transactions and pinned until
+    a user explicitly amends them with `office amend options`.
 
     A transient detection failure (`gh repo view` erred or timed out) is not
     pinned for good: it is probed again on each later call (dispatch, land,
