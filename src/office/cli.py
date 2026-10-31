@@ -204,6 +204,17 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
+# `amend route` takes only --as, --quote, and --restart. These amend the plan, so `amend route` refuses them
+# instead of dropping them (#896).
+_ROUTE_AMEND_ONLY_FLAGS = {
+    "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
+    "drop_criterion": "--drop-criterion", "add_criterion": "--add-criterion", "drop_non_goal": "--drop-non-goal",
+    "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
+    "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
+    "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+}
+
+
 def _parser() -> argparse.ArgumentParser:
     def flags(**default):
         f = argparse.ArgumentParser(add_help=False)
@@ -313,9 +324,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
     s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="amend route: the live dispatch's new model/effort (same harness)")
+                   help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
-                   help="amend route: interrupt the agent and relaunch it on the new route")
+                   help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -1044,9 +1055,16 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                              reason=" ".join(args.reason or []).strip())
     if cmd == "amend" and args.scope == "route":
         from office import routechange
+        from office.state import Refused
+        # An empty string is a given value (`--reason ""`), so only the unset defaults are skipped.
+        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name) not in (None, False, [])]
+        if given:
+            raise Refused("route-with-amendment-flags", f"{' '.join(given)} amend the plan, not a route; nothing was recorded",
+                          scope=args.delta[0] if args.delta else None, preserved="plan, contracts, and route unchanged",
+                          next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart)
+                                        restart=args.restart, cwd=cwd)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
@@ -1059,7 +1077,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
                            drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
-                           no_review=args.no_review, reason=args.reason, edits=edits)
+                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as,
+                           restart=args.restart)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)

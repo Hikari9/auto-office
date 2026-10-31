@@ -433,18 +433,70 @@ def test_a_revision_that_drops_the_run_gear_recommendation_clears_it(env):
     assert "planner recommends" not in env.office("inspect", "plan")[1]
 
 
-def test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs():
+SONNET_CLAUDE_MEDIUM = "claude@1/claude-sonnet-5-5@medium"
+SONNET_AGY_MEDIUM = "agy@1/claude-sonnet-5-5@medium"
+
+
+def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
+    """Sonnet 5.5 Claude Code -> agy is a same-model, same-effort harness fallback on new XS-XL gear runs.
+
+    docs/xs-xl-run-gear.md:74-85 defines it on the M and L rows; XS and XL runs are covered too.
+    Legacy presets (gear='express') keep their order.
+    """
     from test_issue809_real_routes import candidate, decide
     pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
             candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
-    new = decide("M", pool, gear="M")
-    assert [e["route"].split("@")[0] for e in new["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
-    assert new["routing"]["sonnet_self_fallbacks"][0]["to"].startswith("agy@")
-    legacy = decide("M", pool, gear="express")
+    # The M slate's leading routes are the effective policy's seed routes the pool holds (#871), not a frozen tuple.
+    pooled = {(c["model_id"], c["harness"]) for c in pool}
+    seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
+            if (e["model_id"], e["harness"]) in pooled]
+    assert seed, "the M seed must name at least one pooled route"
+    m_slate = decide("M", pool, gear="M")["selection_disclosure"]["slate"]
+    assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed)]} == \
+        {(harness, model) for model, harness in seed}, m_slate
+    # M new gear: a route ranked between the pair pushes the agy route down, so the fallback moves it back up.
+    m_pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
+              candidate("gemini-3.8-flash", "medium", 43, harness="agy"),
+              candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60)]
+    m_new = decide("M", m_pool, gear="M")
+    assert [(f["from"], f["to"]) for f in m_new["routing"]["sonnet_self_fallbacks"]] == \
+        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], m_new["routing"]
+    assert [e["route"] for e in m_new["selection_disclosure"]["slate"][:2]] == [SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM]
+    # Legacy express keeps the agy route where utility put it, with no fallback record.
+    legacy = decide("M", m_pool, gear="express")
     assert "sonnet_self_fallbacks" not in legacy["routing"]
-    assert len(legacy["selection_disclosure"]["slate"]) == 3
+    assert [e["route"] for e in legacy["selection_disclosure"]["slate"]] == \
+        [SONNET_CLAUDE_MEDIUM, "agy@1/gemini-3.8-flash@medium", SONNET_AGY_MEDIUM]
+    # Same effort only: a Sonnet agy route at high is not the fallback for claude medium; the medium route is.
+    mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60)], gear="M")
+    assert [(f["from"], f["to"]) for f in mixed["routing"]["sonnet_self_fallbacks"]] == \
+        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], mixed["routing"]
+    # L new gear at high effort: the seed already puts the agy route straight after claude at the same effort.
+    l_pool = [candidate("claude-sonnet-5-5", "high", 47, harness="claude"),
+              candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60),
+              candidate("gpt-6.1-terra", "high", 44)]
+    l_new = decide("L", l_pool, gear="L")
+    assert [e["route"] for e in l_new["selection_disclosure"]["slate"][:2]] == \
+        ["claude@1/claude-sonnet-5-5@high", "agy@1/claude-sonnet-5-5@high"], l_new["selection_disclosure"]
+    # XS and XL new gear runs: XS leads with the pair; XL moves the agy route up past a route ranked between them.
+    xs = decide("XS", pool, gear="XS")
+    assert [(f["from"], f["to"]) for f in xs["routing"]["sonnet_self_fallbacks"]] == \
+        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xs["routing"]
+    assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
+    assert "sonnet_self_fallbacks" not in decide("XS", pool, gear="express")["routing"]
+    xl_pool = [candidate("claude-sonnet-5-5", "medium", 50, harness="claude"),
+               candidate("gpt-6.1-terra", "medium", 49),
+               candidate("claude-sonnet-5-5", "medium", 48, harness="agy", remaining=60)]
+    xl = decide("XL", xl_pool, gear="XL")
+    assert [(f["from"], f["to"]) for f in xl["routing"]["sonnet_self_fallbacks"]] == \
+        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xl["routing"]
+    assert [e["route"].split("@")[0] for e in xl["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
+    legacy_xl = decide("XL", xl_pool, gear="express")
+    assert "sonnet_self_fallbacks" not in legacy_xl["routing"]
+    assert [e["route"] for e in legacy_xl["selection_disclosure"]["slate"]][:2] == \
+        [SONNET_CLAUDE_MEDIUM, "codex@1/gpt-6.1-terra@medium"]
 
 
 def test_planner_free_text_rejects_control_characters():
