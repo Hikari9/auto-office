@@ -725,6 +725,7 @@ office amend options --prs|--no-prs --quote "<user approval>" --confirm   amend 
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
+office land --batch batch.json          ordered run/PR lanes, one version owner, one full suite before any merge
 office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
