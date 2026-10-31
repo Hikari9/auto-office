@@ -9,11 +9,11 @@ def entry() -> int:
     is not converted: its side effects may already have happened, so a retry could repeat them."""
     try:
         from office.cli import main
-    except (ImportError, OSError, SyntaxError):
+    except (ImportError, OSError, SyntaxError, ValueError):
         try:
             from office import version
             code, line = version.REBUILD_EXIT_CODE, version.rebuild_line()
-        except (ImportError, OSError, SyntaxError):
+        except (ImportError, OSError, SyntaxError, ValueError):
             # version.py imports only the standard library, so when it cannot load, its file is being replaced or damaged.
             code, line = 75, "office: install is being rebuilt, retry in 5 s"
         print(line, file=sys.stderr)

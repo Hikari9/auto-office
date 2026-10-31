@@ -143,12 +143,14 @@ def test_an_import_failure_with_a_healthy_version_still_exits_with_the_retry_cod
     from office import __main__ as entrypoint
 
     monkeypatch.setitem(sys.modules, "office.cli", _ReplacedModule(ModuleNotFoundError("No module named 'jsonschema'")))
-    monkeypatch.setattr(version, "current", lambda: "3.2.0")
+    probed = []
+    monkeypatch.setattr(version, "current", lambda: probed.append("probe") or "3.2.0")
 
     assert entrypoint.entry() == version.REBUILD_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.err.strip() == RETRY_LINE
     assert "Traceback" not in captured.err
+    assert probed == []
 
 
 def test_a_startup_import_failure_never_traces_back_even_when_the_version_probe_raises(monkeypatch, capsys):
