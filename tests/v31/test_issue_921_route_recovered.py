@@ -547,6 +547,75 @@ def test_a_later_review_that_leaves_a_recovered_route_clears_its_line(cold):
     assert routechange.recovery_lines(cold.con, run(cold)) == []
 
 
+def probe_at(env, d, result, reason=None, at=None):
+    """A probe of the failed route's invocation and effort, recorded at `at` (default now)."""
+    with db.transaction(env.con):
+        env.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, reason_class, probed_at) "
+                        "VALUES(?,?,?,?,?,?,?)", (f"probe:{d['triple']}:{at or now_iso()}", d["harness"],
+                                                 d["invocation_model_id"], d["effort"], result, reason, at or now_iso()))
+
+
+def test_a_fresh_failed_probe_keeps_a_lapsed_route_down_until_a_later_pass(plain):
+    d = failed_route(plain)
+    probe_at(plain, d, "fail", "auth-quota-blocked")  # routing still rejects the route on this probe
+    expire(plain, d)
+    assert sweep(plain) == []
+    probe_at(plain, d, "pass", at=FUTURE)
+    assert len(sweep(plain)) == 1
+
+
+def test_a_stale_failed_probe_does_not_keep_a_lapsed_route_down(plain):
+    d = failed_route(plain)
+    probe_at(plain, d, "fail", "auth-quota-blocked", at=PAST)  # past the temporary TTL: routing no longer reads it
+    expire(plain, d)
+    assert len(sweep(plain)) == 1
+
+
+def test_a_newer_failed_probe_supersedes_an_older_pass_for_a_review_route(cold):
+    review_fallback(cold, CODEX)
+    probe_pass(cold, CODEX, FUTURE)
+    with db.transaction(cold.con):  # the same route fails its probe after the pass
+        cold.con.execute("INSERT INTO route_probes(key, harness, invocation_model_id, effort, result, reason_class, probed_at) "
+                         "VALUES('probe:later-fail','codex','gpt-6.1-sol','high','fail','auth-quota-blocked',"
+                         "'2999-06-01T00:00:00+00:00')")
+    assert sweep(cold) == []
+
+
+def test_a_live_harness_wide_cooldown_keeps_a_lapsed_route_down(plain):
+    d = failed_route(plain)  # an auth failure also demotes every route on its harness
+    with db.transaction(plain.con):  # only the route's own demotion lapses
+        plain.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?",
+                          (now_iso(), routing.demotion_key(d["harness"], d["invocation_model_id"], d["effort"])))
+    assert sweep(plain) == []
+    expire(plain, d)  # the harness-wide demotion lapses too
+    assert len(sweep(plain)) == 1
+
+
+def test_a_live_shared_quota_pool_keeps_a_lapsed_route_down(plain):
+    """OpenCode's free models share one quota wall: a live pool cooldown keeps a lapsed demotion of one of them down."""
+    d = {"route": "opencode@1/some-free@high", "harness": "opencode", "model": "some-free", "effort": "high"}
+    with db.transaction(plain.con):
+        state.emit(plain.con, run(plain), "route.failed", "free tier exhausted", task_id="T1",
+                   payload={**d, "reason": "usage_limit", "demoted_until": PAST})
+        plain.con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
+                          (routing.demotion_key("opencode", "some-free", "high"), PAST, now_iso()))
+        plain.con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
+                          ("pool:opencode:free", FUTURE, now_iso()))
+    assert sweep(plain) == []
+    with db.transaction(plain.con):
+        plain.con.execute("UPDATE route_cooldowns SET expires_at=? WHERE route=?", (PAST, "pool:opencode:free"))
+    assert len(sweep(plain)) == 1
+
+
+def test_a_review_change_the_user_recorded_is_never_recovered_even_with_quota_auth_evidence(cold):
+    with db.transaction(cold.con):
+        state.record_route_change(cold.con, run(cold), "T1", CODEX, "codex@1/gpt-6-luna@low", kind="repin",
+                                  reason="the user kept the plan reviewer", actor="user", stage="code_reviewer",
+                                  extra={"notice": "review", "gate": "G1", "skip_class": "quota-auth"})
+    probe_pass(cold, CODEX, FUTURE)
+    assert sweep(cold) == []  # the evidence qualifies, but the user made the change: the user's decision stands
+
+
 def skip_decision(category=None):
     """A review decision whose preferred primary (CODEX) was rejected and whose selection chose a luna route."""
     primary = {"harness": "codex", "model_id": "gpt-6.1-sol", "effort": "high", "harness_version": "1.0.0"}
