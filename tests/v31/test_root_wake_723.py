@@ -629,7 +629,8 @@ def test_723_session_moving_to_another_run_waits_for_an_in_flight_wake(env, monk
     assert root_wake.poll(con, run) == "delivered"
     send.thread.join(10)
     assert moved and moved[0] >= sent[0]
-    with db.transaction(con):
+    with db.transaction(con):  # the root read the first wake: a newer one is not coalesced behind it
+        con.execute("UPDATE root_wake_intents SET state='observed' WHERE run_id=? AND state='delivered'", (run["id"],))
         state.emit(con, run, "task.paused", "after move", task_id="T1")
     with db.transaction(con):
         con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))
