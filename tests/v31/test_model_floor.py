@@ -18,7 +18,7 @@ def test_visual_reviewer_prefers_latest_gemini_flash():
     seed = cfg["roles"]["visual_reviewer"]["preferred_seed"]
     # Latest Gemini Flash leads (low, then medium); GPT-6.1 Terra low is the fallback. Sonnet is not seeded.
     assert seed[:2] == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "low"},
-                        {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}]
+                        {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"}]
     rows = {(r["invocation_harness"], r["invocation_model_id"]): r for r in candidates.catalog_rows()}
     for slug in ("gemini-3.8-flash-medium", "gemini-3.8-flash-low"):
         assert rows[("agy", slug)].get("dispatchable") is not False
