@@ -704,7 +704,7 @@ def _what_changed(con, run_id: str, seqs: list[int]) -> str:
     keys = ",".join("?" for _ in seqs)
     row = con.execute(f"SELECT summary FROM events WHERE run_id=? AND seq IN ({keys}) ORDER BY seq DESC LIMIT 1",
                       (run_id, *seqs)).fetchone() if seqs else None
-    return row[0] if row else "new lifecycle transitions"
+    return (row[0] if row else None) or "new lifecycle transitions"
 
 
 def wake_line(run_id: str, change: str, action: str, *, through: int | None = None) -> str:
