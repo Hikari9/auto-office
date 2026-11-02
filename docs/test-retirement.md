@@ -180,7 +180,7 @@ Node counts are collected pytest nodes at base for that function.
 
 ## Module inventory
 
-Every test module under `tests/` except `tests/contracts/`: the base commit's modules, the nine modules main added after the inventory base, the modules main added after that (rows labelled `keep`, added on main after the inventory base), and the three modules this change adds: `tests/v31/test_policy_data_contracts.py` and `tests/test_test_retirement_inventory.py` came with the first task, and `tests/test_test_retirement_record.py` with this one. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
+Every test module under `tests/` except `tests/contracts/`: the base commit's modules, the nine modules main added after the inventory base, the modules main added after that, including `test_issue_1002_unknown_is_unlimited.py`, `test_issue_1030_submit_grant.py`, `test_issue_656_model_verify.py` and `test_issue_755_apply_verification.py` added after `9f809b6c` (rows labelled `keep`, added on main after the inventory base), and the three modules this change adds: `tests/v31/test_policy_data_contracts.py` and `tests/test_test_retirement_inventory.py` came with the first task, and `tests/test_test_retirement_record.py` with this one. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
 
 | Module | Disposition | Reason |
 |---|---|---|
@@ -314,8 +314,10 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue846_size_seeds.py` | consolidate | 5 of 16 nodes duplicated slate order or the gear tables; slate anchoring, reroute and seed precedence stay |
 | `tests/v31/test_issue936_greenfield_gear.py` | keep |  |
 | `tests/v31/test_issue938_review.py` | keep |  |
+| `tests/v31/test_issue_1002_unknown_is_unlimited.py` | keep |  |
 | `tests/v31/test_issue_1029_wake_line.py` | keep |  |
 | `tests/v31/test_issue_1030_review_submit.py` | keep |  |
+| `tests/v31/test_issue_1030_submit_grant.py` | keep |  |
 | `tests/v31/test_issue_1031_executor_subagents.py` | keep |  |
 | `tests/v31/test_issue_267.py` | keep |  |
 | `tests/v31/test_issue_268.py` | keep |  |
@@ -336,6 +338,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_653_markdown_prose.py` | keep |  |
 | `tests/v31/test_issue_654_already_merged_land.py` | keep |  |
 | `tests/v31/test_issue_655_identical_new_file.py` | keep |  |
+| `tests/v31/test_issue_656_model_verify.py` | keep |  |
 | `tests/v31/test_issue_659_pr_title_slug.py` | keep |  |
 | `tests/v31/test_issue_662_manual_deploy.py` | keep |  |
 | `tests/v31/test_issue_664_native_select_steps.py` | keep |  |
@@ -358,6 +361,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_740_recovery.py` | keep |  |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |  |
 | `tests/v31/test_issue_753_reused_pane_text.py` | keep |  |
+| `tests/v31/test_issue_755_apply_verification.py` | keep |  |
 | `tests/v31/test_issue_773_stacked_inplace_edit.py` | keep |  |
 | `tests/v31/test_issue_783_cleanup.py` | keep |  |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |  |
@@ -522,7 +526,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 305, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 309, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 

@@ -179,8 +179,10 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue846_size_seeds.py` | consolidate |
 | `tests/v31/test_issue936_greenfield_gear.py` | keep |
 | `tests/v31/test_issue938_review.py` | keep |
+| `tests/v31/test_issue_1002_unknown_is_unlimited.py` | keep |
 | `tests/v31/test_issue_1029_wake_line.py` | keep |
 | `tests/v31/test_issue_1030_review_submit.py` | keep |
+| `tests/v31/test_issue_1030_submit_grant.py` | keep |
 | `tests/v31/test_issue_1031_executor_subagents.py` | keep |
 | `tests/v31/test_issue_267.py` | keep |
 | `tests/v31/test_issue_268.py` | keep |
@@ -201,6 +203,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_653_markdown_prose.py` | keep |
 | `tests/v31/test_issue_654_already_merged_land.py` | keep |
 | `tests/v31/test_issue_655_identical_new_file.py` | keep |
+| `tests/v31/test_issue_656_model_verify.py` | keep |
 | `tests/v31/test_issue_659_pr_title_slug.py` | keep |
 | `tests/v31/test_issue_662_manual_deploy.py` | keep |
 | `tests/v31/test_issue_664_native_select_steps.py` | keep |
@@ -223,6 +226,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_740_recovery.py` | keep |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |
 | `tests/v31/test_issue_753_reused_pane_text.py` | keep |
+| `tests/v31/test_issue_755_apply_verification.py` | keep |
 | `tests/v31/test_issue_773_stacked_inplace_edit.py` | keep |
 | `tests/v31/test_issue_783_cleanup.py` | keep |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |
