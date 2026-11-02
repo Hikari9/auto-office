@@ -37,3 +37,15 @@ def test_inventory_totals_match_the_inventory_rows():
     assert match, "the module inventory has no Totals line"
     counts = Counter(disposition for _, disposition in _rows("test-retirement.md", "## Module inventory"))
     assert ast.literal_eval(match.group(1)) == dict(counts)
+
+
+def test_inventory_lists_exactly_the_test_modules_that_exist():
+    root = DOCS.parent
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in (root / "tests").rglob("test_*.py")
+        if "contracts" not in path.relative_to(root / "tests").parts
+    }
+    live = {path for path, disposition in _rows("test-retirement.md", "## Module inventory") if disposition != "retire"}
+    assert actual - live == set(), "test modules missing from the inventory"
+    assert live - actual == set(), "inventory rows for modules that do not exist"

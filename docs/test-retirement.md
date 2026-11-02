@@ -39,6 +39,10 @@ Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen 
 - `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated`
 - `tests/v31/test_rolling_review.py::test_plan_review_ends_at_first_pass_even_on_an_older_version`
 
+### Targeted verification
+
+On the T2 commit that adds the inventory completeness check, in a provisioned writable checkout (`.venv` present): `.venv/bin/python -m pytest -n 2 --all -q tests/contracts tests/test_pr_test_selection.py tests/v31/test_verification_coverage.py tests/v31/test_issue_563_artifact_integrity.py tests/test_version_single_source.py tests/test_test_retirement_record.py` gave 191 passed, 0 failed, including the CLI smoke tests and `test_pinned_gate_executes_for_composed_commit` that need `.venv`. `pytest --all -q --collect-only tests` collected 6,576 nodes at base `5030f91f` plus this change. No full-suite run was started.
+
 ### Draft comment for #796
 
 Keep #796 focused on improving the performance of optional historical and full diagnostic runs. Ordinary PRs use the scoped gate in [validation.md](validation.md); this issue does not require preserving every historical test node as a mandatory per-PR check. Full validation remains required for the cases specified there.
@@ -160,7 +164,7 @@ Node counts are collected pytest nodes at base for that function.
 
 ## Module inventory
 
-Every test module under `tests/` except `tests/contracts/`, at the base commit. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
+Every test module under `tests/` except `tests/contracts/`, at the current base `5030f91f` (307 modules), plus the two modules this change adds (`added`). The 9 modules that reached main after `d1402697` are `keep`. Retired modules are listed too, so the live modules are the rows that are not `retire` (306). `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
 
 | Module | Disposition | Reason |
 |---|---|---|
@@ -202,6 +206,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/test_session_end_hook.py` | keep |  |
 | `tests/test_shipped_catalog_tables.py` | keep |  |
 | `tests/test_spoke_receipt_integrity.py` | keep |  |
+| `tests/test_test_retirement_record.py` | added | checks that this inventory, the contract-suite table and the actual test-module set agree; this change adds it |
 | `tests/test_trust_alias_625.py` | keep |  |
 | `tests/test_trust_conformance.py` | keep |  |
 | `tests/test_v3_instruction_contract.py` | keep |  |
@@ -322,6 +327,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_issue_712_deploy_artifacts.py` | keep |  |
 | `tests/v31/test_issue_714_topological_restack.py` | keep |  |
 | `tests/v31/test_issue_721_accepted_route.py` | keep |  |
+| `tests/v31/test_issue_730_run_base.py` | keep |  |
 | `tests/v31/test_issue_734_fetched_base.py` | keep |  |
 | `tests/v31/test_issue_740_recovery.py` | keep |  |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |  |
@@ -337,6 +343,13 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_issue_845_user_allow.py` | keep |  |
 | `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |  |
 | `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |  |
+| `tests/v31/test_issue_895_false_stalls.py` | keep |  |
+| `tests/v31/test_issue_896_amend_contract_route.py` | keep |  |
+| `tests/v31/test_issue_897_full_suite_timeout.py` | keep |  |
+| `tests/v31/test_issue_918_busy_reply_ingest.py` | keep |  |
+| `tests/v31/test_issue_920_reinstall_wake.py` | keep |  |
+| `tests/v31/test_issue_921_route_recovered.py` | keep |  |
+| `tests/v31/test_issue_922_919_wake_default.py` | keep |  |
 | `tests/v31/test_job_ownership.py` | keep |  |
 | `tests/v31/test_kilo_registration.py` | keep |  |
 | `tests/v31/test_land.py` | keep |  |
@@ -365,6 +378,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_plan_path.py` | keep |  |
 | `tests/v31/test_plan_review_lifecycle.py` | keep |  |
 | `tests/v31/test_planner_amend_serial.py` | keep |  |
+| `tests/v31/test_policy_data_contracts.py` | added | `PDC`: policy-data contracts that replace the retired model-specific assertions; this change adds it |
 | `tests/v31/test_preexisting_checks.py` | keep |  |
 | `tests/v31/test_preflight.py` | keep |  |
 | `tests/v31/test_prompt_landed_baseline.py` | keep |  |
@@ -431,6 +445,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_visual_port_conflict.py` | keep |  |
 | `tests/v31/test_visual_preflight.py` | keep |  |
 | `tests/v31/test_wait.py` | keep |  |
+| `tests/v31/test_wake_coalesce.py` | keep |  |
 | `tests/v31/test_worktree_setup.py` | keep |  |
 | `tests/web/browser/test_agents.py` | historical-diagnostic | drives a real browser through Playwright and skips without it; kept for on-demand UI diagnosis |
 | `tests/web/browser/test_allocation.py` | historical-diagnostic | drives a real browser through Playwright and skips without it; kept for on-demand UI diagnosis |
@@ -463,7 +478,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 267, 'historical-diagnostic': 21, 'consolidate': 7, 'retire': 3}.
+Totals: {'keep': 276, 'historical-diagnostic': 21, 'consolidate': 7, 'retire': 3, 'added': 2}.
 
 ## Left alone on purpose
 

@@ -51,10 +51,12 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 |---|---|
 | `tests/test_check_ecosystem.py` | keep |
 | `tests/test_plugin_skill_entry.py` | keep |
+| `tests/test_test_retirement_record.py` | added |
 | `tests/v31/test_conformance_vision_routing.py` | keep |
 | `tests/v31/test_delegation_shadow.py` | keep |
 | `tests/v31/test_economics_efficiency.py` | keep |
 | `tests/v31/test_issue502_strategy_efficiency.py` | keep |
+| `tests/v31/test_issue_730_run_base.py` | keep |
 | `tests/v31/test_issue_790_codex_pane_submit.py` | keep |
 | `tests/v31/test_issue_827_opencode_reviewer_crash.py` | keep |
 | `tests/v31/test_issue_836_close_cancels_jobs.py` | keep |
@@ -222,6 +224,13 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 | `tests/v31/test_issue_817_effort_ceiling.py` | keep |
 | `tests/v31/test_issue_845_invocation_table.py` | keep |
 | `tests/v31/test_issue_845_user_allow.py` | keep |
+| `tests/v31/test_issue_895_false_stalls.py` | keep |
+| `tests/v31/test_issue_896_amend_contract_route.py` | keep |
+| `tests/v31/test_issue_897_full_suite_timeout.py` | keep |
+| `tests/v31/test_issue_918_busy_reply_ingest.py` | keep |
+| `tests/v31/test_issue_920_reinstall_wake.py` | keep |
+| `tests/v31/test_issue_921_route_recovered.py` | keep |
+| `tests/v31/test_issue_922_919_wake_default.py` | keep |
 | `tests/v31/test_job_ownership.py` | keep |
 | `tests/v31/test_kilo_registration.py` | keep |
 | `tests/v31/test_land.py` | keep |
@@ -250,6 +259,7 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 | `tests/v31/test_plan_path.py` | keep |
 | `tests/v31/test_plan_review_lifecycle.py` | keep |
 | `tests/v31/test_planner_amend_serial.py` | keep |
+| `tests/v31/test_policy_data_contracts.py` | added |
 | `tests/v31/test_preexisting_checks.py` | keep |
 | `tests/v31/test_preflight.py` | keep |
 | `tests/v31/test_prompt_landed_baseline.py` | keep |
@@ -316,6 +326,7 @@ The table uses T1's module-level dispositions. `historical-diagnostic` classifie
 | `tests/v31/test_visual_port_conflict.py` | keep |
 | `tests/v31/test_visual_preflight.py` | keep |
 | `tests/v31/test_wait.py` | keep |
+| `tests/v31/test_wake_coalesce.py` | keep |
 | `tests/v31/test_worktree_setup.py` | keep |
 | `tests/web/browser/test_agents.py` | historical-diagnostic |
 | `tests/web/browser/test_allocation.py` | historical-diagnostic |
