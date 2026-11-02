@@ -307,7 +307,7 @@ def _run_probe(argv: list[str], unknown) -> dict:
     from office import gates
     for attempt in (1, 2):
         try:
-            # stdin is closed so a credential prompt exits instead of hanging into a timeout (#941).
+            # stdin is closed, so a probe that reads it gets EOF rather than blocking (#941).
             proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                                   timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
@@ -340,9 +340,12 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
             result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
         return result
     try:
-        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
-    except (TypeError, ValueError):
+        percent = float(data["tightest_remaining_percent"])
+    except (TypeError, ValueError, OverflowError):
         return unknown("command could not be run or parsed")
+    if not math.isfinite(percent):  # json accepts NaN and Infinity; neither is a reading
+        return unknown("command returned a non-finite tightest_remaining_percent")
+    result = {"status": "ok", "tightest_remaining_percent": percent}
 
     if isinstance(data.get("families"), dict):
         result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
@@ -354,9 +357,9 @@ def _normalize_family(family: str, raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     try:
         remaining = float(raw["tightest_remaining_percent"]) if raw.get("status") == "ok" else None
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         remaining = None
-    if remaining is None:
+    if remaining is None or not math.isfinite(remaining):
         return {"status": "unknown", "tightest_remaining_percent": None,
                 "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
     return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
@@ -372,9 +375,10 @@ _FAILED_TTL = 60.0
 
 def _shared_ttl() -> float:
     try:
-        return max(0.0, float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL)))
+        ttl = float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL))
     except ValueError:
         return _SHARED_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _SHARED_TTL
 
 
 # A timed-out probe (#941) uses the last successful reading for this long. The reading is
@@ -403,23 +407,26 @@ def _shared_entry(harness: str) -> dict | None:
 
 
 def _stamp(value) -> float | None:
-    """A cache timestamp, or None when the file holds a corrupt one."""
+    """A cache timestamp, or None when the file holds a corrupt one. A NaN or infinite stamp
+    fails the `0 <= now - at < ttl` checks at each use, so it needs no check here."""
     try:
-        stamp = float(value)
-    except (TypeError, ValueError):
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
-    return stamp if math.isfinite(stamp) else None
 
 
 def _shared_cache_get(harness: str) -> dict | None:
     entry = _shared_entry(harness)
     if not entry or not isinstance(entry.get("result"), dict):
         return None
-    ok = entry["result"].get("status") == "ok"
+    result = entry["result"]
+    ok = result.get("status") == "ok"
+    if ok and not _valid_reading(result):
+        return None
     ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
     at = _stamp(entry.get("at"))
-    if at is not None and time.time() - at < ttl:
-        return entry["result"]
+    if at is not None and 0 <= time.time() - at < ttl:
+        return result
     return None
 
 
@@ -432,7 +439,7 @@ def _valid_reading(reading: dict) -> bool:
     try:
         return reading.get("status") == "ok" and all(
             math.isfinite(float(r["tightest_remaining_percent"])) for r in [reading, *fams])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
 

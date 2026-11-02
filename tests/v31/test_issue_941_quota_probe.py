@@ -12,10 +12,16 @@ from office import candidates, dispatch
 
 ADAPTER = {"id": "claude", "quota_probe": {"command": ["probe"]}}
 TIMEOUT = subprocess.TimeoutExpired(["probe"], 20)
+NAN = float("nan")
+INF = float("inf")
 
 
 def _ok(percent):
     return SimpleNamespace(returncode=0, stdout=json.dumps({"tightest_remaining_percent": percent}))
+
+
+def _stdout(text):
+    return SimpleNamespace(returncode=0, stdout=text)
 
 
 class FakeProbe:
@@ -55,11 +61,16 @@ def _good_reading_then_expire_fresh_cache(monkeypatch, percent=60):
     candidates._QUOTA_CACHE.clear()
 
 
-def _age_last_good(seconds):
+def _edit_cache(edit):
+    """Apply `edit(data)` to the harness entry of the shared cache file."""
     path = candidates._shared_cache_path()
     data = json.loads(path.read_text())
-    data["claude"]["last_good"]["at"] -= seconds
+    edit(data["claude"])
     path.write_text(json.dumps(data))
+
+
+def _age_last_good(seconds):
+    _edit_cache(lambda entry: entry["last_good"].__setitem__("at", entry["last_good"]["at"] - seconds))
 
 
 def test_timeout_on_a_quiet_host_retries_once_after_backoff(monkeypatch):
@@ -143,6 +154,18 @@ def test_a_non_timeout_failure_never_uses_the_last_good_reading(monkeypatch):
     assert result["cause"] == "command exited with code 7"
 
 
+def test_a_non_timeout_failure_keeps_the_last_good_reading_for_a_later_timeout(monkeypatch):
+    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
+    FakeProbe(monkeypatch, [SimpleNamespace(returncode=7, stdout="")])
+    assert candidates.probe_quota(ADAPTER)["status"] == "unknown"
+    candidates._QUOTA_CACHE.clear()
+    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result["status"] == "ok" and result["stale"] is True
+
+
 def test_a_disabled_probe_never_uses_the_last_good_reading(monkeypatch):
     FakeProbe(monkeypatch, [_ok(60)])
     candidates.probe_quota(ADAPTER)
@@ -211,14 +234,25 @@ def test_last_good_ttl_boundary_is_exclusive(monkeypatch, age, stale):
     assert (result["status"] == "ok") is stale and result.get("stale", False) is stale
 
 
-@pytest.mark.parametrize("corrupt_at", [float("nan"), float("inf")])
+@pytest.mark.parametrize(("junk", "age", "stale"), [("abc", 5, True), ("inf", 601, False), ("nan", 601, False)])
+def test_unparseable_or_non_finite_last_good_ttl_uses_the_default(monkeypatch, junk, age, stale):
+    # The default is 600s: a 5s-old reading is inside it, a 601s-old one is outside it. An infinite
+    # or NaN TTL must fall back to 600s, so a 601s-old reading must not be served.
+    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
+    monkeypatch.setenv("OFFICE_QUOTA_LAST_GOOD_TTL", junk)
+    _age_last_good(seconds=age)
+    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result.get("stale", False) is stale
+
+
+@pytest.mark.parametrize("corrupt_at", ["x", None, NAN, INF])
 def test_a_corrupt_top_level_stamp_is_not_served_as_fresh(monkeypatch, corrupt_at):
     FakeProbe(monkeypatch, [_ok(60)])
     candidates.probe_quota(ADAPTER)
-    path = candidates._shared_cache_path()
-    data = json.loads(path.read_text())
-    data["claude"]["at"] = corrupt_at
-    path.write_text(json.dumps(data))
+    _edit_cache(lambda entry: entry.__setitem__("at", corrupt_at))
     candidates._QUOTA_CACHE.clear()
     fake = FakeProbe(monkeypatch, [_ok(70)])
 
@@ -227,45 +261,103 @@ def test_a_corrupt_top_level_stamp_is_not_served_as_fresh(monkeypatch, corrupt_a
     assert fake.calls == 1 and result == {"status": "ok", "tightest_remaining_percent": 70.0}
 
 
-@pytest.mark.parametrize("junk", ["abc", "inf", "nan"])
-def test_unparseable_or_non_finite_last_good_ttl_uses_the_default(monkeypatch, junk):
-    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
-    monkeypatch.setenv("OFFICE_QUOTA_LAST_GOOD_TTL", junk)
-    _age_last_good(seconds=5)
-    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
-
-    result = candidates.probe_quota(ADAPTER)
-
-    assert result["stale"] is True and result["stale_age_s"] == 5
-
-
-def test_a_non_timeout_failure_keeps_the_last_good_reading_for_a_later_timeout(monkeypatch):
-    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
-    FakeProbe(monkeypatch, [SimpleNamespace(returncode=7, stdout="")])
-    assert candidates.probe_quota(ADAPTER)["status"] == "unknown"
-    candidates._QUOTA_CACHE.clear()
-    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
-
-    result = candidates.probe_quota(ADAPTER)
-
-    assert result["status"] == "ok" and result["stale"] is True
-
-
-def test_the_probe_runs_with_stdin_closed_so_a_prompt_exits_instead_of_hanging(monkeypatch):
-    fake = FakeProbe(monkeypatch, [_ok(60)])
-
+def test_a_future_fresh_stamp_is_not_served(monkeypatch):
+    FakeProbe(monkeypatch, [_ok(90)])
     candidates.probe_quota(ADAPTER)
+    _edit_cache(lambda entry: entry.__setitem__("at", entry["at"] + 3600))
+    candidates._QUOTA_CACHE.clear()
+    fake = FakeProbe(monkeypatch, [_ok(70)])
 
-    assert fake.kwargs["stdin"] is subprocess.DEVNULL
+    result = candidates.probe_quota(ADAPTER)
+
+    assert fake.calls == 1 and result["tightest_remaining_percent"] == 70.0
 
 
-@pytest.mark.parametrize("corrupt_at", ["x", None, float("nan"), float("inf")])
+def test_a_nan_fresh_cache_entry_is_not_served(monkeypatch):
+    candidates._shared_cache_put("claude", {"status": "ok", "tightest_remaining_percent": NAN})
+    fake = FakeProbe(monkeypatch, [_ok(70)])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert fake.calls == 1 and result == {"status": "ok", "tightest_remaining_percent": 70.0}
+
+
+@pytest.mark.parametrize("stdout", ['{"tightest_remaining_percent": NaN}', '{"tightest_remaining_percent": Infinity}'])
+def test_a_non_finite_probe_percent_is_unknown_not_ok(monkeypatch, stdout):
+    FakeProbe(monkeypatch, [_stdout(stdout)])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result["status"] == "unknown" and result["tightest_remaining_percent"] is None
+    assert result["cause"] == "command returned a non-finite tightest_remaining_percent"
+
+
+def test_a_non_finite_family_percent_is_unknown_for_that_family(monkeypatch):
+    body = '{"tightest_remaining_percent": 60, "families": {"claude": {"status": "ok", "tightest_remaining_percent": NaN}}}'
+    FakeProbe(monkeypatch, [_stdout(body)])
+
+    result = candidates.probe_quota({"id": "agy", "quota_probe": {"command": ["probe"]}})
+
+    assert result["families"]["claude"]["status"] == "unknown"
+
+
+def test_a_huge_integer_from_the_probe_is_unknown_not_a_crash(monkeypatch):
+    FakeProbe(monkeypatch, [_stdout('{"tightest_remaining_percent": ' + "9" * 400 + "}")])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result == {"status": "unknown", "tightest_remaining_percent": None,
+                      "cause": "command could not be run or parsed"}
+
+
+@pytest.mark.parametrize("field", ["at", "percent"])
+def test_a_huge_integer_in_the_cache_is_not_a_crash(monkeypatch, field):
+    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
+    if field == "at":
+        _edit_cache(lambda entry: entry["last_good"].__setitem__("at", 10 ** 400))
+    else:
+        _edit_cache(lambda entry: entry["last_good"]["result"].__setitem__("tightest_remaining_percent", 10 ** 400))
+    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result["status"] == "unknown" and "stale" not in result
+
+
+def test_a_non_finite_shared_ttl_uses_the_default(monkeypatch):
+    FakeProbe(monkeypatch, [_ok(60)])
+    candidates.probe_quota(ADAPTER)
+    _edit_cache(lambda entry: entry.__setitem__("at", entry["at"] - 400))  # past the default 300s
+    monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", "inf")
+    candidates._QUOTA_CACHE.clear()
+    fake = FakeProbe(monkeypatch, [_ok(70)])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert fake.calls == 1 and result["tightest_remaining_percent"] == 70.0
+
+
+@pytest.mark.parametrize("patch", [
+    {"tightest_remaining_percent": "abc"},
+    {"tightest_remaining_percent": NAN},
+    {"tightest_remaining_percent": INF},
+    {"families": {"claude": {"status": "ok", "tightest_remaining_percent": "abc"}}},
+    {"families": {"claude": {"status": "ok", "tightest_remaining_percent": NAN}}},
+])
+def test_an_invalid_stored_reading_is_not_served(monkeypatch, patch):
+    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
+    _edit_cache(lambda entry: entry["last_good"]["result"].update(patch))
+    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result["status"] == "unknown" and "stale" not in result
+
+
+@pytest.mark.parametrize("corrupt_at", ["x", None])
 def test_a_corrupt_last_good_timestamp_is_not_served(monkeypatch, corrupt_at):
     _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
-    path = candidates._shared_cache_path()
-    data = json.loads(path.read_text())
-    data["claude"]["last_good"]["at"] = corrupt_at
-    path.write_text(json.dumps(data))
+    _edit_cache(lambda entry: entry["last_good"].__setitem__("at", corrupt_at))
     FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
 
     result = candidates.probe_quota(ADAPTER)
@@ -283,24 +375,13 @@ def test_a_last_good_stamp_in_the_future_is_not_served(monkeypatch):
     assert result["status"] == "unknown" and "stale" not in result
 
 
-def test_an_invalid_stored_reading_is_not_served(monkeypatch):
-    _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
-    path = candidates._shared_cache_path()
-    data = json.loads(path.read_text())
-    data["claude"]["last_good"]["result"]["tightest_remaining_percent"] = "abc"
-    path.write_text(json.dumps(data))
-    FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
-
-    result = candidates.probe_quota(ADAPTER)
-
-    assert result["status"] == "unknown" and "stale" not in result
-
-
-def test_every_stale_agy_family_is_marked_so_a_family_gate_sees_it(monkeypatch):
+def test_every_stale_ok_agy_family_is_marked_so_a_family_gate_sees_it(monkeypatch):
     agy = {"id": "agy", "quota_probe": {"command": ["probe"]}}
-    body = json.dumps({"tightest_remaining_percent": 60,
-                       "families": {"claude": {"status": "ok", "tightest_remaining_percent": 40}}})
-    FakeProbe(monkeypatch, [SimpleNamespace(returncode=0, stdout=body)])
+    body = json.dumps({"tightest_remaining_percent": 60, "families": {
+        "claude": {"status": "ok", "tightest_remaining_percent": 40},
+        "gemini": {"status": "ok", "tightest_remaining_percent": 20},
+        "codex": {"status": "unknown"}}})
+    FakeProbe(monkeypatch, [_stdout(body)])
     candidates.probe_quota(agy)
     monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", "0")
     candidates._QUOTA_CACHE.clear()
@@ -311,7 +392,17 @@ def test_every_stale_agy_family_is_marked_so_a_family_gate_sees_it(monkeypatch):
 
     assert family["status"] == "ok" and family["tightest_remaining_percent"] == 40.0
     assert family["stale"] is True and family["cause"] == result["cause"]
+    assert result["families"]["gemini"]["stale"] is True
+    assert "stale" not in result["families"]["codex"]
     assert candidates.quota_unknown_record({"adapter_id": "agy", "quota": family})["status"] == "stale"
+
+
+def test_the_probe_runs_with_stdin_closed(monkeypatch):
+    fake = FakeProbe(monkeypatch, [_ok(60)])
+
+    candidates.probe_quota(ADAPTER)
+
+    assert fake.kwargs["stdin"] is subprocess.DEVNULL
 
 
 def test_office_status_names_a_route_chosen_on_a_stale_reading(monkeypatch):
