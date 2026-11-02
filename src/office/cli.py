@@ -41,6 +41,8 @@ Auto Office {ver}
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
+  office amend route <task> --auto --quote "<words>"
+                                    clear a pending task's declared route: it routes automatically again
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
@@ -214,7 +216,7 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
-# `amend route` takes only --as, --quote, and --restart. These amend the plan, so `amend route` refuses them
+# `amend route` takes only --as, --quote, --restart, and --auto. These amend the plan, so `amend route` refuses them
 # instead of dropping them (#896).
 _ROUTE_AMEND_ONLY_FLAGS = {
     "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
@@ -342,6 +344,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
                    help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
+    s.add_argument("--auto", dest="route_auto", action="store_true",
+                   help="amend route: clear the task's declared route so it routes automatically again; refused on any other amendment")
     prs_mode = s.add_mutually_exclusive_group()
     prs_mode.add_argument("--prs", action="store_true", help="amend options: enable task PR publishing")
     prs_mode.add_argument("--no-prs", action="store_true", help="amend options: disable task PR publishing")
@@ -1129,7 +1133,11 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                           next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart, cwd=cwd)
+                                        restart=args.restart, cwd=cwd, auto=args.route_auto)
+    if cmd == "amend" and getattr(args, "route_auto", False):
+        from office.state import Refused
+        raise Refused("auto-without-route", "--auto applies to office amend route only; nothing was recorded",
+                      next_step='office amend route <task> --auto --quote "<user\'s words>"')
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()

@@ -236,3 +236,35 @@ def test_a_declared_route_denied_later_is_refused_not_dispatched(env):
     code, out = env.office("dispatch", "T1", env=_quota(env))
     assert code != 0 and "denied by user routing.user_policy.denied_models" in out, out
     assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
+
+
+def test_auto_clears_a_declared_route_and_dispatch_routes_automatically_again(env):
+    """#977: `office amend route <task> --auto --quote` drops the user-declared route and records it."""
+    _approve(env)
+    env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0 and f"T1 route {CODEX} -> automatic (claude@1/claude-opus-5-5@medium planned)" in out, out
+    assert env.con().execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()[0] is None
+    first, second = _events(env)
+    assert (second["before"], second["after"]) == (CODEX, "claude@1/claude-opus-5-5@medium")
+    assert second["actor"] == "user" and "back to automatic" in second["reason"] and second["auto"] is True
+    code, out = env.office("status")
+    assert "routes: T1 claude@1/claude-opus-5-5@medium (planned)" in out, out
+    code, out = env.office("dispatch", "T1", env=_quota(env))
+    assert code == 0 and _triple(env) == "claude@1/claude-opus-5-5@medium", out
+
+
+def test_auto_refuses_without_a_declared_route_a_quote_or_on_a_live_dispatch(env):
+    _approve(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "auto please")
+    assert code != 0 and "already routes automatically" in out, out
+    env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
+    code, out = env.office("amend", "route", "T1", "--auto")
+    assert code != 0 and "--quote" in out, out
+    code, out = env.office("amend", "route", "T1", "--auto", "--as", "codex/gpt-6-astra@low", "--quote", "x")
+    assert code != 0 and "takes no --as" in out, out
+    code, out = env.office("amend", "T1", "--auto", "--quote", "x", "--", "something")
+    assert code != 0 and "auto-without-route" in out, out
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "auto please")
+    assert code != 0 and "route-live" in out and "office revoke T1" in out, out

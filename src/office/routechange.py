@@ -19,6 +19,7 @@ from office.state import Refused, Usage
 from office.util import dumps, loads, now_iso, parse_iso
 
 USAGE = 'office amend route <task|dispatch> --as <harness>/<model>[@effort] --quote "<user\'s words>" [--restart]'
+AUTO_USAGE = 'office amend route <task> --auto --quote "<user\'s words>"'
 LIVE = ("launching", "running")
 PENDING = ("planned", "queued", "changes_required")  # no live agent: a route change declares the route the next dispatch/rerun runs
 DECLARABLE = (*PENDING, "accepted")
@@ -33,10 +34,12 @@ def _is_worker(con, run: dict, cwd: Path | None) -> bool:
 
 
 def change_route(con, run: dict, target: str | None, as_route: str | None, quote: str | None, *,
-                 restart: bool = False, cwd: Path | None = None) -> Result:
+                 restart: bool = False, cwd: Path | None = None, auto: bool = False) -> Result:
     if _is_worker(con, run, cwd):
         raise Refused("worker-cannot-change-route", "a worker cannot change its own route; the orchestrator does, on the user's words",
                       next_step="office submit")
+    if auto:
+        return _clear_declared(con, run, target, as_route, quote, restart)
     if not target or not as_route:
         raise Usage("usage", "name the live dispatch and its new route", next_step=USAGE, exit_code=2)
     if not (quote or "").strip():
@@ -168,6 +171,53 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
                              "accepted producer evidence kept)"], next="the next amendment or review that reopens this task uses it")
     return Result(lines=[f"{tid} route {before or 'unrecorded'} -> {after} (declared; dispatch runs it, no fallback)"],
                   next=f"office dispatch {tid}")
+
+
+def _clear_declared(con, run: dict, target: str | None, as_route: str | None, quote: str | None,
+                    restart: bool) -> Result:
+    """`--auto` (#977): drop the user-declared route on a task with no live agent, so its next dispatch routes
+    automatically again (the approved plan's slate with its quota-aware fallbacks). The change is recorded
+    in the route history like any other deliberate route change."""
+    if as_route or restart:
+        raise Usage("usage", "--auto returns the task to automatic routing; it takes no --as or --restart",
+                    next_step=AUTO_USAGE, exit_code=2)
+    if not target:
+        raise Usage("usage", "name the task to return to automatic routing", next_step=AUTO_USAGE, exit_code=2)
+    if not (quote or "").strip():
+        raise Usage("quote-required", "a route change records the user's words (--quote)", next_step=AUTO_USAGE,
+                    exit_code=2)
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}")
+    task = _pending_task(con, run, target)
+    if task is None:
+        known = state.get_task(con, run["id"], target.upper()) if target[:1] not in "dD" or len(target) <= 2 else None
+        tid = known["id"] if known else target
+        raise Refused("route-live", f"{tid} has no pending route to clear: a live dispatch keeps its route, and only "
+                      f"a planned, queued, changes-required or accepted executor task can return to automatic routing",
+                      scope=tid, preserved="the task and its route",
+                      next_step=f"office revoke {tid}, then {AUTO_USAGE.replace('<task>', tid)}")
+    tid = task["id"]
+    rec = state.recorded_route(task)
+    if not (rec.get("declared") and dispatch._route_quote(rec)):
+        raise Refused("route-unchanged", f"{tid} has no declared route; it already routes automatically", scope=tid)
+    before = routing.candidate_id(rec["candidate"])
+    plan = dispatch._planned_slate(con, run, tid) or {}
+    after = plan.get("primary")
+    with db.transaction(con):
+        cur = state.get_task(con, run["id"], tid)
+        if cur["status"] != task["status"] or cur.get("current_dispatch_id") != task.get("current_dispatch_id") \
+                or cur.get("route_json") != task.get("route_json"):
+            raise Refused("state-changed", f"{tid} changed while the route was being cleared; re-run", scope=tid,
+                          next_step=AUTO_USAGE)
+        state.update_task(con, run["id"], tid, route_json=None)
+        state.record_route_change(con, run, tid, before, after or "automatic", kind="reroute", actor="user",
+                                  reason=f"user returned the task to automatic routing: \"{quote.strip()}\"",
+                                  extra={"quote": quote, "pending": True, "auto": True})
+    shown = f"automatic ({after} planned)" if after else "automatic"
+    ran = bool(task.get("current_dispatch_id"))
+    return Result(lines=[f"{tid} route {before} -> {shown} (declared route cleared)"],
+                  next=(f"office rerun {tid} --fresh --reroute routes it from current evidence" if ran
+                        else f"office dispatch {tid}"))
 
 
 def _live_dispatch(con, run: dict, target: str) -> tuple[dict, dict]:
