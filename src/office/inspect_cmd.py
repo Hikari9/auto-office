@@ -111,8 +111,11 @@ def _task(con, run, tid) -> Result:
              f"scope {', '.join(t['scope'])} | depends {', '.join(t['depends']) or 'none'}",
              f"contract p{t['contract_version']} acceptance p{t['acceptance_version']} escalations {t['escalations_used']}"]
     if t.get("review_override"):
+        from office import gates
+        inert = gates.review_pin_inert(run)
         lines.append(f"review pinned by user: {t['review_override']['as']}"
-                     + (" (external)" if t["review_override"].get("external") else ""))
+                     + (" (external)" if t["review_override"].get("external") else "")
+                     + (f"; no effect: {inert}" if inert else ""))
     for d in con.execute("SELECT id, role, triple, status, terminal_classification, exit_code, applied_plan_version, worktree, "
                          "launcher, override_json, " + _optional_cols(con) + " FROM dispatches WHERE run_id=? AND task_id=? "
                          "ORDER BY started_at",
