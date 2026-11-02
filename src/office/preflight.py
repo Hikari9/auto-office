@@ -263,10 +263,12 @@ def _in_scope(wt: Path, rel: str, scope: list[str]) -> bool:
 
 
 def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: Path,
-                 tier: str = "deep") -> tuple[list[str], list[str]]:
+                 tier: str = "deep", changed: list[str] | None = None) -> tuple[list[str], list[str]]:
     """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair. Only the inline
-    tier may skip a lens (the brief's other tiers cover all four). `head` is the full sha, `scope` the
+    tier may skip a lens (the brief's other tiers cover all four); the focused tier of a new run takes two lenses and
+    one round. `head` is the full sha, `scope` the
     task's SCOPE: a finding of any severity is out-of-scope only when its file is outside it."""
+    from office import self_review_subagents
     led, errors = parse_ledger(text)
     stop: list[str] = []
     fix = [f"ledger {e}" for e in errors]
@@ -277,13 +279,25 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                    "what changed, then update COMMIT")
     if led["round"] is None:
         fix.append("ledger: no ROUND line")
-    for lens in briefs.LEDGER_LENSES:
-        if lens not in led["lenses"]:
-            fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
-        elif led["lenses"][lens] is not None and tier != "inline":
-            fix.append(f"ledger: lens {lens} is skipped, but the {tier} tier reviews all four lenses: review it and "
-                       f"write `LENS {lens} reviewed`")
-    last_round = (led["round"] or 1) >= briefs.MAX_REVIEW_ROUNDS
+    if tier == briefs.FOCUSED:
+        if (led["round"] or 1) > briefs.FOCUSED_REVIEW_ROUNDS:
+            fix.append(f"ledger: self-review is one round: use ROUND {briefs.FOCUSED_REVIEW_ROUNDS} and stop reviewing")
+        platform = self_review_subagents.platform_relevant(changed if changed is not None else scope)
+        for lens in ("edge-cases", "test-strength", "platform"):
+            if lens not in led["lenses"]:
+                fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+            elif led["lenses"][lens] is not None and (lens != "platform" or platform):
+                fix.append(f"ledger: lens {lens} must be reviewed" if lens != "platform" else
+                           "ledger: platform must be reviewed: the diff touches platform or build files")
+    else:
+        for lens in briefs.LEDGER_LENSES:
+            if lens not in led["lenses"]:
+                fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+            elif led["lenses"][lens] is not None and tier != "inline":
+                fix.append(f"ledger: lens {lens} is skipped, but the {tier} tier reviews all four lenses: review it and "
+                           f"write `LENS {lens} reviewed`")
+    cap = briefs.FOCUSED_REVIEW_ROUNDS if tier == briefs.FOCUSED else briefs.MAX_REVIEW_ROUNDS
+    last_round = (led["round"] or 1) >= cap
     for f in led["findings"]:
         what = f"line {f['line']}: {f['severity']} {_one_line(f['location'], 80)} {_one_line(f['summary'])}"
         if f["kind"] == "contract-conflict":
@@ -294,7 +308,7 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                 stop.append(f"contract-conflict: {what} would break ACCEPT {n}: \"{_one_line(accept[n - 1])}\"; "
                             "do not change the contract yourself: report it")
         elif f["kind"] == "open" and f["severity"] in _BLOCKERS and last_round:
-            stop.append(f"self-review: round {briefs.MAX_REVIEW_ROUNDS} ended with a finding still open ({what}); "
+            stop.append(f"self-review: round {cap} ended with a finding still open ({what}); "
                         "the round cap is spent: report it")
         elif f["kind"] == "open":
             fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path> {_MUTATION}`, or mark it "
@@ -361,7 +375,7 @@ def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: st
     if len(text) > briefs.LEDGER_MAX_CHARS:
         return [], uncommitted + [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line "
                                   "per finding"]
-    stop, fix = check_ledger(text, head, task["accept"] or [], task["scope"] or [], wt, tier)
+    stop, fix = check_ledger(text, head, task["accept"] or [], task["scope"] or [], wt, tier, changed)
     return stop, uncommitted + fix
 
 
@@ -398,12 +412,14 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
     same signal verdict and reasons without duplicating the ledger gate.
     """
     changed = committed_changes(wt, base, head, dep_bases)
+    tier = briefs.run_self_review_tier(run)
     ledger_stop, ledger_fix = ledger_verdict(
-        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")),
+        wt, task, changed, head, tier,
         submission=submission, require=require)
     all_stop = stop + ledger_stop
     all_fix = fix + ledger_fix
-    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))
+    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= (
+        briefs.FOCUSED_REVIEW_ROUNDS if tier == briefs.FOCUSED else briefs.MAX_REVIEW_ROUNDS)))
     if signaled:
         verdict = "stop" if all_stop else "fix"
         reasons = all_stop or [f"self-review round cap spent with repairs outstanding: {item}" for item in all_fix]
@@ -575,6 +591,13 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                                              stop=stop, fix=fix)
     stop += ledger_stop
     fix += ledger_fix
+    if not (stop or fix or wait):
+        from office import self_review_proof
+        proof = self_review_proof.gate(con, run, task, wt, base, head,
+                                       committed_changes(wt, base, head, dep_bases), execute=True)
+        if not proof["ok"]:
+            fix.append("self-review: " + proof["reason"])
+        res.data["self_review_proof"] = proof
 
     res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"
