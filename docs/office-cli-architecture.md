@@ -176,7 +176,6 @@ Write access of a reviewer:
 |---|---|---|
 | codex | dispatch dir only (`--cd <dispatch dir>`, no `--add-dir`; also the tmp dirs codex always allows) | yes, by the sandbox |
 | claude | its dispatch dir only: `--permission-mode dontAsk` with a single `Edit(<dispatch dir>/**)` allow (Claude Code checks only `Edit(path)` rules for writes, and one covers the Write tool). `--restricted` ignores the user, project and local settings files, so an allow rule the operator already has cannot widen the fence (managed settings still apply). Everything else is denied, including other runs' dispatch dirs. Explicit `Edit(...)` denies cover the checkout, the worktrees dir, the data home and the read-only guidance roots (`~/.claude`, `~/.codex`, `~/.agents`, `~/AGENTS.md`, `~/CLAUDE.md`); a deny is skipped when it would contain the dispatch dir, since deny beats allow | yes, by the permission rules (Bash is denied, so no shell path around them) |
-| gemini | `--approval-mode plan` (read-only) | yes |
 | agy | `--dangerously-skip-permissions`, no scoping flag exists | no |
 
 ### 3.6 Legacy Migration (D139-6, D142-6)

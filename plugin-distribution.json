@@ -1,0 +1,49 @@
+{
+  "public_skills": [
+    "auto-office",
+    "auto-office-lean",
+    "auto-takeover",
+    "auto-routing",
+    "auto-self-improve",
+    "auto-closeout",
+    "auto-intake",
+    "auto-review",
+    "claude-cli",
+    "codex-cli",
+    "agy-cli",
+    "hermes-cli",
+    "opencode-cli",
+    "pi-cli",
+    "herdr",
+    "herdr-close-panes"
+  ],
+  "retired_skills": [
+    "auto-adapter",
+    "auto-execution",
+    "auto-loop",
+    "auto-maintenance",
+    "auto-planning",
+    "auto-update-benchmarks",
+    "auto-verification",
+    "office-submit"
+  ],
+  "support_roots": [
+    "adapters",
+    "catalog",
+    "config",
+    "docs",
+    "protocol",
+    "references",
+    "schemas",
+    "scripts"
+  ],
+  "support_files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
+    "MANIFESTO.md",
+    "README.md",
+    "plugin.json",
+    ".claude-plugin/plugin.json"
+  ]
+}

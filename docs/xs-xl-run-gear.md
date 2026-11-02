@@ -4,6 +4,8 @@ This is the normative runtime boundary for **new runs**. It complements—not re
 
 ## Pinned run gears (complexity is not risk)
 
+For a **new or near-empty repo** that benefits from one continuous strong builder instead of many handoffs, the separately selected `--gear greenfield` provides **2-3 internal phases inside one XL-routed executor task, with one end-of-build convergence review**. It is never auto-fitted, and the risk/authorization/checks floors remain. See [greenfield / lean gear](greenfield-lean-gear.md).
+
 | Run gear | Planner | Producer mode | Producer self-review | Independent plan review | Independent convergence | Verification |
 | --- | --- | --- | --- | --- | --- | --- |
 | XS | Minimal inline plan | Orchestrator-inline, bounded low-risk by default | Four-lens inline ledger | Only if risk requires | Only if risk requires | Deterministic and applicable acceptance checks |
@@ -17,6 +19,8 @@ A new run's **complexity** gear is pinned by the orchestrator at intake (or expl
 Historical gear aliases are still accepted only when explicitly selected for compatibility. Such starts retain the original legacy funding contract, emit a compatibility notice, and cannot be mistaken for new XS-XL runs. CLI help advertises XS-XL as the default; removing explicit aliases would break established legacy start integrations. Existing pinned runs resume unchanged.
 
 ### Self-review subagents (`self_review_subagents.py`)
+
+For new runs (convergence-v1) each funded gear (S, M, L, XL) gets exactly **one** `combined` subagent per task: edge cases and test strength in one read-only pass, with platform/build only when the scope touches it. Security is covered by the convergence reviewer. The paragraph below describes the funding a run pinned to v3.1 keeps.
 
 Only pinned `run-gear-1` runs fund them, and each is an independently launched reviewer session on the task's accepted revision, advisory only and never a convergence verdict or round. XS funds none (the executor's inline four-lens ledger is all of it). S and M fund one `four-lens` subagent per task. L and XL fund **up to four specialists per task**: `edge-cases` and `test-strength` always, `security` when the run risk is elevated or irreversible, the blast radius is production, or the task scope names auth, security, permission, secret, token, crypt or credential paths, and `platform` when the scope touches scripts, CI, packaging or manifests or the descriptor domain is infrastructure. A missing, invalid or wrong-commit report blocks convergence review (fail closed) and spends no round. A report for the same revision, commit and rubric is reused.
 

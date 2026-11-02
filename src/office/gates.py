@@ -637,6 +637,13 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
+        if code != 0 and (runner := _missing_runner(command, out)):
+            # #739: the interpreter this check ran with has no test runner. That is the
+            # environment, not the code: say so instead of CHANGES_REQUIRED.
+            return {"verdict": "UNAVAILABLE", "results": results,
+                    "summary": f"`{command}`: the interpreter it ran with has no `{runner}` module; run the check "
+                               f"in the repository's environment (for example `uv run python -m {runner}` or "
+                               f"`.venv/bin/python -m {runner}`) by amending the check, then office resume"}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
             why = f"check {timed_out}" if killed else f"check failed (exit {code})"
@@ -649,6 +656,22 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def _missing_runner(command: str, out: str) -> str | None:
+    """The module a check runs as its tool (`python -m X`, or a bare `X` command) when the
+    output says that very module is missing; None otherwise, so a test's own failed
+    import stays a real failure."""
+    missing = re.search(r"No module named '?([A-Za-z0-9_.]+)'?", out[-2000:])
+    if not missing:
+        return None
+    name = missing.group(1)
+    # The whole `-m` target or command word, so `No module named 'pkg.sub'` from inside
+    # `python -m pkg.tests` (the project's own import) is never read as a missing tool.
+    end = r"(?=$|[\s;&|])"
+    runs = (re.search(rf"(?:^|[\s;&|])-m\s+{re.escape(name)}{end}", command)
+            or re.match(rf"\s*{re.escape(name)}{end}", command))
+    return name if runs else None
 
 
 class _TimedOut(str):
@@ -753,6 +776,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     else a fresh session runs on the same route. `prefer_not` lists routes a
     review-only re-run starts away from: they are used again only when no other
     route qualifies."""
+    # Route from the run as stored now, not the snapshot the calling job loaded: one
+    # convergence job runs every self-review subagent in turn, and a user re-pin
+    # (office config --apply-routing) made meanwhile must reach the next reviewer.
+    run = state.get_run(con, run["id"]) or run
     convergence = contract.is_convergence(run)
     # v3.1 bounds route substitution; the convergence contract walks the whole
     # eligible fallback chain before reporting the reviewer unavailable (#337),
@@ -850,11 +877,34 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             with db.transaction(con):
                 con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
                             (resume["parent"], resume["session_id"], dispatch_id))
+        guard = _worktree_guard(d, profile_kind, cwd)
+        before = guard(None) if guard else None
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
                             include_dirs=include_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")),
                             resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
+        _note_headless_reviewer(con, run, d, profile_kind)
+        if guard and (changed := guard(before)):
+            # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
+            # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
+            reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the reviewer is the "
+                      "likely cause, but an edit made by anyone else while it ran trips the same check")
+            failures.append(reason)
+            last_failed = (triple, reason)
+            dispatch_mod.reclaim_pane(run, dispatch_id)
+            if not pinned:
+                excluded.add(triple)
+            with db.transaction(con):
+                state.emit(con, run, "review.worktree_changed", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
+                           f"{role} {dispatch_id} on {triple}: {changed}", task_id=gate.get("task_id"),
+                           dispatch_id=dispatch_id, payload={"route": triple, "gate": gate["id"], "changed": changed})
+                con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+                con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
+                            (dispatch_id,))
+            if pinned:
+                break  # the user named this reviewer; never substitute another
+            continue
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
         wrote_file = output.is_file() and output.stat().st_size > 0
@@ -862,8 +912,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         # Wall signatures come from the harness log, never from the review
         # itself (a review of quota code must not read as a quota wall).
         log_text = "" if wrote_file else _log_text(d, ddir)
+        # A pane agent prints its quota wall only in the pane. Read before any re-prompt, so a walled
+        # reviewer moves to another harness at once instead of minutes later (run 12922516, 2026-11-02).
+        pane_wall = None if wrote_file else _pane_quota_wall(d, ddir)
         launch_failed = ((d.get("terminal_classification") != "success" or pane_terminal_status) and not wrote_file) \
-            or _quota_signature(log_text) or _auth_signature(log_text)
+            or _quota_signature(log_text) or _auth_signature(log_text) or bool(pane_wall)
         if not parsed.valid and not launch_failed:
             # The reviewer answered (or ended cleanly) but its reply file is
             # missing or unparseable. Its work is not discarded and no other
@@ -957,9 +1010,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
         if pane_terminal_status:
             reason += f" (Herdr pane status {pane_terminal_status})"
-        wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+        wall = "quota" if pane_wall or _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
         if wall:
-            reason += f" [{wall}]"
+            reason += f" [{wall}" + (f": {pane_wall}" if pane_wall else "") + "]"
         failures.append(reason)
         last_failed = (triple, reason)
         if pinned:
@@ -975,6 +1028,49 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
                 "env_failures": len(failures), "exhausted": True}
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
+    """For a reviewer profile that declares `verify_worktree_unchanged` (a harness with no read-only
+    sandbox), return `guard(before) -> dict | str | None`: `guard(None)` takes the fingerprint (HEAD,
+    tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
+    or None. Returns None when the profile does not ask for the check."""
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
+    if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):
+        return None
+
+    def git(*args: str) -> str:
+        try:
+            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+        except OSError as exc:
+            return f"unverifiable: {exc}"
+        return f"unverifiable: git exited {proc.returncode}" if proc.returncode else proc.stdout
+
+    def fingerprint() -> dict:
+        untracked = sha256_bytes(b"".join(
+            name.encode() + b"\0" + _file_digest(Path(cwd) / name).encode()
+            for name in sorted(git("ls-files", "--others", "--exclude-standard", "-z").split("\0")) if name))
+        return {"HEAD": git("rev-parse", "HEAD").strip(),
+                "tracked diff": sha256_bytes(git("diff", "HEAD", "--binary").encode()),
+                "status": sha256_bytes(git("status", "--porcelain=v1", "--untracked-files=all").encode()),
+                "untracked files": untracked}
+
+    def guard(before: dict | None):
+        now = fingerprint()
+        if before is None:
+            return now
+        if str(now["HEAD"]).startswith("unverifiable") or str(before["HEAD"]).startswith("unverifiable"):
+            return "the worktree could not be fingerprinted (not a git checkout or git failed), so the review cannot be trusted"
+        return ", ".join(k for k in now if now[k] != before[k]) or None
+    return guard
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError:
+        return "unreadable"
 
 
 def _reviewer_pane_terminal_without_reply(d: dict, output: Path) -> str | None:
@@ -1165,6 +1261,22 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     return text, parsed, reason
 
 
+def _note_headless_reviewer(con, run: dict, d: dict, profile_kind: str) -> None:
+    """A reviewer whose profile has a Herdr pane form but ran headless took the CLI fallback (Herdr unusable,
+    or no pane): say so where office status reads launch notices (#1027). Herdr runs it by default."""
+    from office import adapters
+    if (d or {}).get("launcher") not in ("process", "process-fallback"):
+        return
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    if not adapters.pane_capable(adapter, profile_kind):
+        return
+    why = "the Herdr pane could not start" if d["launcher"] == "process-fallback" else "Herdr was not usable"
+    with db.transaction(con):
+        state.emit(con, run, "launch", f"{d.get('task_id') or d['id']}: {d['role']} {d['id']} on {d.get('triple')} ran "
+                   f"headless (CLI fallback): {why}", task_id=d.get("task_id"), dispatch_id=d["id"],
+                   payload={"launcher": d["launcher"], "profile": profile_kind})
+
+
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
     g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
@@ -1310,7 +1422,9 @@ def _last_block(text: str) -> str:
     """Reviewers sometimes narrate before answering; keep the reply from the
     last VERDICT line onward plus the finding lines around it."""
     lines = text.splitlines()
-    idx = [i for i, l in enumerate(lines) if re.search(r"VERDICT\s*[:=]", l, re.I)]
+    # A verdict line leads its line (as the parser reads it), never a quote inside a finding:
+    # `verdict == "UNAVAILABLE"` in a FINDING once cut the real VERDICT line off every rewrite (#894).
+    idx = [i for i, l in enumerate(lines) if re.match(r"VERDICT\s*[:=]", review_parse._clean(l), re.I)]
     if not idx:
         return text
     start = idx[-1]
@@ -1318,6 +1432,27 @@ def _last_block(text: str) -> str:
                                  review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
+
+
+PANE_WALL_LINES = 12
+
+
+def _pane_quota_wall(d: dict, ddir: Path) -> str | None:
+    """The id of an adapter quota failure signature (opencode's "Free usage limit reached")
+    among the last lines of a Herdr pane agent that wrote no reply, or None. Only the
+    adapter's own quota signatures, and only the pane's last lines, count: the agent's
+    review text above them may well discuss quota code."""
+    if d.get("launcher") != "herdr":
+        return None
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    sigs = [s for s in adapter.get("failure_signatures") or []
+            if isinstance(s, dict) and s.get("pattern") and _quota_signature(s["pattern"])]
+    if not sigs:
+        return None
+    lines = [line for line in _log_text(d, ddir, pane=True).splitlines() if line.strip()][-PANE_WALL_LINES:]
+    tail = "\n".join(lines).lower()
+    return next((s.get("id") or s["pattern"] for s in sigs if s["pattern"].lower() in tail), None)
 
 
 def _quota_signature(text: str) -> bool:
@@ -1436,12 +1571,16 @@ def _fresh_code(code: str, taken: set[str]) -> str:
     return f"{prefix}{n}"
 
 
-def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=()) -> list[dict]:
+def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=(),
+                 foreign=()) -> list[dict]:
     """One review reply's findings under codes that still name what they named. A code the scope already
     holds for a finding with a different fingerprint is recorded under a fresh code; a code reused for the
     same finding keeps it. Findings recorded before fingerprints existed carry none and keep their code.
-    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
-    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
+    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take. `foreign` are codes
+    another gate of the same scope already holds (#398: a visual F11 beside a convergence F11 left one of
+    them unreachable by `office disposition L-T1:F11`): a finding new to this gate kind never takes one."""
+    foreign = set(foreign)
+    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved) | foreign
     seen: dict[str, str] = {}
     renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
     out = []
@@ -1452,9 +1591,14 @@ def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict]
             row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
                               "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
             known = row[0] if row else None
-        if known is not None and known != fp and (f["code"], fp) in renamed:
+        # A code another gate kind holds collides only when this gate kind never held it (a row recorded
+        # before fingerprints existed keeps its code).
+        collides = (known is not None and known != fp) or (
+            f["code"] in foreign and f["code"] not in seen and con.execute(
+                f"SELECT 1 FROM findings WHERE {where} AND code=? LIMIT 1", (*params, f["code"])).fetchone() is None)
+        if collides and (f["code"], fp) in renamed:
             f = {**f, "code": renamed[(f["code"], fp)]}
-        elif known is not None and known != fp:
+        elif collides:
             fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
             taken.add(fresh)
             state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "

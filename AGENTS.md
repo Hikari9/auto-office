@@ -14,6 +14,7 @@ Every PR that lands on `main` bumps the release version in that same PR, followi
 - Add one line for the new version at the top of `CHANGELOG.md`.
 - Parallel PRs that bump the same version conflict. Rebase, take the next free version, and update the `CHANGELOG.md` line.
 - The bump is part of the change, not a separate release step. Do not skip it, and do not stop on a classifier block: report the exact command that was blocked.
+- **Batch exception:** for an explicitly planned office land --batch release, member PRs defer their bump to the **one** designated version-owner lane/PR. The batch manifest and final SHA enforce one version change and one changelog version heading. See docs/batch-landing.md.
 
 ## Validation
 

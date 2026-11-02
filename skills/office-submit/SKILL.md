@@ -19,8 +19,19 @@ goes to step 2. Skip for an empty or tiny mechanical diff. Fix rounds repeat ste
 
 ## 2. Adversarial self-review
 
-Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). Office sets
-the tier from the run's gear and risk (unknown risk is never the `inline` tier, and a planner-declared lightweight path does not lower it). You cannot lower it. Do the review as the tier says:
+Find the base and the tier in the brief's `SELF-REVIEW` line (`git diff <base>`, `(tier: <tier>)`). A new run's tier is
+always `focused`. Only a run pinned to v3.1 gets `inline`, `single` or `deep`, set from its gear and risk (unknown risk is
+never `inline`). You cannot lower it. Do the review as the tier says:
+
+- **`focused`:** one round, edge cases and test strength only (platform/build too when the diff touches scripts, CI,
+  packaging or OS/process code). Start exactly one `Agent` subagent with the diff command, those lenses and a read-only
+  instruction, or make one fresh pass yourself. Security is not yours: the convergence reviewer covers it. Write
+  `ROUND 1`, `LENS edge-cases reviewed`, `LENS test-strength reviewed` and a `LENS platform` line. There is no fix-diff re-review.
+  Each medium or high fix names the one test that proves it (`fixed <test path> mutation=failed`). Office runs that test
+  alone on a copy of your commit with the non-test source reverted: it must fail by a test failure (a collection error,
+  timeout or missing command does not count) and pass unreverted. You do not revert anything for the proof, and with no
+  named test or no pytest command in the task's checks Office records an exemption instead of blocking. `office preflight`
+  runs the proof and `office submit` needs its recorded result. No exemption flag exists on this tier.
 
 - **`inline`:** no subagents. Make one fresh pass per lens yourself and fix medium+ findings.
   You may skip a lens that clearly does not apply, with a one-line reason in your report.
@@ -29,7 +40,7 @@ the tier from the run's gear and risk (unknown risk is never the `inline` tier, 
 - **`deep`:** start four `Agent` subagents in one message, in parallel. Give each the diff command, the brief
   path, and one lens, and tell it to read only (no edits).
 
-If the tier is missing from the line, treat it as `deep`. The lenses are the same in every tier:
+If the tier is missing from the line, treat it as `deep`. The lenses of the v3.1 tiers are:
 
 - **(a) Security:** secrets, token exposure in workflows or logs (`workflow_dispatch` inputs echoed),
   auth bypass, missing server-side revalidation, path or symlink escapes.
@@ -52,7 +63,7 @@ Record that mutation for the report. A finding outside SCOPE goes in the report 
 
 Record every finding in the ledger `OFFICE_SELF_REVIEW.md` (worktree root, untracked; format in the brief's `LEDGER` line:
 `COMMIT <full sha of HEAD>`, `ROUND <1-3>`, a `LENS` line per lens, `FINDING <severity> <lens> <file:line> | <summary> | <disposition>`).
-Dispositions: `fixed <test path> mutation=failed`, `out-of-scope`, `dismissed <reason>`, `contract-conflict accept=<n>`, `open`.
+On `focused` the ledger is `ROUND 1` and the `edge-cases`, `test-strength` and `platform` lenses only. Dispositions: `fixed <test path> mutation=failed`, `out-of-scope`, `dismissed <reason>`, `contract-conflict accept=<n>`, `open`.
 A medium or high fix names the test file that proves it and `mutation=failed` (you reverted the fix and the test failed);
 a finding of any severity is `out-of-scope` only when its file is outside SCOPE.
 Record severity as found: a fix never lowers it. Low findings are fixed but do not trigger a re-review. A medium or

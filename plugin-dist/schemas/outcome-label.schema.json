@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "label"
+  ],
+  "properties": {
+    "label": {
+      "enum": [
+        "pending",
+        "verified_no_observed_failure",
+        "recurrence_failure",
+        "revert_failure",
+        "material_post_merge_defect",
+        "abandoned",
+        "environment_failure"
+      ]
+    },
+    "attribution": {
+      "enum": [
+        "model",
+        "harness",
+        "adapter",
+        "quota/account",
+        "environment/network",
+        "planner",
+        "brief",
+        "repository",
+        "verification",
+        "unknown"
+      ]
+    },
+    "contributing_attributions": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string",
+        "anyOf": [
+          { "not": { "pattern": "^narrative:" } },
+          {
+            "enum": [
+              "narrative:success",
+              "narrative:partial_success",
+              "narrative:abandoned",
+              "narrative:defect_detected",
+              "narrative:failed_verification",
+              "narrative:operator_rejected"
+            ]
+          }
+        ]
+      },
+      "contains": { "pattern": "^narrative:" },
+      "minContains": 0,
+      "maxContains": 1
+    },
+    "evidence_hash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "Finding F20: technical labels always require a full, valid SHA-256 hash. `type: string` plus the pattern rejects null, empty, and malformed hashes alike; `required` rejects a missing key outright.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": {
+            "enum": [
+              "verified_no_observed_failure",
+              "recurrence_failure",
+              "revert_failure",
+              "material_post_merge_defect"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": ["evidence_hash"],
+        "properties": {
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F15: an `abandoned` label tagged with the defect_detected or failed_verification narrative subtype (docs/v3-runtime-contracts.md §7.3.1/7.3.2) is also always-mandatory evidence, matching its restored pre-migration reward weight.",
+      "if": {
+        "required": ["label", "contributing_attributions"],
+        "properties": {
+          "label": { "const": "abandoned" },
+          "contributing_attributions": {
+            "type": "array",
+            "contains": {
+              "enum": ["narrative:defect_detected", "narrative:failed_verification"]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["evidence_hash"],
+        "properties": {
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F22: narrative:success / narrative:partial_success reconstruct a reward only for verified_no_observed_failure; on any other label they are an unknown/off-label tag and must be rejected outright, not silently ignored.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "not": { "const": "verified_no_observed_failure" } }
+        }
+      },
+      "then": {
+        "properties": {
+          "contributing_attributions": {
+            "not": {
+              "contains": {
+                "enum": ["narrative:success", "narrative:partial_success"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F22: narrative:abandoned / narrative:defect_detected / narrative:failed_verification / narrative:operator_rejected reconstruct a reward only for abandoned; on any other label they are off-label and must be rejected.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "not": { "const": "abandoned" } }
+        }
+      },
+      "then": {
+        "properties": {
+          "contributing_attributions": {
+            "not": {
+              "contains": {
+                "enum": [
+                  "narrative:abandoned",
+                  "narrative:defect_detected",
+                  "narrative:failed_verification",
+                  "narrative:operator_rejected"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Finding F26: pending is a non-terminal placeholder and never carries evidence or a narrative subtype tag.",
+      "if": {
+        "required": ["label"],
+        "properties": {
+          "label": { "const": "pending" }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence_hash": false,
+          "contributing_attributions": false
+        }
+      }
+    }
+  ]
+}

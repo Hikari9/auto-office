@@ -1,0 +1,3 @@
+# Pane-hosted Claude goes idle between its own background notifications
+
+A Claude executor that backgrounds its own long commands (build, test suites) reports `idle`/`done` between turns while those shells are still running, then wakes on their completion notifications. A monitor that treats "not `working` for two samples" as completion fires early on a Claude pane with no report written yet. For Claude executors, key completion on the report artifact (file exists / contains its final section) and on the agent disappearing, not on lifecycle state. Codex panes stay `working` through their turn, so state-based exits are safer there.

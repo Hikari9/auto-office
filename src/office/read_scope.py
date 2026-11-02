@@ -2,8 +2,7 @@
 
 One definition feeds two consumers:
 - `add_dirs()` is appended to reviewer and vision launches for harnesses that
-  need a flag to read a directory (claude and agy `--add-dir`, gemini
-  `--include-directories`).
+  need a flag to read a directory (claude and agy `--add-dir`).
 - `allow_rules()` are the `permissions.allow` entries `office install` writes to
   ~/.claude/settings.json. context-mode's ctx_execute_file refuses paths outside
   the project root unless a `Read(<glob>)` allow rule covers them, and no launch

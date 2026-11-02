@@ -1,0 +1,71 @@
+# Shipped role routing policy (#850 sections 1-3): the one source of truth for the allow / deny rules a fresh
+# install carries. Everything not listed is neutral, never implicitly denied, and stays eligible.
+#
+#   role:
+#     <harness>[@<major>][|<harness>[@<major>]...]/<model>:
+#       allow | deny:
+#         <effort | "*">: all | [XS, S, M, L, XL]      # "all" = every size; "*" = every effort
+#
+# Preference ORDER is not here: executors use executor_slates.IDEAL, reviewers and the visual reviewer use
+# roles.<role>.preferred_seed in config.default.yaml. A user's routing.user_policy.role_rules outrank every rule
+# below, and a size-scoped rule only applies when the task size is known.
+version: 1
+
+executor:
+  claude@2/claude-haiku-5-5:
+    allow: {medium: [XS], high: [S]}
+    deny: {high: [XS], xhigh: all, max: all}
+  agy@1/gemini-3.8-flash:
+    allow: {low: [XS], medium: [S]}
+    deny: {high: [XS, S], xhigh: all, max: all}
+  codex@0/gpt-6.1-terra:
+    allow: {low: [XS], medium: [S, M], high: [L]}
+    deny: {high: [XS, S, M], xhigh: all, max: all}
+  claude@2|agy@1/claude-sonnet-5-5:
+    allow: {medium: [M], high: [L]}
+    deny: {high: [XS, S, M], xhigh: all, max: all}
+  opencode/glm-5.3-flash:
+    allow: {max: [M]}
+  # Claude Code only. An Opus executor on agy is never automatic, so its XL medium is denied too.
+  claude@2/claude-opus-5-5:
+    allow: {medium: [XL]}
+    deny: {medium: [XS, S, M, L], high: all, xhigh: all, max: all}
+  agy@1/claude-opus-5-5:
+    deny: {medium: all, high: all, xhigh: all, max: all}
+  codex@0/gpt-6.1-sol:
+    allow: {medium: [XL]}
+    deny: {high: all, xhigh: all, max: all}
+  # TODO(Gemini 4 Argon registration PR): confirm the registered harness and model id; inert until then.
+  agy@1/gemini-4-argon:
+    allow: {medium: [L], high: [XL]}
+    deny: {high: [XS, S, M, L], xhigh: all, max: all}
+  # Retired generations and Astra are never executors. Astra planning is a separate role and unaffected.
+  codex@0/gpt-6-astra:
+    deny: {"*": all}
+  codex@0/gpt-5.6-sol:
+    deny: {"*": all}
+  codex@0/gpt-5.6-terra:
+    deny: {"*": all}
+
+# Code review and plan review share one list. Order (luna high, deepseek max, Opus low on claude, Opus low on
+# agy) is roles.<role>.preferred_seed. Opus never reviews above low, and Sonnet 5.5 medium/high never reviews.
+code_reviewer: &reviewers
+  codex@0/gpt-6-luna:
+    allow: {high: all}
+    deny: {xhigh: all, max: all}
+  opencode/deepseek-v4.1-flash-free:
+    allow: {max: all}
+  claude@2|agy@1/claude-opus-5-5:
+    allow: {low: all}
+    deny: {medium: all, high: all, xhigh: all, max: all}
+  claude@2|agy@1/claude-sonnet-5-5:
+    deny: {medium: all, high: all}
+plan_reviewer: *reviewers
+
+visual_reviewer:
+  agy@1/gemini-3.8-flash:
+    allow: {low: all, medium: all}
+  codex@0/gpt-6.1-terra:
+    allow: {low: all}
+  codex@0/gpt-5.6-terra:
+    deny: {low: all}

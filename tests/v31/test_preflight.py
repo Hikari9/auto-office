@@ -132,7 +132,7 @@ def _signals(env):
     return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
 
 
-@pytest.mark.approved
+@pytest.mark.review_contract("v3.1")
 def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
@@ -152,7 +152,7 @@ def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     assert "office prompt" in next_step and "office preflight" in next_step and "office submit" in next_step, next_step
 
 
-@pytest.mark.approved
+@pytest.mark.review_contract("v3.1")
 def test_a_fix_signals_only_after_the_round_cap(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
@@ -281,8 +281,8 @@ def test_preflight_outside_a_task_worktree_stops(env):
     assert code == 4 and "no executor dispatch owns this directory" in out, out
 
 
+@pytest.mark.review_contract("v3.1")
 @pytest.mark.integration
-@pytest.mark.approved
 def test_executor_brief_carries_self_review_preflight_and_status_line(env):
     _, _, d = _dispatched(env)
     from office import paths
@@ -616,7 +616,6 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     cfg = tmp_path / "settings.json"
     cfg.write_text("{}")
     monkeypatch.setitem(install.CONFIG, "claude", cfg)
-    monkeypatch.setitem(install.CONFIG, "gemini", tmp_path / "absent" / "settings.json")
     monkeypatch.setattr(install.read_scope, "sync", lambda data, ledger: ([], [], []))
     monkeypatch.setattr(install.read_scope, "load_ledger", lambda: [])
 

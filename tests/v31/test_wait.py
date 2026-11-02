@@ -5,6 +5,7 @@ silent through an amendment deadlock and a stalled gate that printed none of the
 """
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -378,7 +379,7 @@ def test_signals_an_older_run_already_read_are_not_news(env):
         state.advance_cursor(con, run["id"], "orchestrator", seq)
     assert con.execute("SELECT 1 FROM cursors WHERE consumer=?", (state.SIGNAL_CONSUMER,)).fetchone() is None
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 @pytest.mark.approved
@@ -456,7 +457,7 @@ def test_a_working_agent_is_not_a_stall(env, virtual_wait_clock):
     e = _herdr(env, status="working", pane="thinking")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_an_agent_idle_past_the_threshold_without_submitting_is_a_stall(env):
@@ -500,7 +501,7 @@ def test_an_agent_idle_after_an_accepted_submit_is_not_a_stall(env):
     code, out = env.office("submit", cwd=d["worktree"], env={**e, "OFFICE_DISPATCH_ID": d["id"], "OFFICE_ROLE": "executor"})
     assert code == 0, out
     code, out = _wait(env, e)
-    assert "stall" not in out, out
+    assert not re.search(r"\bstall", out), out
 
 
 def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env, virtual_wait_clock):
@@ -508,7 +509,7 @@ def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env, virtual_w
     e = _herdr(env, status="idle", pane="esc to cancel", changing="1")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_herdr_unreachable_is_never_a_stall(env, virtual_wait_clock):
@@ -516,7 +517,7 @@ def test_herdr_unreachable_is_never_a_stall(env, virtual_wait_clock):
     e = _herdr(env, mode="unreachable")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_a_dead_headless_process_is_a_stall(env):
@@ -637,7 +638,7 @@ def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env, virtual_wait_cloc
     e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 REAL_LIMIT = """\

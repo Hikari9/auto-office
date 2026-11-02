@@ -123,7 +123,7 @@ def main(argv: list[str]) -> int:
                               "statusCheckRollup": s.get("checks", [])})
         elif argv[1] == "checks":
             code = s.get("checks_exit", 0)
-            out = "no required checks reported" if code == 0 else "build  fail"
+            out = s.get("checks_out") or ("no required checks reported" if code == 0 else "build  fail")
     state_path().write_text(json.dumps(s))
     if out:
         print(out, file=sys.stdout if code == 0 else sys.stderr)

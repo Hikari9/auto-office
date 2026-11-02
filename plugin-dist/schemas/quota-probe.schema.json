@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "tightest_remaining_percent",
+    "window_reset_at",
+    "scope",
+    "error"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "ok",
+        "unknown",
+        "error"
+      ]
+    },
+    "tightest_remaining_percent": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "window_reset_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "account",
+        "workspace",
+        "session",
+        "unknown"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

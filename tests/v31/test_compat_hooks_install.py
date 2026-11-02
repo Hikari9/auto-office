@@ -107,7 +107,7 @@ def test_install_is_idempotent_backs_up_and_uninstall_removes_only_managed(env, 
     assert "already current" in out
     assert json.loads(settings.read_text()) == data
     code, out = env.office("doctor")
-    assert "claude: 3 office hook(s)" in out, out
+    assert "claude: 4 office hook(s)" in out, out
     code, out = env.office("uninstall")
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"] == [user_hook]

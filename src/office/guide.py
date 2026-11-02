@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from office import amend, contract, paths, planpath, plans, route_learning, state
+from office import oversize as oversize_signal
 from office.result import Result
 from office.util import atomic_write_text, short, sha256_obj
 
@@ -166,7 +167,8 @@ def next_action(con, run: dict) -> str:
     by_id = {t["id"]: t for t in tasks}
     held_repairs = []
     for t in tasks:
-        if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
+        is_live = gates_mod.worker_live(con, t.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], t["id"]))
+        if t["status"] == "changes_required" and not is_live:
             dependencies = unaccepted_dependencies(t, by_id)
             holder = dispatch.scope_holder(con, run, t)
             if dependencies or holder:
@@ -198,11 +200,11 @@ def next_action(con, run: dict) -> str:
             return f"findings on {t['id']} wait for you: {rerun.recovery_hint(con, run, t['id'])}"
     if held_repairs:
         return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
-    for t in tasks:
-        if t["status"] == "changes_required":
-            # Its live worker has the findings; the repair path stays the next action.
-            return (f"no action; {t['id']}'s worker is fixing its findings (if it stops: "
-                    f"office rerun {t['id']} --resume | --fresh)")
+    live_repairs = [t for t in tasks if t["status"] == "changes_required" and (
+        gates_mod.worker_live(con, t.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], t["id"]))
+    )]
+    if live_repairs:
+        return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live_repairs)
     for t in tasks:
         if t["status"] in ("submitted", "accepted"):
             stale = gates_mod.stale_dependency(con, run, t)
@@ -297,6 +299,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     c = _counts(tasks)
     res = Result()
     res.add(f"{short(run['id'])} {run['phase']} | req r{run['requirements_version']} | plan p{run['plan_version']}")
+    prs_option = (run.get("landing") or {}).get("prs") or {}
+    if prs_option.get("amended_at"):
+        res.add(f"run option amendment: task PRs {'on' if prs_option.get('enabled') else 'off'} "
+                f"(user confirmed {prs_option['amended_at']})")
     from office import upgrade
     stale = upgrade.notice(run)
     if stale:
@@ -330,6 +336,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
+    from office import economics
+    usage, usage_verbose = economics.status_lines(con, run, [t["id"] for t in tasks if t["status"] != "cancelled"])
+    for line in usage:
+        res.add(line)
+    res.verbose.extend(usage_verbose)
+    oversize, oversize_next = ([], None) if state.is_terminal(run) else oversize_signal.lines(con, run, tasks)
+    for line in oversize:
+        res.add(line)
     if not state.is_terminal(run):
         from office import gates as review_gates
         for line in review_gates.review_route_lines(con, run["id"], limit=3):
@@ -378,8 +392,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     from office import root_wake
     for line in root_wake.lines(con, run):
         res.add(line)
-    from office import ctx_alert
+    from office import ctx_alert, executor_context
     ctx_alert.notice(con, run)
+    handoffs = executor_context.recent(con, run)
+    for line in executor_context.status_lines(run, handoffs):
+        res.add(line)
     from office import questions
     for q in questions.recorded(con, run):
         res.add(f"question: {q}")
@@ -432,11 +449,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         # Nothing for the root to do and no one will wake it: it must block on `office wait`. Keep the guide's own
         # line after the prefix so the trial, hold or dependency it names is not lost.
         res.next = f"{NO_WAKE_WAIT}: {res.next}"
+    if oversize_next and not episodes and not stuck_reply:
+        res.next = f"{res.next}; {oversize_next}"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
                 "open_defects": [d["code"] for d in rs["open_defects"]], "next": res.next}
     res.data["root_wake"] = root_wake.metrics(con, run)
+    res.data["executor_handoffs"] = handoffs
     if resumed:
         res.verbose.append("resumed: pending jobs and deliveries reconstructed from runs.db")
     return res
@@ -1081,6 +1101,10 @@ def _waiting_on(con, run: dict, task: dict) -> str:
             stale = gates.stale_dependency(con, run, task)
             if stale:
                 parts.append(stale)
+    if task["status"] == "changes_required" and not parts:
+        from office import gates as gates_mod
+        if gates_mod.worker_live(con, task.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], task["id"])):
+            parts.append("finding delivered to the live worker")
     return "; ".join(parts)
 
 

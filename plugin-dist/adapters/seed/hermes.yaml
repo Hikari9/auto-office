@@ -1,0 +1,46 @@
+id: hermes
+verified_state: valid-unverified
+version_fingerprint:
+  command: [hermes, --version]
+  parser: first-line
+model_source:
+  type: catalog-plus-probe
+  command: null
+effort_mapping:
+  none: null
+  low: low
+  medium: medium
+  high: high
+  xhigh: null
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: hermes
+  argv: [--model, "{model}", --cwd, "{cwd}"]
+  prompt_transport: stdin
+  cwd_transport: flag
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: false
+  notes: Pipe prompt on stdin. Hermes reads from stdin and uses --model for model selection. Completion detected by exit code 0 plus output markers.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: false
+  minimum_effort: null
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: quota-exceeded, attribution: quota/account, pattern: "quota exceeded"}
+  - {id: model-unavailable, attribution: harness, pattern: "model not available"}
+  - {id: rate-limit, attribution: quota/account, pattern: "rate limit"}
+  - {id: context-overflow, attribution: model, pattern: "context length exceeded"}
+  - {id: invalid-key, attribution: environment/network, pattern: "invalid API key"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Hermes adapter seeded for migration. Hermes records sessions in ~/.hermes/state.db (SQLite) and supports skill detection via skill-md-read inference. Active profile config is at ~/.hermes/profiles/{active}/config.yaml.
