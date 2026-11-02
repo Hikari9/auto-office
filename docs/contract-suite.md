@@ -33,7 +33,7 @@ The three CLI smoke tests invoke the real `office` executable in child processes
 
 ## Measurement
 
-Run-level acceptance uses `scripts/validate.sh --pr` and an approved convergence review. The full suite is optional and is not the run-level gate.
+Ordinary PR acceptance uses `scripts/validate.sh --pr` and an approved convergence review. Full validation remains required for test infrastructure changes, deleted or renamed tests, release work, and explicit task requirements; see [validation](validation.md).
 
 Measured on this Mac (Apple Silicon, macOS, 18 logical CPUs; CPython 3.14.8) with `/usr/bin/time -l .venv/bin/python -m pytest -n 2 tests/contracts/core -q`:
 
@@ -45,48 +45,50 @@ This is the new core suite measurement, not a measurement of the PR selector or 
 
 ## Legacy test-module disposition
 
-Every test module tracked at the T2 base is listed below. All are **keep**: this task removes, renames, archives, or suppresses no test. The new core contracts add focused coverage while the existing modules retain their distinct historical, safety, and integration assertions.
+The table uses T1's module-level dispositions and lists every module in the [retirement inventory](test-retirement.md), including retired ones. `historical-diagnostic` classifies retained tests for on-demand diagnosis; `consolidate` retains the module while retiring or rewriting some tests. See [test retirement and traceability](test-retirement.md) for individual dispositions and replacement coverage.
 
 | Legacy module | Disposition |
 |---|---|
-| `tests/contracts/test_executor_policy.py` | keep |
-| `tests/contracts/test_route_parity.py` | keep |
 | `tests/test_adapters.py` | keep |
 | `tests/test_agy_usage.py` | keep |
 | `tests/test_alias_resolution.py` | keep |
 | `tests/test_amend_checks_only.py` | keep |
 | `tests/test_amend_contract_edits.py` | keep |
 | `tests/test_amend_requirements_delivery.py` | keep |
-| `tests/test_amendments.py` | keep |
+| `tests/test_amendments.py` | historical-diagnostic |
 | `tests/test_budget.py` | keep |
 | `tests/test_catalog_archival.py` | keep |
+| `tests/test_check_ecosystem.py` | keep |
 | `tests/test_checks_stale.py` | keep |
 | `tests/test_db_connect.py` | keep |
-| `tests/test_derived_routing.py` | keep |
+| `tests/test_derived_routing.py` | historical-diagnostic |
 | `tests/test_dogfood.py` | keep |
-| `tests/test_families.py` | keep |
+| `tests/test_families.py` | historical-diagnostic |
 | `tests/test_hooks.py` | keep |
 | `tests/test_instruction_conformance.py` | keep |
 | `tests/test_integration.py` | keep |
-| `tests/test_landings.py` | keep |
-| `tests/test_monitor.py` | keep |
+| `tests/test_landings.py` | historical-diagnostic |
+| `tests/test_monitor.py` | historical-diagnostic |
 | `tests/test_packet_delivery_channel.py` | keep |
 | `tests/test_pane_busy.py` | keep |
+| `tests/test_plugin_skill_entry.py` | keep |
 | `tests/test_pr_report.py` | keep |
 | `tests/test_pr_test_selection.py` | keep |
 | `tests/test_pre_push_hook.py` | keep |
-| `tests/test_propose.py` | keep |
+| `tests/test_propose.py` | historical-diagnostic |
 | `tests/test_release_identity.py` | keep |
 | `tests/test_reuse_compact.py` | keep |
-| `tests/test_review.py` | keep |
-| `tests/test_route_policy.py` | keep |
+| `tests/test_review.py` | historical-diagnostic |
+| `tests/test_route_policy.py` | consolidate |
 | `tests/test_route_probe.py` | keep |
-| `tests/test_runtime.py` | keep |
+| `tests/test_runtime.py` | historical-diagnostic |
 | `tests/test_schemas.py` | keep |
-| `tests/test_scoring.py` | keep |
+| `tests/test_scoring.py` | historical-diagnostic |
 | `tests/test_session_end_hook.py` | keep |
 | `tests/test_shipped_catalog_tables.py` | keep |
 | `tests/test_spoke_receipt_integrity.py` | keep |
+| `tests/test_test_retirement_inventory.py` | keep |
+| `tests/test_test_retirement_record.py` | keep |
 | `tests/test_trust_alias_625.py` | keep |
 | `tests/test_trust_conformance.py` | keep |
 | `tests/test_v3_instruction_contract.py` | keep |
@@ -100,7 +102,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_agy_executor.py` | keep |
 | `tests/v31/test_amend_accepted.py` | keep |
 | `tests/v31/test_amend_additive.py` | keep |
-| `tests/v31/test_argon_catalog_809.py` | keep |
+| `tests/v31/test_argon_catalog_809.py` | retire |
 | `tests/v31/test_benchmark_refresh.py` | keep |
 | `tests/v31/test_bug_hint.py` | keep |
 | `tests/v31/test_cap_diff.py` | keep |
@@ -117,6 +119,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_composer_held.py` | keep |
 | `tests/v31/test_config_command.py` | keep |
 | `tests/v31/test_config_sandbox.py` | keep |
+| `tests/v31/test_conformance_vision_routing.py` | keep |
 | `tests/v31/test_context_snapshot.py` | keep |
 | `tests/v31/test_convergence_cap_waiver.py` | keep |
 | `tests/v31/test_convergence_contract.py` | keep |
@@ -125,6 +128,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_declared_route_426.py` | keep |
 | `tests/v31/test_defect_criteria.py` | keep |
 | `tests/v31/test_defect_redirect.py` | keep |
+| `tests/v31/test_delegation_shadow.py` | keep |
 | `tests/v31/test_dependency_readiness.py` | keep |
 | `tests/v31/test_deploy_env_files.py` | keep |
 | `tests/v31/test_discovery_dispatch.py` | keep |
@@ -135,12 +139,13 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_dormant_lease.py` | keep |
 | `tests/v31/test_e2e_flow.py` | keep |
 | `tests/v31/test_economics.py` | keep |
+| `tests/v31/test_economics_efficiency.py` | keep |
 | `tests/v31/test_executor_binding_config_drift.py` | keep |
 | `tests/v31/test_external_visual.py` | keep |
 | `tests/v31/test_finding_identity.py` | keep |
 | `tests/v31/test_fixture_source_path.py` | keep |
 | `tests/v31/test_gates.py` | keep |
-| `tests/v31/test_haiku_5_5.py` | keep |
+| `tests/v31/test_haiku_5_5.py` | retire |
 | `tests/v31/test_harness_model_cli.py` | keep |
 | `tests/v31/test_harness_version_memo.py` | keep |
 | `tests/v31/test_headless_agent_env.py` | keep |
@@ -157,17 +162,18 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_install_drift.py` | keep |
 | `tests/v31/test_integrated_review.py` | keep |
 | `tests/v31/test_intelligence_floor.py` | keep |
-| `tests/v31/test_issue809_executor_slates.py` | keep |
+| `tests/v31/test_issue502_strategy_efficiency.py` | keep |
+| `tests/v31/test_issue809_executor_slates.py` | retire |
 | `tests/v31/test_issue809_inline_dispatch.py` | keep |
 | `tests/v31/test_issue809_pane_size_label.py` | keep |
-| `tests/v31/test_issue809_real_routes.py` | keep |
-| `tests/v31/test_issue809_regression.py` | keep |
+| `tests/v31/test_issue809_real_routes.py` | consolidate |
+| `tests/v31/test_issue809_regression.py` | consolidate |
 | `tests/v31/test_issue809_rollout_metrics.py` | keep |
 | `tests/v31/test_issue809_run_gear.py` | keep |
 | `tests/v31/test_issue809_self_review_subagents.py` | keep |
 | `tests/v31/test_issue809_xl_review.py` | keep |
-| `tests/v31/test_issue811_terra_supersession.py` | keep |
-| `tests/v31/test_issue846_size_seeds.py` | keep |
+| `tests/v31/test_issue811_terra_supersession.py` | consolidate |
+| `tests/v31/test_issue846_size_seeds.py` | consolidate |
 | `tests/v31/test_issue_267.py` | keep |
 | `tests/v31/test_issue_268.py` | keep |
 | `tests/v31/test_issue_399_dispatch_recovery.py` | keep |
@@ -203,16 +209,29 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_issue_712_deploy_artifacts.py` | keep |
 | `tests/v31/test_issue_714_topological_restack.py` | keep |
 | `tests/v31/test_issue_721_accepted_route.py` | keep |
+| `tests/v31/test_issue_730_run_base.py` | keep |
 | `tests/v31/test_issue_734_fetched_base.py` | keep |
 | `tests/v31/test_issue_740_recovery.py` | keep |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |
 | `tests/v31/test_issue_783_cleanup.py` | keep |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |
+| `tests/v31/test_issue_790_codex_pane_submit.py` | keep |
 | `tests/v31/test_issue_790_held_pointer.py` | keep |
 | `tests/v31/test_issue_790_review_route.py` | keep |
 | `tests/v31/test_issue_817_effort_ceiling.py` | keep |
+| `tests/v31/test_issue_827_opencode_reviewer_crash.py` | keep |
+| `tests/v31/test_issue_836_close_cancels_jobs.py` | keep |
 | `tests/v31/test_issue_845_invocation_table.py` | keep |
 | `tests/v31/test_issue_845_user_allow.py` | keep |
+| `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |
+| `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |
+| `tests/v31/test_issue_895_false_stalls.py` | keep |
+| `tests/v31/test_issue_896_amend_contract_route.py` | keep |
+| `tests/v31/test_issue_897_full_suite_timeout.py` | keep |
+| `tests/v31/test_issue_918_busy_reply_ingest.py` | keep |
+| `tests/v31/test_issue_920_reinstall_wake.py` | keep |
+| `tests/v31/test_issue_921_route_recovered.py` | keep |
+| `tests/v31/test_issue_922_919_wake_default.py` | keep |
 | `tests/v31/test_job_ownership.py` | keep |
 | `tests/v31/test_kilo_registration.py` | keep |
 | `tests/v31/test_land.py` | keep |
@@ -220,7 +239,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_landing_gaps.py` | keep |
 | `tests/v31/test_lane_gate_revoke.py` | keep |
 | `tests/v31/test_launch_argv_evidence.py` | keep |
-| `tests/v31/test_lineage_supersession_811.py` | keep |
+| `tests/v31/test_lineage_supersession_811.py` | consolidate |
 | `tests/v31/test_live_delivery_stall.py` | keep |
 | `tests/v31/test_model_floor.py` | keep |
 | `tests/v31/test_model_lineages_610.py` | keep |
@@ -241,6 +260,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_plan_path.py` | keep |
 | `tests/v31/test_plan_review_lifecycle.py` | keep |
 | `tests/v31/test_planner_amend_serial.py` | keep |
+| `tests/v31/test_policy_data_contracts.py` | keep |
 | `tests/v31/test_preexisting_checks.py` | keep |
 | `tests/v31/test_preflight.py` | keep |
 | `tests/v31/test_prompt_landed_baseline.py` | keep |
@@ -263,7 +283,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_role_override_dispatch_837.py` | keep |
 | `tests/v31/test_role_policy_837.py` | keep |
 | `tests/v31/test_role_policy_cli_837.py` | keep |
-| `tests/v31/test_role_seed_routing.py` | keep |
+| `tests/v31/test_role_seed_routing.py` | consolidate |
 | `tests/v31/test_rolling_review.py` | keep |
 | `tests/v31/test_root_wake_723.py` | keep |
 | `tests/v31/test_round_cap_stop.py` | keep |
@@ -291,7 +311,7 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_self_review_ledger.py` | keep |
 | `tests/v31/test_self_review_receipt.py` | keep |
 | `tests/v31/test_session_capture.py` | keep |
-| `tests/v31/test_sonnet_5_5.py` | keep |
+| `tests/v31/test_sonnet_5_5.py` | consolidate |
 | `tests/v31/test_stacked_restack.py` | keep |
 | `tests/v31/test_start_trust.py` | keep |
 | `tests/v31/test_startup_prompts.py` | keep |
@@ -307,19 +327,20 @@ Every test module tracked at the T2 base is listed below. All are **keep**: this
 | `tests/v31/test_visual_port_conflict.py` | keep |
 | `tests/v31/test_visual_preflight.py` | keep |
 | `tests/v31/test_wait.py` | keep |
+| `tests/v31/test_wake_coalesce.py` | keep |
 | `tests/v31/test_worktree_setup.py` | keep |
-| `tests/web/browser/test_agents.py` | keep |
-| `tests/web/browser/test_allocation.py` | keep |
-| `tests/web/browser/test_chat.py` | keep |
-| `tests/web/browser/test_e2e.py` | keep |
-| `tests/web/browser/test_issues.py` | keep |
-| `tests/web/browser/test_layout.py` | keep |
-| `tests/web/browser/test_model_registry_610.py` | keep |
-| `tests/web/browser/test_routing.py` | keep |
-| `tests/web/browser/test_settings.py` | keep |
-| `tests/web/browser/test_shell.py` | keep |
-| `tests/web/browser/test_smoke.py` | keep |
-| `tests/web/browser/test_workbench.py` | keep |
+| `tests/web/browser/test_agents.py` | historical-diagnostic |
+| `tests/web/browser/test_allocation.py` | historical-diagnostic |
+| `tests/web/browser/test_chat.py` | historical-diagnostic |
+| `tests/web/browser/test_e2e.py` | historical-diagnostic |
+| `tests/web/browser/test_issues.py` | historical-diagnostic |
+| `tests/web/browser/test_layout.py` | historical-diagnostic |
+| `tests/web/browser/test_model_registry_610.py` | historical-diagnostic |
+| `tests/web/browser/test_routing.py` | historical-diagnostic |
+| `tests/web/browser/test_settings.py` | historical-diagnostic |
+| `tests/web/browser/test_shell.py` | historical-diagnostic |
+| `tests/web/browser/test_smoke.py` | historical-diagnostic |
+| `tests/web/browser/test_workbench.py` | historical-diagnostic |
 | `tests/web/test_activity.py` | keep |
 | `tests/web/test_api_commands.py` | keep |
 | `tests/web/test_capabilities.py` | keep |

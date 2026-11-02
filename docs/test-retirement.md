@@ -6,6 +6,45 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 
 ## Counts
 
+### Same-host comparison
+
+Measured on 2026-11-02 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CPython 3.14.8. The baseline is the run's `origin/main` base `d14026977392289164d1e09fe454728c71f65b28` in a separate checkout with its own dependencies; the after revision is this branch at `fe99d1fa`, which contains T1's accepted revision, plus `tests/test_test_retirement_record.py` (one module, one node; counts include it, wall time was measured at `fe99d1fa` without it). The after tree also contains the modules that reached main after the baseline, so the module and node deltas are net of those additions. Each timing run was sequential, but a separate `scripts/validate.sh --full` was running on the host (load average about 12 to 15), so wall times are load-dependent and are not a controlled speedup.
+
+| Tier and measure | Before | After |
+|---|---:|---:|
+| Default: test modules with collected nodes | 202 | 208 |
+| Default: test functions with collected nodes | 2,169 | 2,269 |
+| Default: collected nodes | 4,016 | 4,073 |
+| Default: wall time | 365.54 s | 360.80 s |
+| `--all`: test modules with collected nodes | 305 | 314 |
+| `--all`: test functions with collected nodes | 4,317 | 4,524 |
+| `--all`: collected nodes | 6,407 | 6,577 |
+
+From each checkout, collection used `uv run --frozen --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the resulting node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not a count of every function defined in source.
+
+Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen --extra test pytest -n 2 -q tests`. The baseline reported 4,013 passed, 2 failed, 2 skipped; the after revision reported 4,071 passed, 0 failed, 2 skipped. The baseline failures are `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` (missing `dispatchable` key) and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest summary totals one more than its collection count; that discrepancy was not investigated. The default-tier run is not the full suite.
+
+### Full suite
+
+`scripts/validate.sh --full` on T2 head `e0f9145f7a7e` (2026-10-31, same host as the table above): 6,084 passed, 10 failed, 154 skipped, 130 subtests passed in 2,269.60 s. This run is not a clean pass. The 10 failing nodes below also fail with `uv run --frozen --extra test pytest -n 2 --all` on base `origin/main` `d1402697`, with the same node set, per the orchestrator's record. None is in a file this PR changes. The result was recorded by the orchestrator; it was not re-executed in this worktree. Commits after `e0f9145f` change only documentation and `tests/test_test_retirement_record.py`, a parity check that was not part of the recorded run.
+
+- `tests/test_release_identity.py::test_skill_checks_for_the_cli_before_anything_else`
+- `tests/v31/test_issue_703_effective_checks.py::test_amended_run_check_replaces_superseded_integration_command`
+- `tests/v31/test_issue_705_squash_close.py::test_owned_squash_pr_close_proves_heads_and_checks_without_fake_ancestry_or_consent`
+- `tests/v31/test_issue_705_squash_close.py::test_squash_close_preserves_the_pinned_v31_review_contract`
+- `tests/v31/test_issue_790_held_pointer.py::test_enter_that_cannot_submit_says_so_and_marks_one_same_route_retry`
+- `tests/v31/test_landing_gaps.py::test_run_checks_failing_on_a_moved_base_rebase_and_continue`
+- `tests/v31/test_review_reroute.py::test_the_review_reprompt_is_sent_only_inside_the_pane_identity_fence`
+- `tests/v31/test_review_reroute.py::test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command`
+- `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated`
+- `tests/v31/test_rolling_review.py::test_plan_review_ends_at_first_pass_even_on_an_older_version`
+
+### Draft comment for #796
+
+Keep #796 focused on improving the performance of optional historical and full diagnostic runs. Ordinary PRs use the scoped gate in [validation.md](validation.md); this issue does not require preserving every historical test node as a mandatory per-PR check. Full validation remains required for the cases specified there.
+
+### T1 inventory
+
 | | Before | After |
 |---|---:|---:|
 | Test modules outside `tests/contracts/` | 307 | 306 |
@@ -167,6 +206,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_shipped_catalog_tables.py` | keep |  |
 | `tests/test_spoke_receipt_integrity.py` | keep |  |
 | `tests/test_test_retirement_inventory.py` | keep | added by this change: checks this inventory against the modules that exist |
+| `tests/test_test_retirement_record.py` | keep | added by this change: checks the contract-suite legacy table matches this inventory |
 | `tests/test_trust_alias_625.py` | keep |  |
 | `tests/test_trust_conformance.py` | keep |  |
 | `tests/test_v3_instruction_contract.py` | keep |  |
@@ -438,11 +478,10 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 277, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 278, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 
-- `docs/mutation-testing.md:19` still cites the deleted `tests/v31/test_haiku_5_5.py`. It is outside this run's scope, so it is a follow-up.
 - Modules and nodes named in `SAFETY_SMOKE` or `SPECIAL` in `scripts/select_pr_tests.py`, the nodes cited in `docs/contract-suite.md`, and everything in `tests/contracts/`.
 - `tests/test_derived_routing.py` is synthetic (`'m'`, `'fallback'`) and tests the retained 3.0 runtime, so it is classified historical-diagnostic, not retired.
 - `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`: `adaptive.py` hard-codes the Sonnet claude-to-agy hoist, so this is its only guard.
