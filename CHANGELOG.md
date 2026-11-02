@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.26
+
+- feat(wake): the root-wake prompt is one line, `Run <id> (through event N): <what changed>; next: <action>. Run office --run <id> context.`. The standing rules moved to SKILL.md (#1029).
+
 ## 3.15.25
 
 - chore(harness): remove the gemini harness; agy replaces it (#1028). agy's Gemini models, the gemini model-family floor and agy's ~/.gemini token paths stay.
