@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.48
+
+Credit-limited routes can carry an opt-in daily dispatch budget (quota.daily_dispatch_budget); at the budget the route reads as quota-exhausted so reviewer chains fall through, with a warning at 80% (#831).
+
 ## 3.15.47
 
 A reviewer the orchestrator revokes is no longer recorded as a route failure, and no fallback reviewer is started for it (#1007).
