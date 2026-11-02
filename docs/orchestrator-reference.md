@@ -109,6 +109,26 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 - Never run commands inside a task worktree yourself: tools leave files (`uv run` writes `uv.lock`) and `office submit` then
   refuses them as out of scope. Reproduce a check in a scratch copy.
 
+## Idle-only outcome QA (#904)
+
+The orchestrator may sanity-check what executors returned against what the user asked for, but only in time it
+would otherwise spend waiting. It never delays a run. Order of work, every time `office status` or `office wait`
+returns:
+
+1. **P0, unblock progress.** Dispatch ready tasks, answer raised questions within your authority, act on reviewer
+   findings, failures, recoveries and amendments, and run any actionable `next:`.
+2. **P1, required lifecycle.** Integration, required checks and reviews, verification, authorized landing, closeout.
+3. **P2, idle-only QA.** Only when work is in flight and `next:` names no action: take one small slice. Compare the
+   user's goal, the task's current acceptance criteria and contract with the executor's completion report and the
+   evidence already recorded (status, summaries, check results, reviewer verdicts). Read a targeted part of the diff
+   only when the evidence looks thin. Then re-check status before another slice; a new P0 or P1 item preempts QA.
+
+What QA is not: a landing gate, a second code review, a test run, or a reason to dispatch an extra agent. It does
+not approve the orchestrator's own work or bypass review authority. A concrete gap goes through the normal
+mechanisms (`office amend`, `office rerun`, `office prompt`, or the report path). With no idle window, QA is skipped,
+and a summary says so rather than claiming it ran. Keep it cheap: aim for about 3% of run tokens and stay under
+5%. These are targets, not measured baselines.
+
 ## Planning inline
 
 Start from the fetched remote default branch. Office pins that commit even when the caller's local main or detached checkout

@@ -997,3 +997,18 @@ def test_status_drops_a_signal_from_a_dispatch_that_ended(env):
     con.commit()
     code, out = env.office("status", env=EXTERNAL)
     assert not any(l.startswith("blocker: T1") and "round cap" in l for l in out.splitlines()), out
+
+
+def test_idle_outcome_qa_guidance_keeps_progress_first_and_qa_optional():
+    """#904: idle-only outcome QA is guidance; the order (P0 progress, P1 lifecycle, then QA) and its limits are
+    pinned so later edits cannot turn it into a gate or let it delay dispatch."""
+    root = Path(__file__).resolve().parents[2]
+    skill = (root / "SKILL.md").read_text()
+    ref = (root / "docs" / "orchestrator-reference.md").read_text()
+    bullet = next(line for line in skill.splitlines() if line.startswith("- Idle-only outcome QA"))
+    assert "`next:` names no action" in bullet and "always come first" in bullet and "never a gate" in bullet
+    section = ref.split("## Idle-only outcome QA (#904)", 1)[1].split("\n## ", 1)[0]
+    assert section.index("**P0") < section.index("**P1") < section.index("**P2")
+    for phrase in ("a landing gate", "a second code review", "QA is skipped",
+                   "preempts QA"):
+        assert phrase in section, phrase
