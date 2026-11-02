@@ -753,6 +753,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     else a fresh session runs on the same route. `prefer_not` lists routes a
     review-only re-run starts away from: they are used again only when no other
     route qualifies."""
+    # Route from the run as stored now, not the snapshot the calling job loaded: one
+    # convergence job runs every self-review subagent in turn, and a user re-pin
+    # (office config --apply-routing) made meanwhile must reach the next reviewer.
+    run = state.get_run(con, run["id"]) or run
     convergence = contract.is_convergence(run)
     # v3.1 bounds route substitution; the convergence contract walks the whole
     # eligible fallback chain before reporting the reviewer unavailable (#337),

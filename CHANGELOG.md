@@ -2,6 +2,26 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.7
+
+- fix(review): a reviewer routes from the run's current pin, not the snapshot its job loaded, so an `--apply-routing` re-pin reaches self-review subagents inside an in-flight convergence job.
+
+## 3.15.6
+
+- fix(config): `office config --run <id> --apply-routing --quote` re-pins the `quota` block too, so a lowered `quota.reserve_percent` reaches a live run.
+
+## 3.15.5
+
+- fix(config): a stale preferred_seed entry in another role no longer blocks config writes or `office route allow`. Only seeds the edit changes are validated, and an unchanged stale seed is a warning naming the command that replaces it (#874).
+
+## 3.15.4
+
+- fix(land): a GitHub error while reading required checks (rate limit, 5xx, network) is `checks-unavailable` with a retry and stale-gh-cache hint, never `checks-failed` pointing at `office rerun` (#772).
+
+## 3.15.3
+
+- fix(land): restack reads the pushed task branch head. A failed accepted-revision push leaves an ancestor that is a safe lease (#538). A head pushed by hand per `next:` whose tree is the accepted revision merged with the base is adopted instead of re-conflicting, and `next:` names `office close --landed-externally` (#676).
+
 ## 3.15.2
 
 - fix(convergence): a stacked task's in-place edit of a `shared:` file composes when the composition still holds the file exactly as the task's recorded base (#773); sibling edits are still refused. The `next:` hint no longer says to serialize tasks that already depend on each other.
