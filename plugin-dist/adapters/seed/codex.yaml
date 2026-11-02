@@ -71,7 +71,8 @@ office_profiles:
       argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
       resume_argv: [resume, "{session_id}"]
   reviewer:
-    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "-"]
+    argv: [exec, -c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "-"]
+    submit_grant: codex-rules
     prompt: stdin
     output: file
     herdr_kind: codex

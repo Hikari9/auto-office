@@ -108,7 +108,7 @@ def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
     (sub,) = [a for a in top._actions if isinstance(a, argparse._SubParsersAction)]
     global_flags = options(top)  # the shared --run/--state-dir/... flags every subcommand inherits
     amend_specific = options(sub.choices["amend"]) - global_flags
-    assert amend_specific - {"--as", "--quote", "--restart"} == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
+    assert amend_specific - {"--as", "--quote", "--restart", "--auto"} == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
 
 
 @pytest.mark.approved

@@ -27,7 +27,7 @@ trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-
 quota_probe:
   type: command
   command: null
-  unknown_is_unlimited: false
+  unknown_is_unlimited: false  # true: an unknown quota reads as full headroom (a harness with no quota)
 shallow_review:
   supported: false
 agentic_capability:

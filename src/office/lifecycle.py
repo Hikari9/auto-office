@@ -439,12 +439,22 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
     landing = gates.landing_state(con, run, handoff)
+    by_hand: list[str] = []
+    if gates.is_pr_ref(handoff):
+        # The documented compose-by-hand recovery (#729): the handed-off PR is the integration.
+        blockers, by_hand = gates.composed_by_hand_blockers(blockers)
     if landing["status"] != "landed" and not handoff:
         blockers.append(f"landing not recorded: {landing['detail']}")
     if blockers:
+        _, settleable = gates.composed_by_hand_blockers(blockers)
+        nxt = guide.next_action(con, run)
+        if settleable and not gates.is_pr_ref(handoff):
+            nxt += ("; or, once you composed the integration by hand and opened its PR, "
+                    "office close --handoff <pr-url> records that and closes the run")
         raise Refused("close-blocked", "cannot close: " + "; ".join(blockers[:4]),
-                      scope=f"run {short(run['id'])}", preserved="all work, evidence and reviews",
-                      next_step=guide.next_action(con, run))
+                      scope=f"run {short(run['id'])}", preserved="all work, evidence and reviews", next_step=nxt)
+    if by_hand:
+        landing = {**landing, "integration_composed_by_hand": {"handoff": handoff, "settled": by_hand}}
     from office import deploy_artifacts
     deploy_artifacts.preserve_interrupted(run)
     with db.transaction(con):
@@ -460,7 +470,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                          archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
         cancelled_jobs = jobs.cancel_run_jobs_in_transaction(con, run["id"])
         _learn(con, current)
-        state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
+        state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}"
+                   + (f"; integration composed by hand in {handoff} ({'; '.join(by_hand)})" if by_hand else ""))
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
     stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
@@ -471,6 +482,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     planpath.remove(Path(run["repo_root"]), run)
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
+    if by_hand:
+        res.add(f"integration composed by hand: {handoff} stands in for Office's integration ({'; '.join(by_hand)})")
     _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)

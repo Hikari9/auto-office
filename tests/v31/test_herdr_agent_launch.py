@@ -320,9 +320,10 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         # R12: a reviewer may write its reply file, and gets that file's directory.
         assert str(out.parent) in args, args
         if kind == "claude":
-            assert args[args.index("--disallowedTools") + 1].startswith("Edit,Bash,NotebookEdit,Edit(/")
+            assert args[args.index("--disallowedTools") + 1].startswith("Edit,NotebookEdit,Bash(ls),Bash(ls *),")
             # Writes are allowed to the dispatch dir alone; dontAsk denies the rest.
-            assert args[args.index("--allowedTools") + 1] == f"Read,Grep,Glob,Edit(/{out.parent}/**)"
+            assert args[args.index("--allowedTools") + 1] == (f"Read,Grep,Glob,Edit(/{out.parent}/**),"
+                                                              f"Bash(office review submit --file {out.parent}/review-submit.txt)")
             assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
         else:

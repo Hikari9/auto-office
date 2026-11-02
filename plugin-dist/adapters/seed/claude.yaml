@@ -69,21 +69,21 @@ office_profiles:
       argv: [--model, "{model}", --effort, "{effort}", --permission-mode, bypassPermissions, --add-dir, "{cwd}"]
       resume_argv: [--resume, "{session_id}"]
   reviewer:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}{submit_allow}", --disallowedTools, "Edit,NotebookEdit{bash_deny}{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}{submit_allow}", --disallowedTools, "Edit,NotebookEdit{bash_deny}{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
       resume_argv: [--resume, "{session_id}"]
   vision:
-    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
+    argv: [-p, --model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}{submit_allow}", --disallowedTools, "Edit,NotebookEdit{bash_deny}{write_deny}", --add-dir, "{output_dir}", --output-format, text, "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     image_transport: prompt-path
     prompt: stdin
     output: stdout
     herdr_kind: claude
     interactive:
-      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}", --disallowedTools, "Edit,Bash,NotebookEdit{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
+      argv: [--model, "{model}", --effort, "{effort}", --permission-mode, dontAsk, --restricted, --allowedTools, "Read,Grep,Glob{write_allow}{submit_allow}", --disallowedTools, "Edit,NotebookEdit{bash_deny}{write_deny}", --add-dir, "{output_dir}", "{include_dirs}"]
       resume_argv: [--resume, "{session_id}"]

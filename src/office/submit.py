@@ -568,7 +568,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
     reason = preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
     if exempt and not has_ledger and enforced and task["scope"] and any(preflight._in_scope_changes(
-            wt, task, preflight.committed_changes(wt, base, head, dep_bases))):
+            wt, task, preflight.review_changes(con, task, wt, base, head, dep_bases))):
         _check_exemption(task, exempt, reason, exempt_tier)  # empty, read-only and v3.1 work needs no exemption
     ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
         con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True,
@@ -589,14 +589,14 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
                       scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
     from office import self_review_proof
     proof = self_review_proof.gate(con, run, task, wt, base, head,
-                                   preflight.committed_changes(wt, base, head, dep_bases), execute=False)
+                                   preflight.review_changes(con, task, wt, base, head, dep_bases), execute=False)
     if not proof["ok"]:
         raise Refused("self-review-proof", f"{task['id']}: {proof['reason']}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)",
                       next_step="run office preflight (it runs the revert-and-fail proof), then office submit")
     receipt = _self_review_receipt(wt, task, run, head, tree, exempt_tier if exempt and not has_ledger else tier,
                                    enforced, exempt, reason,
-                                   preflight.committed_changes(wt, base, head, dep_bases), preflight)
+                                   preflight.review_changes(con, task, wt, base, head, dep_bases), preflight)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs

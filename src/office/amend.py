@@ -61,9 +61,16 @@ def _send_is_report(after: str) -> bool:
 
 
 _OTHER_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|publish|release|email|notify users|delete|drop table|truncate|"
+    r"\b(?<!\w-)(?:deploy|publish|release|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
+# Emailing people is an authority action; naming an email field, address or error key is not (#543).
+_EMAIL_OUTBOUND = re.compile(
+    r"\b(?:(?:bulk|mass)[ -]e-?mails?|e-?mail (?:blast|campaign)s?|"
+    r"e-?mail(?:s|ed|ing)? (?:out\b|to (?:the |all |every |our |each )?(?:users?|customers?|members?|people|team|everyone|"
+    r"subscribers?|recipients?|list|attendees?|donors?|staff)\b)|"
+    r"e-?mail(?:s|ed|ing)? (?:the |all |every |our |each )?(?:users?|customers?|members?|people|team|everyone|subscribers?|"
+    r"recipients?|attendees?|donors?|staff|list)\b)", re.I)
 _PROD_FLAG = re.compile(r"(?<![\w-])--prod\b", re.I)
 _SEND_WORD = re.compile(r"\b(?<!\w-)send\b(?!-\w)", re.I)
 
@@ -74,9 +81,9 @@ class _AuthorityTerms:
 
     def search(self, text: str):
         found = _OTHER_TERMS.search(text)
-        prod_flag = _PROD_FLAG.search(text)
-        if prod_flag and (found is None or prod_flag.start() < found.start()):
-            found = prod_flag
+        for extra in (_PROD_FLAG.search(text), _EMAIL_OUTBOUND.search(text)):
+            if extra and (found is None or extra.start() < found.start()):
+                found = extra
         for m in _SEND_WORD.finditer(text):
             after = text[m.end():].lstrip(" \t")
             if not _send_is_report(after) and (found is None or m.start() < found.start()):
@@ -355,10 +362,11 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
         before = _snapshot(con, run)
-        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True)
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True, capture_only=True)
         _audit(con, run, amendment_id, before, version, delta)
-        # A checks-only change to an accepted task reruns its checks instead of reopening it.
-        rerun = sync["checks_only"]
+        # A checks-only change to an accepted task reruns its checks instead of reopening it; a capture-only
+        # visual change reruns its lane's visual capture (#728).
+        rerun = sync["checks_only"] + sync["capture_only"]
         # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
         affected = sorted((set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"])) - set(rerun))
         if not scope_ids and not affected and not rerun:
@@ -370,7 +378,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
-        rechecked = [tid for tid in rerun if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
+        rechecked = [tid for tid in sync["checks_only"] if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
+        recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
         from office import contract
@@ -397,6 +406,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
+    for line in recaptured:
+        res.add(line)
     old_tasks = {t["id"]: t for t in current.get("tasks") or []}
     for task in parsed.tasks:
         prior = old_tasks.get(task["id"]) or {}
@@ -485,21 +496,23 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
                      now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
         before = _snapshot(con, run)
         prior_graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
-        sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, capture_only=True)
         _audit(con, run, amendment_id, before, version, delta)
         _sync_leases(con, run, sync["contract"])
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
-        affected = set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])
+        affected = (set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])) - set(sync["capture_only"])
         ripple = _ripple(con, run, prior_graph, sync)
         affected -= set(ripple)
+        recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version,
                  hold=_amended_holds(con, run, affected))
-        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} (a task you build on changed its contract)", version,
-                 hold=ripple)
+        owners = sorted(sync["contract"])
+        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} {_ripple_note(owners)}", version,
+                 hold=ripple, owners=owners)
         flagged = _envelope_changes(con, run, parsed)
         from office import contract
         if contract.is_convergence(run):
@@ -508,13 +521,28 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
     jobs.kick(con, run["id"])
-    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *redirect_lines]
+    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *recaptured,
+             *redirect_lines]
     if flagged:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
     res = Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
                  if flagged else "exceptions only; office status")
     plans.show_diagram(con, state.get_run(con, run["id"]), version, parsed.tasks, plan_path, res)
     return res
+
+
+def _recapture(con, run: dict, task_ids: list[str], amendment_id: str) -> list[str]:
+    """A capture-only visual amendment (#728): the accepted task is not reopened; its lane recaptures. Caller holds tx."""
+    from office import contract, convergence
+    lines = []
+    for tid in task_ids:
+        state.emit(con, run, "task.capture_amended", f"{tid} visual capture contract changed by {amendment_id}; "
+                   "the task stays accepted", task_id=tid, audience="runtime")
+        if contract.is_convergence(run):
+            lines += convergence.recapture_visual(con, run, tid, amendment_id)
+        else:
+            lines.append(f"{tid} visual capture contract updated by {amendment_id}; its next visual capture uses it")
+    return lines
 
 
 def _task_changed(cur: dict, planned: dict | None) -> bool:
@@ -579,8 +607,9 @@ def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dic
     _deliver(con, run, aid, affected, f"plan p{version} contract revision", version,
              hold=_amended_holds(con, run, affected))
     ripple = _ripple(con, run, prior_graph or {}, changes)
-    _deliver(con, run, aid, ripple, f"plan p{version} contract revision (a task you build on changed its contract)",
-             version, hold=ripple)
+    owners = sorted(changes.get("contract", []))
+    _deliver(con, run, aid, ripple, f"plan p{version} contract revision {_ripple_note(owners)}",
+             version, hold=ripple, owners=owners)
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
             from office import gates
@@ -729,12 +758,21 @@ def _relaunch_decision(task: dict) -> dict | None:
     return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
 
 
+def _owners_label(owners: list[str]) -> str:
+    return ", ".join(owners) or "a task you build on"
+
+
+def _ripple_note(owners: list[str]) -> str:
+    return f"({_owners_label(owners)} changed its contract, not yours: adjust only work that relies on what changed)"
+
+
 def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
-             hold: list[str] = ()) -> list[str]:
+             hold: list[str] = (), owners: list[str] | None = None) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
     unapplied ones. A task in `hold` is built on a task being redone: it gets the delta and is reopened, but no
     executor is relaunched until the orchestrator reruns it (office rerun), after the dependency is accepted again.
-    Caller holds tx."""
+    `owners` marks a ripple delivery (#960): the receiving tasks build on the `owners`, whose contract changed,
+    so their prompt says so instead of telling them to apply someone else's amendment. Caller holds tx."""
     from office import dispatch, gates
     targets = []
     for tid in task_ids:
@@ -763,8 +801,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             state.enqueue(con, run, "notify_worker", {"dispatch_id": d["id"], "task_id": tid,
                           "unblock": submit_mod.self_blocked(task), "amendment_id": amendment_id,
                           "block_id": submit_mod.block_id(con, d["id"]),
-                          "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
-                                  "then office submit again."},
+                          "text": (f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
+                                   "then office submit again." if owners is None else
+                                   f"AMENDMENT {amendment_id} changed the contract of {_owners_label(owners)}, "
+                                   f"not yours: run office status, change your work only where it relies on what changed, "
+                                   f"office ack {amendment_id}, then office submit again.")},
                           dedup_key=f"notify:{did}", max_attempts=1)
         elif task["status"] in ("planned",):
             # Nothing has run: the first session starts from the current contract.

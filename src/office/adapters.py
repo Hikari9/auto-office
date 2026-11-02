@@ -538,6 +538,15 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
         if "{write_deny}" in arg:
             deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
             arg = arg.replace("{write_deny}", "".join("," + r for r in deny))
+        granted = bool(output) and kind in read_scope.READER_KINDS
+        if "{submit_allow}" in arg:  # exactly one command, no wildcard (#1030 narrow grant)
+            from office import review_submit
+            arg = arg.replace("{submit_allow}", f",Bash({review_submit.submit_command(output)})" if granted else "")
+        if "{bash_deny}" in arg:
+            from office import review_submit
+            deny = ([r for c in review_submit.CLAUDE_READONLY_BASH for r in (f"Bash({c})", f"Bash({c} *)")]
+                    if granted else ["Bash"])
+            arg = arg.replace("{bash_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
                .replace("{last_message}", str(Path(output).with_name("last-message.txt") if output else Path(cwd) / "last-message.txt"))
                .replace("{cwd_toml}", toml_path(cwd))
@@ -561,7 +570,10 @@ def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
     dispatch dir and `env` (OPENCODE_CONFIG_DIR) points the harness at it. The same
     env serves the pane and headless forms. Raises AdapterError when the file cannot
     be written, so the launch stops with a reason instead of running unfenced."""
-    spec = (profile(adapter, kind) or {}).get("agent_file") or {}
+    prof = profile(adapter, kind) or {}
+    if prof.get("submit_grant") == "codex-rules" and output and kind in read_scope.READER_KINDS:
+        _write_codex_submit_rules(adapter, kind, Path(output))
+    spec = prof.get("agent_file") or {}
     if not spec or not output or kind not in read_scope.READER_KINDS:
         return {}
     if spec.get("format") != "opencode":
@@ -572,6 +584,18 @@ def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
         raise AdapterError(f"the {adapter.get('id')} {kind} agent file could not be written under "
                            f"{Path(output).parent}: {exc}") from exc
     return {spec.get("env") or "OPENCODE_CONFIG_DIR": str(config_dir)}
+
+
+def _write_codex_submit_rules(adapter: dict, kind: str, output: Path) -> None:
+    """The reviewer's own trusted project (its dispatch dir) carries one execpolicy rule: the exact submit command."""
+    from office import review_submit
+    rules = output.parent / ".codex" / "rules" / "office-review-submit.rules"
+    try:
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.write_text(review_submit.codex_rules(output), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"the {adapter.get('id')} {kind} submit rule could not be written under {output.parent}: "
+                           f"{exc}") from exc
 
 
 def headless_resume_args(adapter: dict, kind: str, session_id: str) -> list[str] | None:

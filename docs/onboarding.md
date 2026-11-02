@@ -29,7 +29,7 @@ An answer is `office` (Let Office decide), `keep`, or a full `harness/model@effo
 
 `office` removes only that role's user-level `preferred_seed`, so the shipped default applies. The repo file is never written,
 and a repo override still wins in its repository. `office onboard` reports one when it exists. Running runs keep the policy they
-pinned (#440). `office config --run <id> --apply-routing --quote "<words>"` stays the only way to re-pin a run.
+pinned (#440). `office config --run <id> --apply-routing --quote "<words>"` stays the only way to re-pin a run's routing; `--apply-verification` re-pins only its check timeouts and check concurrency (#755).
 
 User-facing copy says preference, not promise: *Office favors this route according to its routing policy, but may choose another model or
 effort when availability, quota, task fit, capability, evidence, or policy calls for it.*

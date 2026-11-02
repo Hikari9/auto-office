@@ -954,3 +954,46 @@ def test_wall_budget_stall_signature_ignores_the_growing_elapsed_age(env):
         state.emit(con, run, guide.WAIT_STALL_KIND, "stall", audience="runtime", payload={"signature": sig})
     assert guide._fresh_stall(con, run, [line.format(3760)]) == (False, sig)
     assert guide._fresh_stall(con, run, [line.format(3760).replace("D1", "D2")])[0]
+
+
+@pytest.mark.approved
+def test_status_keeps_an_open_executors_stop_signal_as_a_blocker_until_it_resolves(env):
+    """#671: a live executor that signalled a stop shows as a blocker on every status, with its next step, and
+    next: no longer tells the root to wait on it. It clears once that dispatch submits."""
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="contract-conflict: line 4 would break ACCEPT 7",
+                                  next_step="office amend T1 --contract -- \"<change>\"")
+    for _ in range(2):  # the first status reads the event; the blocker stays
+        code, out = env.office("status", env=EXTERNAL)
+        line = next((l for l in out.splitlines() if l.startswith("blocker: T1")), None)
+        assert line and d["id"] in line and "contract-conflict" in line, out
+        assert "next: office amend T1 --contract" in out, out
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, requirements_version, "
+                "plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                "VALUES('Rlater', ?, 'T1', 99, ?, 'c', 't', 1, 1, 1, 'f', 'op-later', 'current', '9999-01-01T00:00:00+00:00')",
+                (d["run_id"], d["id"]))
+    con.commit()
+    code, out = env.office("status", env=EXTERNAL)
+    assert "contract-conflict" not in out, out
+
+
+@pytest.mark.approved
+def test_status_drops_a_signal_from_a_dispatch_that_ended(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="self-review round cap", next_step="office status")
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='exited' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("status", env=EXTERNAL)
+    assert not any(l.startswith("blocker: T1") and "round cap" in l for l in out.splitlines()), out

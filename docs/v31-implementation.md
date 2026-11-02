@@ -183,7 +183,7 @@ from the default branch). The integration worktree is recreated from git on ever
 holds no installed dependencies. The repo declares its install once as `worktree.setup` in
 `.auto-office/config.yaml` (pinned into the run policy at `office start`, with `setup_timeout_s` and
 `applies_to`, default task, integration, and check); Office runs that command once in each new task,
-integration, and check worktree and logs it to `setup.log`. Without it, run-level checks install in
+integration, and check worktree and logs it to `setup.log`. A failed task setup is a notice and the agent still launches, except exit 127 (the command is not on PATH), which stops the dispatch with an `office doctor` hint because it fails the same way in every worktree (#364). Without it, run-level checks install in
 the command (`pnpm install --frozen-lockfile && pnpm lint`). A check that is not found reports
 UNAVAILABLE with that instruction. Office runs only the command the repo declares; it never chooses a
 package manager itself. Checks must not mutate the tree: a
@@ -205,7 +205,7 @@ form, because both travel in the stored route.
 
 `office amend route T1 --as <route> --quote "<user's words>"` can record the next executor's route while
 T1 is accepted. It launches nothing and preserves the submitted producer's route and all accepted
-evidence. The next legal reopen uses the declared route. Revoking an amendment worker preserves the
+evidence. The next legal reopen uses the declared route. `office amend route T1 --auto --quote "<user's words>"` clears a declared route on a task with no live agent and records the change; its next dispatch routes from the approved plan's slate again, and a rerun of a task that already ran takes `--fresh --reroute` (#977). Revoking an amendment worker preserves the
 need to satisfy newly added acceptance criteria; only the previously accepted revision remains audit evidence.
 Reused routes are checked against current factual gates before a new lease or launch is scheduled,
 including the run repository's live denial policy when a background caller runs elsewhere.
