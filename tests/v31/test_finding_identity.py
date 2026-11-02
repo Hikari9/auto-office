@@ -605,7 +605,9 @@ def test_lane_retract_in_ingest_touches_only_the_current_finding(env):
             first = _q(env, "SELECT * FROM findings WHERE scope='L-T1' ORDER BY rowid")
             assert len(first) == 2 and first[1]["disposition"] == "dismissed", first
     rows = _q(env, "SELECT * FROM findings WHERE scope='L-T1' ORDER BY rowid")
-    assert len(_q(env, "SELECT 1 FROM gates WHERE kind='convergence_review'")) == 3
+    # Four reviews since #768 (#1017): each scope widening changes T1's contract, so a recomposition with an
+    # unchanged tree is reviewed again instead of carrying the earlier review.
+    assert len(_q(env, "SELECT 1 FROM gates WHERE kind='convergence_review'")) == 4
     assert [r["state"] for r in rows] == ["nonblocking", "retracted"], rows
     assert rows[0] == first[0], "the older generation is never rewritten"
     moved = {"state", "updated_at"}
