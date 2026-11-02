@@ -335,7 +335,31 @@ def test_real_claude_install_exposes_exactly_the_public_skills(tmp_path):
         assert done.returncode == 0, done.stdout + done.stderr
     installed = _installed_skills(tmp_path / "plugins")
     assert installed == set(CFG["public_skills"])
-    assert "auto-office" in installed  # invoked as /auto-office:auto-office (namespaced only; see README)
+    assert "auto-office" in installed
+    _assert_host_exposes_namespaced_skills(env, tmp_path)
+
+
+def _assert_host_exposes_namespaced_skills(env, cwd: Path) -> None:
+    """The host's own session-init metadata names every invocable skill/command.
+
+    Reads only the first stream-json event (emitted before any model turn) and
+    closes the pipe, so no model response is awaited.
+    """
+    proc = subprocess.Popen(
+        ["claude", "-p", "x", "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
+        env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        init = json.loads(proc.stdout.readline())
+    finally:
+        proc.kill()
+        proc.wait()
+    assert init.get("subtype") == "init", init.get("type")
+    expected = {f"auto-office:{name}" for name in CFG["public_skills"]}
+    exposed = {s for s in init["skills"] if s.startswith("auto-office:")}
+    assert exposed == expected
+    assert "auto-office:auto-office" in init["slash_commands"]  # README: namespaced invocation only
+    assert "auto-office" not in init["slash_commands"]  # plugin does not claim bare /auto-office
 
 
 @pytest.mark.skipif(shutil.which("codex") is None, reason="codex CLI not installed")
