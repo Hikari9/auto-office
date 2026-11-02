@@ -537,8 +537,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("note", nargs="*")
     s.add_argument("--quote", help="dismissed: the user's own words, which dismiss an open blocking lane finding")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, or plan (the user's request "
-                                  "for another plan review)")
+    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, plan (the user's request "
+                                  "for another plan review), or submit (a reviewer hands back its review: stdin or --file)")
+    s.add_argument("--file", dest="review_file", help="submit: the review file (default: stdin)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
     s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
@@ -1181,6 +1182,11 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
         return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
+    if cmd == "review" and args.target.lower() == "submit":
+        from office import review_submit
+        text = (Path(args.review_file).expanduser().read_text(encoding="utf-8", errors="replace")
+                if args.review_file else sys.stdin.read())
+        return review_submit.submit(con, text)
     if cmd == "review" and args.target.lower() == "plan":
         from office import gates, plans
         from office.state import Usage

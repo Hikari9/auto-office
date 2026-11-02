@@ -32,7 +32,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, review_submit, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -2462,9 +2462,12 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     harness's own per-dispatch settings (`_harness_env`)."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
-        # Reviewers get no Office authority: they cannot submit or ack.
+        # Reviewers get no Office authority: they cannot submit or ack. They may hand back their own review
+        # through `office review submit`, which honours only this dispatch's secret (#1030).
         for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
             wenv.pop(k, None)
+        if dispatch.get("role") in review_submit.REVIEW_ROLES and dispatch.get("gate_id"):
+            wenv.update(review_submit.token_env(run, dispatch))
     carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
     carry.update(harness_env or {})
     env_file = ddir / "agent.env"
@@ -3725,6 +3728,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                 return 0, "success"
         finally:
             con.close()
+        if review_submit.submitted(output):
+            return 0, "success"  # office review submit validated and stored it: no settle or idle heuristics (#1030)
         size = output.stat().st_size if output and output.is_file() else 0
         data = _reply_bytes(output) if size else None
         digest = hashlib.sha256(data).hexdigest() if data else None
@@ -4731,6 +4736,8 @@ def supervise(dispatch_id: str) -> int:
             for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
                 env.pop(k, None)
             env["OFFICE_ROLE"] = "reviewer"
+            if d["role"] in review_submit.REVIEW_ROLES and d.get("gate_id"):
+                env.update(review_submit.token_env(run, d))  # its own review only (#1030)
         try:
             env.update(_harness_env(run, d, spec, strict=True))
         except adapters.AdapterError as exc:
