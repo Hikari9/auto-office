@@ -688,6 +688,18 @@ def test_an_identical_tree_recomposition_keeps_the_waiver_and_starts_no_review(e
     assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
 
 
+def test_an_identical_tree_after_an_acceptance_change_is_reviewed_again(env):
+    """#768: an amendment changed T1's acceptance criteria; the resubmitted same tree is no proof of the new ones."""
+    _delegated_waiver(env)
+    gates_before = len(_gates(env, "convergence_review"))
+    con = env.con()
+    con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+    con.commit()
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.carried"), "a changed acceptance contract is not carried"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the recomposition is reviewed again"
+
+
 def test_a_waiver_without_a_tree_binds_its_commit_only(env):
     """Legacy rows (recorded before trees were stored) match the commit, never a recomposed one."""
     _delegated_waiver(env)

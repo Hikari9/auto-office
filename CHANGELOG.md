@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.22
+
+- fix(convergence): a same-tree recomposition after a contract or acceptance change is reviewed again, not carried (#768).
+
 ## 3.15.21
 
 - fix(convergence): an EVIDENCE_BLOCKED lane whose block is not the visual capture names `office resume`, not a visual capture amend (#870).
