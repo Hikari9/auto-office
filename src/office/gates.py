@@ -2345,8 +2345,11 @@ def close_blockers(con, run: dict) -> list[str]:
     for t in state.tasks(con, run["id"]):
         if t["status"] not in ("accepted", "cancelled"):
             out.append(f"{t['id']} is {t['status']}")
-    if con.execute("SELECT 1 FROM deliveries WHERE run_id=? AND status IN ('queued','delivered')", (run["id"],)).fetchone():
-        out.append("an amendment is delivered but not applied")
+    pending = con.execute("SELECT amendment_id, task_id FROM deliveries WHERE run_id=? AND status IN ('queued','delivered') "
+                          "ORDER BY amendment_id, task_id", (run["id"],)).fetchall()
+    if pending:
+        named = ", ".join(f"{r['amendment_id']} ({r['task_id']})" for r in pending[:4])
+        out.append(f"{UNAPPLIED_PREFIX} not applied: {named}" + (f" and {len(pending) - 4} more" if len(pending) > 4 else ""))
     if any(not superseded_integration_gate(con, run, g) for g in
            con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],))):
         out.append("reviews are still running")
@@ -2361,8 +2364,34 @@ def close_blockers(con, run: dict) -> list[str]:
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] != "accepted":
-        out.append(f"integration {integ['status']}")
+        out.append(f"{INTEGRATION_PREFIX}{integ['status']}")
     return out
+
+
+# The close blockers a hand-composed handoff settles (#729): the user composed the integration from the accepted
+# revisions themselves and hands that PR over, so Office's own integration and pending deltas no longer apply.
+UNAPPLIED_PREFIX = "amendment delivered but"
+INTEGRATION_PREFIX = "integration "
+
+
+_PR_REF = re.compile(r"/pull/\d+/?$|/merge_requests/\d+/?$|^#\d+$")
+
+
+def is_pr_ref(ref: str | None) -> bool:
+    """A pull or merge request: the only handoff that can stand in for a hand-composed integration (#729)."""
+    return bool(ref and _PR_REF.search(ref.strip()))
+
+
+# Integration states a hand composition replaces. `waiting` (tasks not accepted) and `converging` (lane reviews
+# open) are not: the work itself is unfinished, and their own blockers say so.
+HAND_COMPOSABLE = ("blocked", "conflict", "pending", "stale")
+
+
+def composed_by_hand_blockers(blockers: list[str]) -> tuple[list[str], list[str]]:
+    """(blockers a `--handoff` close still has, blockers the hand-composed handoff settles)."""
+    exact = {INTEGRATION_PREFIX + s for s in HAND_COMPOSABLE}
+    settled = [b for b in blockers if b in exact or b.startswith(UNAPPLIED_PREFIX + " not applied: ")]
+    return [b for b in blockers if b not in settled], settled
 
 
 def landing_state(con, run: dict, handoff: str | None) -> dict:

@@ -205,6 +205,9 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   and refused; changing gear/base/review gates is not a supported live option amendment.
 - With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR with `Closes #<issue>`, and
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
+- After the compose-by-hand recovery for a blocked integration (for example a rebase conflict), `office close --handoff <pr-url>`
+  closes the run when the ref is a pull or merge request: it records `integration_composed_by_hand` and settles the integration
+  status and unapplied amendment deltas, which the refusal names. Other blockers (tasks not accepted, reviews running) still refuse (#729).
 - If `office land` stops after the task PRs merge, retry it: recorded merges are skipped, default-branch verification resumes,
   and a recorded successful deploy is not repeated. After it succeeds, run `office close`.
 - `office close --landed-externally <merged-pr-url>` also recovers squash merges. Without original-commit ancestry, Office requires
