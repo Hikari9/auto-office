@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.34
+
+`office amend route <task> --auto --quote "<words>"` clears a pending task's declared route so it routes automatically again, and records the change (#977).
+
 ## 3.15.33
 
 `office config --run <id> --apply-verification --quote "<words>"` re-pins a running run's check timeouts and check concurrency from the config files, and `office config --run <id> <key>` shows the value the run pinned (#755).
