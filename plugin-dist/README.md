@@ -110,13 +110,15 @@ Verify after install: `claude plugin details auto-office@auto-office` lists 16 s
 For normal use:
 
 ```bash
-uv tool install auto-office
+uv tool install git+https://github.com/Hikari9/auto-office
 ```
+
+Auto Office is not on PyPI: the `auto-office` name there belongs to an unrelated project, so never `uv tool install auto-office` or `pip install auto-office`.
 
 For browser capture and visual gates:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 ```
 
 The visual extra installs Playwright support and uses the local Chrome. Without it, a visual gate that requires capture reports `CAPTURE_BLOCKED`; it does not quietly pass.
@@ -179,7 +181,7 @@ checks remain authoritative. See `skills/auto-adapter/SKILL.md` for registration
 
 `office doctor` verifies the installed runtime, hook state, pinned runtimes, visual prerequisites, and known harness defects. If it reports `install: STALE`, reinstall the checkout rather than trusting the version string alone. `office doctor --fix` repairs Office-managed integration drift while preserving and backing up unrelated configuration.
 
-`office update --check` checks PyPI and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from PyPI, then refreshes the runtime registration and runs `office doctor`.
+`office update --check` checks the release on GitHub `main` and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from GitHub, then refreshes the runtime registration and runs `office doctor`.
 
 > **For coding agents:** do not silently install or rewrite global harness configuration. If `office` is missing, ask the human before running `uv tool install ...` or `office install`; once installed, use the CLI contract below.
 
@@ -360,7 +362,7 @@ flowchart TB
 
 The runtime then evaluates the current revision through the gates funded by the run:
 
-- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
+- deterministic task checks (the executor has already self-reviewed: one focused round for a new run, four lenses and 3 rounds for a run pinned to v3.1; Office has also proved each named fix test by reverting source);
 - dependency/current-amendment checks;
 - once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
 - later, run-level integration checks.
@@ -676,7 +678,7 @@ failing subroutes still produce application findings.
 Install the visual extra when you expect browser/UI work:
 
 ```bash
-uv tool install 'auto-office[visual]'
+uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'
 office doctor --probe-vision
 ```
 
@@ -729,9 +731,11 @@ office submit                         planner/executor: submit a plan or work
 office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
 office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend options --prs|--no-prs --quote "<user approval>" --confirm   amend live task PR publishing
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
+office land --batch batch.json          ordered run/PR lanes, one version owner, one full suite before any merge
 office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
@@ -747,6 +751,16 @@ office doctor [--fix]
 office prune [-f]
 office cleanup --older|--run <id> [--apply|--decline]
 ```
+
+The `--no-prs` choice at `office start` is no longer permanent. If write access arrives while
+an Office run is in progress, the user can explicitly authorize
+`office amend options --prs --quote "<user's exact approval>" --confirm` (omit `--confirm` on an interactive
+terminal to accept the `y/N` prompt). Office records the old/new settings and authorization in `runs.db`
+(`office inspect events` / `office inspect run`), and queues PR synchronization for work already submitted.
+To switch **off**, use `office amend options --no-prs` with the same confirmation: Office refuses if an
+executor is still working with PR instructions or any PR/PR-sync operation already exists. Other start-only
+options remain frozen; a refused amendment explains why without changing the run. GitHub availability is
+checked before enabling, but a later push can still fail if repository write permissions are missing.
 
 Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
 

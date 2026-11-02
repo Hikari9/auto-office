@@ -6,8 +6,8 @@ refuses something this page allows, the runtime is right; fix this page.
 
 ## Install and update
 
-- `office --version` not found: stop, ask the user to approve installing it, never install silently. On approval:
-  `uv tool install "<skill directory>"` (`pipx install` if `uv` is missing), then `office install` (managed harness hooks and
+- `office --version` not found: follow SKILL.md's Install check. Install only after the user picks **Install the CLI**
+  (never install silently): `uv tool install git+https://github.com/Hikari9/auto-office` (`pipx install git+https://github.com/Hikari9/auto-office` if `uv` is missing), then `office install` (managed harness hooks and
   runtime registration, with a backup of each config) and `office doctor`.
 - Release (the part before any `+`) differs from the directory's `src/office/_version.py`: tell the user and offer
   `uv tool install --force --reinstall "<skill directory>"`, then `office install`. Runs already started keep their pinned runtime.
@@ -58,7 +58,7 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 `dispatch --as` and `rerun --as` record orchestrator choices with ordinary routing safety gates. Add `--quote "<user's words>"` only for actual user authority. `amend route` can record an accepted task's future route without rewriting its submitted producer; its next legal reopen uses that route. Revoking new acceptance work does not mark the new criteria satisfied.
 
 - `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
-- An `office` command exits 75 (EX_TEMPFAIL) and prints `office: install is being rebuilt, retry in 5 s (<ExceptionType>: <module>)` on stderr, with no traceback, when the install is replaced as the command starts (for example during `uv tool install --force`). Retry the same command after a few seconds, because nothing ran. A failure whose origin is outside the office package (a dependency that fails to import) is not a rebuild: the command exits 1 and prints its cause with a reinstall hint, naming `uv tool install --force --editable <checkout>` for a checkout or `uv tool install --force auto-office` for a release. If a reinstall is already running, the hint says to retry after it finishes. A replacement that breaks a command after it has started still raises a traceback; check the run before retrying it. The root wake supervisor records one `office.reinstalled` event once the install is healthy again, and that event wakes the root to resume the run. The event waits for a fresh-process probe that imports the CLI and resolves the version. While the supervisor's ticks keep failing it retries with backoff, up to 30 s between ticks.
+- An `office` command exits 75 (EX_TEMPFAIL) and prints `office: install is being rebuilt, retry in 5 s (<ExceptionType>: <module>)` on stderr, with no traceback, when the install is replaced as the command starts (for example during `uv tool install --force`). Retry the same command after a few seconds, because nothing ran. A failure whose origin is outside the office package (a dependency that fails to import) is not a rebuild: the command exits 1 and prints its cause with a reinstall hint, naming `uv tool install --force --editable <checkout>` for a checkout or `uv tool install --force git+https://github.com/Hikari9/auto-office` for a release. If a reinstall is already running, the hint says to retry after it finishes. A replacement that breaks a command after it has started still raises a traceback; check the run before retrying it. The root wake supervisor records one `office.reinstalled` event once the install is healthy again, and that event wakes the root to resume the run. The event waits for a fresh-process probe that imports the CLI and resolves the version. While the supervisor's ticks keep failing it retries with backoff, up to 30 s between ticks.
 - Exit 5 prints a `question:` line (dispatch, pane, question, options, answer command). Decide planning, scope, ordering and
   test detail yourself: amend the contract first if the answer changes it, then `office answer <task|dispatch> <n>` (a number
   presses that option in a selection widget; `office prompt` types text, which a widget ignores) or
@@ -71,6 +71,19 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   and arms nothing. `office status` prints `wake: armed`, `wake: off` or `wake: unavailable (<reason>)` on every non-terminal run.
   A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
+- **Outside Herdr, a Claude Code root can now be woken natively (#940):** `office install --only claude --item turn.stop`
+  installs the managed `Stop` command hook with `asyncRewake: true` (Claude Code must load/approve this hook), alongside
+  the existing session-start and prompt-submit hooks. After `office resume` inside a *verified Claude process*,
+  the root's normal Stop event starts a background, one-per-run listener to the Office event ledger; when a new
+  authoritative action arrives it exits **2**, providing a scoped system reminder to the **existing** idle Claude session.
+  No Herdr pane, agent restart, synthetic user prompt or model polling is used. `office status` reports
+  `wake: armed (Claude native Stop/asyncRewake; arms on next Claude Stop)` or `listener active`; `--wake-off`
+  disarms both transports. If the hook is not installed, this is a detached shell, the session is not bound,
+  or the caller is an executor/subagent, wake remains unavailable and `next: office wait` is the fallback.
+  The listener ends on a new user prompt, session rebind, run closure or hook timeout (24 hours); a later Stop
+  re-arms it. A terminal/closed Claude session cannot be reawakened. Check `office status` if a host disables hooks.
+  Native exit 2 means *notification issued*, not action completed; the root must read `office context` and obey
+  all permission/review gates. See [root-wake](root-wake.md) for the safety contract and manual fallback.
 - Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
   record each episode as an orchestrator event, which wakes an armed root. `office wait` exits 0 on `review.queued_too_long`
   and `review.closed_unread`, and exits 3 on `review.stalled`:
@@ -185,6 +198,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   the by-hand steps; a refusal pushes nothing, and a timed-out push is reported as unknown, not as nothing pushed. The `pr.recovered` event records the
   heads and base.
 - Office rewrites only the block above the PR body's `<!-- office:pr ... -->` line; put criteria that report data below it.
+- If GitHub access becomes available after a run started with `--no-prs`, ask the user to authorize
+  `office amend options --prs --quote "<user's exact words>" --confirm` before switching. Office records a
+  `run.options_amended` event, enables subsequent task PRs and queues PR sync for already accepted work.
+  Disabling PRs after a PR exists, a sync job was queued, or an executor has live PR instructions is unsafe
+  and refused; changing gear/base/review gates is not a supported live option amendment.
 - With task PRs off (local, no GitHub, `--no-prs`), push the integration branch it names, open a PR with `Closes #<issue>`, and
   `office close --handoff <pr-url>`. `office close --abandon "<reason>"` stops early; nothing is deleted until `office prune -f`.
 - If `office land` stops after the task PRs merge, retry it: recorded merges are skipped, default-branch verification resumes,
@@ -209,6 +227,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   listed file into the deploy checkout with its mode preserved, never stages or commits it, and refuses an entry outside the repo.
 
 ## Root context snapshot
+
+To start from an existing PR branch without creating task PRs, run
+`office start "<goal>" --no-prs --base <pr-branch>`. Office pins that ref's commit;
+the branch must be available in the caller's checkout. Without `--no-prs`, the
+run base must be safe for task PRs targeting the tracked default branch.
 
 `office start` resolves the base and pins configuration from the caller's checkout, then records the durable repository root
 identified by the shared Git directory. A removable linked caller such as `.claude/worktrees/agent-*` is not the run's Git cwd.
@@ -267,3 +290,53 @@ Every dispatch of multiple tasks now writes a compact `delegation.shadow` **oper
 `office inspect efficiency` reads observed Office-attributed usage and recent shadow events on demand. Economics collection remains opt-in and off by default (`economics.collect: false`); neither this command nor shadow dispatch reads transcripts, scans sessions, estimates billed dollars or enables telemetry. A root percentage is the share **of observed token components**, never proof of entire-run cost. Missing fields, outside-Office turns, actual USD, nominal estimates and subscription quota remain distinct. Unknown review/rework/admin costs are not silently zero.
 
 For controlled comparisons, `python eval/v31/compare_economics.py cases.json` accepts a JSON array with matched `pair_id` and `arm` (`baseline` or `treatment`), identical `task_shape`, `harness` and `billing_mode`, `verified_completion: true`, non-negative `integrated_defects`, measured values in `metrics`, and explicitly verified `complete_metrics`. Metrics are withheld unless both arms complete; reported actual USD comparisons require API billing and `cost_kind: actual`. It needs at least three complete, matched pairs with non-worse verified defects before identifying an improvement as claim-ready. **No real matched run dataset has been supplied in #502; no efficiency improvement is claimed yet.**
+
+## Executor context cap (#939)
+
+The per-executor cap is separate from the orchestrator's ctx-high notice. Pinned
+`executor_context.enabled` (default true) and `executor_context.threshold_tokens`
+(default 200000; 0 disables) live in `config/config.default.yaml` and ordinary run config.
+An invalid threshold falls back to 200000 and `office status` says so.
+
+Measurement: the supervisor checks attributable Claude and Codex session transcripts every
+15 seconds while the executor runs. Claude
+uses the last assistant message's input plus cached-input usage, excluding sidechains. Codex
+uses the last turn's input and output count, never cumulative lifetime totals. Unobserved or
+unsupported harnesses are not guessed and cannot claim an enforced cap.
+
+Signal: crossing the cap writes one `executor.context_cap` event (which wakes the root) and a
+`signaled` marker on the executor dispatch. Office takes no other action. The marker clears when
+the session drops below the cap; the next crossing is a new episode.
+
+Decisions (the root's only way to act):
+
+- `office executor-context <task> rotate`: refused when rotation is disabled for the task, the
+  task has no live executor, the live writer changed while the snapshot was taken, or a rotation is
+  already requested. An executor session (`OFFICE_DISPATCH_ID` set) is always refused. One transaction writes a
+  `requested` handoff snapshot (task state, worktree HEAD, git status and diff stat, existing
+  task commits as evidence to verify, remaining ACCEPT items, open findings) and enqueues a
+  deduplicated `rotate_executor` job. The snapshot never asserts completion. A private copy is
+  at the run's `dispatches/<old-id>/context-handoff.json` (0600).
+- `office executor-context <task> continue`: acknowledges a `signaled` marker. Refused when no
+  signal is pending.
+- `office executor-context <task> threshold <tokens>`: records a per-task cap as an
+  `executor.threshold` event. Whole tokens only; 0 disables rotation for the task.
+- Repo-wide: `office config --repo executor_context.threshold_tokens <tokens>`. A running run
+  keeps the policy it pinned at start, so use the task form for the current run.
+
+Opt-outs: `executor_context.threshold_tokens: 0` or `executor_context.enabled: false` disables
+the signal and rotation. `enabled: false` also overrides a per-task threshold.
+
+If a requested rotation cannot proceed (the task moved, or the executor submitted), its handoff
+becomes `skipped` with an `executor.rotate_skipped` event, which wakes the root; decide again.
+
+The rotation job stops the old executor's process tree and verifies it has exited before it
+creates a fresh dispatch on the same task, branch and worktree. The replacement brief carries the
+handoff. Dependency restacking is skipped so uncommitted WIP stays put. The exhausted session is
+never resumed, and the stop is not counted as a route failure or a retry. If the stop cannot be
+verified, the task is blocked with a visible reason and no replacement launches. A submitted or
+superseded executor is not restarted.
+
+`office status` shows the pending signal and each requested, restarted, or blocked handoff. `--json`
+exposes them as `executor_handoffs`. The DB row is authoritative; the file is a projection, and a
+file-write failure never causes a second launch.

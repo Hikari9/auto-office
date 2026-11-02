@@ -18,6 +18,12 @@ Office runs the full suite under `verification.full_suite_timeout_seconds` (defa
 
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
 
+## Visual review diagnostics (#942)
+
+`office doctor` always tries to launch headless Chromium. Visual review is enabled when some gear preset in the effective config sets `funded_browser_verification`. When it is enabled and the launch fails, doctor counts one problem and exits 1. An unreadable or malformed config counts as enabled, so the failure is not hidden, and the line says the config is unreadable. The message names the fix: the `<python> -m playwright install chromium-headless-shell` command (with `--with-deps` on Linux), or, when `OFFICE_CHROME` or the default Google Chrome path is the binary being launched, the path to check. When visual review is not enabled, the same failure is reported and is not a failure. A missing optional `playwright` package is reported and never counts.
+
+At closeout, each task whose visual review is required (planner-declared `visual:` block, or acceptance that reads as user-visible) is checked against its latest visual gate. A task is disclosed by ID when the review never ran (no covering gate) or finished without comparable evidence (`evidence_status` other than `COMPARABLE` or `NOT_APPLICABLE`, or a gate that is not `done`). A convergence lane gate covers the tasks frozen in its membership. A lane gate that predates recorded membership covers no task. While one exists, a required task is reported as unverifiable unless its latest covering gate is newer than that gate. DOM-only tests do not count as visual review. Disclosures appear as lines in the close report, in the final `office close done` line, and in the structured result as `visual_review_disclosures`.
+
 ## Default pytest measurement
 
 On 2026-10-29, `.venv/bin/python -m pytest -n 2` ran from the repository root with pytest's default marker selection, one sequential run per tree on the same machine. The baseline is `origin/main` (`986e9d8d`), run from a git worktree. The branch is `854ca15f`, this PR's HEAD. It sits on T1 R14 (`60a46a5c`).

@@ -39,9 +39,9 @@ Take every decision to the user through the harness's native question tool when 
 ## Install check (every session, before anything else)
 
 Detection: !`command -v office || echo "office: not found"`
-- **Found:** run `office --version` and `office doctor`. If doctor fails, ask once, natively (see Asking the user): **Repair the install** (`office install --no-hooks`, `office doctor`) or **Lean for this request** (hand off now); repair only on yes, and if either step fails, stop, report that command, and offer the lean hand-off. If the release differs from this directory's `src/office/_version.py` or doctor prints `install: STALE`, tell the user and offer `uv tool upgrade auto-office` if the CLI came from PyPI, or `uv tool install --force --reinstall "<this skill's directory>"` if it came from a full checkout containing pyproject.toml, never a plugin-only skill folder, then `office install`. Runs already started keep their pinned runtime.
+- **Found:** run `office --version` and `office doctor`. If doctor fails, ask once, natively (see Asking the user): **Repair the install** (`office install --no-hooks`, `office doctor`) or **Lean for this request** (hand off now); repair only on yes, and if either step fails, stop, report that command, and offer the lean hand-off. If the release differs from this directory's `src/office/_version.py` or doctor prints `install: STALE`, tell the user. For a uv-managed CLI, inspect its origin with `test "$(command -v office)" -ef "$(uv tool dir)/auto-office/bin/office" && "$(uv tool dir)/auto-office/bin/python" -c 'from importlib.metadata import distribution; print(distribution("auto-office").read_text("direct_url.json") or "index install (not Auto Office)")'`: a `vcs_info` URL for github.com/Hikari9/auto-office is a GitHub install; a local `file:` URL with `dir_info` identifies a source directory, including editable installs; absent metadata means an index install, and the PyPI `auto-office` is an unrelated project, so tell the user to reinstall from GitHub. An archive, failed command, non-uv CLI, or unclear origin is not proof of a GitHub or checkout install; report it and do not guess. Offer `uv tool upgrade auto-office` for a confirmed GitHub install, or `uv tool install --force --reinstall "<checkout path>"` for a source directory install, then `office install`. Runs already started keep their pinned runtime.
 - **Not found:** in one shell command, set `CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"` and run `cat "$CFG"`; if it prints `lean` (a trailing newline is fine), hand off. Otherwise ask once per session, natively (see Asking the user): **Install the CLI (Recommended)**, **Lean for this request**, **Lean, don't ask again** (in one shell command: `CFG="${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"; mkdir -p "$(dirname "$CFG")" && printf lean >| "$CFG"`; if that fails, tell the user the choice was not saved and continue this request as **Lean for this request**). Either Lean choice: hand off. Only if the user asks to be asked again, run `rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/auto-office/install-choice"`.
-- **Install:** only after the user picks **Install the CLI**, run `uv tool install auto-office` and check its exit status. If it fails, stop, report that command, and offer the lean hand-off. If it succeeds and `command -v office` fails, the uv bin directory is not on PATH: tell the user to run `uv tool update-shell`, open a new shell, and stop (no lean offer for this case). Otherwise run `office install --no-hooks` (onboarding offers hooks) and `office doctor`. Stop at the first failure, report that command, and offer the lean hand-off. On success, continue below.
+- **Install:** only after the user picks **Install the CLI**, run `uv tool install git+https://github.com/Hikari9/auto-office` and check its exit status. If it fails, stop, report that command, and offer the lean hand-off. If it succeeds and `command -v office` fails, the uv bin directory is not on PATH: tell the user to run `uv tool update-shell`, open a new shell, and stop (no lean offer for this case). Otherwise run `office install --no-hooks` (onboarding offers hooks) and `office doctor`. Stop at the first failure, report that command, and offer the lean hand-off. On success, continue below.
 - **Hand off:** invoke the Skill tool with `auto-office:auto-office-lean` and continue the same request there. If that Skill call fails, read sibling `../auto-office-lean/SKILL.md` in the installed plugin root and follow it.
 
 At lifecycle intake, run `office update --check`; if it reports an update, offer it in the next native intake question round. A failed or offline check does not block intake. Detail: `docs/orchestrator-reference.md`.
@@ -60,13 +60,15 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 
 ## Start
 
+For an intentionally new or near-empty repository, the explicit `--gear greenfield` build contract is documented in [`docs/greenfield-lean-gear.md`](docs/greenfield-lean-gear.md): one strong executor owns 2-3 internal phases, followed by one independent convergence review.
+
 1. Check for an Auto Office update as described above, then create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
-   `--gear XS|S|M|L|XL` (complexity and coordination, never risk; an unknown size is M), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
+   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for near-empty repos only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
    unset risk is unknown, never low: an unknown run keeps independent code review under every gear until the plan classifies it, see "Risk floor and the lightweight path").
    Never ask about benchmark refreshes; benchmark refreshes are maintainer-only and are not available in the installed plugin.
 4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.
@@ -96,6 +98,13 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Office types into a pane only once Herdr's own record shows it is that dispatch's (cwd, agent kind and name, session) and no other dispatch holds it.
   A mismatch sends nothing, starts no headless copy and prints a `pane-mismatch` notice: inspect the pane, then `office revoke <task>`. Revoke
   restores a task to accepted only when an amendment alone demoted it; one reopened for owed work (RECHECK or cleanup findings, a restack, a hold) stays reopened.
+- Root auto-wake: in a verified Claude Herdr pane, `office resume` arms Herdr's event notifier. In a verified
+  **non-Herdr Claude Code root** with the installed managed Stop/`asyncRewake` hook, `office resume` arms native
+  event-driven re-entry at the next Stop event (#940); no duplicate polling turns or detached model sessions.
+  To configure: `office install --only claude --item turn.stop`, reload/approve Claude hooks, then `office resume`.
+  `office status` names armed, off, and unavailable cases. `office resume --wake-off` is sticky; explicit
+  `--auto-wake` re-arms. The notifier never authorizes, approves, merges or bypasses independent review. If it
+  cannot be armed or Claude's host does not support `asyncRewake`, use `office wait` while work is in flight.
 - `office wait`: exit 0 means act, 3 a stall or your already-reported action with no work in flight, 5 an agent asked a question, 124 nothing new. On 3, follow `next:` before waiting again. Key on the exit code, never on status text.
   Exit 5 prints a `question:` line. Decide planning, scope, ordering and test detail yourself (amend the contract first if the answer changes
   it), then `office answer <task|dispatch> <n>` or `-- "<text>"` (a `[startup]` held screen, #510: the printed `--choice|--keys --expect`).
@@ -107,6 +116,9 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
   workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
 - An executor that cannot finish stops with `office raise --kind question|blocker|scope-request [--path P] -- "<text>"`, not `submit`; its task stays blocked. Answer with `office answer <task> -- "<text>"`. Grant a scope-request only by `office amend <scope> --contract`, which also unblocks it.
+- New runs self-review in one focused round (one subagent, edge cases and test strength, platform when the diff needs it);
+  security is covered by the single convergence reviewer when a lane changes a sensitive path, and Office proves each named
+  test by running it alone on a copy with the non-test source reverted. Runs pinned to v3.1 keep the four lenses below.
 - Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
   gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
@@ -122,6 +134,14 @@ never wait or `--skip`; continue on the current preferences and tell the user to
 - Ordinary amendments (decomposition, ordering, acceptance detail, tests) are yours: `office amend <T2|plan> -- "<delta>"`. Plan review
   reviews the initial plan only: once it closes (APPROVED, its round cap, or a waiver) no amendment is reviewed again; you own them. While
   it is still open a revision is its next round; to skip that for a trivial one, `office amend plan --no-review --reason "<why>" -- "<delta>"`.
+- Live task-PR publishing is the **only** start option that can be changed after launch:
+  `office amend options --prs --quote "<user's exact approval>" --confirm` turns it on when GitHub is available;
+  `office amend options --no-prs --quote "<user's exact approval>" --confirm` turns it off only before any
+  PR sync work or recorded PR and with no executor still running with PR instructions. `--confirm` explicitly
+  confirms the quoted authorization for headless use; an interactive terminal can confirm with `y` instead.
+  The new setting is written to `runs.db` with a `run.options_amended` before/after event and persists on resume.
+  Turning PRs on queues sync for earlier submitted/accepted work. It does **not** alter the run's base,
+  gear, requirements, review gates or deployment authorization; unsafe/unsupported changes are refused with a reason.
 - A note is prose only. To change what is enforced, edit the task's structured contract: `office amend T1 --add-check "<cmd>"` (also
   `--add-accept`, `--drop-check`, `--drop-accept`, `--set depends=T2`). It versions the contract, runs the new check at the gate (an accepted
   task reruns it and reopens only on failure), records old and effective contract plus rationale (`office inspect amendments`), and never
@@ -195,6 +215,18 @@ recovered once when its head is one Office reviewed or pushed and folding the op
 early; `--landed-externally <merged-pr-url>` verifies external or owned squash landing, then closes. Rebase, `--no-prs`, recovery and PR-body detail:
 `docs/orchestrator-reference.md`.
 
+## Batch landing
+
+For a multi-run or multi-PR release, use office land --batch <manifest.json> from
+the target repo, first with --dry-run. Each run or PR lane declares
+land_after dependencies; exactly one lane owns the version bump. The
+batch composes the pinned PR heads, runs the full suite once on that composed
+SHA, and merges nothing unless the suite passes. Each merge pins the validated
+head, and the default branch tree must equal the composed tree at the end. A
+red batch resumes after an appended fix PR (or an explicit --retry-full for a
+transient failure). See docs/batch-landing.md. Do not confuse this
+cross-run release operation with a single-run office land or deploy.
+
 ## Takeover
 
 When the runtime itself is the bottleneck, suggest `auto-takeover` with the evidence. Only the user starts
@@ -204,6 +236,11 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
+
+## Executor context cap
+
+Crossing the per-executor cap (`executor_context.threshold_tokens`, default 200000) signals you (`executor.context_cap`, shown in `office status`). Office never rotates an executor on its own. Decide with `office executor-context <task> rotate | continue | threshold <tokens>`. Opt out with `executor_context.threshold_tokens: 0` or `executor_context.enabled: false`. Handoff contents and failure behavior: `docs/orchestrator-reference.md`.
+
 ## Diagnostics
 `office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
 `office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
