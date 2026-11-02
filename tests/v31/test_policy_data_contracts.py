@@ -372,12 +372,19 @@ def test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_ca
     rows = shipped_catalog.load()["models"]
     assert rows
     for row in rows:
+        key = shipped_catalog.key(row)
         status = route_policy.row_status(row)
-        if row.get("dispatchable") is False:
-            assert status["status"] == "discovered-unconfirmed", shipped_catalog.key(row)
+        if row.get("dispatchable") is not False:
+            assert status["status"] == "available", key
+            assert row.get("discovery") != "eligible", key
+            continue
+        assert status["status"] == "discovered-unconfirmed", key
         if row.get("discovery") == "eligible":
-            assert row["dispatchable"] is False, shipped_catalog.key(row)
-            assert row["discovery_reason"] and row["invocation_model_id"], shipped_catalog.key(row)
+            assert row["discovery_reason"] and row["invocation_model_id"], key
+        else:
+            # A gated row outside discovery must say why: unproven invocation or a superseded model.
+            superseded = (row.get("supersession_metadata") or {}).get("superseded_by")
+            assert str(row.get("invocation_source") or "").startswith("unverified:") or superseded, key
 
 
 @pytest.mark.parametrize("size", SIZES)
