@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.31
+
+Resubmitting a task's accepted tree unchanged (for example after an amendment demoted it) is empty work: no self-review ledger is owed, and the revision records an empty exemption (#781).
+
 ## 3.15.30
 
 Adapters can set `quota_probe.unknown_is_unlimited: true` so an unknown quota reads as full headroom; routing stops skipping harnesses that have no probe (#1002).
