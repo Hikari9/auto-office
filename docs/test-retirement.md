@@ -123,7 +123,7 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_5_5_high_clears_the_executor_floor` | 1 | deleted | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value`; `PDC::test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception`; `tests/v31/test_intelligence_floor.py::test_executor_and_reviewer_floors_use_intelligence` |
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_alias_high_now_invokes_sonnet_5_5` | 1 | deleted | `tests/test_alias_resolution.py::test_alias_is_offered_at_every_effort_of_the_newest_member` (generic alias resolution). Obsolete part: the shipped Sonnet alias's invocation target and score are catalog data and are no longer asserted. |
 | `tests/v31/test_issue811_terra_supersession.py::test_six_terra_rows_are_present_and_only_probed_efforts_dispatch` | 1 | deleted | Obsolete: pins six catalog rows and their scores. Eligible-but-undispatchable rule: `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
-| `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
+| `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`, which also requires every gated row outside discovery to disclose why (an `unverified:` invocation source or a superseded model) |
 | `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` | 1 | rewritten | `tests/v31/test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` (every catalog row: source effort matches its effort, a `dispatchable: false` row is never `available`); `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`. Obsolete part: the six-effort score table and the per-effort dispatchable roster are catalog data. |
 
 ## Module inventory
@@ -150,7 +150,6 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_hooks.py` | keep |  |
 | `tests/test_instruction_conformance.py` | keep |  |
 | `tests/test_integration.py` | keep |  |
-| `tests/test_issue_927_onboarding_wording.py` | keep |  |
 | `tests/test_landings.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_monitor.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_packet_delivery_channel.py` | keep |  |
@@ -186,7 +185,6 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_amend_accepted.py` | keep |  |
 | `tests/v31/test_amend_additive.py` | keep |  |
 | `tests/v31/test_argon_catalog_809.py` | retire | pinned Argon catalog rows and the Argon slate tail; replaced by the data-driven exception and catalog-status contracts |
-| `tests/v31/test_batch_landing.py` | keep |  |
 | `tests/v31/test_benchmark_refresh.py` | keep |  |
 | `tests/v31/test_bug_hint.py` | keep |  |
 | `tests/v31/test_cap_diff.py` | keep |  |
@@ -225,7 +223,6 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_economics.py` | keep |  |
 | `tests/v31/test_economics_efficiency.py` | keep |  |
 | `tests/v31/test_executor_binding_config_drift.py` | keep |  |
-| `tests/v31/test_executor_context.py` | keep |  |
 | `tests/v31/test_external_visual.py` | keep |  |
 | `tests/v31/test_finding_identity.py` | keep |  |
 | `tests/v31/test_fixture_source_path.py` | keep |  |
@@ -259,11 +256,6 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue809_xl_review.py` | keep |  |
 | `tests/v31/test_issue811_terra_supersession.py` | consolidate | 1 of 6 nodes pinned the six Terra catalog rows; the supersession nodes stay |
 | `tests/v31/test_issue846_size_seeds.py` | consolidate | 5 of 16 nodes duplicated slate order or the gear tables; slate anchoring, reroute and seed precedence stay |
-| `tests/v31/test_issue936_greenfield_gear.py` | keep |  |
-| `tests/v31/test_issue938_review.py` | keep |  |
-| `tests/v31/test_issue_1029_wake_line.py` | keep |  |
-| `tests/v31/test_issue_1030_review_submit.py` | keep |  |
-| `tests/v31/test_issue_1031_executor_subagents.py` | keep |  |
 | `tests/v31/test_issue_267.py` | keep |  |
 | `tests/v31/test_issue_268.py` | keep |  |
 | `tests/v31/test_issue_399_dispatch_recovery.py` | keep |  |
@@ -301,11 +293,8 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_721_accepted_route.py` | keep |  |
 | `tests/v31/test_issue_730_run_base.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_734_fetched_base.py` | keep |  |
-| `tests/v31/test_issue_739_missing_test_runner.py` | keep |  |
 | `tests/v31/test_issue_740_recovery.py` | keep |  |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |  |
-| `tests/v31/test_issue_753_reused_pane_text.py` | keep |  |
-| `tests/v31/test_issue_773_stacked_inplace_edit.py` | keep |  |
 | `tests/v31/test_issue_783_cleanup.py` | keep |  |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |  |
 | `tests/v31/test_issue_790_codex_pane_submit.py` | keep |  |
@@ -318,26 +307,13 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_845_user_allow.py` | keep |  |
 | `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |  |
 | `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |  |
-| `tests/v31/test_issue_894_verdict_line.py` | keep |  |
 | `tests/v31/test_issue_895_false_stalls.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_896_amend_contract_route.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_897_full_suite_timeout.py` | keep | added on main after the inventory base; untouched by this change |
-| `tests/v31/test_issue_899_policy_view.py` | keep |  |
-| `tests/v31/test_issue_905_command_substitution.py` | keep |  |
-| `tests/v31/test_issue_908_low_fixed.py` | keep |  |
-| `tests/v31/test_issue_910_vision_probe_pane.py` | keep |  |
-| `tests/v31/test_issue_913_next_live_worker.py` | keep |  |
-| `tests/v31/test_issue_917_oversize.py` | keep |  |
 | `tests/v31/test_issue_918_busy_reply_ingest.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_920_reinstall_wake.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_921_route_recovered.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_922_919_wake_default.py` | keep | added on main after the inventory base; untouched by this change |
-| `tests/v31/test_issue_937_run_options.py` | keep |  |
-| `tests/v31/test_issue_940_non_herdr_wake.py` | keep |  |
-| `tests/v31/test_issue_941_quota_probe.py` | keep |  |
-| `tests/v31/test_issue_942_visual_disclosure.py` | keep |  |
-| `tests/v31/test_issue_944_usage.py` | keep |  |
-| `tests/v31/test_issue_945_verification_kind.py` | keep |  |
 | `tests/v31/test_job_ownership.py` | keep |  |
 | `tests/v31/test_kilo_registration.py` | keep |  |
 | `tests/v31/test_land.py` | keep |  |
@@ -381,10 +357,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_review_reroute.py` | keep |  |
 | `tests/v31/test_review_stopping_rule.py` | keep |  |
 | `tests/v31/test_reviewer_files.py` | keep |  |
-| `tests/v31/test_reviewer_launch_parity.py` | keep |  |
-| `tests/v31/test_reviewer_pane_quota_wall.py` | keep |  |
 | `tests/v31/test_reviewer_read_scope.py` | keep |  |
-| `tests/v31/test_reviewer_routes_from_current_pin.py` | keep |  |
 | `tests/v31/test_revoke_accepted.py` | keep |  |
 | `tests/v31/test_revoke_stops.py` | keep |  |
 | `tests/v31/test_risk_floor_lightweight.py` | keep |  |
@@ -469,7 +442,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 304, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 277, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 
