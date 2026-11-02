@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.30
+
+Adapters can set `quota_probe.unknown_is_unlimited: true` so an unknown quota reads as full headroom; routing stops skipping harnesses that have no probe (#1002).
+
 ## 3.15.29
 
 - feat(review): narrow grant (Rico-approved). claude and codex reviewers may run exactly `office review submit --file <own dispatch dir>/review-submit.txt` and nothing else: an exact claude allow plus explicit read-only Bash denies, and a per-dispatch codex execpolicy rule. pi gets no grant (#1030).
