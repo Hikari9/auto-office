@@ -406,7 +406,7 @@ def _listed_tasks(con, run: dict) -> list[str]:
     return [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
 
 
-def _office_rows(con, run_id: str) -> list[dict]:
+def office_rows(con, run_id: str) -> list[dict]:
     if not has_table(con):
         return []
     return [dict(r) for r in con.execute(
@@ -417,7 +417,7 @@ def status_lines(con, run: dict, task_ids: list[str]) -> tuple[list[str], list[s
     """`office status` usage as (default, verbose). Read-only. Nothing shows by default until collection is on or a
     row exists; the off notice is verbose only."""
     on = enabled(run)
-    rows = _office_rows(con, run["id"])
+    rows = office_rows(con, run["id"])
     if not on and not rows:
         return [], ["usage: unknown (cost collection is off; office config economics.collect true)"]
     lines = [f"usage: {_labelled(rows)}"]
