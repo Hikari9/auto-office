@@ -512,7 +512,7 @@ def _compose(con, run: dict, scope: dict) -> dict:
                     wt, {**t, "base_commit": task_base or run["base_sha"]}, previous, env=genv)
             except integration.SharedAppendUnsafe as exc:
                 return {"status": "conflict", "detail":
-                        f"{t['id']}: shared append integrity unverified: {exc}; serialize tasks or repair the append-only history, then office resume"}
+                        f"{t['id']}: shared append integrity unverified: {exc}; {integration.shared_append_next(t, previous)}"}
             previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")

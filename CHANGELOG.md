@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.2
+
+- fix(convergence): a stacked task's in-place edit of a `shared:` file composes when the composition still holds the file exactly as the task's recorded base (#773); sibling edits are still refused. The `next:` hint no longer says to serialize tasks that already depend on each other.
+
 ## 3.15.1
 
 - fix(wake): stop duplicate "new lifecycle transitions" wakes. A newer actionable wake is held (default 180s, `OFFICE_WAKE_COALESCE_SECONDS`) while the previous one is delivered but unobserved, then one wake carries the latest event id when the root observes or the window ends; queued/running gate progress no longer changes the wake signature. #723's at-least-once delivery is kept (docs/root-wake.md).
