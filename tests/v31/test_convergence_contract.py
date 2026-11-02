@@ -291,6 +291,7 @@ def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
         # #913: the live parent is prompted, never rerun; the held dependent is named, never offered.
         assert waiting.startswith('office prompt T1 -- "fix findings'), waiting
         assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
+        assert guide._needs_orchestrator(con, run), waiting  # the prompt is the orchestrator's to send
 
         # When T1's lease really releases, T2 becomes the one legal repair.
         owner["T2"] = None
