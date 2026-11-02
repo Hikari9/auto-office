@@ -211,3 +211,14 @@ def test_restack_never_adopts_a_head_that_drops_main_changes(env, monkeypatch):
     monkeypatch.setattr(land, "_restack", drops_main)
     code, out = env.office("land")
     assert code == 4 and "restack-push-failed" in out and "will not overwrite" in out, out
+def test_a_rate_limited_checks_lookup_is_unavailable_not_failed(env, monkeypatch):
+    """#772: GitHub's rate-limit error from `gh pr checks` is not a failed check; never point at a rerun."""
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), checks_exit=1,
+                      checks_out="GraphQL: API rate limit already exceeded for user ID 1.")
+    before = remote_head(bare, "main")
+    code, out = env.office("land")
+    assert code == 4 and "checks-unavailable" in out and "checks-failed" not in out, out
+    assert "office rerun" not in out and "rate_limit" in out, out
+    assert remote_head(bare, "main") == before
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
