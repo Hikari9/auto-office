@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.42
+
+The amendment authority filter no longer refuses text that names an email field or address; only outbound email phrasing (email the users, bulk email, emails to customers) counts as an authority action (#543).
+
 ## 3.15.41
 
 An amendment that changes only a task's visual.url or visual.start keeps the accepted task accepted and reruns its lane's visual capture, with no executor and no round spent (#728).
