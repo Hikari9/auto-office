@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.50
+
+A failed scripted visual step (a click that timed out, a state that never appeared) now reaches the lane's vision reviewer as evidence with a screenshot instead of an automatic RECHECK (#384, step 1).
+
 ## 3.15.49
 
 - test: retire the exhaustive model-roster and duplicate tests, with a traceability record in `docs/test-retirement.md` and an inventory check (#871 PR C, #1037).
