@@ -10,19 +10,26 @@ from __future__ import annotations
 
 import pytest
 
-from office import candidates, config, executor_slates as slates, route_policy, routing, shipped_catalog
+import yaml
+
+from office import adapters, candidates, config, executor_slates as slates, route_policy, routing, shipped_catalog
 
 POLICY = slates.POLICY
 INDEX = POLICY["benchmark_index"]
 SIZES = tuple(POLICY["floors"])
 CLEAR = max(POLICY["floors"].values()) + 10
-HARNESSES = tuple(sorted({"claude", "agy", "codex", "opencode"}
-                         | {h for r in POLICY["model_restrictions"] for h in r.get("allowed_harnesses", ())}))
+# Every shipped adapter (read from the seed files, never a user adapter), every harness the policy names,
+# and a sentinel no adapter defines: a restriction must bind all of them, not a hand-picked few.
+SHIPPED_HARNESSES = {yaml.safe_load(f.read_text(encoding="utf-8"))["id"] for f in adapters.adapter_dir().glob("*.yaml")}
+HARNESSES = tuple(sorted(SHIPPED_HARNESSES
+                         | {h for r in POLICY["model_restrictions"] for h in r.get("allowed_harnesses", ())}
+                         | {"unknown-harness-sentinel"}))
 
 
 def test_the_policy_data_under_test_is_not_empty():
     """An emptied table would deselect or vacuously pass the loops below."""
     assert SIZES and all(POLICY["executor_preferred"].get(size) for size in SIZES)
+    assert len(SHIPPED_HARNESSES) >= 2 and SHIPPED_HARNESSES <= set(HARNESSES)
     assert POLICY["model_restrictions"] and POLICY["floor_exceptions"] and POLICY["planner_preferred"]
     assert set(POLICY["planner_preferred"]) <= set(SIZES)
     rules = route_policy.SEED_ROLE_RULES
@@ -137,6 +144,8 @@ def test_a_gear_without_a_planner_table_keeps_the_flat_seed(gear):
 @pytest.mark.parametrize("restriction", POLICY["model_restrictions"], ids=lambda r: r["model_id"])
 def test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data(restriction):
     model = restriction["model_id"]
+    if "allowed_harnesses" in restriction:
+        assert set(HARNESSES) - set(restriction["allowed_harnesses"]), "a harness restriction needs a harness it denies"
     for size in SIZES:
         for harness in HARNESSES:
             allowed = (size in restriction.get("allowed_sizes", SIZES)
