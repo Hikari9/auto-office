@@ -448,10 +448,12 @@ def _applies_next() -> str:
 # ------------------------------------------------------------------ a run's routing (#308)
 
 def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
-    """Re-pin a run's `roles` and `routing` from the current config files: the one
-    opt-in that moves a running run off the values it pinned at start. Later
-    dispatches route from the re-pinned policy; the drift notice then has nothing
-    left to report for those blocks. `quote` is the user's words authorizing it."""
+    """Re-pin a run's `roles`, `routing` and `quota` from the current config files:
+    the one opt-in that moves a running run off the values it pinned at start.
+    Later dispatches route from the re-pinned policy; the drift notice then has
+    nothing left to report for those blocks. `quota` is here because route choice
+    reads the run's pinned `quota.reserve_percent`: without it a lowered reserve
+    could never reach a live run. `quote` is the user's words authorizing it."""
     if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
     if not run_arg:
@@ -475,7 +477,7 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     except ValueError as exc:
         raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
     policy = dict(run.get("policy") or {})
-    blocks = ("roles", "routing")
+    blocks = ("roles", "routing", "quota")
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
     if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
         changed.append("routing")
