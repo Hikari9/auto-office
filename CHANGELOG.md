@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.23
+
+- test(convergence): the retract-in-ingest test expects four convergence reviews, since #768 re-reviews a same-tree recomposition after a contract change.
+
 ## 3.15.22
 
 - fix(convergence): a same-tree recomposition after a contract or acceptance change is reviewed again, not carried (#768).
