@@ -498,8 +498,9 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version,
                  hold=_amended_holds(con, run, affected))
-        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} (a task you build on changed its contract)", version,
-                 hold=ripple)
+        owners = sorted(sync["contract"])
+        _deliver(con, run, amendment_id, ripple, f"{delta.strip()} {_ripple_note(owners)}", version,
+                 hold=ripple, owners=owners)
         flagged = _envelope_changes(con, run, parsed)
         from office import contract
         if contract.is_convergence(run):
@@ -579,8 +580,9 @@ def contract_from_planner(con, run: dict, amendment_id: str | None, changes: dic
     _deliver(con, run, aid, affected, f"plan p{version} contract revision", version,
              hold=_amended_holds(con, run, affected))
     ripple = _ripple(con, run, prior_graph or {}, changes)
-    _deliver(con, run, aid, ripple, f"plan p{version} contract revision (a task you build on changed its contract)",
-             version, hold=ripple)
+    owners = sorted(changes.get("contract", []))
+    _deliver(con, run, aid, ripple, f"plan p{version} contract revision {_ripple_note(owners)}",
+             version, hold=ripple, owners=owners)
     for t in state.tasks(con, run["id"]):
         if t["status"] == "paused" and (t.get("pause_reason") or "").startswith("contract amendment"):
             from office import gates
@@ -729,12 +731,21 @@ def _relaunch_decision(task: dict) -> dict | None:
     return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
 
 
+def _owners_label(owners: list[str]) -> str:
+    return ", ".join(owners) or "a task you build on"
+
+
+def _ripple_note(owners: list[str]) -> str:
+    return f"({_owners_label(owners)} changed its contract, not yours: adjust only work that relies on what changed)"
+
+
 def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
-             hold: list[str] = ()) -> list[str]:
+             hold: list[str] = (), owners: list[str] | None = None) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
     unapplied ones. A task in `hold` is built on a task being redone: it gets the delta and is reopened, but no
     executor is relaunched until the orchestrator reruns it (office rerun), after the dependency is accepted again.
-    Caller holds tx."""
+    `owners` marks a ripple delivery (#960): the receiving tasks build on the `owners`, whose contract changed,
+    so their prompt says so instead of telling them to apply someone else's amendment. Caller holds tx."""
     from office import dispatch, gates
     targets = []
     for tid in task_ids:
@@ -763,8 +774,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             state.enqueue(con, run, "notify_worker", {"dispatch_id": d["id"], "task_id": tid,
                           "unblock": submit_mod.self_blocked(task), "amendment_id": amendment_id,
                           "block_id": submit_mod.block_id(con, d["id"]),
-                          "text": f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
-                                  "then office submit again."},
+                          "text": (f"AMENDMENT {amendment_id}: run office status, apply it, office ack {amendment_id}, "
+                                   "then office submit again." if owners is None else
+                                   f"AMENDMENT {amendment_id} changed the contract of {_owners_label(owners)}, "
+                                   f"not yours: run office status, change your work only where it relies on what changed, "
+                                   f"office ack {amendment_id}, then office submit again.")},
                           dedup_key=f"notify:{did}", max_attempts=1)
         elif task["status"] in ("planned",):
             # Nothing has run: the first session starts from the current contract.
