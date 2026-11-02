@@ -24,7 +24,7 @@ test = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6.100"]
 mutation = ["mutmut>=3.2,<4"]
 
 [project.scripts]
-office = "office.cli:main"
+office = "office.__main__:entry"
 
 [project.urls]
 Repository = "https://github.com/Hikari9/auto-office"

@@ -398,6 +398,13 @@ def test_the_v31_path_honours_the_veto(veto_env):
     assert _plan_version(env) == 2
     assert _plan_gates(env) == before
     assert len(_rows(env, "SELECT 1 FROM events WHERE kind='plan.review_skipped'")) == 1
+    # T3 queues no second round behind p1's in-flight round (Q14/S3). This test sets that round to finished
+    # without running its job, which bypasses ingest; the in-flight rule itself is pinned in test_rolling_review.py.
+    con = env.con()
+    with con:
+        con.execute("UPDATE gates SET status='done', verdict='CHANGES_REQUIRED' "
+                    "WHERE kind='plan_review' AND plan_version=1 AND status='queued'")
+    con.close()
     code, out = env.office("amend", "plan", "--", "second, reviewed tweak", env=MANUAL)
     assert code == 0 and _plan_version(env) == 3
     assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"

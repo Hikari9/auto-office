@@ -32,7 +32,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, version, worktree_setup
+from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, verification_coverage, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
@@ -437,7 +437,6 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
     if not changed and not allow_unchanged:
         return []
     cfgv = state.pinned_config(run).get("verification") or {}
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     found = []
     with check_slot(check_concurrency(cfgv)):
@@ -454,6 +453,7 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
+                timeout, _ = check_timeout(cfgv, r["command"])
                 code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
                 log = evdir / (Path(r["log"]).stem + ".base.log")
                 log.write_text(out, encoding="utf-8")
@@ -550,10 +550,23 @@ def _tracked_stat_snapshot(cwd: Path) -> dict[str, tuple[int, int, int, int, int
     return snapshot
 
 
+def check_timeout(cfgv: dict, command: str) -> tuple[int, str]:
+    """(seconds, setting) one check command runs under. The full suite runs under
+    verification.full_suite_timeout_seconds or check_timeout_seconds, whichever is
+    larger. The setting is the one that binds, so a timeout names what to raise."""
+    check = int(cfgv.get("check_timeout_seconds", 1800))
+    if verification_coverage.is_full_suite(command):
+        full = int(cfgv.get("full_suite_timeout_seconds") or 0)
+        if full <= 0:  # unset, blank, or non-positive: the default
+            full = 7200
+        if full >= check:
+            return full, "full_suite_timeout_seconds"
+    return check, "check_timeout_seconds"
+
+
 def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
                   check_tree: bool = True) -> dict:
     from office.submit import matches_revision
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     evdir.mkdir(parents=True, exist_ok=True)
     findings, results = [], []
@@ -563,7 +576,6 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         log = evdir / f"check-{i}.log"
         started = time.time()
         environment = _check_env(run)
-        from office import verification_coverage
         if verification_coverage._complete_pytest_command(command):
             environment.pop("PYTEST_ADDOPTS", None)
             environment.pop("PYTEST_PLUGINS", None)
@@ -579,7 +591,11 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         # but must still fail closed when the check mutates tracked source.
         before_tracked = _tracked_diff_snapshot(cwd)
         before_stats = _tracked_stat_snapshot(cwd)
+        timeout, setting = check_timeout(cfgv, command)
+        timed_out = f"timed out after {timeout}s; raise verification.{setting} to allow a longer run"
         code, out = _run_check(command, cwd, timeout, environment)
+        # Only Office's own kill is a timeout: a process that exits 124 itself is not.
+        killed = isinstance(out, _TimedOut)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -616,21 +632,28 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": detail, "results": results,
                     "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
-            what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
+            what = timed_out if killed else "exited 124" if code == 124 else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
+            why = f"check {timed_out}" if killed else f"check failed (exit {code})"
+            action = f"raise verification.{setting} or shorten the check" if killed else "make this check pass"
             findings.append({"code": f"C{i}", "severity": "material", "location": command,
-                             "summary": f"check failed (exit {code}): {tail[-600:]}", "action": "make this check pass"})
+                             "summary": f"{why}: {tail[-600:]}", "action": action})
         if check_tree and not matches_revision(cwd, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
             return {"verdict": "STALE", "summary": "worktree changed while checks ran", "results": results}
     verdict = "PASS" if not findings else "CHANGES_REQUIRED"
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+class _TimedOut(str):
+    """Output of a check Office killed at its limit. Only _run_check makes one, so a check that
+    prints the timeout text and exits 124 itself still reads as a plain str, not a kill."""
 
 
 def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
@@ -649,10 +672,10 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
         with contextlib.suppress(OSError):
             os.killpg(proc.pid, signal.SIGKILL)
         try:
-            stdout, _ = proc.communicate(timeout=10)
+            stdout, stderr = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
-            stdout = ""
-        return 124, f"timed out after {timeout}s\n{stdout or ''}"
+            stdout, stderr = "", ""
+        return 124, _TimedOut(f"timed out after {timeout}s\n{(stdout or '') + (stderr or '')}")
 
 
 def host_overloaded() -> str | None:
@@ -810,7 +833,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             if last_failed and last_failed[0] != triple:
                 review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
             elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
-                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id)
+                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id,
+                                    skip_class=skipped[2])
             con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
                         "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
         ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
@@ -979,10 +1003,10 @@ def _launch_spec(ddir: Path) -> dict:
     return spec if isinstance(spec, dict) else {}
 
 
-def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
-    """(route, why) when routing passed over the review's preferred primary route for `chosen`: the first
+def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str, str] | None:
+    """(route, why, skip_class) when routing passed over the review's preferred primary route for `chosen`: the first
     preferred_seed entry matched a candidate that selection rejected (quota cooldown, trust, capability) and
-    `chosen` is not that entry's route."""
+    `chosen` is not that entry's route. skip_class is "quota-auth" for a quota or auth rejection, else "other"."""
     seed = ((decision.get("request") or {}).get("preferred_seed") or [])[:1]
     if not seed or routing.preferred_rank(chosen, seed) is not None:
         return None
@@ -990,17 +1014,21 @@ def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
               if routing.preferred_rank(c, seed) is not None}
     for r in decision.get("rejected") or []:
         if r.get("candidate") in wanted:
-            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}"
+            skip_class = "quota-auth" if routing.quota_auth_rejection(r) else "other"
+            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}", skip_class
     return None
 
 
 def review_route_notice(con, run: dict, gate: dict, role: str, before: str | None, after: str, reason: str, *,
-                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office") -> None:
+                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office",
+                        skip_class: str | None = None) -> None:
     """A user-visible notice that a plan or lane review left its primary or pinned route: old route, new route and
-    why, in `office status` and `office inspect route`. Caller holds the tx."""
+    why, in `office status` and `office inspect route`. `skip_class` (#921) says whether the route was avoided for
+    quota or auth. Caller holds the tx."""
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    extra = {"notice": "review", "gate": gate["id"], **({"skip_class": skip_class} if skip_class else {})}
     state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
-                              stage=role, extra={"notice": "review", "gate": gate["id"]})
+                              stage=role, extra=extra)
     if kind == "reviewer-fallback":
         state.emit(con, run, "route.fallback", f"{scope} {role} fell back from {before or 'unrecorded'} to {after}: {reason}",
                    task_id=gate.get("task_id"), dispatch_id=dispatch_id,

@@ -134,10 +134,45 @@ def current() -> str:
             raise RuntimeError(f"OFFICE_VERSION_OVERRIDE={override!r} is not an exact PEP 440 version")
         return override
     base = base_version()
-    identity = _cached_source_identity(base) if _is_source_checkout() else base
+    identity = _cached_source_identity(base) if _is_source_checkout() and not _probing else base
     if not is_exact(identity):
         raise RuntimeError(f"Auto Office version {identity!r} is not an exact PEP 440 version")
     return identity
+
+
+# `uv tool install --force` replaces the package files in place. A process that starts during that
+# replacement fails its imports or its version probe. EX_TEMPFAIL: the caller should retry.
+REBUILD_EXIT_CODE = 75
+REBUILD_RETRY_SECONDS = 5
+# Set only while rebuilding_reason() runs, so the probe before every command spawns no git subprocess.
+_probing = False
+
+
+def rebuilding_reason() -> str | None:
+    """Why this process cannot resolve its install right now, else None.
+
+    Only an import or read failure counts as a rebuild. A bad OFFICE_VERSION_OVERRIDE
+    stays a RuntimeError: that is configuration, and retrying it cannot help."""
+    global _probing
+    _probing = True  # the probe needs imports and reads, not the git-derived source identity (#920)
+    try:
+        # Uncached: the probe's base-only answer must not reach the lru_cache that later callers read.
+        getattr(current, "__wrapped__", current)()
+    except (ImportError, OSError) as exc:
+        return failure_cause(exc)
+    finally:
+        _probing = False
+    return None
+
+
+def failure_cause(exc: BaseException) -> str:
+    """The exception type and the module it names. `office/__main__.py` keeps the same form for a startup failure."""
+    module = getattr(exc, "name", None) or getattr(exc, "filename", None) or "office"
+    return f"{type(exc).__name__}: {module}"
+
+
+def rebuild_line(cause: str) -> str:
+    return f"office: install is being rebuilt, retry in {REBUILD_RETRY_SECONDS} s ({cause})"
 
 
 # A wheel carries these source paths under office/_resources (pyproject force-include).

@@ -166,16 +166,20 @@ def _is_fresh(rec: dict, ttl_days: float, timeout_s: float, now: datetime) -> bo
     return age <= timedelta(days=ttl_days)
 
 
-def status(con, cand: dict, *, adapter: dict | None = None, ttl_days: float | None = None,
-           timeout_s: float | None = None, now: datetime | None = None) -> dict | None:
-    """The fresh probe record for this exact fingerprint, or None. A record of a
-    sibling effort, model, harness version, adapter or profile is never returned."""
+def exact_row(con, cand: dict, adapter: dict | None = None) -> dict | None:
+    """The cache row for this candidate's exact fingerprint, fresh or not, or None when a part cannot be read. A row of
+    a sibling effort, model, harness version, adapter or profile is a different key and is never returned."""
     ad = _adapter(cand, adapter)
     fp = fingerprint(cand, ad)
     if "unknown" in (fp["harness_version"], fp["adapter_hash"]):
         return None
-    probe_key = key(cand, ad)
-    rec = _cache_row(con, probe_key)
+    return _cache_row(con, key(cand, ad))
+
+
+def status(con, cand: dict, *, adapter: dict | None = None, ttl_days: float | None = None,
+           timeout_s: float | None = None, now: datetime | None = None) -> dict | None:
+    """The fresh probe record for this exact fingerprint, or None."""
+    rec = exact_row(con, cand, adapter)
     if rec is None:
         return None
     defaults = route_policy.DISCOVERY_DEFAULTS

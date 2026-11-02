@@ -55,6 +55,10 @@ Keep #796 focused on improving the performance of optional historical and full d
 
 Check the row count against `git diff --stat`: 3 modules deleted (16 functions) plus 39 functions removed from 7 retained modules is 55 removed `def test_` lines, and no function is rewritten. `PDC` adds 21 functions (64 nodes).
 
+## Baseline failure name
+
+The baseline failure `test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs` is the name at base `d1402697`. Main `67600943` renamed it to `test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs` (fix `1e22deca`). `tests/v31/test_issue809_run_gear.py` is byte-identical to `origin/main` `67600943`, and the fault-injection rows and traceability rows cite the new name.
+
 ## Fault injection
 
 Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at the copy), the listed tests failed, and the file was restored from the checked-out tree. The restored copy then passed all of `PDC`.
@@ -463,6 +467,7 @@ Totals: {'keep': 267, 'historical-diagnostic': 21, 'consolidate': 7, 'retire': 3
 
 ## Left alone on purpose
 
+- `docs/mutation-testing.md:19` still cites the deleted `tests/v31/test_haiku_5_5.py`. It is outside this run's scope, so it is a follow-up.
 - Modules and nodes named in `SAFETY_SMOKE` or `SPECIAL` in `scripts/select_pr_tests.py`, the nodes cited in `docs/contract-suite.md`, and everything in `tests/contracts/`.
 - `tests/test_derived_routing.py` is synthetic (`'m'`, `'fallback'`) and tests the retained 3.0 runtime, so it is classified historical-diagnostic, not retired.
 - `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`: `adaptive.py` hard-codes the Sonnet claude-to-agy hoist, so this is its only guard.

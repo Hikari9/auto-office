@@ -235,11 +235,6 @@ def test_every_shipped_role_rule_holds_at_its_own_scope():
     wrong = []
     for rule in rules:
         for size in rule.get("sizes") or [None]:
-            overlapping = [r for r in rules if r is not rule and r["role"] == rule["role"]
-                           and r["route"] == rule["route"] and size in (r.get("sizes") or [size])
-                           and r.get("sizes") is not None and rule.get("sizes") is None]
-            if overlapping:
-                continue
             if _state(rule, rule["role"], size) != rule["state"]:
                 wrong.append((rule["role"], rule["route"], size, rule["state"]))
     assert not wrong, wrong
