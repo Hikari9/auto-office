@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import secrets
+import shlex
 from pathlib import Path
 
 from office import contract, db, paths, review_parse, state
@@ -26,6 +27,33 @@ TOKEN_FILE = "review.token"
 SUBMITTED_FILE = "reply.submitted"
 DISPATCH_ENV, TOKEN_ENV = "OFFICE_REVIEW_DISPATCH", "OFFICE_REVIEW_TOKEN"
 REVIEW_ROLES = ("plan_reviewer", "code_reviewer", "integration_reviewer", "visual_reviewer")
+# The one file a granted reviewer submits from, beside its reply: the grant names this exact command, no wildcard.
+SUBMIT_FILE = "review-submit.txt"
+# Claude Code runs its built-in read-only Bash commands in every permission mode, and the set is not
+# configurable (docs: permissions > read-only commands). Dropping the blanket Bash deny for the submit allow
+# would let them through, so each documented member is denied explicitly, bare and with arguments.
+CLAUDE_READONLY_BASH = ("ls", "cat", "echo", "pwd", "head", "tail", "grep", "find", "wc", "which", "diff",
+                        "stat", "du", "cd", "git")
+
+
+def submit_argv(output: str | Path) -> list[str]:
+    """The exact argv a granted reviewer may run (#1030 narrow grant)."""
+    return ["office", "review", "submit", "--file", str(Path(output).parent / SUBMIT_FILE)]
+
+
+def submit_command(output: str | Path) -> str:
+    """The same command as one shell line, its path quoted (a run dir may contain spaces)."""
+    return shlex.join(submit_argv(output))
+
+
+def codex_rules(output: str | Path) -> str:
+    """A codex execpolicy rules file allowing exactly the submit command to run outside the sandbox (it writes
+    runs.db). Codex splits a command line at control operators and allows a segment only when it matches a
+    prefix rule; redirections, substitutions, env assignments and globs are never matched."""
+    tokens = submit_argv(output)
+    return ("# Written by Auto Office for this reviewer dispatch only (#1030): one exact command, nothing else.\n"
+            f"prefix_rule(pattern={tokens!r}, decision=\"allow\",\n"
+            "            justification=\"hand this review back to Auto Office; it writes only Office state\")\n")
 MAX_CHARS = 200_000
 
 

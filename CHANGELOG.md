@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.29
+
+- feat(review): narrow grant (Rico-approved). claude and codex reviewers may run exactly `office review submit --file <own dispatch dir>/review-submit.txt` and nothing else: an exact claude allow plus explicit read-only Bash denies, and a per-dispatch codex execpolicy rule. pi gets no grant (#1030).
+
 ## 3.15.28
 
 - feat(review): `office review submit` (stdin or --file) lets a reviewer hand back its verdict for any review kind. It validates the reply for its gate, records it at once and ends the reviewer's wait. Reviewers get only a per-dispatch submit secret, no other Office authority (#1030).
