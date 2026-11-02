@@ -1204,7 +1204,8 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
     if onto != run["base_sha"]:
         parents_for_base.insert(0, ("rebased default branch", onto))
     try:
-        return integration.combine(run, parents_for_base)
+        return integration.combine(run, parents_for_base, shared={
+            h["task"]: integration.shared_paths(state.get_task(con, run["id"], h["task"])) for h in heads})
     except integration.CombineConflict as exc:
         raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
                       f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],

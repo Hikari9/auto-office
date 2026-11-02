@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.36
+
+A dependent task's base now composes sibling tasks' appends to the same declared shared: registry as their union instead of refusing the dispatch with dependency-conflict (#537).
+
 ## 3.15.35
 
 `office model verify <harness>/<model> --evidence <run>/<task>` promotes a model added with office model add to a local-evidence: source on cited acceptances under independent review; explicit only (#656).

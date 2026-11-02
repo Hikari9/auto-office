@@ -290,7 +290,8 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     if not pending:
         if accepted:
             try:
-                base = integration.combine(run, accepted)
+                base = integration.combine(run, accepted, shared={
+                    dep: integration.shared_paths(state.get_task(con, run["id"], dep)) for dep, _ in accepted})
             except (integration.CombineConflict, paths.GitError) as exc:
                 raise Refused("rebase-conflict" if rebased else "dependency-conflict",
                               f"{task['id']} cannot combine the current base with accepted dependencies: {exc}",
@@ -330,7 +331,8 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                             "reopened": reopened, "line": f"restack onto {dep} conflicts; task HEAD unchanged"}
                 merged.append({"task": dep, "revision": rev_id, "commit": sha})
             try:
-                base = integration.combine(run, accepted)
+                base = integration.combine(run, accepted, shared={
+                    dep: integration.shared_paths(state.get_task(con, run["id"], dep)) for dep, _ in accepted})
             except (integration.CombineConflict, paths.GitError) as exc:
                 if rebased:
                     raise Refused("rebase-conflict", f"{task['id']} cannot combine rebased base: {exc}",
