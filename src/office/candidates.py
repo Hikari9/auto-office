@@ -279,7 +279,7 @@ def _probe_quota(adapter: dict) -> dict:
         if isinstance(value, dict):
             result = _normalize_probe_result(value, unknown)
         else:
-            result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+            result = (_normalize_probe_result({"tightest_remaining_percent": value}, unknown) if value is not None
                       else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
@@ -325,7 +325,7 @@ def _run_probe(argv: list[str], unknown) -> dict:
             return unknown(f"command exited with code {proc.returncode}")
         try:
             data = json.loads(proc.stdout)
-        except ValueError:
+        except (ValueError, RecursionError):
             return unknown("command returned invalid JSON")
         return _normalize_probe_result(data, unknown)
     return unknown("command could not be run or parsed")  # pragma: no cover
@@ -339,6 +339,8 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
         if isinstance(data.get("families"), dict):  # a known family can still gate its own models
             result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
         return result
+    if isinstance(data["tightest_remaining_percent"], bool):
+        return unknown("command returned a boolean tightest_remaining_percent")
     try:
         percent = float(data["tightest_remaining_percent"])
     except (TypeError, ValueError, OverflowError):
@@ -359,7 +361,7 @@ def _normalize_family(family: str, raw) -> dict:
         remaining = float(raw["tightest_remaining_percent"]) if raw.get("status") == "ok" else None
     except (KeyError, TypeError, ValueError, OverflowError):
         remaining = None
-    if remaining is None or not math.isfinite(remaining):
+    if remaining is None or not math.isfinite(remaining) or isinstance(raw.get("tightest_remaining_percent"), bool):
         return {"status": "unknown", "tightest_remaining_percent": None,
                 "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
     return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
@@ -401,7 +403,7 @@ def _shared_cache_path() -> Path:
 def _shared_entry(harness: str) -> dict | None:
     try:
         entry = json.loads(_shared_cache_path().read_text()).get(harness)
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return None
     return entry if isinstance(entry, dict) else None
 
@@ -430,16 +432,26 @@ def _shared_cache_get(harness: str) -> dict | None:
     return None
 
 
+def _is_number(value) -> bool:
+    """A finite real number. Bools, numeric strings and integers too large for a float are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _valid_reading(reading: dict) -> bool:
-    """A stored ok reading whose percents are finite numbers. The cache file is not trusted:
-    a bad value would otherwise reach the reserve check as an uncaught float() error."""
+    """A stored ok reading whose percents are numbers. The cache file is not trusted: a bad value
+    would otherwise reach the reserve check as a crash or as a reading that is not a number."""
     families = reading.get("families")
     fams = [f for f in families.values() if isinstance(f, dict) and f.get("status") == "ok"] \
         if isinstance(families, dict) else []
     try:
         return reading.get("status") == "ok" and all(
-            math.isfinite(float(r["tightest_remaining_percent"])) for r in [reading, *fams])
-    except (KeyError, TypeError, ValueError, OverflowError):
+            _is_number(r["tightest_remaining_percent"]) for r in [reading, *fams])
+    except KeyError:
         return False
 
 
@@ -490,7 +502,7 @@ def _shared_cache_put(harness: str, result: dict) -> None:
                 data = json.loads(path.read_text()) if path.exists() else {}
                 if not isinstance(data, dict):
                     data = {}
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 data = {}
             now = time.time()
             prior = data.get(harness) if isinstance(data.get(harness), dict) else {}

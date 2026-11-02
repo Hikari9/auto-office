@@ -234,7 +234,7 @@ def test_last_good_ttl_boundary_is_exclusive(monkeypatch, age, stale):
     assert (result["status"] == "ok") is stale and result.get("stale", False) is stale
 
 
-@pytest.mark.parametrize(("junk", "age", "stale"), [("abc", 5, True), ("inf", 601, False), ("nan", 601, False)])
+@pytest.mark.parametrize(("junk", "age", "stale"), [("abc", 5, True), ("inf", 601, False), ("nan", 5, True)])
 def test_unparseable_or_non_finite_last_good_ttl_uses_the_default(monkeypatch, junk, age, stale):
     # The default is 600s: a 5s-old reading is inside it, a 601s-old one is outside it. An infinite
     # or NaN TTL must fall back to 600s, so a 601s-old reading must not be served.
@@ -292,13 +292,62 @@ def test_a_non_finite_probe_percent_is_unknown_not_ok(monkeypatch, stdout):
     assert result["cause"] == "command returned a non-finite tightest_remaining_percent"
 
 
-def test_a_non_finite_family_percent_is_unknown_for_that_family(monkeypatch):
-    body = '{"tightest_remaining_percent": 60, "families": {"claude": {"status": "ok", "tightest_remaining_percent": NaN}}}'
+@pytest.mark.parametrize("literal", ["NaN", "Infinity"])
+def test_a_non_finite_family_percent_is_unknown_for_that_family(monkeypatch, literal):
+    body = ('{"tightest_remaining_percent": 60, "families": {"claude": {"status": "ok", '
+            '"tightest_remaining_percent": ' + literal + "}}}")
     FakeProbe(monkeypatch, [_stdout(body)])
 
     result = candidates.probe_quota({"id": "agy", "quota_probe": {"command": ["probe"]}})
 
-    assert result["families"]["claude"]["status"] == "unknown"
+    assert result["status"] == "ok" and result["families"]["claude"]["status"] == "unknown"
+
+
+def test_a_huge_integer_family_percent_is_unknown_for_that_family(monkeypatch):
+    body = ('{"tightest_remaining_percent": 60, "families": {"claude": {"status": "ok", '
+            '"tightest_remaining_percent": ' + "9" * 400 + "}}}")
+    FakeProbe(monkeypatch, [_stdout(body)])
+
+    result = candidates.probe_quota({"id": "agy", "quota_probe": {"command": ["probe"]}})
+
+    assert result["status"] == "ok" and result["families"]["claude"]["status"] == "unknown"
+
+
+def test_a_boolean_family_percent_is_unknown_for_that_family(monkeypatch):
+    body = ('{"tightest_remaining_percent": 60, "families": {"claude": {"status": "ok", '
+            '"tightest_remaining_percent": true}}}')
+    FakeProbe(monkeypatch, [_stdout(body)])
+
+    result = candidates.probe_quota({"id": "agy", "quota_probe": {"command": ["probe"]}})
+
+    assert result["status"] == "ok" and result["families"]["claude"]["status"] == "unknown"
+
+
+def test_a_boolean_probe_percent_is_unknown_not_a_reading(monkeypatch):
+    FakeProbe(monkeypatch, [_stdout('{"tightest_remaining_percent": true}')])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result["status"] == "unknown"
+    assert result["cause"] == "command returned a boolean tightest_remaining_percent"
+
+
+def test_a_fixture_non_finite_percent_is_unknown_not_a_reading(monkeypatch):
+    monkeypatch.setenv("OFFICE_QUOTA_FIXTURE", '{"claude": NaN}')
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result == {"status": "unknown", "tightest_remaining_percent": None,
+                      "cause": "command returned a non-finite tightest_remaining_percent"}
+
+
+def test_deeply_nested_probe_output_is_unknown_not_a_crash(monkeypatch):
+    FakeProbe(monkeypatch, [_stdout("[" * 100000 + "]" * 100000)])
+
+    result = candidates.probe_quota(ADAPTER)
+
+    assert result == {"status": "unknown", "tightest_remaining_percent": None,
+                      "cause": "command returned invalid JSON"}
 
 
 def test_a_huge_integer_from_the_probe_is_unknown_not_a_crash(monkeypatch):
@@ -324,17 +373,20 @@ def test_a_huge_integer_in_the_cache_is_not_a_crash(monkeypatch, field):
     assert result["status"] == "unknown" and "stale" not in result
 
 
-def test_a_non_finite_shared_ttl_uses_the_default(monkeypatch):
+@pytest.mark.parametrize(("junk", "age", "probes"), [("inf", 400, True), ("nan", 100, False)])
+def test_a_non_finite_shared_ttl_uses_the_default(monkeypatch, junk, age, probes):
+    # The default fresh TTL is 300s: a 400s-old entry is stale, a 100s-old one is fresh.
     FakeProbe(monkeypatch, [_ok(60)])
     candidates.probe_quota(ADAPTER)
-    _edit_cache(lambda entry: entry.__setitem__("at", entry["at"] - 400))  # past the default 300s
-    monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", "inf")
+    _edit_cache(lambda entry: entry.__setitem__("at", entry["at"] - age))
+    monkeypatch.setenv("OFFICE_QUOTA_CACHE_TTL", junk)
     candidates._QUOTA_CACHE.clear()
     fake = FakeProbe(monkeypatch, [_ok(70)])
 
     result = candidates.probe_quota(ADAPTER)
 
-    assert fake.calls == 1 and result["tightest_remaining_percent"] == 70.0
+    assert fake.calls == (1 if probes else 0)
+    assert result["tightest_remaining_percent"] == (70.0 if probes else 60.0)
 
 
 @pytest.mark.parametrize("patch", [
@@ -343,6 +395,8 @@ def test_a_non_finite_shared_ttl_uses_the_default(monkeypatch):
     {"tightest_remaining_percent": INF},
     {"families": {"claude": {"status": "ok", "tightest_remaining_percent": "abc"}}},
     {"families": {"claude": {"status": "ok", "tightest_remaining_percent": NAN}}},
+    {"tightest_remaining_percent": True},
+    {"tightest_remaining_percent": "50"},
 ])
 def test_an_invalid_stored_reading_is_not_served(monkeypatch, patch):
     _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
