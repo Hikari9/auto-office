@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.33
+
+`office config --run <id> --apply-verification --quote "<words>"` re-pins a running run's check timeouts and check concurrency from the config files, and `office config --run <id> <key>` shows the value the run pinned (#755).
+
 ## 3.15.32
 
 A task's worktree setup that exits 127 (command not found) now stops the dispatch with an office doctor hint instead of launching an agent without dependencies; other setup failures stay a notice (#364).
