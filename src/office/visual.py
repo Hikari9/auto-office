@@ -321,6 +321,22 @@ def job_capture(con, run: dict, job: dict) -> dict:
     return {"evidence_status": status}
 
 
+# A scripted interaction step the capture could not complete (#384). In a lane visual review it is evidence for the
+# vision reviewer, who can tell a real bug from a step that does not apply at that viewport, not an automatic RECHECK.
+INTERACTION = "interaction"
+
+
+def _failed_step_shot(page, evdir: Path, name: str) -> dict:
+    """A screenshot of the page as the failed step left it, so the vision reviewer sees why; {} if it cannot."""
+    shot = evdir / f"{name}-failed-step.png"
+    try:
+        page.screenshot(path=str(shot), full_page=True)
+        os.chmod(shot, 0o600)
+    except Exception:  # the failure itself is the evidence; a missing picture never hides it
+        return {}
+    return {"screenshot": str(shot), "failed_step": True}
+
+
 def _wait_url(url: str, timeout: float, *, require_success: bool = False) -> str | None:
     # Wait for healthy HTTP responses, not just a listening preview port (#669).
     # A self-started preview needs HTTP <400. A supplied server may serve a
@@ -716,7 +732,8 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
             shot_hash = sha256_file(Path(shot_path)) if shot_path and Path(shot_path).is_file() else None
             if st["name"] == "default":
                 default_shot_hash = shot_hash
-            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid"):
+            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid") \
+                    and not frame.get("failed_step"):  # a step that failed leaves the default page: that is the evidence
                 frame["cause"] = "capture"
                 frame["invalid"] = f"state '{st['name']}' screenshot identical to default"
             if ref is not None and not frame.get("invalid"):
@@ -826,16 +843,20 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                     return {**out, "invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
                 lines = str(exc).splitlines()
                 err_line = lines[0][:120] if lines else str(exc)[:120]
-                return {**out, "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
+                return {**out, **_failed_step_shot(page, evdir, name),
+                        "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
                                       "summary": f"interaction '{step['verb']} {target}' failed: {err_line}",
-                                      "action": "the intended interaction must work", "measurement": "method: dom"}]}
+                                      "action": "the intended interaction must work", "measurement": "method: dom",
+                                      "kind": INTERACTION}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
             if reference:
                 return {**out, "invalid": f"reference is not in state {st['name']}"}
-            return {**out, "failures": [{"location": f"{st['expect']} @ {w}x{h}",
+            return {**out, **_failed_step_shot(page, evdir, name),
+                    "failures": [{"location": f"{st['expect']} @ {w}x{h}",
                                   "summary": f"state '{st['name']}' did not produce {st['expect']} after its interaction",
-                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom"}]}
+                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom",
+                                  "kind": INTERACTION}]}
         page.wait_for_timeout(300)
         shot = evdir / f"{name}.png"
         page.screenshot(path=str(shot), full_page=True)

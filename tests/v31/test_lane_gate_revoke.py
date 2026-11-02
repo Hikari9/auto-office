@@ -372,3 +372,35 @@ def test_a_revoked_reviewer_is_not_a_route_failure_and_takes_no_fallback(env, mo
     assert gate["review_status"] == "UNAVAILABLE" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
     assert len(_q(env, f"SELECT id FROM dispatches WHERE gate_id='{gate['id']}'")) == 1
     assert not _q(env, "SELECT 1 FROM events WHERE kind='route.fallback'")
+
+
+def test_a_failed_scripted_step_is_evidence_for_the_vision_reviewer_not_a_recheck(env, monkeypatch, tmp_path):
+    """#384 step 1: a scripted interaction the capture could not complete reaches the vision reviewer as evidence
+    (its brief names it), and the reviewer's verdict decides; no round is spent on the script alone."""
+    from office import gates, visual
+    briefs = []
+    real = gates.run_reviewer
+
+    def spy(con, run, gate, role, brief, **kw):
+        briefs.append((role, brief))
+        return real(con, run, gate, role, brief, **kw)
+
+    monkeypatch.setattr(gates, "run_reviewer", spy)
+    _capture_with(monkeypatch, tmp_path, [{"location": "[aria-label=tools] @ 1440x900 state tools-open",
+                                           "summary": "interaction 'click [aria-label=tools]' failed: Timeout 30000ms",
+                                           "kind": visual.INTERACTION}])
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert gate["route"] != "deterministic-capture" and gate["verdict"] == "APPROVED", gate
+    vision = [b for role, b in briefs if role == "visual_reviewer"]
+    assert vision and "SCRIPTED STEP FAILURES" in vision[0] and "click [aria-label=tools]" in vision[0], vision
+
+
+def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env, monkeypatch, tmp_path):
+    from office import visual
+    _capture_with(monkeypatch, tmp_path, [
+        {"location": "page @ 390x844", "summary": "horizontal overflow: content is 600px"},
+        {"location": "x @ 390x844 state s", "summary": "interaction 'click x' failed", "kind": visual.INTERACTION}])
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
