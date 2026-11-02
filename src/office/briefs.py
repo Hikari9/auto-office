@@ -294,6 +294,16 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
         if packet["scope"] else
         "SCOPE none: no files change; the work is external (a comment or issue edit) and nothing is committed",
     ]
+    if packet.get("context_handoff"):
+        import json as _json
+        handoff = packet["context_handoff"]
+        out += ["", "FRESH EXECUTOR CONTEXT HANDOFF: your predecessor reached its context cap.",
+                "Continue the SAME task in the SAME worktree, preserving staged, unstaged, and committed work.",
+                "Treat this report as a snapshot, not proof of completion; verify its claims against git and ACCEPT.",
+                "Do NOT resume the predecessor session or restart the task from scratch.",
+                _json.dumps({key: handoff.get(key) for key in
+                             ("from_dispatch_id", "tokens", "threshold_tokens", "state",
+                              "done", "remaining", "open_findings")}, indent=2)]
     if contract.is_convergence(run) and packet["scope"]:
         out.append("AUTONOMY inside SCOPE the implementation is yours: exact files, helpers, internal APIs, refactors, "
                    "technique and extra tests. The seams are not: declared interfaces, dependencies, ACCEPT, "

@@ -224,6 +224,10 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
 work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
 
+## Executor context cap
+
+Crossing the per-executor cap (`executor_context.threshold_tokens`, default 200000) signals you (`executor.context_cap`, shown in `office status`). Office never rotates an executor on its own. Decide with `office executor-context <task> rotate | continue | threshold <tokens>`. Opt out with `executor_context.threshold_tokens: 0` or `executor_context.enabled: false`. Handoff contents and failure behavior: `docs/orchestrator-reference.md`.
+
 ## Diagnostics
 
 `office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
