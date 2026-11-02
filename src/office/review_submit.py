@@ -103,13 +103,17 @@ def submit(con, text: str) -> Result:
                       next_step="review the commit your brief names, then office review submit again")
     spec = gates._launch_spec(ddir)
     output = Path(spec.get("output") or ddir / "reply.txt")
-    tmp = output.with_name(output.name + ".submitting")
-    tmp.write_text(text + "\n", encoding="utf-8")
-    os.replace(tmp, output)
-    atomic_write_json(ddir / SUBMITTED_FILE, {"at": now_iso(), "sha256": sha256_bytes((text + "\n").encode())},
-                      mode=0o600)
     verdict = parsed.verdict or parsed.evidence_status
     with db.transaction(con):
+        # Fenced with the gate check: a gate that took its result meanwhile keeps the reply it took.
+        live = con.execute("SELECT status FROM gates WHERE id=?", (gate["id"],)).fetchone()
+        if not live or live[0] not in ("queued", "running"):
+            raise Refused("review-closed", f"review gate {gate['id']} closed while the review was being submitted")
+        tmp = output.with_name(output.name + ".submitting")
+        tmp.write_text(text + "\n", encoding="utf-8")
+        os.replace(tmp, output)
+        atomic_write_json(ddir / SUBMITTED_FILE, {"at": now_iso(), "sha256": sha256_bytes((text + "\n").encode())},
+                          mode=0o600)
         state.emit(con, run, "review.submitted", f"{d.get('task_id') or gate.get('scope') or 'plan'} {d['role']} "
                    f"{did} submitted its review ({verdict})", task_id=d.get("task_id"), dispatch_id=did,
                    audience="runtime", payload={"gate": gate["id"], "verdict": verdict})
