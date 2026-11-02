@@ -75,9 +75,10 @@ source_notes: >-
   model identity is read back yet (a --mode json readback is a follow-up), so
   conformance stays pending and only medium is proven to launch (--thinking
   off..max is pi's only effort knob, so effort_mapping is that map verbatim; no
-  level is proven to change model behavior). No reviewer or vision profile is
-  declared: pi has no verified read-only isolation, so it is not a code or
-  visual reviewer, and its quota is always unknown (no probe; never treated as
+  level is proven to change model behavior). The reviewer profile (code and
+  plan review only, never vision) runs headless with a read/grep/find/ls tool
+  allowlist and a before/after worktree fingerprint, because pi has no verified
+  read-only sandbox. Its quota is always unknown (no probe; never treated as
   unlimited). Session identity is not declared; pi keeps its own session files,
   which Office does not read, so no headless resume form exists yet. A
   pane-hosted interactive form is declared for Herdr delegation (herdr_kind pi,
@@ -86,6 +87,13 @@ source_notes: >-
 session:
   id: none
 capabilities: [builder]
+# Generic read-only reviewer (code and plan review only; pi has no vision profile). Office derives the
+# reviewer launch form from the worker form below plus these flags: --tools is an allowlist of
+# read/grep/find/ls, so edit, write and bash are never enabled. bash is left out on purpose because pi
+# cannot restrict it to read-only commands. pi has no sandbox, so Office also fingerprints the worktree
+# (HEAD, tracked diff, untracked files) before and after each review and fails the route as degraded
+# when it changed (verify_worktree_unchanged, set on every derived reviewer profile).
+reviewer_readonly_args: [--tools, "read,grep,find,ls"]
 office_profiles:
   worker:
     argv: [--print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]

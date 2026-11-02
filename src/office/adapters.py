@@ -107,15 +107,81 @@ def load_sources() -> dict[str, tuple[dict, str, Path]]:
     return copy.deepcopy(cached)
 
 
+# Read-only reviewer flag sets Office has vetted, by harness executable. `reviewer_readonly_args` is
+# security-relevant: it decides which flags a reviewer launches with and automatically grants the review
+# capability, so an adapter's own text is never trusted. Only a form accepted here derives a profile; a
+# harness is added only after its read-only flags are verified. pi: --tools is an allowlist of tool
+# names, so only the read-only built-ins are accepted (bash cannot be limited to read-only commands).
+PI_READONLY_TOOLS = frozenset({"read", "grep", "find", "ls"})
+
+
+def _vetted_pi(args: list[str]) -> bool:
+    if len(args) != 2 or args[0] != "--tools":
+        return False
+    tools = args[1].split(",")
+    return bool(tools) and all(t in PI_READONLY_TOOLS for t in tools)
+
+
+VETTED_READONLY_ARGS = {"pi": _vetted_pi}
+
+
+def readonly_args_problem(adapter: dict) -> str | None:
+    """Why `reviewer_readonly_args` cannot be trusted, or None when absent or vetted."""
+    args = adapter.get("reviewer_readonly_args")
+    if args is None:
+        return None
+    exe = os.path.basename(executable(adapter) or "")
+    vet = VETTED_READONLY_ARGS.get(exe)
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
+        return "reviewer_readonly_args must be a non-empty list of strings"
+    if vet is None:
+        return (f"reviewer_readonly_args is only accepted for harnesses whose read-only flags Office has vetted "
+                f"({', '.join(sorted(VETTED_READONLY_ARGS))}); {exe or 'this harness'} is not one. Write an explicit "
+                "office_profiles.reviewer only for a harness with a verified read-only sandbox")
+    if not vet(args):
+        return f"reviewer_readonly_args {args} is not a vetted read-only form for {exe} (pi accepts --tools with only read,grep,find,ls)"
+    return None
+
+
+def derive_reviewer_profile(adapter: dict) -> dict | None:
+    """The generic read-only reviewer launch form for a harness with no verified isolation.
+
+    An adapter that declares a worker profile and vetted `reviewer_readonly_args` (see
+    `readonly_args_problem`) and no reviewer profile of its own gets one derived from the worker form:
+    the same trust flags, model and effort pins, prompt and reply transport, headless only (no pane
+    form), the read-only args first, and `verify_worktree_unchanged` so Office fails a review that
+    changed the worktree as degraded."""
+    profiles = adapter.get("office_profiles") or {}
+    args = adapter.get("reviewer_readonly_args")
+    worker = profiles.get("worker")
+    if "reviewer" in profiles or not isinstance(worker, dict) or not isinstance(worker.get("argv"), list) \
+            or not args or readonly_args_problem(adapter):
+        return None
+    derived = {k: v for k, v in worker.items() if k not in ("argv", "herdr_kind", "interactive")}
+    derived["argv"] = [*[str(a) for a in args], *worker["argv"]]
+    derived["output"] = "stdout"
+    derived["verify_worktree_unchanged"] = True
+    return derived
+
+
+def _with_derived_reviewer(data: dict) -> dict:
+    if (derived := derive_reviewer_profile(data)) is not None:
+        data.setdefault("office_profiles", {})["reviewer"] = derived
+        caps = list(data.get("capabilities") or [])
+        data["capabilities"] = caps if "review" in caps else [*caps, "review"]
+    return data
+
+
 def _load_sources_uncached() -> dict[str, tuple[dict, str, Path]]:
     out: dict[str, tuple[dict, str, Path]] = {}
     for p in sorted(adapter_dir().glob("*.yaml")):
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        data = _with_derived_reviewer(yaml.safe_load(p.read_text(encoding="utf-8")) or {})
         out[data.get("id", p.stem)] = (data, "seed", p)
     for p in user_adapter_files():
         data = _read(p)
         if data is None or _has_todo(data):
             continue
+        data = _with_derived_reviewer(data)
         aid = str(data.get("id") or p.stem)
         if aid in out and out[aid][1] == "seed":
             if data.get("override_seed") is not True:

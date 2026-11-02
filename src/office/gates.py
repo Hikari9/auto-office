@@ -850,11 +850,33 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             with db.transaction(con):
                 con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
                             (resume["parent"], resume["session_id"], dispatch_id))
+        guard = _worktree_guard(d, profile_kind, cwd)
+        before = guard(None) if guard else None
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
                             include_dirs=include_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")),
                             resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
+        if guard and (changed := guard(before)):
+            # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
+            # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
+            reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the reviewer is the "
+                      "likely cause, but an edit made by anyone else while it ran trips the same check")
+            failures.append(reason)
+            last_failed = (triple, reason)
+            dispatch_mod.reclaim_pane(run, dispatch_id)
+            if not pinned:
+                excluded.add(triple)
+            with db.transaction(con):
+                state.emit(con, run, "review.worktree_changed", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
+                           f"{role} {dispatch_id} on {triple}: {changed}", task_id=gate.get("task_id"),
+                           dispatch_id=dispatch_id, payload={"route": triple, "gate": gate["id"], "changed": changed})
+                con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+                con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
+                            (dispatch_id,))
+            if pinned:
+                break  # the user named this reviewer; never substitute another
+            continue
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
         wrote_file = output.is_file() and output.stat().st_size > 0
@@ -975,6 +997,49 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
                 "env_failures": len(failures), "exhausted": True}
     return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+
+
+def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
+    """For a reviewer profile that declares `verify_worktree_unchanged` (a harness with no read-only
+    sandbox), return `guard(before) -> dict | str | None`: `guard(None)` takes the fingerprint (HEAD,
+    tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
+    or None. Returns None when the profile does not ask for the check."""
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
+    if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):
+        return None
+
+    def git(*args: str) -> str:
+        try:
+            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+        except OSError as exc:
+            return f"unverifiable: {exc}"
+        return f"unverifiable: git exited {proc.returncode}" if proc.returncode else proc.stdout
+
+    def fingerprint() -> dict:
+        untracked = sha256_bytes(b"".join(
+            name.encode() + b"\0" + _file_digest(Path(cwd) / name).encode()
+            for name in sorted(git("ls-files", "--others", "--exclude-standard", "-z").split("\0")) if name))
+        return {"HEAD": git("rev-parse", "HEAD").strip(),
+                "tracked diff": sha256_bytes(git("diff", "HEAD", "--binary").encode()),
+                "status": sha256_bytes(git("status", "--porcelain=v1", "--untracked-files=all").encode()),
+                "untracked files": untracked}
+
+    def guard(before: dict | None):
+        now = fingerprint()
+        if before is None:
+            return now
+        if str(now["HEAD"]).startswith("unverifiable") or str(before["HEAD"]).startswith("unverifiable"):
+            return "the worktree could not be fingerprinted (not a git checkout or git failed), so the review cannot be trusted"
+        return ", ".join(k for k in now if now[k] != before[k]) or None
+    return guard
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError:
+        return "unreadable"
 
 
 def _reviewer_pane_terminal_without_reply(d: dict, output: Path) -> str | None:
