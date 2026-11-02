@@ -20,10 +20,8 @@ INJECT_MAX_BYTES = 1024
 EVENT_ALIASES = {
     "SessionStart": "session.start", "UserPromptSubmit": "prompt.submit", "PreToolUse": "tool.pre",
     "PostToolUse": "tool.post", "Stop": "turn.stop", "PreCompact": "compact.pre", "SessionEnd": "session.end",
-    "BeforeAgent": "prompt.submit", "BeforeTool": "tool.pre", "AfterTool": "tool.post", "AfterAgent": "turn.stop",
-    "PreCompress": "compact.pre",
 }
-DENY_CAPABLE = {"claude", "gemini"}
+DENY_CAPABLE = {"claude"}
 
 
 def _primary_checkout(start: Path) -> Path | None:
@@ -323,9 +321,7 @@ def _budget(lines: list[str]) -> str:
 def _say(harness: str, event: str, text: str) -> None:
     if not text:
         return
-    if harness == "gemini":
-        print(json.dumps({"hookSpecificOutput": {"additionalContext": text}}))
-    elif harness in ("claude",):
+    if harness in ("claude",):
         print(text)
     elif harness == "codex":
         # No verified injection channel on Codex: say nothing into context.

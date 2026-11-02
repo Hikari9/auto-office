@@ -19,7 +19,7 @@ import yaml
 from office import cli, configcmd, discovery, onboarding, version
 from office.state import OfficeError
 
-ALL_SIGNED_IN = {"claude": "found", "codex": "found", "agy": "found", "gemini": "found"}
+ALL_SIGNED_IN = {"claude": "found", "codex": "found", "agy": "found"}
 VERSIONS = {"claude": "2.1.300", "codex": "0.160.0", "agy": "1.3.2"}
 
 
@@ -125,7 +125,7 @@ def test_status_lists_installed_harnesses_with_sign_in_and_never_writes(h):
     assert data["free_models"] == {"enabled": False, "default": False, "options": ["enable", "disable"]}
     rows = {r["harness"]: r for r in data["harnesses"]}
     assert rows["claude"]["installed"] and rows["claude"]["version"] == "2.1.300" and rows["claude"]["auth"] == "found"
-    assert rows["gemini"]["installed"] is False
+    assert rows["kilo"]["installed"] is False  # a harness with no binary on this PATH
     assert not h.user.exists() and not h.claude_settings.exists()
 
 

@@ -89,8 +89,6 @@ def current_harness(explicit: str | None = None) -> tuple[str | None, str]:
         return os.environ["OFFICE_HARNESS"], "OFFICE_HARNESS"
     if os.environ.get("CLAUDECODE") == "1":
         return "claude", "CLAUDECODE"
-    if os.environ.get("GEMINI_CLI") == "1":
-        return "gemini", "GEMINI_CLI"
     key = discovery.process_key()
     if key:
         return key.split(":", 1)[0], "process tree"
@@ -266,9 +264,6 @@ def credentials(harness: str) -> tuple[str, str]:
     elif harness == "agy":
         ok, where = _files_or_env([gemini_home / "antigravity-cli" / "antigravity-oauth-token",
                                    gemini_home / "jetski-standalone-oauth-token"], (), "sign in to agy")
-    elif harness == "gemini":
-        ok, where = _files_or_env([gemini_home / "oauth_creds.json"], ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-                                  "sign in to gemini")
     elif harness == "opencode":
         ok, where = _opencode_signed_in()
     elif harness == "kilo":

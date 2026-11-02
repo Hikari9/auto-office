@@ -21,11 +21,9 @@ MARKER = "--office-managed"
 # Portable event -> native event name, per harness with a verified JSON schema.
 EVENTS = {
     "claude": {"session.start": "SessionStart", "prompt.submit": "UserPromptSubmit", "tool.pre": "PreToolUse", "turn.stop": "Stop"},
-    "gemini": {"session.start": "SessionStart", "prompt.submit": "BeforeAgent", "tool.pre": "BeforeTool"},
 }
 CONFIG = {
     "claude": Path("~/.claude/settings.json"),
-    "gemini": Path("~/.gemini/settings.json"),
 }
 UNVERIFIED = {
     "codex": "Codex hook config location and denial path are unverified (architecture R1/§8); explicit office commands cover it",

@@ -21,11 +21,6 @@ codex:
     Marks only the dispatch's own worktree or sandbox dir as a trusted codex
     project so a pane does not stop on codex's project-trust dialog. It trusts
     no other path.
-gemini:
-  yolo: >-
-    --approval-mode yolo on the worker form only: headless gemini cannot answer
-    approval prompts. Grants unprompted edits and commands in the Office
-    worktree. Reviewer and vision forms use --approval-mode plan (read-only).
 kilo:
   --auto: >-
     Worker and pane forms only: Kilo requires --auto for autonomous use and

@@ -28,7 +28,7 @@ def test_packaged_index_is_exact_three_column_tsv():
     raw = cli_runtimes.packaged_default().read_text(encoding="utf-8")
     entries = cli_runtimes.parse(raw)
     assert raw.splitlines()[0] == "key\tskill_path\tmodels_path"
-    assert {e.key for e in entries} == {"claude", "codex", "agy", "pi", "hermes", "kilo", "opencode", "gemini"}
+    assert {e.key for e in entries} == {"claude", "codex", "agy", "pi", "hermes", "kilo", "opencode"}
     assert all(e.models_path == f"models/{e.key}.json" for e in entries)
     assert raw == cli_runtimes.render(entries)
 
@@ -42,7 +42,7 @@ def test_sync_saves_manifest_and_canonical_models_without_modifying_seed(isolate
     saved = harnesscmd.manifest_sync()
     assert saved.exit_code == 0, saved.lines
     entries, yes = cli_runtimes.load()
-    assert yes and len(entries) == 8
+    assert yes and len(entries) == 7
     statuses, yes = cli_runtimes.statuses()
     assert yes
     # More harnesses may have been registered since this draft was created.
@@ -194,7 +194,7 @@ def test_user_manifest_path_override_and_packaged_skill_resolution(isolated, mon
     custom_dir = isolated / "elsewhere"
     monkeypatch.setenv("OFFICE_CLI_RUNTIMES", str(custom_dir / "index.tsv"))
     p, count, _, _ = cli_runtimes.sync()
-    assert p == custom_dir / "index.tsv" and count == 8
+    assert p == custom_dir / "index.tsv" and count == 7
     assert (custom_dir / "models" / "claude.json").is_file()
     entries, yes = cli_runtimes.load()
     assert yes

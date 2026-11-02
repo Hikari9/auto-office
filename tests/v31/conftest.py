@@ -182,7 +182,7 @@ class Env:
         for d in (self.home, self.data, self.state, self.bin):
             d.mkdir(parents=True, exist_ok=True)
         self.fakes = {}
-        for name in ("codex", "claude", "gemini", "agy"):
+        for name in ("codex", "claude", "agy"):
             self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
                                            f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
             (self.bin / name).write_text(self.fakes[self.bin / name])
