@@ -402,6 +402,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.add(f"question: {q}")
     for line in _amendment_stalls(con, run):
         res.add(f"blocker: {line}")
+    # A worker that stopped on something only the orchestrator resolves, and an executor idle without submitting,
+    # stay visible while their dispatch is open, not only as a one-off event or an `office wait` exit (#671).
+    held = [] if state.is_terminal(run) else open_signals(con, run)
+    if probe_panes and not state.is_terminal(run):
+        signalled = {line.split(" ", 2)[1] for line in held if len(line.split(" ", 2)) > 2}
+        held += [line for line in _idle_executors(con, run) if line.split(":", 1)[0].split()[-1] not in signalled]
+    for line in held:
+        res.add(f"blocker: {line}")
     episodes, verdict_lines = [], []
     if not state.is_terminal(run):
         from office import db, watchdog
@@ -440,10 +448,13 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     if "FULL SUITE NOT VERIFIED" in detail:
         res.add(f"verification warning: {detail}")
     res.next = next_action(con, run)
+    held_next = next((line.rsplit("; next: ", 1)[1] for line in held if "; next: " in line), None)
     if episodes:
         res.next = episodes[0]["next"]
     elif stuck_reply:
         res.next = stuck_reply
+    elif held_next and res.next.startswith(WAITING_ACTIONS):
+        res.next = held_next  # never steer the root into waiting on a worker that is waiting on it (#671)
     elif (res.next.startswith(WAITING_ACTIONS) and not state.is_terminal(run) and _work_in_flight(con, run)
           and not root_wake.armed(con, run) and not wait_in_flight(run["id"])):
         # Nothing for the root to do and no one will wake it: it must block on `office wait`. Keep the guide's own
@@ -873,6 +884,25 @@ def worker_signals(con, run: dict) -> tuple[list[str], int]:
     if signals:
         last = signals[-1]["seq"]
     return out, last
+
+
+def open_signals(con, run: dict) -> list[str]:
+    """The newest worker signal of each executor dispatch that is still the task's open session and has not
+    submitted since, read or not (#671). It clears itself when the dispatch ends, is replaced or submits."""
+    import json
+    out = []
+    for row in con.execute(
+            "SELECT e.task_id, e.dispatch_id, e.summary, e.payload_json FROM events e "
+            "JOIN dispatches d ON d.id=e.dispatch_id JOIN tasks t ON t.run_id=d.run_id AND t.id=d.task_id "
+            "AND t.current_dispatch_id=d.id WHERE e.run_id=? AND e.kind=? AND d.role='executor' "
+            "AND d.ended_at IS NULL AND d.status IN ('launching','running') "
+            "AND e.seq=(SELECT MAX(seq) FROM events x WHERE x.run_id=e.run_id AND x.kind=e.kind AND x.dispatch_id=e.dispatch_id) "
+            "AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.dispatch_id=d.id AND r.created_at>=e.created_at) "
+            "ORDER BY e.seq", (run["id"], state.SIGNAL_KIND)).fetchall():
+        p = json.loads(row["payload_json"] or "{}")
+        out.append(f"{row['task_id']} {row['dispatch_id']} {p.get('source', 'worker')}: "
+                   f"{p.get('reason', row['summary'])}; next: {p.get('next', 'office status')}")
+    return out
 
 
 WAIT_ACTION_KIND = "wait.action_reported"
