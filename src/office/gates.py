@@ -1422,7 +1422,9 @@ def _last_block(text: str) -> str:
     """Reviewers sometimes narrate before answering; keep the reply from the
     last VERDICT line onward plus the finding lines around it."""
     lines = text.splitlines()
-    idx = [i for i, l in enumerate(lines) if re.search(r"VERDICT\s*[:=]", l, re.I)]
+    # A verdict line leads its line (as the parser reads it), never a quote inside a finding:
+    # `verdict == "UNAVAILABLE"` in a FINDING once cut the real VERDICT line off every rewrite (#894).
+    idx = [i for i, l in enumerate(lines) if re.match(r"VERDICT\s*[:=]", review_parse._clean(l), re.I)]
     if not idx:
         return text
     start = idx[-1]
