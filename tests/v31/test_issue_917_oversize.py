@@ -155,5 +155,5 @@ def test_cost_over_budget_counts_known_cost_only():
                              "cost_usd": usd, "cost_kind": kind}
     assert executor_context.exceeded(task, disp, [row(1.0, "actual"), row(0.3, "estimated-nominal")]) == [
         "cost $1.30 > 2.5x $0.50"]
-    assert executor_context.exceeded(task, disp, [row(1.0, "actual"), row(None, "unknown")]) == ["cost $1.00 > 2.5x $0.50"]
+    assert executor_context.exceeded(task, disp, [row(1.3, "actual"), row(None, "unknown")]) == ["cost $1.30 > 2.5x $0.50"]
     assert executor_context.exceeded(task, disp, [row(0.5, "actual"), row(9.0, "quota")]) == []
