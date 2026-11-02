@@ -184,3 +184,17 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
                                    f"dedicated {estimate['dedicated_text']} {estimate['unit']}")
     return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline_text']} vs dedicated "
                             f"{estimate['dedicated_text']} {estimate['unit']} ({estimate['evidence']})", estimate)
+
+
+# ------------------------------------------------------------------ expected budget per size class (#917)
+
+# Expected (context tokens in one turn, wall seconds, cost USD) of one dispatch per size class. A dispatch
+# observed past OVERSIZE_FACTOR x any of them is oversized for its class: a signal, never an action.
+BUDGETS = {
+    "XS": {"context": 60_000, "wall": 600, "cost": 0.5},
+    "S": {"context": 100_000, "wall": 1_200, "cost": 1.5},
+    "M": {"context": 150_000, "wall": 2_400, "cost": 4.0},
+    "L": {"context": 200_000, "wall": 4_500, "cost": 8.0},
+    "XL": {"context": 272_000, "wall": 9_000, "cost": 15.0},
+}
+OVERSIZE_FACTOR = 2.5

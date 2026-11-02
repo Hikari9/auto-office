@@ -13,7 +13,7 @@ import re
 import os
 from pathlib import Path
 
-from office import amend, contract, paths, planpath, plans, route_learning, state
+from office import amend, contract, oversize, paths, planpath, plans, route_learning, state
 from office.result import Result
 from office.util import atomic_write_text, short, sha256_obj
 
@@ -340,6 +340,9 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for line in usage:
         res.add(line)
     res.verbose.extend(usage_verbose)
+    oversize, oversize_next = ([], None) if state.is_terminal(run) else oversize.lines(con, run, tasks)
+    for line in oversize:
+        res.add(line)
     if not state.is_terminal(run):
         from office import gates as review_gates
         for line in review_gates.review_route_lines(con, run["id"], limit=3):
@@ -445,6 +448,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         # Nothing for the root to do and no one will wake it: it must block on `office wait`. Keep the guide's own
         # line after the prefix so the trial, hold or dependency it names is not lost.
         res.next = f"{NO_WAKE_WAIT}: {res.next}"
+    if oversize_next and not episodes and not stuck_reply:
+        res.next = f"{res.next}; {oversize_next}"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
