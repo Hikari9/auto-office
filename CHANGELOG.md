@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.39
+
+office status keeps an open executor's stop signal, or an executor pane idle without submitting, as a blocker: line with its resolving next: until it resolves (#671).
+
 ## 3.15.38
 
 A contract amendment's ripple delivery tells each dependant which task's contract changed and that it is not theirs, instead of telling it to apply the amendment (#960).
