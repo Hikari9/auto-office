@@ -52,6 +52,7 @@ Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at
 | Role-policy expansion drops later harness alternatives | `route_policy._expand_role_policy`: `for harness in harnesses` to `harnesses[:1]` (no `agy` rule is expanded) | `PDC::test_every_harness_alternative_of_the_compact_role_policy_is_enforced` only; the tests that iterate the expanded rules pass vacuously |
 | Discovery probe skips the size floor | `routing._pool_gate`: size floor check disabled | `PDC::test_a_probe_is_gated_by_the_size_floor_like_a_dispatch` |
 | Catalog status ignores `dispatchable: false` | `route_policy.row_status`: always `available` | `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
+| Catalog row gated without disclosure | `catalog/routes.tsv`: `agy/claude-opus-5-5@high` set `dispatchable=false` with no discovery metadata | `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
 | Candidate build keeps shipped denies | `candidates.build_candidates`: role deny skip disabled | `PDC::test_built_executor_candidates_never_include_an_unscoped_shipped_deny` |
 | A user deny does not beat the preferred route | `routing.route`: role-deny branch disabled | `PDC::test_a_user_deny_beats_the_preferred_route_and_emits_no_waiver_for_it`, `PDC::test_the_router_rejects_every_shipped_deny_in_its_role_and_scope` |
 | Slate route below its size floor | `catalog/executor-policy.yaml`: XS floor raised to 90 | `PDC::test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception` |
@@ -149,6 +150,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_hooks.py` | keep |  |
 | `tests/test_instruction_conformance.py` | keep |  |
 | `tests/test_integration.py` | keep |  |
+| `tests/test_issue_927_onboarding_wording.py` | keep |  |
 | `tests/test_landings.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_monitor.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_packet_delivery_channel.py` | keep |  |
@@ -184,6 +186,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_amend_accepted.py` | keep |  |
 | `tests/v31/test_amend_additive.py` | keep |  |
 | `tests/v31/test_argon_catalog_809.py` | retire | pinned Argon catalog rows and the Argon slate tail; replaced by the data-driven exception and catalog-status contracts |
+| `tests/v31/test_batch_landing.py` | keep |  |
 | `tests/v31/test_benchmark_refresh.py` | keep |  |
 | `tests/v31/test_bug_hint.py` | keep |  |
 | `tests/v31/test_cap_diff.py` | keep |  |
@@ -222,6 +225,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_economics.py` | keep |  |
 | `tests/v31/test_economics_efficiency.py` | keep |  |
 | `tests/v31/test_executor_binding_config_drift.py` | keep |  |
+| `tests/v31/test_executor_context.py` | keep |  |
 | `tests/v31/test_external_visual.py` | keep |  |
 | `tests/v31/test_finding_identity.py` | keep |  |
 | `tests/v31/test_fixture_source_path.py` | keep |  |
@@ -255,6 +259,11 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue809_xl_review.py` | keep |  |
 | `tests/v31/test_issue811_terra_supersession.py` | consolidate | 1 of 6 nodes pinned the six Terra catalog rows; the supersession nodes stay |
 | `tests/v31/test_issue846_size_seeds.py` | consolidate | 5 of 16 nodes duplicated slate order or the gear tables; slate anchoring, reroute and seed precedence stay |
+| `tests/v31/test_issue936_greenfield_gear.py` | keep |  |
+| `tests/v31/test_issue938_review.py` | keep |  |
+| `tests/v31/test_issue_1029_wake_line.py` | keep |  |
+| `tests/v31/test_issue_1030_review_submit.py` | keep |  |
+| `tests/v31/test_issue_1031_executor_subagents.py` | keep |  |
 | `tests/v31/test_issue_267.py` | keep |  |
 | `tests/v31/test_issue_268.py` | keep |  |
 | `tests/v31/test_issue_399_dispatch_recovery.py` | keep |  |
@@ -292,8 +301,11 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_721_accepted_route.py` | keep |  |
 | `tests/v31/test_issue_730_run_base.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_734_fetched_base.py` | keep |  |
+| `tests/v31/test_issue_739_missing_test_runner.py` | keep |  |
 | `tests/v31/test_issue_740_recovery.py` | keep |  |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |  |
+| `tests/v31/test_issue_753_reused_pane_text.py` | keep |  |
+| `tests/v31/test_issue_773_stacked_inplace_edit.py` | keep |  |
 | `tests/v31/test_issue_783_cleanup.py` | keep |  |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |  |
 | `tests/v31/test_issue_790_codex_pane_submit.py` | keep |  |
@@ -306,13 +318,26 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_845_user_allow.py` | keep |  |
 | `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |  |
 | `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |  |
+| `tests/v31/test_issue_894_verdict_line.py` | keep |  |
 | `tests/v31/test_issue_895_false_stalls.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_896_amend_contract_route.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_897_full_suite_timeout.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_899_policy_view.py` | keep |  |
+| `tests/v31/test_issue_905_command_substitution.py` | keep |  |
+| `tests/v31/test_issue_908_low_fixed.py` | keep |  |
+| `tests/v31/test_issue_910_vision_probe_pane.py` | keep |  |
+| `tests/v31/test_issue_913_next_live_worker.py` | keep |  |
+| `tests/v31/test_issue_917_oversize.py` | keep |  |
 | `tests/v31/test_issue_918_busy_reply_ingest.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_920_reinstall_wake.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_921_route_recovered.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_922_919_wake_default.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_937_run_options.py` | keep |  |
+| `tests/v31/test_issue_940_non_herdr_wake.py` | keep |  |
+| `tests/v31/test_issue_941_quota_probe.py` | keep |  |
+| `tests/v31/test_issue_942_visual_disclosure.py` | keep |  |
+| `tests/v31/test_issue_944_usage.py` | keep |  |
+| `tests/v31/test_issue_945_verification_kind.py` | keep |  |
 | `tests/v31/test_job_ownership.py` | keep |  |
 | `tests/v31/test_kilo_registration.py` | keep |  |
 | `tests/v31/test_land.py` | keep |  |
@@ -356,7 +381,10 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_review_reroute.py` | keep |  |
 | `tests/v31/test_review_stopping_rule.py` | keep |  |
 | `tests/v31/test_reviewer_files.py` | keep |  |
+| `tests/v31/test_reviewer_launch_parity.py` | keep |  |
+| `tests/v31/test_reviewer_pane_quota_wall.py` | keep |  |
 | `tests/v31/test_reviewer_read_scope.py` | keep |  |
+| `tests/v31/test_reviewer_routes_from_current_pin.py` | keep |  |
 | `tests/v31/test_revoke_accepted.py` | keep |  |
 | `tests/v31/test_revoke_stops.py` | keep |  |
 | `tests/v31/test_risk_floor_lightweight.py` | keep |  |
@@ -441,7 +469,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 277, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 304, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 
