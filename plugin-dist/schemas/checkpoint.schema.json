@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 checkpoint packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "checkpoint_id",
+    "family_id",
+    "producer",
+    "scope",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "base_sha",
+    "head_sha",
+    "completed_tasks",
+    "decisions",
+    "changes_and_interfaces",
+    "validation_evidence",
+    "review",
+    "deviations",
+    "dependencies_and_artifacts",
+    "blockers",
+    "unresolved_concerns",
+    "next_phase",
+    "serialized_at"
+  ],
+  "properties": {
+    "checkpoint_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "latest_landing_id": {
+      "type": "string"
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "producer": {
+      "type": "object",
+      "required": [
+        "dispatch_id",
+        "holder_id",
+        "role",
+        "triple"
+      ],
+      "properties": {
+        "dispatch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holder_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "triple": {
+          "type": "string",
+          "pattern": ".+@.+/.+@.+"
+        }
+      },
+      "additionalProperties": true
+    },
+    "scope": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "base_sha": {
+      "type": "string",
+      "minLength": 4
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 4
+    },
+    "diff_stat": {
+      "type": "string"
+    },
+    "completed_tasks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    },
+    "changes_and_interfaces": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    },
+    "validation_evidence": {
+      "type": "object",
+      "required": [
+        "commands",
+        "passed",
+        "evidence_hash"
+      ],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "output_summary": {
+          "type": "string"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "mode",
+        "round",
+        "dispositions"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "labeled-inline",
+            "independent_adversary",
+            "integration_adversary",
+            "exempt"
+          ]
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reviewer_id": {
+          "type": "string"
+        },
+        "reviewer_triple": {
+          "type": "string"
+        },
+        "dispositions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "disposition",
+              "finding_id"
+            ],
+            "properties": {
+              "finding_id": {
+                "type": "string"
+              },
+              "disposition": {
+                "enum": [
+                  "accepted",
+                  "refuted",
+                  "deferred",
+                  "none"
+                ]
+              },
+              "rationale": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    },
+    "dependencies_and_artifacts": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": [
+          "string",
+          "object"
+        ]
+      }
+    },
+    "unresolved_concerns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "serialized_at": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}

@@ -1,0 +1,90 @@
+id: codex
+verified_state: valid-unverified
+version_fingerprint:
+  command: [codex, --version]
+  parser: first-line
+model_source:
+  type: catalog-plus-probe
+  command: null
+effort_mapping:
+  none: none
+  low: low
+  medium: medium
+  high: high
+  xhigh: xhigh
+  max: max
+benchmark_slug_mapping: {}
+invocation:
+  executable: codex
+  argv: [exec, --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", "{prompt}"]
+  prompt_transport: argv
+  cwd_transport: flag
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+  notes: Read prompt bytes and pass as one argv element; never build a shell command.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: [python3, scripts/codex-usage.py, --json]
+  unknown_is_unlimited: false
+shallow_review:
+  supported: true
+  minimum_effort: high
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: stdin-deadlock, attribution: adapter, pattern: "background launch waiting on stdin"}
+  - {id: resume-wrong-cwd, attribution: harness, pattern: "resume inherited caller cwd"}
+  - {id: resume-rejects-cd, attribution: adapter, pattern: "resume errors on --cd: unexpected argument"}
+  - {id: resume-drops-effort, attribution: adapter, pattern: "resume without -c model_reasoning_effort silently reverts to config default"}
+  - {id: pgrep-matches-wrapper-shell, attribution: false-positive-liveness, pattern: "pgrep -f 'codex exec' matches the harness wrapper shell, not the codex process"}
+  - {id: comm-codex-vs-node, attribution: false-negative-liveness, pattern: "nvm-installed codex reports comm==node, not comm==codex"}
+  - {id: harness-timeout-default-kill, attribution: harness, pattern: "backgrounded dispatch killed near 120s with no error when timeout was not set to 600000"}
+  - {id: piped-tail-head-buffers-output, attribution: harness, pattern: "output file reads 0 bytes for the whole run when piped through tail/head"}
+  - {id: env-i-strips-herdr-env, attribution: adapter, pattern: "env -i launched to dodge the shell-profile fault also drops HERDR_ENV and herdr from PATH, so the dispatch never reaches a pane or the pane ledger"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Current office-skills Codex mechanics seeded for migration; must be re-conformed locally before promotion.
+# How Office learns this harness's session id (resume needs it). `detected`: codex
+# takes no id at launch; it arrives in the SessionStart/hook payload, from herdr's
+# agent_session, in the `session id:` line of the header block the CLI prints
+# before the prompt (`output`: the headless `codex exec` stream, or the startup
+# banner box of a herdr pane, read before the prompt is sent), and from the
+# session's own transcript (`transcript`: the rollout whose prompt names this
+# dispatch's brief; herdr often reports no agent_session for codex, #406).
+# Office records the first one it sees.
+session:
+  id: detected
+  sources: [hook, herdr, output, transcript]
+  output_pattern: '^session id:\s*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$'
+capabilities: [planning, builder, review]
+office_profiles:
+  worker:
+    argv: [exec, --yolo, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}", "-"]
+    prompt: stdin
+    output: stdout
+    herdr_kind: codex
+    interactive:
+      argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
+      resume_argv: [resume, "{session_id}"]
+  reviewer:
+    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "-"]
+    prompt: stdin
+    output: file
+    herdr_kind: codex
+    interactive:
+      argv: [-c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}"]
+      resume_argv: [resume, "{session_id}"]
+  vision:
+    argv: [exec, --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "{images}", "-"]
+    image_arg: [--image, "{image}"]
+    image_transport: argv
+    prompt: stdin
+    output: file
+    herdr_kind: codex
+    interactive:
+      argv: [-c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}"]
+      resume_argv: [resume, "{session_id}"]

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Auto Office v3 start receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "receipt_id",
+    "session_id",
+    "family_id",
+    "dispatch_id",
+    "pid",
+    "requirements_version",
+    "plan_version",
+    "routing_version",
+    "effective_config_hash",
+    "selection_disclosure",
+    "adapter",
+    "model",
+    "effort",
+    "worktree",
+    "logfile",
+    "started_at"
+  ],
+  "properties": {
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pid": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "plan_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "routing_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "effective_config_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "selection_disclosure": {
+      "type": "object",
+      "required": [
+        "role",
+        "triple",
+        "invocation_model_id",
+        "model_id",
+        "effort",
+        "harness",
+        "harness_version",
+        "reason"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "triple": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "adapter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effort": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree": {
+      "type": "string",
+      "minLength": 1
+    },
+    "logfile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pane_id": {
+      "type": "string"
+    },
+    "agent_name": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "minLength": 10
+    }
+  }
+}
