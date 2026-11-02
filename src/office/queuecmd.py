@@ -11,6 +11,7 @@ or `queue auto on` turns it back on.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -84,7 +85,13 @@ def _resolve(con, item: str | None, run_arg: str | None, task: str | None, *, cr
             return dict((exact or rows)[0])
         if rows:
             raise Usage("ambiguous-item", f"{item!r} matches {len(rows)} queue items", next_step="office queue list")
-        raise Usage("unknown-item", f"no queue item {item!r}", next_step="office queue list")
+        named = re.fullmatch(r"run:(\S+)", item)
+        if not named:
+            raise Usage("unknown-item", f"no queue item {item!r}", next_step="office queue list")
+        if run_arg or task:
+            raise Usage("usage", f"name the run once: {item} or --run <id> [--task <T>], not both",
+                        next_step="office queue list")
+        run_arg, task = named.group(1), None  # #800: a run is nameable before it has a queue item
     if not run_arg:
         raise Usage("usage", "name a queue item, or --run <id> [--task <T>]", next_step="office queue list")
     run = state.find_run(con, run_arg)
@@ -131,6 +138,25 @@ def paused_block(con: sqlite3.Connection, run_id: str, task_id: str | None) -> d
     return db.row_dict(row)
 
 
+# A queued integrate job of a paused run is held by a not_before no claim reaches, then released on resume (#800).
+INTEGRATION_HELD = "9999-12-31T00:00:00+00:00"
+
+
+def integration_hold(con, run_id: str) -> str | None:
+    """The not_before for a new integrate job of this run: held while the whole run is paused."""
+    return INTEGRATION_HELD if paused_block(con, run_id, None) else None
+
+
+def _hold_integration(con, run_id: str, held: bool) -> int:
+    if held:
+        cur = con.execute("UPDATE outbox SET not_before=? WHERE run_id=? AND kind='integrate' AND status='queued'",
+                          (INTEGRATION_HELD, run_id))
+    else:
+        cur = con.execute("UPDATE outbox SET not_before=NULL WHERE run_id=? AND kind='integrate' AND status='queued' "
+                          "AND not_before=?", (run_id, INTEGRATION_HELD))
+    return cur.rowcount
+
+
 def pause(con, *, item: str | None = None, run_arg: str | None = None, task: str | None = None,
           reason: str | None = None) -> Result:
     with db.transaction(con):
@@ -143,10 +169,15 @@ def pause(con, *, item: str | None = None, run_arg: str | None = None, task: str
         if not _runnable_left(con, it) and _stored_auto(con, it["run_id"]) != "off":
             auto = "run" if it["run_id"] else "global"
             _set_auto(con, it["run_id"], "paused", f"last runnable work paused ({it['id']})")
-        _emit(con, it["run_id"], "queue.paused", f"queue: paused {it['id']}",
-              {"item": it["id"], "auto_paused": auto})
-    return Result(lines=[f"paused {it['id']}" + (f"; {auto} auto mode paused" if auto else "")],
-                  next=resume_command(it), data={"item": it, "auto_paused": auto})
+        whole_run = bool(it["run_id"]) and it["task_id"] is None and it["kind"] == "run"
+        held = _hold_integration(con, it["run_id"], True) if whole_run else 0
+        _emit(con, it["run_id"], "queue.paused", f"queue: paused {it['id']}"
+              + ("; its automatic integration checks are held" if whole_run else ""),
+              {"item": it["id"], "auto_paused": auto, "integration_held": whole_run, "held_jobs": held})
+    lines = [f"paused {it['id']}" + (f"; {auto} auto mode paused" if auto else "")]
+    if whole_run:
+        lines.append("integration checks for this run are held until it is resumed")
+    return Result(lines=lines, next=resume_command(it), data={"item": it, "auto_paused": auto})
 
 
 def resume(con, *, item: str | None = None, run_arg: str | None = None, task: str | None = None) -> Result:
@@ -157,9 +188,17 @@ def resume(con, *, item: str | None = None, run_arg: str | None = None, task: st
         # Resume undoes the pause's own auto-pause; an operator's `auto off` stays off.
         if _stored_auto(con, it["run_id"]) == "paused":
             _set_auto(con, it["run_id"], "on", f"resumed {it['id']}")
-        _emit(con, it["run_id"], "queue.resumed", f"queue: resumed {it['id']}", {"item": it["id"]})
+        released = (_hold_integration(con, it["run_id"], False)
+                    if it["run_id"] and it["task_id"] is None and it["kind"] == "run" else 0)
+        _emit(con, it["run_id"], "queue.resumed", f"queue: resumed {it['id']}"
+              + (f"; {released} held integration check job(s) released" if released else ""),
+              {"item": it["id"], "released_jobs": released})
         it = _get(con, it["id"])
-    return Result(lines=[f"resumed {it['id']}"], next="office queue list", data={"item": it})
+    if released:
+        from office import jobs
+        jobs.kick(con, it["run_id"])
+    return Result(lines=[f"resumed {it['id']}"] + ([f"released {released} held integration check job(s)"] if released else []),
+                  next="office queue list", data={"item": it})
 
 
 def set_priority(con, item: str | None, level: str | None, *, run_arg=None, task=None) -> Result:

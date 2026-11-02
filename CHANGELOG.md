@@ -2,7 +2,7 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.15.12
+## 3.15.18
 
 - feat(amend): a live run can amend its PR options after the user confirms (#937).
 - feat(land): ordered batch landing across runs and PRs composes and runs the full suite on a branch before advancing main (#943).
@@ -21,6 +21,30 @@ One line or short list per version, newest first. The version itself lives only 
 - fix(preflight): accept a low-risk `fixed` disposition without a test path (#908).
 - docs(onboarding): the missing-CLI question is asked once per session, and the origin probe tells GitHub, checkout and index installs apart (#927).
 - feat(plugin): the plugin ships a curated 16-skill set with the original full `/auto-office` and a standalone `/auto-review`, generated into `plugin-dist/` (#926).
+
+## 3.15.17
+
+- fix(panes): a vision conformance probe pane is labelled "vision probe" and closed once its reply is read (#910).
+
+## 3.15.16
+
+- feat(queue): `office queue pause run:<id>` holds the run's automatic integration checks until `office queue resume` (#800).
+
+## 3.15.15
+
+- fix(watchdog): a dispatch in a reused pane reads only the output below its own setup line, so a revoked executor's usage limit never stalls it (#753).
+
+## 3.15.14
+
+- fix(review): a FINDING that quotes `verdict ==` no longer hides the reply's VERDICT line (#894).
+
+## 3.15.13
+
+- test(review): three route-refusal tests use kilo, a harness with no reviewer profile, as their builder-only example. #993 gave pi a read-only reviewer profile, so the old pi example launched and failed preflight instead of being refused.
+
+## 3.15.12
+
+- feat(review): reviewers launch like executors. pi reviews in a Herdr pane (its pane form may write only its reply, and the worktree guard still applies), and its read-only headless form is the CLI fallback. A pane-capable reviewer that ran headless is announced in status (#1027).
 
 ## 3.15.11
 

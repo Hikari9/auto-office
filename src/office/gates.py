@@ -884,6 +884,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                             external=bool(launch_form.get("external")),
                             resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
+        _note_headless_reviewer(con, run, d, profile_kind)
         if guard and (changed := guard(before)):
             # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
             # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
@@ -1260,6 +1261,22 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     return text, parsed, reason
 
 
+def _note_headless_reviewer(con, run: dict, d: dict, profile_kind: str) -> None:
+    """A reviewer whose profile has a Herdr pane form but ran headless took the CLI fallback (Herdr unusable,
+    or no pane): say so where office status reads launch notices (#1027). Herdr runs it by default."""
+    from office import adapters
+    if (d or {}).get("launcher") not in ("process", "process-fallback"):
+        return
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    if not adapters.pane_capable(adapter, profile_kind):
+        return
+    why = "the Herdr pane could not start" if d["launcher"] == "process-fallback" else "Herdr was not usable"
+    with db.transaction(con):
+        state.emit(con, run, "launch", f"{d.get('task_id') or d['id']}: {d['role']} {d['id']} on {d.get('triple')} ran "
+                   f"headless (CLI fallback): {why}", task_id=d.get("task_id"), dispatch_id=d["id"],
+                   payload={"launcher": d["launcher"], "profile": profile_kind})
+
+
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
     g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
@@ -1405,7 +1422,9 @@ def _last_block(text: str) -> str:
     """Reviewers sometimes narrate before answering; keep the reply from the
     last VERDICT line onward plus the finding lines around it."""
     lines = text.splitlines()
-    idx = [i for i, l in enumerate(lines) if re.search(r"VERDICT\s*[:=]", l, re.I)]
+    # A verdict line leads its line (as the parser reads it), never a quote inside a finding:
+    # `verdict == "UNAVAILABLE"` in a FINDING once cut the real VERDICT line off every rewrite (#894).
+    idx = [i for i, l in enumerate(lines) if re.match(r"VERDICT\s*[:=]", review_parse._clean(l), re.I)]
     if not idx:
         return text
     start = idx[-1]
