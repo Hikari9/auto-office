@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.9
+
+- fix(review): a Herdr pane reviewer that hit its harness quota wall (the adapter's own signature in the pane's last lines, e.g. opencode "Free usage limit reached") moves the chain to another harness before any re-prompt.
+
 ## 3.15.8
 
 - fix(checks): a check whose interpreter lacks its own test runner (`python3 -m pytest` with no pytest) is UNAVAILABLE with the fix, not CHANGES_REQUIRED (#739).
