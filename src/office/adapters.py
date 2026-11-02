@@ -122,7 +122,13 @@ def _vetted_pi(args: list[str]) -> bool:
     return bool(tools) and all(t in PI_READONLY_TOOLS for t in tools)
 
 
-VETTED_READONLY_ARGS = {"pi": _vetted_pi}
+# Every other token of the worker argv a derived reviewer inherits. A worker argv carrying anything outside
+# this set (--tools, -t, --tools=edit, --exclude-tools, --approve, ...) could override or widen the
+# read-only allowlist, so the whole derived argv is checked and nothing is derived from it.
+PI_WORKER_TOKENS = frozenset({"--print", "--no-approve", "--no-extensions", "--no-mcp", "--model", "--thinking",
+                              "--no-session", "{model}", "{effort}"})
+
+VETTED_READONLY_ARGS = {"pi": (_vetted_pi, PI_WORKER_TOKENS)}
 
 
 def readonly_args_problem(adapter: dict) -> str | None:
@@ -131,7 +137,7 @@ def readonly_args_problem(adapter: dict) -> str | None:
     if args is None:
         return None
     exe = os.path.basename(executable(adapter) or "")
-    vet = VETTED_READONLY_ARGS.get(exe)
+    vet, worker_tokens = VETTED_READONLY_ARGS.get(exe, (None, frozenset()))
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
         return "reviewer_readonly_args must be a non-empty list of strings"
     if vet is None:
@@ -140,6 +146,12 @@ def readonly_args_problem(adapter: dict) -> str | None:
                 "office_profiles.reviewer only for a harness with a verified read-only sandbox")
     if not vet(args):
         return f"reviewer_readonly_args {args} is not a vetted read-only form for {exe} (pi accepts --tools with only read,grep,find,ls)"
+    worker = ((adapter.get("office_profiles") or {}).get("worker") or {}).get("argv")
+    extra = [str(t) for t in worker or [] if str(t) not in worker_tokens]
+    if extra:
+        return (f"the worker argv carries {extra}, which a derived {exe} reviewer would inherit after the vetted "
+                f"read-only flags and could override them; the derived reviewer argv allows only {sorted(worker_tokens)}. "
+                "Write an explicit office_profiles.reviewer instead")
     return None
 
 

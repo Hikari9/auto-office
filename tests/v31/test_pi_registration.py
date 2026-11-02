@@ -479,14 +479,14 @@ def test_role_executor_allows_the_same_rows_for_executor_only(monkeypatch):
     assert "pi/gpt-6-luna@high: allow" not in _effective("code_reviewer", monkeypatch)
 
 
-def _user_adapter(tmp_path, monkeypatch, *, exe, args, caps=("builder",)):
+def _user_adapter(tmp_path, monkeypatch, *, exe, args, caps=("builder",), worker_argv=None):
     import yaml
     adir = tmp_path / "adapters"
     adir.mkdir(exist_ok=True)
     (adir / "acme.yaml").write_text(yaml.safe_dump({
         "id": "acme", "invocation": {"executable": exe}, "capabilities": list(caps),
         "effort_mapping": {"high": "high"}, "reviewer_readonly_args": args,
-        "office_profiles": {"worker": {"argv": ["run", "--model", "{model}", "--effort", "{effort}"],
+        "office_profiles": {"worker": {"argv": worker_argv or ["--print", "--no-approve", "--model", "{model}", "--thinking", "{effort}"],
                                        "prompt": "stdin", "output": "stdout", "herdr_kind": "acme",
                                        "interactive": {"argv": ["--model", "{model}"]}}}}))
     monkeypatch.setattr(adapters, "user_adapter_files", lambda: sorted(adir.glob("*.yaml")))
@@ -497,7 +497,7 @@ def test_a_user_adapter_for_a_vetted_harness_gets_a_derived_read_only_reviewer(t
     from office import harnesscmd
     acme = _user_adapter(tmp_path, monkeypatch, exe="pi", args=["--tools", "read,grep"])
     prof = adapters.profile(acme, "reviewer")
-    assert prof["argv"] == ["--tools", "read,grep", "run", "--model", "{model}", "--effort", "{effort}"]
+    assert prof["argv"] == ["--tools", "read,grep", "--print", "--no-approve", "--model", "{model}", "--thinking", "{effort}"]
     assert prof["verify_worktree_unchanged"] is True and "interactive" not in prof and "herdr_kind" not in prof
     assert "review" in acme["capabilities"] and adapters.profile(acme, "vision") is None
     result = harnesscmd.model_add("acme/vendor/m1", ["high"], roles=["reviewer"])
@@ -625,19 +625,91 @@ def test_a_pi_reviewer_that_changes_the_worktree_is_degraded_and_its_verdict_is_
     assert d["outcome"] == "environment_failure", d
 
 
-@pytest.mark.approved
-def test_a_pi_reviewer_with_an_empty_reply_is_not_approved(env):
-    _pi_review(env, [{"exit": 0}, {"exit": 0}, {"exit": 0}])
-    assert _pi_reviews(env), "the pi reviewer was the route that ran"
+def _gate_and_events(env):
     con = env.con()
-    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
-    assert gate["verdict"] != "APPROVED", gate
+    try:
+        gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+        kinds = [r[0] for r in con.execute("SELECT kind FROM events").fetchall()]
+    finally:
+        con.close()
+    return gate, kinds
 
 
 @pytest.mark.approved
-def test_a_pi_reviewer_with_a_malformed_reply_is_not_approved(env):
-    _pi_review(env, [{"reply": "looks fine to me"}, {"reply": "still fine"}, {"reply": "ok"}])
-    assert _pi_reviews(env), "the pi reviewer was the route that ran"
-    con = env.con()
-    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+@pytest.mark.parametrize("scripted", [
+    pytest.param([{"exit": 0}, {"exit": 0}, {"exit": 0}], id="empty-reply"),
+    pytest.param([{"reply": "looks fine to me"}, {"reply": "still fine"}, {"reply": "ok"}], id="malformed-reply"),
+])
+def test_a_pi_reviewer_with_no_usable_reply_ends_the_review_unavailable_not_approved(env, scripted):
+    """pi has no resumable session, so there is no reprompt: the one pi review is read, found unusable, and the
+    gate records the review as unavailable instead of approving or inventing a verdict."""
+    _pi_review(env, scripted)
+    assert len(_pi_reviews(env)) == 1, "one pi review ran, with no silent retry on another route"
+    gate, kinds = _gate_and_events(env)
     assert gate["verdict"] != "APPROVED", gate
+    assert "convergence.unavailable" in kinds and "gate.approved" in kinds[:kinds.index("convergence.unavailable")], kinds
+    assert not any(k == "review.worktree_changed" for k in kinds)
+    d = _dispatch_for(env, "code_reviewer")
+    assert d["harness"] == "pi" and d["status"] == "exited", d
+
+
+def _dispatch_for(env, role):
+    con = env.con()
+    try:
+        return dict(con.execute("SELECT * FROM dispatches WHERE role=? ORDER BY started_at DESC", (role,)).fetchone())
+    finally:
+        con.close()
+
+
+def _pi_plan_review(env, plan_reviewer):
+    """A full-gear run whose plan review is routed to the registered pi/gpt-6-luna@high reviewer."""
+    from office import harnesscmd
+    from test_compat_hooks_install import PLAN_ONE
+    _install_pi(env)
+    env.trust()
+    harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
+    code, out = env.office("config", "roles.plan_reviewer.preferred_seed", "pi/gpt-6-luna@high", "--force", check=0)
+    assert code == 0, out
+    env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=plan_reviewer)
+    return env.office("start", "add numbers", "--gear", "full", env=PI_LUNA_ENV, check=0)
+
+
+@pytest.mark.approved
+def test_a_pi_plan_review_runs_with_the_read_only_allowlist_and_its_verdict_is_ingested(env):
+    code, out = _pi_plan_review(env, [PASS])
+    calls = [c for c in env.calls() if c.get("role") == "plan_reviewer"]
+    assert calls and calls[0]["harness"] == "pi", env.calls()
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--tools") + 1] == "read,grep,find,ls", argv
+    code, data = env.ojson("status")
+    assert data["data"]["plan_review"]["ended"] is True, data
+    assert "review.worktree_changed" not in _event_kinds(env)
+
+
+@pytest.mark.approved
+def test_a_pi_plan_reviewer_that_changes_the_checkout_is_degraded(env):
+    _pi_plan_review(env, [{"write": {"planted.txt": "the plan reviewer wrote this"}, "reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    assert "review.worktree_changed" in _event_kinds(env), _event_kinds(env)
+
+
+def _event_kinds(env):
+    con = env.con()
+    try:
+        return [r[0] for r in con.execute("SELECT kind FROM events").fetchall()]
+    finally:
+        con.close()
+
+
+# F1 regression: the whole derived reviewer argv is checked, not only the vetted prefix.
+@pytest.mark.parametrize("worker_argv", [
+    ["--print", "--tools", "edit", "--model", "{model}", "--thinking", "{effort}"],
+    ["--print", "--tools=edit", "--model", "{model}", "--thinking", "{effort}"],
+    ["--print", "-t", "write", "--model", "{model}", "--thinking", "{effort}"],
+    ["--print", "--exclude-tools", "read", "--model", "{model}", "--thinking", "{effort}"],
+    ["--print", "--approve", "--model", "{model}", "--thinking", "{effort}"],
+])
+def test_a_worker_argv_that_could_override_the_allowlist_derives_no_reviewer(tmp_path, monkeypatch, worker_argv):
+    acme = _user_adapter(tmp_path, monkeypatch, exe="pi", args=["--tools", "read,grep"], worker_argv=worker_argv)
+    assert adapters.profile(acme, "reviewer") is None
+    assert "review" not in acme["capabilities"]
+    assert "worker argv carries" in adapters.readonly_args_problem(acme)
