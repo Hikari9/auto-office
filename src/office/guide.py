@@ -166,7 +166,8 @@ def next_action(con, run: dict) -> str:
     by_id = {t["id"]: t for t in tasks}
     held_repairs = []
     for t in tasks:
-        if t["status"] == "changes_required" and not gates_mod.worker_live(con, t.get("current_dispatch_id")):
+        is_live = gates_mod.worker_live(con, t.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], t["id"]))
+        if t["status"] == "changes_required" and not is_live:
             dependencies = unaccepted_dependencies(t, by_id)
             holder = dispatch.scope_holder(con, run, t)
             if dependencies or holder:
@@ -198,11 +199,11 @@ def next_action(con, run: dict) -> str:
             return f"findings on {t['id']} wait for you: {rerun.recovery_hint(con, run, t['id'])}"
     if held_repairs:
         return "no action; " + "; ".join(held_repairs) + "; office wait for the holder or dependency to finish"
-    for t in tasks:
-        if t["status"] == "changes_required":
-            # Its live worker has the findings; the repair path stays the next action.
-            return (f"no action; {t['id']}'s worker is fixing its findings (if it stops: "
-                    f"office rerun {t['id']} --resume | --fresh)")
+    live_repairs = [t for t in tasks if t["status"] == "changes_required" and (
+        gates_mod.worker_live(con, t.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], t["id"]))
+    )]
+    if live_repairs:
+        return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live_repairs)
     for t in tasks:
         if t["status"] in ("submitted", "accepted"):
             stale = gates_mod.stale_dependency(con, run, t)
@@ -1094,6 +1095,10 @@ def _waiting_on(con, run: dict, task: dict) -> str:
             stale = gates.stale_dependency(con, run, task)
             if stale:
                 parts.append(stale)
+    if task["status"] == "changes_required" and not parts:
+        from office import gates as gates_mod
+        if gates_mod.worker_live(con, task.get("current_dispatch_id")) or bool(gates_mod.live_task_session(con, run["id"], task["id"])):
+            parts.append("finding delivered to the live worker")
     return "; ".join(parts)
 
 
