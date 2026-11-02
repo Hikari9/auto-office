@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, greenfield, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -794,12 +794,17 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
+def _slate_gear(run: dict) -> str | None:
+    """The gear the size slate and its floors read. A greenfield build is one XL executor task (#936)."""
+    return "XL" if greenfield.enabled(run) else run.get("gear")
+
+
 def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: str,
                      executor_policy: dict | None = None) -> bool:
     """True when the #809 ideal slate, not a user seed, nominates this sized XS-XL run's routes (#846)."""
     executor_policy = executor_policy or executor_slates.POLICY
     sizes = executor_policy["floors"]
-    return (role in routing.ADAPTIVE_ROLES and run.get("gear") in sizes
+    return (role in routing.ADAPTIVE_ROLES and _slate_gear(run) in sizes
             and task_size in sizes
             and task_size not in (policy_cfg.get("preferred_seed_by_size") or {}))
 
@@ -892,7 +897,7 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     desc = _effective_task_descriptor(run, task)
     task_size = desc.get("task_size") or (run.get("risk") or {}).get("size_class")
     context = {"role": role, "playbook": run.get("playbook"), "size_class": task_size,
-               "gear": run.get("gear"), "dispatch_kind": dispatch_kind,
+               "gear": _slate_gear(run), "dispatch_kind": dispatch_kind,
                "task_size_rationale": desc.get("task_size_rationale"),
                "dispatch_profile": desc.get("profile"),
                "dispatch_profile_version": desc.get("profile_version")}
