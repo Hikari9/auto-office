@@ -13,7 +13,8 @@ import re
 import os
 from pathlib import Path
 
-from office import amend, contract, oversize, paths, planpath, plans, route_learning, state
+from office import amend, contract, paths, planpath, plans, route_learning, state
+from office import oversize as oversize_signal
 from office.result import Result
 from office.util import atomic_write_text, short, sha256_obj
 
@@ -340,7 +341,7 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     for line in usage:
         res.add(line)
     res.verbose.extend(usage_verbose)
-    oversize, oversize_next = ([], None) if state.is_terminal(run) else oversize.lines(con, run, tasks)
+    oversize, oversize_next = ([], None) if state.is_terminal(run) else oversize_signal.lines(con, run, tasks)
     for line in oversize:
         res.add(line)
     if not state.is_terminal(run):
