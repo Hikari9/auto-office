@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.35
+
+`office model verify <harness>/<model> --evidence <run>/<task>` promotes a model added with office model add to a local-evidence: source on cited acceptances under independent review; explicit only (#656).
+
 ## 3.15.34
 
 `office amend route <task> --auto --quote "<words>"` clears a pending task's declared route so it routes automatically again, and records the change (#977).
