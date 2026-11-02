@@ -223,6 +223,20 @@ def test_planner_choice_within_band_and_override_with_reason():
     assert "stage 6" in blocked["planner_error"] and "quota unknown" in blocked["planner_error"]
 
 
+def test_an_ineligible_planner_entry_drops_alone_and_the_eligible_primary_stands():
+    """#875: one rejected or unknown entry no longer discards the planner's whole route."""
+    cs = [cand("a", "m1", idx=50), cand("b", "m2", idx=50), cand("c", "m3", idx=49)]
+    audit = routing.route(req(cs, cfg={"competitive_band": 0.05}))["routing"]
+    second, third = audit["candidates"][1], audit["candidates"][2]
+    staged_out = {**audit, "rejected": [{"candidate": "z@2/none@medium", "stage": 4,
+                                          "reason": "L subtask requires index >= 44 (got 40)"}]}
+    plan = adaptive.apply_planner_choice(staged_out, {"routes": [second["label"], "z/none@medium", "y/gone@low",
+                                                                 third["label"]]})
+    assert plan["chooser"] == "planner" and plan["primary"] == second["route"]
+    assert plan["fallbacks"][0] == third["route"] and "planner_error" not in plan
+    assert "z/none@medium rejected at stage 4" in plan["planner_notice"] and "y/gone@low" in plan["planner_notice"]
+
+
 # ------------------------------------------------------------------ inline slate rendering
 
 @pytest.mark.parametrize("n", [1, 2, 3])

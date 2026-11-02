@@ -305,6 +305,8 @@ def _route_task(con, run, tid) -> Result:
             lines.append(f"planner reason: {planner['why']}")
         if planner.get("planner_error"):
             lines.append(f"planner route ignored: {planner['planner_error']}")
+        if planner.get("planner_notice"):
+            lines.append(planner["planner_notice"])
         lines += _matrix(a["disclosure"])
     for a in (x for x in audits if x["phase"] != "plan"):
         d = a["disclosure"].get("dispatch") or {}
