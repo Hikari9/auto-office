@@ -170,7 +170,7 @@ def parse_normalized(path: Path) -> list[dict]:
             "harness": str(entry["harness"]), "session_id": str(entry["session_id"]),
             "turn_id": str(entry.get("turn_id") or ""), "event_id": str(entry["event_id"]),
             "model": entry.get("model"), "occurred_at": entry.get("occurred_at"),
-            "role": entry.get("role"), "phase": entry.get("phase"), "task_id": entry.get("task_id"),
+            "role": entry.get("role"), "phase": entry.get("phase"),
             **{f: _int(entry.get(f)) for f in TOKEN_FIELDS},
             "cost_usd": float(cost) if isinstance(cost, (int, float)) and kind != "unknown" else None,
             "cost_kind": kind, "quota_units": entry.get("quota_units"),
@@ -352,7 +352,18 @@ def _cost_data(rows: list[dict]) -> dict:
     for kind, vs in _cost_kinds(rows).items():
         known = _known(vs)
         out[kind] = {"count": len(vs), "usd": sum(known) if known else None}
+        if known and len(known) < len(vs):  # a priced kind with some unpriced turns: the usd total is partial
+            out[kind]["unknown_count"] = len(vs) - len(known)
     return out
+
+
+def _missing(rows: list[dict]) -> dict:
+    return {f: sum(1 for r in rows if r[f] is None) for f in TOKEN_FIELDS}
+
+
+def _task_ids(rows: list[dict], task_ids: list[str]) -> list[str]:
+    """The listed tasks, then any task a usage row names: a cancelled task keeps its spend visible."""
+    return [*task_ids, *sorted({r["task_id"] for r in rows if r["task_id"]} - set(task_ids))]
 
 
 def _cost(rows: list[dict]) -> str:
@@ -373,7 +384,7 @@ def _table_cells(rows: list[dict]) -> str:
 
 def _labelled(rows: list[dict]) -> str:
     if not rows:
-        return "unknown (no usage reported)"
+        return "unknown (no usage recorded)"
     return (f"{len(rows)} turn(s), input {_fmt(rows, 'input_tokens')}, output {_fmt(rows, 'output_tokens')}, "
             f"cache read {_fmt(rows, 'cache_read_tokens')}, cache write {_fmt(rows, 'cache_write_tokens')}, "
             f"cost {_cost(rows)}")
@@ -387,19 +398,20 @@ def _office_rows(con, run_id: str) -> list[dict]:
 
 
 def status_lines(con, run: dict, task_ids: list[str]) -> tuple[list[str], list[str]]:
-    """`office status` usage as (default, verbose). Read-only: nothing shows until collection is on or a row exists."""
+    """`office status` usage as (default, verbose). Read-only. Nothing shows by default until collection is on or a
+    row exists; the off notice is verbose only."""
     on = enabled(run)
     rows = _office_rows(con, run["id"])
     if not on and not rows:
         return [], ["usage: unknown (cost collection is off; office config economics.collect true)"]
-    default = [f"usage: {_labelled(rows)}"]
-    verbose = [f"usage run/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(rows).items())]
-    for tid in task_ids:
+    lines = [f"usage: {_labelled(rows)}"]
+    lines += [f"usage run/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(rows).items())]
+    for tid in _task_ids(rows, task_ids):
         mine = [r for r in rows if r["task_id"] == tid]
         if not mine:
-            verbose.append(f"usage {tid}: unknown (no usage reported)")
-        verbose += [f"usage {tid}/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(mine).items())]
-    return default, verbose
+            lines.append(f"usage {tid}: unknown (no usage attributed to this task)")
+        lines += [f"usage {tid}/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(mine).items())]
+    return lines, []
 
 
 def inspect(con, run: dict) -> Result:
@@ -418,7 +430,7 @@ def inspect(con, run: dict) -> Result:
     lines = [f"economics: collection {'enabled' if on else 'disabled (showing data recorded while enabled)'}"]
     if not office_rows:
         lines.append("no Office-attributed usage recorded for this run")
-        lines += [f"task {tid}: unknown (no usage reported)" for tid in task_ids]
+        lines += [f"task {tid}: unknown (no usage attributed to this task)" for tid in task_ids]
         return Result(lines=lines, next="office economics ingest" if on else None,
                       data={"enabled": on, "rows": 0, "outside_rows": len(rows)})
     by_group = []
@@ -428,19 +440,19 @@ def inspect(con, run: dict) -> Result:
         groups.setdefault((_role(r), r["phase"] or "unknown"), []).append(r)
     for (role, phase), rs in sorted(groups.items()):
         lines.append(f"  {role}/{phase}: " + _table_cells(rs))
-        by_group.append({"role": role, "phase": phase, "turns": len(rs),
-                         **{f: _sum(rs, f) for f in TOKEN_FIELDS}, "cost": _cost_data(rs)})
+        by_group.append({"role": role, "phase": phase, "turns": len(rs), **{f: _sum(rs, f) for f in TOKEN_FIELDS},
+                         "missing": _missing(rs), "cost": _cost_data(rs)})
     by_task, unmeasured = [], []
     lines.append("task/role: turns | input | output | cache read | cache write | cost")
-    for tid in task_ids:
+    for tid in _task_ids(office_rows, task_ids):
         mine = [r for r in office_rows if r["task_id"] == tid]
         if not mine:
             unmeasured.append(tid)
-            lines.append(f"  task {tid}: unknown (no usage reported)")
+            lines.append(f"  task {tid}: unknown (no usage attributed to this task)")
         for role, rs in sorted(_by_role(mine).items()):
             lines.append(f"  task {tid}/{role}: " + _table_cells(rs))
-            by_task.append({"task": tid, "role": role, "turns": len(rs),
-                            **{f: _sum(rs, f) for f in TOKEN_FIELDS}, "cost": _cost_data(rs)})
+            by_task.append({"task": tid, "role": role, "turns": len(rs), **{f: _sum(rs, f) for f in TOKEN_FIELDS},
+                            "missing": _missing(rs), "cost": _cost_data(rs)})
     missing = {f: sum(1 for r in office_rows if r[f] is None) for f in TOKEN_FIELDS}
     read, write, fresh = (_sum(office_rows, "cache_read_tokens"), _sum(office_rows, "cache_write_tokens"),
                           _sum(office_rows, "input_tokens"))
