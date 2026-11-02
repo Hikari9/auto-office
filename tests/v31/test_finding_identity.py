@@ -83,13 +83,14 @@ def f(code, summary="add is wrong", where="calc.py:1", blocking=False, level="me
             "action": "fix it"}
 
 
-def lane_round(w: World, *findings, resolved=(), retracted=()) -> dict:
+def lane_round(w: World, *findings, resolved=(), retracted=(), kind: str = "convergence_review") -> dict:
     """What convergence.ingest does for one lane review, minus the scope bookkeeping."""
     from office import convergence, gates
-    gate = w.gate()
+    gate = w.gate(kind)
     where, params = "run_id=? AND scope=? AND gate_kind=?", (w.run_id, w.SCOPE["id"], gate["kind"])
     with _tx(w.con):
-        stable = gates.stable_codes(w.con, w.run, where, params, list(findings))
+        foreign = gates.finding_codes(w.con, "run_id=? AND scope=? AND gate_kind!=?", (w.run_id, w.SCOPE["id"], gate["kind"]))
+        stable = gates.stable_codes(w.con, w.run, where, params, list(findings), foreign=foreign)
         gates.mark_current(w.con, where, params, resolved, ("open",), "resolved")
         gates.mark_current(w.con, where, params, retracted, ("open", "nonblocking"), "retracted")
         owned: dict = {}
@@ -119,6 +120,22 @@ def test_a_code_reused_for_a_different_finding_is_recorded_under_a_fresh_code(wo
     rows = world.rows()
     assert [r["code"] for r in rows] == ["F1", "F2"]
     assert rows[0]["fingerprint"] != rows[1]["fingerprint"]
+
+
+def test_a_code_another_gate_kind_holds_in_the_lane_is_never_reused(world):
+    """#398 (3.10.1 recurrence): a visual F11 beside a convergence F11 left one unreachable by L-T1:F11."""
+    conv = lane_round(world, f("F11", "add is wrong"))
+    vis = lane_round(world, f("F11", "the button overlaps the header", where="page:/"), kind="visual")
+    assert conv["codes"] == ["F11"] and vis["codes"] == ["F12"]
+    again = lane_round(world, f("F12", "the button overlaps the header", where="page:/"), kind="visual")
+    assert again["codes"] == ["F12"], "the same visual finding keeps its own code in its own gate kind"
+    twice = lane_round(world, f("F11", "new contrast issue", where="page:/a"), f("F11", "new contrast issue", where="page:/a"),
+                       kind="visual")
+    assert len(set(twice["codes"])) == 1 and "F11" not in twice["codes"], twice
+    assert twice["codes"][0] != "F12", "a fresh code, distinct from the visual F12"
+    disposition(world, "L-T1:F12", "follow-up", "tracked")
+    (vis_row,) = world.rows("gate_kind='visual' AND code='F12' AND disposition IS NOT NULL")
+    assert vis_row["summary"].startswith("the button")
 
 
 def test_a_finding_that_only_moved_keeps_its_code(world):
