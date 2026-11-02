@@ -287,6 +287,10 @@ def _builds_on(con, run: dict, packet: dict) -> list[str]:
             for p in parents if base and integration.contains(run, base, p["commit"])]
 
 
+SUBAGENTS_LINE = ("SUBAGENTS your harness's subagents may work on this task itself if you judge that useful. You stay "
+                  "responsible for SCOPE, the checks and office submit, and the scope guard covers everything they change.")
+
+
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
@@ -310,6 +314,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                    "technique and extra tests. The seams are not: declared interfaces, dependencies, ACCEPT, "
                    "requirements, authority and other tasks' scope. If doing the work right needs a seam to move, "
                    "ask (QUESTIONS) instead of working around it.")
+    # #1031 (Rico, 2026-11-02): neutral, neither pushing nor discouraging; self-review subagents are separate.
+    out.append(SUBAGENTS_LINE)
     if any(planfile.is_shared(p) for p in packet["scope"]):
         out.append("SHARED (+) entries are registries other tasks also edit: add your own entries only, never "
                    "reorder, reformat, or remove others'; append where a conflict is easy to resolve.")
