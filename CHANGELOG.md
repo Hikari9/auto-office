@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.38
+
+A contract amendment's ripple delivery tells each dependant which task's contract changed and that it is not theirs, instead of telling it to apply the amendment (#960).
+
 ## 3.15.37
 
 Plan submit now shows a planner route entry that routing dropped as a notice, and office queue help says pausing a whole run also holds its integration checks.
