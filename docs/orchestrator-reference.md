@@ -71,6 +71,19 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   and arms nothing. `office status` prints `wake: armed`, `wake: off` or `wake: unavailable (<reason>)` on every non-terminal run.
   A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
+- **Outside Herdr, a Claude Code root can now be woken natively (#940):** `office install --only claude --item turn.stop`
+  installs the managed `Stop` command hook with `asyncRewake: true` (Claude Code must load/approve this hook), alongside
+  the existing session-start and prompt-submit hooks. After `office resume` inside a *verified Claude process*,
+  the root's normal Stop event starts a background, one-per-run listener to the Office event ledger; when a new
+  authoritative action arrives it exits **2**, providing a scoped system reminder to the **existing** idle Claude session.
+  No Herdr pane, agent restart, synthetic user prompt or model polling is used. `office status` reports
+  `wake: armed (Claude native Stop/asyncRewake; arms on next Claude Stop)` or `listener active`; `--wake-off`
+  disarms both transports. If the hook is not installed, this is a detached shell, the session is not bound,
+  or the caller is an executor/subagent, wake remains unavailable and `next: office wait` is the fallback.
+  The listener ends on a new user prompt, session rebind, run closure or hook timeout (24 hours); a later Stop
+  re-arms it. A terminal/closed Claude session cannot be reawakened. Check `office status` if a host disables hooks.
+  Native exit 2 means *notification issued*, not action completed; the root must read `office context` and obey
+  all permission/review gates. See [root-wake](root-wake.md) for the safety contract and manual fallback.
 - Review gates past a bound are classified once per episode (#919). `office status`, `office wait` and the root-wake watchdog
   record each episode as an orchestrator event, which wakes an armed root. `office wait` exits 0 on `review.queued_too_long`
   and `review.closed_unread`, and exits 3 on `review.stalled`:

@@ -12,7 +12,7 @@ from test_issue_895_false_stalls import _ago, _reviewer_gate
 from test_root_wake_723 import PANE, setup_root
 from test_wait import EXTERNAL, _go
 
-from office import context_snapshot, db, guide, rerun, root_wake, state, watchdog
+from office import context_snapshot, db, discovery, guide, rerun, root_wake, state, watchdog
 from office import gates as gates_mod
 
 REPO = Path(__file__).resolve().parents[2]
@@ -75,7 +75,9 @@ def test_resume_outside_herdr_succeeds_with_a_notice_and_no_wake(env, monkeypatc
     con = env.con()
     assert not root_wake.armed(con, _run(con)) and armed == [], out
     assert "root auto-wake not armed" in out and "Refused" not in out, out
-    assert root_wake.lines(con, _run(con)) == ["wake: unavailable (not inside a Herdr pane); use office wait"]
+    monkeypatch.setattr(discovery, "process_key", lambda: "claude:1:Mon")
+    monkeypatch.setattr(root_wake, "_native_hook_installed", lambda: False)
+    assert root_wake.lines(con, _run(con)) == ["wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"]
 
 
 def test_resume_with_an_unverifiable_pane_succeeds_with_a_notice_and_no_wake(env, monkeypatch):
@@ -91,7 +93,8 @@ def test_resume_with_an_unverifiable_pane_succeeds_with_a_notice_and_no_wake(env
 def test_status_prints_the_wake_state_on_every_non_terminal_run(env, monkeypatch):
     _go(env)
     code, out = env.office("status", check=0, env={"HERDR_PANE_ID": ""})
-    assert "wake: unavailable (not inside a Herdr pane)" in out, out
+    # The subprocess reads the real process tree, so pin only the stable wake-state prefix here.
+    assert "wake: unavailable (" in out, out
     _verified_root(monkeypatch)
     env.office("resume", check=0, env={"HERDR_PANE_ID": PANE})
     code, out = env.office("status", check=0, env={"HERDR_PANE_ID": PANE})
