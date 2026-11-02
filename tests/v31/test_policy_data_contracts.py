@@ -219,25 +219,30 @@ def test_historical_gears_and_a_missing_gear_never_inherit_a_size_policy(gear):
     assert slates.new_gear_size({"size_class": "XL"}) is None
 
 
-def _rule_candidate(rule):
-    spec, rest = rule["route"].split("/", 1)
+def _alternatives(route):
+    """Every harness alternative of a route spec (`claude@2|agy@1/model@effort`) as a candidate."""
+    spec, rest = route.split("/", 1)
     model, effort = rest.rsplit("@", 1)
-    harness, _, major = spec.split("|")[0].partition("@")
-    return {"harness": harness, "harness_version": f"{major}.0.0" if major else None,
-            "model_id": model, "invocation_model_id": model, "effort": effort}
+    found = []
+    for alternative in spec.split("|"):
+        harness, _, major = alternative.strip().partition("@")
+        found.append({"harness": harness, "harness_version": f"{major}.0.0" if major else None,
+                      "model_id": model, "invocation_model_id": model, "effort": effort})
+    return found
 
 
-def _state(rule, role, size):
-    return route_policy.effective_role_state(_rule_candidate(rule), role, [], size)["state"]
+def _state(candidate, role, size):
+    return route_policy.effective_role_state(candidate, role, [], size)["state"]
 
 
 def test_every_shipped_role_rule_holds_at_its_own_scope():
     rules = route_policy.SEED_ROLE_RULES
     wrong = []
     for rule in rules:
-        for size in rule.get("sizes") or [None]:
-            if _state(rule, rule["role"], size) != rule["state"]:
-                wrong.append((rule["role"], rule["route"], size, rule["state"]))
+        for candidate in _alternatives(rule["route"]):
+            for size in rule.get("sizes") or [None]:
+                if _state(candidate, rule["role"], size) != rule["state"]:
+                    wrong.append((rule["role"], rule["route"], candidate["harness"], size, rule["state"]))
     assert not wrong, wrong
 
 
@@ -251,8 +256,9 @@ def test_a_size_scoped_shipped_rule_does_not_leak_to_other_sizes():
         if any(r.get("sizes") is None for r in siblings):
             continue
         covered = {size for r in siblings for size in r["sizes"]}
-        for size in set(SIZES) - covered:
-            assert _state(rule, rule["role"], size) != rule["state"], (rule, size)
+        for candidate in _alternatives(rule["route"]):
+            for size in set(SIZES) - covered:
+                assert _state(candidate, rule["role"], size) != rule["state"], (rule, candidate["harness"], size)
 
 
 def test_a_shipped_role_rule_never_leaks_into_a_role_it_does_not_name():
@@ -260,8 +266,9 @@ def test_a_shipped_role_rule_never_leaks_into_a_role_it_does_not_name():
     for rule in rules:
         named = {r["role"] for r in rules if r["route"] == rule["route"]}
         for role in ("unlisted-role", *({"planner"} | {r["role"] for r in rules}) - named):
-            for size in (None, *SIZES):
-                assert _state(rule, role, size) == "neutral", (rule["route"], role, size)
+            for candidate in _alternatives(rule["route"]):
+                for size in (None, *SIZES):
+                    assert _state(candidate, role, size) == "neutral", (rule["route"], candidate["harness"], role, size)
 
 
 def test_size_scoped_shipped_rules_do_not_apply_when_the_size_is_unknown():
@@ -272,25 +279,68 @@ def test_size_scoped_shipped_rules_do_not_apply_when_the_size_is_unknown():
         sibling_unsized = [r for r in rules if r["role"] == rule["role"] and r["route"] == rule["route"]
                            and r.get("sizes") is None]
         expected = sibling_unsized[0]["state"] if sibling_unsized else "neutral"
-        assert _state(rule, rule["role"], None) == expected, rule
+        for candidate in _alternatives(rule["route"]):
+            assert _state(candidate, rule["role"], None) == expected, (rule, candidate["harness"])
+
+
+def _router_decision(candidate, role, size):
+    candidate = {**candidate, "capabilities": ["builder", "review"], "route_status": "available",
+                 "quota": {"status": "ok", "tightest_remaining_percent": 80},
+                 "cost": {"money_estimate": 1, "quota_burn": 1, "wall_clock_seconds": 1}}
+    request = {"role": role, "candidates": [candidate], "preferred_seed": None,
+               "user_policies": [], "runs_db": None,
+               "policy": {"floor": None, "strict_seed": False, "required_capabilities": []}}
+    if size:
+        request.update(run_gear=size, size_class=size)
+    return routing.route(request)
 
 
 def test_the_router_rejects_every_shipped_deny_in_its_role_and_scope():
     deny = [r for r in route_policy.SEED_ROLE_RULES if r["state"] == "deny"]
     assert deny
     for rule in deny:
-        candidate = {**_rule_candidate(rule), "capabilities": ["builder", "review"], "route_status": "available",
-                     "quota": {"status": "ok", "tightest_remaining_percent": 80},
-                     "cost": {"money_estimate": 1, "quota_burn": 1, "wall_clock_seconds": 1}}
-        for size in rule.get("sizes") or [None]:
-            request = {"role": rule["role"], "candidates": [candidate], "preferred_seed": None,
-                       "user_policies": [], "runs_db": None,
-                       "policy": {"floor": None, "strict_seed": False, "required_capabilities": []}}
-            if size:
-                request.update(run_gear=size, size_class=size)
-            decision = routing.route(request)
-            assert decision["status"] == "no_qualifying_candidate", (rule, size)
-            assert "role-deny" in _categories(decision), (rule, size, decision["rejected"])
+        for candidate in _alternatives(rule["route"]):
+            for size in rule.get("sizes") or [None]:
+                decision = _router_decision(candidate, rule["role"], size)
+                assert decision["status"] == "no_qualifying_candidate", (rule, candidate["harness"], size)
+                assert "role-deny" in _categories(decision), (rule, candidate["harness"], size, decision["rejected"])
+
+
+def _compact_role_policy():
+    import yaml
+    from office import paths
+    path = paths.resources_root().joinpath(*route_policy.ROLE_POLICY_FILE)
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_every_harness_alternative_of_the_compact_role_policy_is_enforced():
+    """The compact file names alternatives (`claude@2|agy@1/model`); each one must bind, not only the first.
+
+    The expansion here is written out independently of `route_policy`, so an expansion that
+    drops a later alternative cannot also hide the rule from the check.
+    """
+    checked, alternatives = 0, 0
+    for role, routes in _compact_role_policy().items():
+        if role == "version":
+            continue
+        for key, states in routes.items():
+            spec, model = key.rsplit("/", 1)
+            for state in ("allow", "deny"):
+                for effort, sizes in (states.get(state) or {}).items():
+                    for e in (route_policy.EFFORTS if effort == "*" else (effort,)):
+                        for candidate in _alternatives(f"{spec}/{model}@{e}"):
+                            alternatives += 1
+                            for size in ([None] if sizes == "all" else sizes):
+                                assert _state(candidate, role, size) == state, (role, key, e, candidate["harness"], size)
+                                if state == "deny":
+                                    decision = _router_decision(candidate, role, size)
+                                    assert decision["status"] == "no_qualifying_candidate", (role, key, e, candidate["harness"], size)
+                                    assert "role-deny" in _categories(decision), (role, key, e, candidate["harness"], size)
+                                checked += 1
+    assert checked and alternatives
+    multi = [k for routes in _compact_role_policy().values() if isinstance(routes, dict)
+             for k in routes if "|" in k.rsplit("/", 1)[0]]
+    assert multi, "the shipped role policy must keep at least one multi-harness route for this check to bite"
 
 
 def test_built_executor_candidates_never_include_an_unscoped_shipped_deny(tmp_path, monkeypatch):
