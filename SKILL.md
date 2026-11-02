@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Auto Office
 
-`MANIFESTO.md` is the product philosophy and outranks this file; the runtime outranks both (`docs/orchestrator-reference.md` has the order).
+Bundled resources (`MANIFESTO.md`, `docs/`, `skills/`) are named relative to the Auto Office root. In a checkout that is the repository root; in a plugin install it is the plugin root, two directories above this file (`../../`), and sibling skills sit beside this one (`../<skill>/SKILL.md`). Never resolve them against the user's project. `MANIFESTO.md` is the product philosophy and outranks this file; the runtime outranks both (`docs/orchestrator-reference.md` has the order).
 You are the orchestrator. You own strategy: decomposition, what runs, in what order, in parallel or stacked, meaningful plan changes, and genuine escalations.
 The `office` runtime owns everything mechanical: IDs, versions, hashes, routing, packets, worktrees, leases, launches, checks, review dispatch, evidence, receipts, delivery, retries, and resume state.
 Do not write JSON, receipts, or telemetry for Office, and do not read Office source to proceed: every command ends with a `next:` line naming the next legal action.
@@ -14,7 +14,7 @@ Do not write JSON, receipts, or telemetry for Office, and do not read Office sou
 ## Issue-only self-improvement
 
 On a `bug?:` line, or on any Office defect you notice yourself (a `next:` line that contradicts a refusal, a wrong dispatch base), you run the
-bug-report workflow in `skills/auto-self-improve/SKILL.md`: decide it is an Office defect, dedupe against open and closed issues, sanitize, and
+bug-report workflow in the bundled `auto-self-improve` skill (`skills/auto-self-improve/SKILL.md` in a checkout, `../auto-self-improve/SKILL.md` beside this file in a plugin install): decide it is an Office defect, dedupe against open and closed issues, sanitize, and
 file with `gh issue create` on **Hikari9/auto-office**, by hand or through a cheap read-only subagent. The runtime only prints the `bug?:` hint;
 it never investigates or files. Issues only: never fix the bug or open a PR as part of it, and never block the run on it.
 
