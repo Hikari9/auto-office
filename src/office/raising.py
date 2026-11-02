@@ -108,15 +108,29 @@ def close_stale(con, run: dict) -> int:
     return len(stale)
 
 
+def scope_covers(con, r: dict) -> bool:
+    """A scope-request whose every path the task's current scope already holds (a contract amendment granted it)."""
+    from office import planfile
+    if r.get("kind") != "scope-request" or not r.get("files"):
+        return False
+    d = state.get_dispatch(con, r["dispatch_id"])
+    task = state.get_task(con, d["run_id"], r["task_id"]) if d else None
+    return bool(task and task.get("scope") and all(planfile.path_in_scope(f, task["scope"]) for f in r["files"]))
+
+
 def answer_command(r: dict) -> str:
     return f'office answer {r["task_id"]} -- "<text>"'
 
 
-def line(r: dict) -> str:
-    """One printable line for the orchestrator: who, kind, text, paths and the commands that resolve it."""
+def line(r: dict, *, covered: bool = False) -> str:
+    """One printable line for the orchestrator: who, kind, text, paths and the commands that resolve it.
+    `covered`: the task's scope already holds every requested path, so the answer alone resumes it (#799)."""
     from office import questions
     paths = f"; paths: {', '.join(r['files'])}" if r["files"] else ""
-    contract = f"; scope changes only with: {r['next']}" if r["kind"] == "scope-request" and r.get("next") else ""
+    contract = ""
+    if r["kind"] == "scope-request":
+        contract = ("; its scope already covers these paths (amended): answer it to resume the worker" if covered
+                    else f"; scope changes only with: {r['next']}" if r.get("next") else "")
     return (f"{r['task_id']} {r['dispatch_id']} raised {r['kind']}: \"{_shown(r['text'])}\"{paths}; "
             f"answer: {answer_command(r)}{contract}; {questions.PROTOCOL}")
 
@@ -132,7 +146,8 @@ def report(con, run: dict) -> tuple[list[str], list[str]]:
     if fresh:
         with db.transaction(con):
             state.advance_cursor(con, run["id"], REPORTED, max(r["seq"] for r in fresh))
-    return [line(r) for r in fresh], [line(r) for r in every]
+    return ([line(r, covered=scope_covers(con, r)) for r in fresh],
+            [line(r, covered=scope_covers(con, r)) for r in every])
 
 
 # ------------------------------------------------------------------ executor: office raise
@@ -190,9 +205,12 @@ def _again(con, r: dict) -> Result:
 
 # ------------------------------------------------------------------ orchestrator: office answer
 
-def _message(r: dict, answer: str) -> str:
+def _message(r: dict, answer: str, *, covered: bool = False) -> str:
     text = f"ANSWER to your raised {r['kind']} ({_shown(r['text'], 120)}): {answer}\n"
-    if r["kind"] == "scope-request":
+    if r["kind"] == "scope-request" and covered:
+        text += (f"A contract amendment already added {', '.join(r['files'])} to your scope: run office status for "
+                 "the amendment and office ack it.\n")
+    elif r["kind"] == "scope-request":
         text += ("Your scope and contract are unchanged by this answer; a file outside your scope is still refused at "
                  "submit. Only a contract amendment widens it.\n")
     return text + "You are unblocked: continue the task and office submit when it is done."
@@ -218,7 +236,8 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
     if not opened:
         return None
     tid = d["task_id"]
-    message = _message(opened[-1], text)
+    covered = scope_covers(con, opened[-1])
+    message = _message(opened[-1], text, covered=covered)
     how, note = "pending-rerun", None
     row_live = gates.worker_live(con, d["id"])
     if row_live:
@@ -249,7 +268,8 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
         elif submit.unblock_self(con, run, task):
             state.emit(con, run, "task.unblocked", f"{tid} unblocked: raise answered; the worker resubmits",
                        audience="runtime", task_id=tid, dispatch_id=d["id"])
-    contract = (f'; this did not change its contract: office amend {tid} --contract -- "<delta>" does'
+    contract = ("; its scope already covers the requested paths" if covered else
+                f'; this did not change its contract: office amend {tid} --contract -- "<delta>" does'
                 if opened[-1]["kind"] == "scope-request" else "")
     if how == "pending-rerun":
         # A dispatch row that still reads live (its agent is gone) must be revoked before a rerun is allowed.

@@ -364,7 +364,8 @@ def recorded(con, run: dict) -> list[str]:
             out.append(line(d, json.loads(last["payload_json"] or "{}")))
     out += [line(d, q) for d, q in _ended_question_dispatches(con, run)]
     from office import raising, startup
-    return out + [raising.line(r) for r in raising.open_raises(con, run)] + startup.recorded(con, run)
+    return out + [raising.line(r, covered=raising.scope_covers(con, r)) for r in raising.open_raises(con, run)] \
+        + startup.recorded(con, run)
 
 
 def _herdr_agents() -> list[dict] | None:
