@@ -7,6 +7,7 @@ a live quota probe, then hands them to office.routing.route unchanged.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -248,8 +249,14 @@ def role_policy(config: dict, role: str) -> dict:
 def probe_quota(adapter: dict) -> dict:
     """Tightest remaining quota percent, or unknown/unavailable with a safe cause.
 
-    A successful result is cached per harness (`quota_cache_ttl`); a failed one is
-    cached only briefly and stays unknown/unavailable, never ok (#450)."""
+    A timed-out probe falls back to the harness's last good reading within
+    `OFFICE_QUOTA_LAST_GOOD_TTL` (#941). Other failures stay unknown/unavailable."""
+    return _stale_fallback(adapter.get("id"), _probe_quota(adapter))
+
+
+def _probe_quota(adapter: dict) -> dict:
+    """The cached probe. A successful result is cached per harness (`quota_cache_ttl`); a
+    failed one is cached only briefly and stays unknown/unavailable, never ok (#450)."""
     harness = adapter.get("id")
     fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
     disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
@@ -272,7 +279,7 @@ def probe_quota(adapter: dict) -> dict:
         if isinstance(value, dict):
             result = _normalize_probe_result(value, unknown)
         else:
-            result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+            result = (_normalize_probe_result({"tightest_remaining_percent": value}, unknown) if value is not None
                       else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
@@ -293,23 +300,24 @@ PROBE_RETRY_BACKOFF_S = 2.0
 
 
 def _run_probe(argv: list[str], unknown) -> dict:
-    """Run one probe command. A timeout while the host is overloaded is the
-    environment, not the harness (the rule checks use, gates.host_overloaded):
-    it is retried once after a backoff, and if it times out again the result is
-    `unavailable` with the load as its cause. A timeout on a quiet host stays a
-    plain unknown with no retry, since a retry would only cost another 20s."""
+    """Run one probe command. Any timeout is retried once after a backoff (#941). A
+    second timeout is marked `timed_out` so it can fall back to the last good reading.
+    While the host is overloaded (gates.host_overloaded) it is `unavailable` with the load
+    as its cause; on a quiet host it stays a plain unknown."""
     from office import gates
     for attempt in (1, 2):
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+            # stdin is closed, so a probe that reads it gets EOF rather than blocking (#941).
+            proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                  timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            loaded = gates.host_overloaded()
-            if not loaded:
-                return unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds")
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
                 continue
-            return {"status": "unavailable", "tightest_remaining_percent": None,
+            loaded = gates.host_overloaded()
+            if not loaded:
+                return {**unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds"), "timed_out": True}
+            return {"status": "unavailable", "tightest_remaining_percent": None, "timed_out": True,
                     "cause": f"command timed out twice after {PROBE_TIMEOUT_S} seconds; {loaded}"}
         except (OSError, subprocess.SubprocessError, TypeError, ValueError):
             return unknown("command could not be run or parsed")
@@ -317,7 +325,7 @@ def _run_probe(argv: list[str], unknown) -> dict:
             return unknown(f"command exited with code {proc.returncode}")
         try:
             data = json.loads(proc.stdout)
-        except ValueError:
+        except (ValueError, RecursionError):
             return unknown("command returned invalid JSON")
         return _normalize_probe_result(data, unknown)
     return unknown("command could not be run or parsed")  # pragma: no cover
@@ -331,10 +339,15 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
         if isinstance(data.get("families"), dict):  # a known family can still gate its own models
             result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
         return result
+    if isinstance(data["tightest_remaining_percent"], bool):
+        return unknown("command returned a boolean tightest_remaining_percent")
     try:
-        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
-    except (TypeError, ValueError):
+        percent = float(data["tightest_remaining_percent"])
+    except (TypeError, ValueError, OverflowError):
         return unknown("command could not be run or parsed")
+    if not math.isfinite(percent):  # json accepts NaN and Infinity; neither is a reading
+        return unknown("command returned a non-finite tightest_remaining_percent")
+    result = {"status": "ok", "tightest_remaining_percent": percent}
 
     if isinstance(data.get("families"), dict):
         result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
@@ -346,9 +359,9 @@ def _normalize_family(family: str, raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     try:
         remaining = float(raw["tightest_remaining_percent"]) if raw.get("status") == "ok" else None
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         remaining = None
-    if remaining is None:
+    if remaining is None or not math.isfinite(remaining) or isinstance(raw.get("tightest_remaining_percent"), bool):
         return {"status": "unknown", "tightest_remaining_percent": None,
                 "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
     return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
@@ -364,32 +377,121 @@ _FAILED_TTL = 60.0
 
 def _shared_ttl() -> float:
     try:
-        return max(0.0, float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL)))
+        ttl = float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL))
     except ValueError:
         return _SHARED_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _SHARED_TTL
+
+
+# A timed-out probe (#941) uses the last successful reading for this long. The reading is
+# marked stale with its age, so `office status` shows the route chosen on it. 0 disables.
+_LAST_GOOD_TTL = 600.0
+
+
+def _last_good_ttl() -> float:
+    try:
+        ttl = float(os.environ.get("OFFICE_QUOTA_LAST_GOOD_TTL", _LAST_GOOD_TTL))
+    except ValueError:
+        return _LAST_GOOD_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _LAST_GOOD_TTL
 
 
 def _shared_cache_path() -> Path:
     return paths.state_home() / "quota-cache.json"
 
 
-def _shared_cache_get(harness: str) -> dict | None:
+def _shared_entry(harness: str) -> dict | None:
     try:
         entry = json.loads(_shared_cache_path().read_text()).get(harness)
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _stamp(value) -> float | None:
+    """A cache timestamp, or None when the file holds a corrupt one. A NaN or infinite stamp
+    fails the `0 <= now - at < ttl` checks at each use, so it needs no check here."""
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _shared_cache_get(harness: str) -> dict | None:
+    entry = _shared_entry(harness)
     if not entry or not isinstance(entry.get("result"), dict):
         return None
-    ok = entry["result"].get("status") == "ok"
+    result = entry["result"]
+    ok = result.get("status") == "ok"
+    if ok and not _valid_reading(result):
+        return None
     ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
-    if time.time() - float(entry.get("at", 0)) < ttl:
-        return entry["result"]
+    at = _stamp(entry.get("at"))
+    if at is not None and 0 <= time.time() - at < ttl:
+        return result
     return None
+
+
+def _is_number(value) -> bool:
+    """A finite real number. Bools, numeric strings and integers too large for a float are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_reading(reading: dict) -> bool:
+    """A stored ok reading whose percents are numbers. The cache file is not trusted: a bad value
+    would otherwise reach the reserve check as a crash or as a reading that is not a number."""
+    families = reading.get("families")
+    fams = [f for f in families.values() if isinstance(f, dict) and f.get("status") == "ok"] \
+        if isinstance(families, dict) else []
+    try:
+        return reading.get("status") == "ok" and all(
+            _is_number(r["tightest_remaining_percent"]) for r in [reading, *fams])
+    except KeyError:
+        return False
+
+
+def _shared_last_good(harness: str) -> tuple[float, dict] | None:
+    """(age seconds, reading) of the last ok probe for this harness, if within the TTL."""
+    last = (_shared_entry(harness) or {}).get("last_good")
+    if not isinstance(last, dict) or not isinstance(last.get("result"), dict) \
+            or not _valid_reading(last["result"]):
+        return None
+    at = _stamp(last.get("at"))
+    if at is None:
+        return None
+    age = time.time() - at
+    # A future stamp means the clock moved back: the reading's age is unknowable, so it is not used.
+    return (age, last["result"]) if 0 <= age < _last_good_ttl() else None
+
+
+def _stale_fallback(harness: str, result: dict) -> dict:
+    """A timed-out probe becomes the harness's last good reading, marked stale, with each ok agy
+    family marked too (quota_for_candidate hands a family result on alone). Any other result is
+    returned without the internal `timed_out` marker. A stale value never stands in for an auth
+    or parse failure."""
+    last = _shared_last_good(harness) if result.get("timed_out") else None
+    if last is None:
+        return {k: v for k, v in result.items() if k != "timed_out"}
+    age, reading = last
+    stale = {"stale": True, "stale_age_s": round(age),
+             "cause": f"probe timed out; last good reading {round(age)}s old"}
+    families = reading.get("families")
+    if isinstance(families, dict):
+        reading = {**reading, "families": {
+            name: {**fam, **stale} if isinstance(fam, dict) and fam.get("status") == "ok" else fam
+            for name, fam in families.items()}}
+    return {**reading, **stale}
 
 
 def _shared_cache_put(harness: str, result: dict) -> None:
     """Read-modify-write under an flock so concurrent office processes do not
-    drop each other's harness entries; the file itself is replaced atomically."""
+    drop each other's harness entries; the file itself is replaced atomically. A
+    failed result keeps the harness's last good reading for `_shared_last_good`."""
     import fcntl
     path = _shared_cache_path()
     try:
@@ -400,9 +502,16 @@ def _shared_cache_put(harness: str, result: dict) -> None:
                 data = json.loads(path.read_text()) if path.exists() else {}
                 if not isinstance(data, dict):
                     data = {}
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 data = {}
-            data[harness] = {"at": time.time(), "result": result}
+            now = time.time()
+            prior = data.get(harness) if isinstance(data.get(harness), dict) else {}
+            entry = {"at": now, "result": result}
+            if result.get("status") == "ok":
+                entry["last_good"] = {"at": now, "result": result}
+            elif isinstance(prior.get("last_good"), dict):
+                entry["last_good"] = prior["last_good"]
+            data[harness] = entry
             tmp = path.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data))
             os.replace(tmp, path)
@@ -417,12 +526,14 @@ def quota_unknown_record(candidate: dict | None) -> dict | None:
     """Why a chosen route's quota was not read, or None when it was. Kept on the
     dispatch's route record and shown in `office status` (#450)."""
     quota = (candidate or {}).get("quota") or {}
-    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
+    stale = bool(quota.get("stale"))
+    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None and not stale:
         return None
     if quota.get("cause") in _NOT_PROBED:
         return None  # no probe ran: nothing failed, so nothing to flag on every live task
     return {"harness": (candidate or {}).get("adapter_id") or (candidate or {}).get("harness"),
-            "status": quota.get("status") or "unknown", "cause": quota.get("cause") or "quota not probed"}
+            "status": "stale" if stale else quota.get("status") or "unknown",
+            "cause": quota.get("cause") or "quota not probed"}
 
 
 def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bool:
