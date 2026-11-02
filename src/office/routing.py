@@ -589,7 +589,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if status != "ok" or q.get("tightest_remaining_percent") is None:
                 unknown.append(c); continue
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
-            (safe if remaining - burn >= reserve else unsafe).append(c)
+            (safe if _within_reserve(remaining, burn, reserve) else unsafe).append(c)
         if not (safe or unknown or unsafe):
             _reject_pool(pool, rejected, "no route survived the earlier gates, so none is left to select (a discovery trial would have no fallback)")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
@@ -779,9 +779,17 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
                 "concurrency-cap")
     if q.get("status", "unknown") == "ok" and q.get("tightest_remaining_percent") is not None:
         remaining, burn = float(q["tightest_remaining_percent"]), float(q.get("projected_burn_percent") or 0)
-        if remaining - burn < reserve:
+        if not _within_reserve(remaining, burn, reserve):
             return 6, "projected quota crosses the protected reserve", "quota"
     return None
+
+
+def _within_reserve(remaining: float, burn: float, reserve: float) -> bool:
+    """A route keeps the protected reserve and still has headroom left after this dispatch. With the reserve
+    pinned at 0, an exhausted route (0% left, e.g. Codex weekly at 100% used) once passed `0 >= 0` and stayed
+    the first reviewer (rsvp runs, 2026-11-02): no headroom is never within any reserve."""
+    left = remaining - burn
+    return left > 0 and left >= reserve
 
 
 def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,

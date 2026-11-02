@@ -450,3 +450,24 @@ def test_accepting_the_router_slate_is_not_an_override():
     audit = routing.route(req(cs))["routing"]
     same = adaptive.apply_planner_choice(audit, {"routes": [e["label"] for e in audit["slate"]]})
     assert same["chooser"] == "planner" and same["override"] is False
+
+
+@pytest.mark.parametrize("reserve", [0.0, 5.0])
+def test_an_exhausted_route_is_never_within_the_reserve_even_at_zero(reserve):
+    """rsvp runs (2026-11-02) pinned quota.reserve_percent 0; Codex weekly at 0% left passed `0 >= 0` and
+    stayed the first reviewer. A route with no headroom left is never safe, at any reserve."""
+    exhausted = cand("codex", "luna", effort="high", idx=60, quota=0)
+    other = cand("claude", "opus", effort="low", idx=45, quota=76)
+    request = req([exhausted, other])
+    request["policy"]["quota_reserve_percent"] = reserve
+    d = routing.route(request)
+    assert d["candidate"]["model_id"] == "opus", d["selected"]
+    assert any(r["candidate"].startswith("codex") and r["stage"] == 6 for r in d["rejected"]), d["rejected"]
+
+
+def test_a_zero_reserve_still_admits_a_route_with_headroom():
+    route = cand("codex", "luna", effort="high", idx=60, quota=3)
+    request = req([route, cand("claude", "opus", effort="low", idx=45, quota=76)])
+    request["policy"]["quota_reserve_percent"] = 0.0
+    d = routing.route(request)
+    assert not [r for r in d["rejected"] if r["candidate"].startswith("codex") and r["stage"] == 6], d["rejected"]
