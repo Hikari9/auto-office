@@ -335,12 +335,27 @@ def _sized_descriptor(run: dict, planned: dict) -> dict:
     return {**declared, **task_sizing.classify(planned, run_gear=run.get("gear"))}
 
 
-def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False) -> dict:
+# The `visual:` keys that say only how to capture the page, not what it must show (#728).
+CAPTURE_KEYS = ("url", "start")
+
+
+def capture_only_change(old: dict | None, new: dict | None) -> bool:
+    """Both visual blocks exist and differ only in how the page is captured (url, start)."""
+    if not isinstance(old, dict) or not isinstance(new, dict) or old == new:
+        return False
+    strip = lambda v: {k: x for k, x in v.items() if k not in CAPTURE_KEYS}  # noqa: E731
+    return strip(old) == strip(new)
+
+
+def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_checks: bool = False,
+               capture_only: bool = False) -> dict:
     """Make the tasks table match a plan version. Caller holds the tx.
 
     With `rerun_checks`, an accepted task whose only change is its `checks:` keeps its contract version and
     is reported under `checks_only` instead of `acceptance`: it is not reopened, its checks are rerun
-    (`rerun_accepted_checks`)."""
+    (`rerun_accepted_checks`). With `capture_only`, an accepted task whose only change is its visual capture
+    (`visual.url` / `visual.start`) keeps both versions and is reported under `capture_only`: it is not
+    reopened, and its lane's visual capture is rerun on the same revision (#728)."""
     existing = {t["id"]: t for t in state.tasks(con, run["id"])}
     from office import greenfield
     # Plans are inserted just before syncing; fetch the *previous* pinned version,
@@ -349,7 +364,7 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
     old = state.get_plan(con, run["id"], run["plan_version"]) if greenfield.enabled(run) else None
     previous_phases = {t["id"]: t.get("phases") or [] for t in (old or {}).get("tasks") or []}
     seen = set()
-    changes = {"added": [], "contract": [], "acceptance": [], "checks_only": [], "cancelled": []}
+    changes = {"added": [], "contract": [], "acceptance": [], "checks_only": [], "capture_only": [], "cancelled": []}
     now = now_iso()
     for p in planned:
         seen.add(p["id"])
@@ -375,8 +390,18 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
         checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]
                        and cur["accepted_revision_id"] == cur["current_revision_id"])
+        settled = (cur["status"] == "accepted" and cur["accepted_revision_id"]
+                   and cur["accepted_revision_id"] == cur["current_revision_id"])
+        recapture = (capture_only and settled and not contract and not checks_changed
+                     and capture_only_change(cur["visual"], p["visual"])
+                     and cur["accept"] == p["accept"] and cur["depends"] == p["depends"] and cur["title"] == p["title"]
+                     and not (greenfield.enabled(run) and previous_phases.get(p["id"], []) != (p.get("phases") or [])))
         fields = dict(title=p["title"], scope=p["scope"], depends=p["depends"], interfaces=p["interfaces"],
                       accept=p["accept"], checks=checks, visual=p["visual"], descriptor=_sized_descriptor(run, p))
+        if recapture:
+            changes["capture_only"].append(p["id"])
+            state.update_task(con, run["id"], p["id"], **fields)
+            continue
         if contract:
             fields["contract_version"] = plan_version
             changes["contract"].append(p["id"])
