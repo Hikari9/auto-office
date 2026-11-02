@@ -105,7 +105,8 @@ Auto Office {ver}
                                     re-pin one run's check timeouts and check concurrency
   office config --run <id> <key>    the value that run pinned at start (what its gates use)
   office queue list|add|pause|resume|priority|demote|auto
-                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run);
+                                    pausing a whole run also holds its queued integration checks until resume
   office web start|stop|status|serve [--port N] [--fixture small|large]
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
@@ -464,7 +465,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
     s.add_argument("value", nargs="?", help="the new priority (priority)")
-    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--task", help="with --run: one task of the run (pausing the whole run also holds its integration checks)")
     s.add_argument("--title")
     s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
     s.add_argument("--reason")
