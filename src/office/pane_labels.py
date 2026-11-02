@@ -78,6 +78,8 @@ def format_label(run, dispatch, scope, title, pr, size=None) -> str:
     issue = match.group(1) if match else issue_number((run.get('landing') or {}).get('issue'))
     reference = '#' + issue if issue else 'PR#' + str(pr) if pr else ''
     role = dispatch.get('role') or dispatch.get('kind')
+    # A vision conformance probe runs as a visual_reviewer but reviews nothing: say what it is (#910).
+    label = 'vision probe' if dispatch.get('kind') == 'conformance' else role_label(role)
     return ' '.join(p for p in (repo_short(run), scope, reference, short_title(title),
-                                role_label(role), size_tag(size), model_tag(dispatch.get('harness'), dispatch.get('model'),
+                                label, size_tag(size), model_tag(dispatch.get('harness'), dispatch.get('model'),
                                                             dispatch.get('effort'))) if p)

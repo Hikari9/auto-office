@@ -107,6 +107,8 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
     d = state.get_dispatch(con, dispatch_id)
     from office import gates
     text = gates._reply_text(d, ddir, out)
+    # The probe is done once its reply is read: snapshot and close its pane, as a reviewer's is (#910).
+    dispatch_mod.reclaim_pane(run, dispatch_id)
     import re
     m = re.findall(r"PROBE\s+(\d{4})\s+(red|green|blue)", text, re.I)
     seen = m[-1] if m else None
