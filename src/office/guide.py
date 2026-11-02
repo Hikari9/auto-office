@@ -297,6 +297,10 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     c = _counts(tasks)
     res = Result()
     res.add(f"{short(run['id'])} {run['phase']} | req r{run['requirements_version']} | plan p{run['plan_version']}")
+    prs_option = (run.get("landing") or {}).get("prs") or {}
+    if prs_option.get("amended_at"):
+        res.add(f"run option amendment: task PRs {'on' if prs_option.get('enabled') else 'off'} "
+                f"(user confirmed {prs_option['amended_at']})")
     from office import upgrade
     stale = upgrade.notice(run)
     if stale:
