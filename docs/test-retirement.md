@@ -9,12 +9,12 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 | | Before | After |
 |---|---:|---:|
 | Test modules outside `tests/contracts/` | 307 | 306 |
-| Collected nodes (`pytest --all --collect-only tests`) | 6,733 | 6,576 |
+| Collected nodes (`pytest --all --collect-only tests`) | 6,733 | 6,577 |
 | Nodes removed | 225 | |
-| Nodes added | | 68 (64 in `PDC`, 1 rewritten node in `test_lineage_supersession_811.py`, 3 in `test_test_retirement_inventory.py`) |
+| Nodes added | | 69 (65 in `PDC`, 1 rewritten node in `test_lineage_supersession_811.py`, 3 in `test_test_retirement_inventory.py`) |
 | Test functions deleted or rewritten (rows below) | | 56 (55 deleted, 1 rewritten) |
 
-Before is the rebased base `5030f91f` (main after #988). Check the row count against `git diff --stat`: 3 modules deleted (16 functions), 39 functions removed from 7 retained modules and 1 function replaced in `test_lineage_supersession_811.py` is 56 removed `def test_` lines. `PDC` adds 21 functions (64 nodes), the 811 rewrite adds 1 and `test_test_retirement_inventory.py` adds 3.
+Before is the rebased base `5030f91f` (main after #988). Check the row count against `git diff --stat`: 3 modules deleted (16 functions), 39 functions removed from 7 retained modules and 1 function replaced in `test_lineage_supersession_811.py` is 56 removed `def test_` lines. `PDC` adds 22 functions (65 nodes), the 811 rewrite adds 1 and `test_test_retirement_inventory.py` adds 3.
 
 ## Baseline failure name
 
