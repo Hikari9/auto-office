@@ -111,6 +111,26 @@ def agent_alive(d: dict) -> bool | None:
     return False if "not_found" in body else None
 
 
+def own_pane_text(text: str, d: dict) -> str:
+    """The pane text below this dispatch's own setup line (`... && touch <its dir>/shell-ready`).
+    A reused pane still shows an earlier agent's output above it, and a usage limit printed by a
+    revoked executor must not stall the dispatch that took the pane over (#753). When the setup
+    line has scrolled off, the earlier agent's output has too, so the text is returned as is."""
+    if not d.get("run_id") or not d.get("id"):
+        return text
+    marker = str(paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "shell-ready")
+    raw = text.splitlines()
+    flat, ends = "", []
+    for line in raw:  # the setup line may wrap at the pane's width
+        flat += dispatch._ANSI_SEQ.sub("", line).strip()
+        ends.append(len(flat))
+    at = flat.rfind(marker)
+    if at < 0:
+        return text
+    end = at + len(marker)
+    return "\n".join(raw[next(i for i, e in enumerate(ends) if e >= end) + 1:])
+
+
 def agent_activity(d: dict) -> dict | None:
     """What a running agent is doing now, or None when that cannot be known
     (herdr unreachable or its pane unreadable): {"alive", "busy", "hash", "text", "status"}
@@ -130,6 +150,7 @@ def agent_activity(d: dict) -> dict | None:
     text = dispatch._herdr_agent_text(name)
     if text is None:
         return None
+    text = own_pane_text(text, d)
     try:
         proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
         agent = (json.loads(proc.stdout or "{}").get("result") or {}).get("agent") or {}
