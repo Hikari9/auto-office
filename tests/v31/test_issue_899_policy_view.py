@@ -8,14 +8,13 @@ import subprocess
 import pytest
 import yaml
 
-from office import adapters, candidates, config, routecmd, scoring, state
+from office import adapters, candidates, config, model_lineages, route_policy, routecmd, scoring, state
 
 INSTALLED_CLAUDE = "2.1.311"
 
 SEED_SONNET = [{"harness": "claude", "model_id": "sonnet", "effort": "high"}]
 
-# Every scenario here is one the view and `--as` must answer the same way. A seeded route on denied_models is
-# not here: see test_a_preferred_seed_cannot_override_a_legacy_deny_in_dispatch and the strict xfail below.
+# Every scenario here is one the view and `--as` must answer the same way.
 SCENARIOS = {
     "shipped-only": {},
     "exact-deny": {"role_rules": [{"role": "executor", "route": "claude/claude-opus-5-5@low", "state": "deny"}]},
@@ -24,6 +23,7 @@ SCENARIOS = {
     "instance-allow": {"role_rules": [{"role": "executor", "route": "claude@2/sonnet@high", "state": "allow"}]},
     "harness-deny": {"role_rules": [{"role": "executor", "route": "harness:claude", "state": "deny", "wildcard": True}]},
     "legacy-deny": {"denied": ["claude/sonnet@high"]},
+    "seed-under-legacy-deny": {"denied": ["claude/sonnet@high"], "seed": SEED_SONNET},
     "seed-under-role-deny": {"role_rules": [{"role": "executor", "route": "claude/sonnet@high", "state": "deny"}],
                              "seed": SEED_SONNET},
     "allow-canonical-over-alias-deny": {"role_rules": [
@@ -118,8 +118,6 @@ def test_a_preferred_seed_cannot_override_a_legacy_deny_in_dispatch(isolated):
     assert "office route policy --effective --role executor" in refusal.next_step
 
 
-@pytest.mark.xfail(strict=True, reason="#899 scope: routecmd.py lets a preferred_seed allow beat denied_models "
-                                       "in the view; dispatch and production routing deny it")
 def test_the_effective_view_shows_a_seeded_legacy_deny_as_denied(isolated):
     target, _ = isolated
     write_policy(target, denied=["claude/sonnet@high"], seed=SEED_SONNET)
@@ -171,3 +169,14 @@ def test_a_pinned_instance_allow_is_accepted_and_shown_as_allowed(isolated):
     write_policy(target, **SCENARIOS["instance-allow"])
     assert view_state("claude/sonnet@high")["state"] == "allow"
     assert dispatch_refusal("claude@2/sonnet@high", repo) is None
+
+
+def test_a_preferred_seed_cannot_lift_a_version_ceiling_in_the_effective_view():
+    """A version ceiling denies a route dispatch refuses, so the seeded view must deny it too (#899)."""
+    cand = {"harness": "claude", "harness_version": INSTALLED_CLAUDE, "model_id": "sonnet",
+            "invocation_model_id": "claude-sonnet-5-5", "alias_resolved_to": "claude-sonnet-5-5", "effort": "high"}
+    identity = model_lineages.identify("sonnet", aliases=cand)
+    ceiling = {"denied": [], "role_rules": [], "sources": {"version_ceilings": "user"},
+               "ceilings": {identity["lineage_key"]: identity["generation_version"]}}
+    seed = route_policy.preferred_seed_policy("executor", SEED_SONNET)
+    assert route_policy.effective_role_state(cand, "executor", [seed, ceiling])["state"] == "deny"
