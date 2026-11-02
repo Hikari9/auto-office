@@ -894,6 +894,14 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                             external=bool(launch_form.get("external")),
                             resume=resume if attempt == 0 else None)
         d = state.get_dispatch(con, dispatch_id)
+        if dispatch_mod.was_revoked(con, d):
+            # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion.
+            summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
+            if convergence:
+                return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": triple,
+                        "dispatch_id": dispatch_id, "summary": summary, "revoked": True, "producer_route": producer}
+            return {"verdict": "UNAVAILABLE", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
+                    "summary": summary, "revoked": True, "producer_route": producer}
         _note_headless_reviewer(con, run, d, profile_kind)
         if guard and (changed := guard(before)):
             # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not

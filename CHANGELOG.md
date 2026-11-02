@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.47
+
+A reviewer the orchestrator revokes is no longer recorded as a route failure, and no fallback reviewer is started for it (#1007).
+
 ## 3.15.46
 
 office dispatch and inspect warn when a --review-as pin has no effect because the run's gear runs no code review (#727).

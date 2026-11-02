@@ -343,3 +343,32 @@ def test_a_visual_change_beyond_the_capture_still_reopens_the_task(env, monkeypa
     code, out = env.office("amend", "T1", "--contract", "--", "add mobile")
     assert code == 0 and "visual capture re-run" not in out, out
     assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] != "accepted"
+
+
+def test_a_revoked_reviewer_is_not_a_route_failure_and_takes_no_fallback(env, monkeypatch):
+    """#1007: revoke stops the reviewer, and stop_dispatch records a signal exit before the revoke can classify it.
+    The reviewer's job still reads the end as the orchestrator's revoke: no fallback route, no second reviewer."""
+    from office import db, dispatch, state
+    real = dispatch.launch
+
+    def launch(run, d, kind, ddir, **kw):
+        if kind != "reviewer":
+            return real(run, d, kind, ddir, **kw)
+        con = db.connect()
+        try:  # the race: the revoke marker, then the process end recorded by stop_dispatch as a signal exit
+            with db.transaction(con):
+                state.emit(con, run, dispatch.REVOKED_KIND, f"{d['id']} revoked", audience="runtime", dispatch_id=d["id"])
+                con.execute("UPDATE dispatches SET status='failed', terminal_classification='signal', "
+                            "ended_at='2026-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
+        finally:
+            con.close()
+        return {}
+
+    monkeypatch.setattr(dispatch, "launch", launch)
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}] * 3)
+    env.office("dispatch", "T1", check=0)
+    gate = _gates(env, "convergence_review")[0]
+    assert gate["review_status"] == "UNAVAILABLE" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
+    assert len(_q(env, f"SELECT id FROM dispatches WHERE gate_id='{gate['id']}'")) == 1
+    assert not _q(env, "SELECT 1 FROM events WHERE kind='route.fallback'")
