@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.17
+
+- fix(panes): a vision conformance probe pane is labelled "vision probe" and closed once its reply is read (#910).
+
 ## 3.15.16
 
 - feat(queue): `office queue pause run:<id>` holds the run's automatic integration checks until `office queue resume` (#800).
