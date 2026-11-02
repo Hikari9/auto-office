@@ -261,6 +261,26 @@ def test_reviewer_reprompt_that_never_submits_stops_with_an_enter_hint(env, monk
     assert "typed but unsubmitted" in reason and "send-keys" in reason
 
 
+def test_issue_583_a_working_agent_whose_composer_is_empty_gets_no_did_not_land_notice(env, monkeypatch):
+    """The pointer is no longer in the composer and herdr reports the agent working: no re-prompt advice."""
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
+                        lambda name: {"status": "working", "busy": True, "content_hash": None})
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=[EMPTY, EMPTY, EMPTY])
+    assert res["prompt_landed"] is False
+    assert _launch_events(env, run) == [], _launch_events(env, run)
+    assert json.loads((ddir / "launch.json").read_text()).get("landing_unconfirmed_working") is True
+
+
+def test_issue_583_an_idle_agent_whose_composer_is_empty_is_still_reported(env, monkeypatch):
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
+                        lambda name: {"status": "idle", "busy": False, "content_hash": None})
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=[EMPTY, EMPTY, EMPTY])
+    assert res["prompt_landed"] is False
+    assert _launch_events(env, run), "an idle agent that never took the brief is still news"
+
+
 def test_issue_583_working_pi_agent_does_not_emit_unsubmitted_pointer_notice(env, monkeypatch):
     # A running pi harness leaves the submitted brief in pane scrollback.
     # That must not cause an actionable "send Enter" / office wait wake-up.

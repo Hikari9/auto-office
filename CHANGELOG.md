@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.43
+
+A herdr agent that is working on its brief, with the pointer no longer in its composer, no longer triggers a 'brief pointer did not land, re-prompt it' notice (#583).
+
 ## 3.15.42
 
 The amendment authority filter no longer refuses text that names an email field or address; only outbound email phrasing (email the users, bulk email, emails to customers) counts as an authority action (#543).

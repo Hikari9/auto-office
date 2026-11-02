@@ -2974,6 +2974,11 @@ def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, p
     view = _pane_view(name)
     # No Enter for an agent herdr no longer reports: the key would go to the pane's shell.
     if sample is None or not _composer_holds(view, pointer):
+        if working:
+            # The pointer is gone from the composer and herdr says the agent is working on something: it most
+            # likely took the brief. Telling the orchestrator to re-prompt it would deliver the brief twice (#583).
+            spec["landing_unconfirmed_working"] = True
+            return False, None
         _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
         return False, None
     if working:
