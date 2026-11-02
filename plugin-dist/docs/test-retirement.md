@@ -8,23 +8,23 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 
 ### Same-host comparison
 
-Measured on 2026-11-02 and 2026-11-03 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CPython 3.14.8, with `-n 2`. Before is the run's `origin/main` base `d14026977392289164d1e09fe454728c71f65b28`; after is T1's accepted revision R13, commit `441e6ff6aac82e51aa3c0e8306d3a1599ce26a2d`. Each is a clean detached checkout with its own dependencies. The after tree contains the modules that reached main after the baseline, so module and node deltas are net of those additions.
+Measured on 2026-11-03 on `osmanthus.local`, an Apple M5 Pro Mac with 18 logical CPUs and 48 GiB memory, macOS 26.7.1, CPython 3.14.8, with `-n 2`. Before is the run base `origin/main` `9f809b6cd1c3c2e37c5e1d7dc230bfa94bc003ef`. After is T1's accepted revision R19, commit `a31bcd790aae4a3ba04c100053949b92aab2f752`. Each is a clean detached checkout with its own dependencies. The two trees are measured back to back in one session and do not wait for other runs.
 
-| Tier and measure | Before `d1402697` | After `441e6ff6` |
+| Tier and measure | Before `9f809b6c` | After `a31bcd79` |
 |---|---:|---:|
-| Default: test modules with collected nodes | 202 | 207 |
-| Default: test functions with collected nodes | 2,169 | 2,269 |
-| Default: collected nodes | 4,016 | 4,073 |
-| Default: wall time | 317.37 s | 331.92 s |
-| `--all`: test modules with collected nodes | 305 | 313 |
-| `--all`: test functions with collected nodes | 4,317 | 4,524 |
-| `--all`: collected nodes | 6,407 | 6,577 |
+| Default: test modules with collected nodes | 233 | 232 |
+| Default: test functions with collected nodes | 2,698 | 2,668 |
+| Default: collected nodes | 5,134 | 4,978 |
+| Default: wall time | 320.83 s | 329.95 s |
+| `--all`: test modules with collected nodes | 343 | 342 |
+| `--all`: test functions with collected nodes | 5,054 | 5,024 |
+| `--all`: collected nodes | 7,767 | 7,611 |
 
-Commands, run from each checkout: `uv run --frozen --offline --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --offline --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not every function defined in source. Wall time: `/usr/bin/time -p uv run --frozen --offline --extra test pytest -n 2 -q tests`, before then after, back to back in one session.
+Commands, run from each checkout: `uv run --frozen --offline --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --offline --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the node IDs. Function counts are distinct node IDs after removing parametrization suffixes, so they count collected functions, not every function defined in source. Wall time: `/usr/bin/time -p uv run --frozen --offline --extra test pytest -n 2 -q tests`, before then after, back to back.
 
-Conditions for the wall times: another run's `scripts/validate.sh --full` was running on the host throughout, so these are load-dependent and not a controlled speedup. The before run started with no `validate.sh` process visible and load averages 5.83 / 8.51 / 10.90 (1, 5, 15 min); two `validate.sh` processes were present by its end. The after run started with two present and load averages 9.09 / 9.28 / 10.57, ending at 9.38 / 9.60 / 10.28. An earlier pair of runs under unequal load gave 298.56 s before (load 16.37 / 20.00 / 14.86, a full suite running) and 312.86 s after (load 7.96 / 12.46 / 12.86, no suite seen), which also shows after as slower. The before run reported 4,013 passed, 2 failed, 2 skipped; the after run 4,072 passed, 2 skipped. The before failures are `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` (missing `dispatchable` key) and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest summary totals one more than its collection count (the after run by one as well); that was not investigated. The default-tier run is not the full suite.
+Load averages (1, 5, 15 min) were 3.50 / 4.07 / 4.71 at the start of the before run, 4.54 / 4.58 / 4.77 at its end and the start of the after run, and 4.49 / 4.65 / 4.74 at the end of the after run. No `validate.sh` process was running when the measurement began. The after tree is slower by 9.1 s (2.8%). That is within the variation seen across earlier runs on this host under other load, so it is not a speedup or a regression claim. The before run reported 5,132 passed, 2 skipped, 1 xfailed. The after run reported 4,974 passed, 2 failed, 2 skipped, 1 xfailed. Both failures are expected on T1's tree alone: `tests/test_test_retirement_inventory.py::test_the_inventory_lists_exactly_the_test_modules_that_exist_plus_the_retired_ones` because the module inventory in this document is owned by this task and is absent from T1's tree, and `tests/contracts/test_plugin_distribution.py::test_curated_installed_package_has_exact_visible_skills` because `plugin-dist/` is regenerated by this task. Both pass on this task's tree (see the checks in the submit note). The default-tier run is not the full suite.
 
-Supplemental, not part of the comparison above: adding this task's `tests/test_test_retirement_record.py` to the after tree is one module and one node (default 208 modules / 4,074 nodes is not re-measured; `--all` collects 6,578 nodes). No wall time was measured with it.
+Supplemental, not part of the comparison above: this task's tree adds `tests/test_test_retirement_record.py` to the after tree. Collected with the same commands it is 233 default modules, 2,669 functions and 4,979 nodes, and 343 `--all` modules, 5,025 functions and 7,612 nodes. No wall time was measured with it.
 
 ### Full suite
 
@@ -93,6 +93,7 @@ Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at
 | Role-policy expansion drops later harness alternatives | `route_policy._expand_role_policy`: `for harness in harnesses` to `harnesses[:1]` (no `agy` rule is expanded) | `PDC::test_every_harness_alternative_of_the_compact_role_policy_is_enforced` only; the tests that iterate the expanded rules pass vacuously |
 | Discovery probe skips the size floor | `routing._pool_gate`: size floor check disabled | `PDC::test_a_probe_is_gated_by_the_size_floor_like_a_dispatch` |
 | Catalog status ignores `dispatchable: false` | `route_policy.row_status`: always `available` | `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
+| Catalog row gated without disclosure | `catalog/routes.tsv`: `agy/claude-opus-5-5@high` set `dispatchable=false` with no discovery metadata | `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
 | Candidate build keeps shipped denies | `candidates.build_candidates`: role deny skip disabled | `PDC::test_built_executor_candidates_never_include_an_unscoped_shipped_deny` |
 | A user deny does not beat the preferred route | `routing.route`: role-deny branch disabled | `PDC::test_a_user_deny_beats_the_preferred_route_and_emits_no_waiver_for_it`, `PDC::test_the_router_rejects_every_shipped_deny_in_its_role_and_scope` |
 | Slate route below its size floor | `catalog/executor-policy.yaml`: XS floor raised to 90 | `PDC::test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception` |
@@ -163,12 +164,12 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_5_5_high_clears_the_executor_floor` | 1 | deleted | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value`; `PDC::test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception`; `tests/v31/test_intelligence_floor.py::test_executor_and_reviewer_floors_use_intelligence` |
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_alias_high_now_invokes_sonnet_5_5` | 1 | deleted | `tests/test_alias_resolution.py::test_alias_is_offered_at_every_effort_of_the_newest_member` (generic alias resolution). Obsolete part: the shipped Sonnet alias's invocation target and score are catalog data and are no longer asserted. |
 | `tests/v31/test_issue811_terra_supersession.py::test_six_terra_rows_are_present_and_only_probed_efforts_dispatch` | 1 | deleted | Obsolete: pins six catalog rows and their scores. Eligible-but-undispatchable rule: `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
-| `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
+| `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`, which also requires every gated row outside discovery to disclose why (an `unverified:` invocation source or a superseded model) |
 | `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` | 1 | rewritten | `tests/v31/test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` (every catalog row: source effort matches its effort, a `dispatchable: false` row is never `available`); `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`. Obsolete part: the six-effort score table and the per-effort dispatchable roster are catalog data. |
 
 ## Module inventory
 
-Every test module under `tests/` except `tests/contracts/`: the base commit's modules, the nine modules main added after the inventory base, the modules main added after that (rows labelled `keep`, added on main after the inventory base), and the two modules this change adds. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
+Every test module under `tests/` except `tests/contracts/`: the base commit's modules, the nine modules main added after the inventory base, the modules main added after that (rows labelled `keep`, added on main after the inventory base), and the three modules this change adds: `tests/v31/test_policy_data_contracts.py` and `tests/test_test_retirement_inventory.py` came with the first task, and `tests/test_test_retirement_record.py` with this one. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
 
 | Module | Disposition | Reason |
 |---|---|---|
