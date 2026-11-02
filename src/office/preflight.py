@@ -314,9 +314,11 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
     fix = [f"ledger {e}" for e in errors]
     if led["commit"] is None:
         fix.append("ledger: no COMMIT line; name HEAD " + head[:12])
-    elif led["commit"] != head.lower():
-        fix.append(f"ledger: names commit {led['commit'][:12]} but HEAD is {head[:12]}; the review is stale: re-review "
-                   "what changed, then update COMMIT")
+    elif led["commit"] != head.strip().lower():
+        # #806: print enough of both shas to tell them apart, never two identical-looking values.
+        shown = 12 if led["commit"][:12] != head.strip().lower()[:12] else 40
+        fix.append(f"ledger: names commit {led['commit'][:shown]} but HEAD is {head.strip()[:shown]}; the review is "
+                   "stale: re-review what changed, then update COMMIT")
     if led["round"] is None:
         fix.append("ledger: no ROUND line")
     if tier == briefs.FOCUSED:

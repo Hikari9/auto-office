@@ -1081,3 +1081,15 @@ def test_issue_576_archive_rejects_preexisting_symlink(repo, tmp_path, monkeypat
         submit._stage_self_review({}, {"id": "D1"}, "R1", wt, receipt, staged)
     assert not staged
     assert dest.is_symlink() and target.read_text() == "do not change"
+
+
+def test_a_stale_ledger_message_never_prints_two_identical_shas(tmp_path):
+    """#806: the stale-ledger line named the same 12-hex value for COMMIT and HEAD."""
+    from office import preflight
+    head = "abcdef012345" + "1" * 28
+    near = "abcdef012345" + "2" * 28
+    _, fix = preflight.check_ledger(ledger_text(near), head, [], ["calc.py"], tmp_path)
+    (line,) = [f for f in fix if "review is stale" in f]
+    assert near in line and head in line, line
+    _, fix = preflight.check_ledger(ledger_text(head), head + "\n", [], ["calc.py"], tmp_path)
+    assert not [f for f in fix if "review is stale" in f], fix
