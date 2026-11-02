@@ -79,6 +79,41 @@ _TEST_STEM = re.compile(r"(?:[a-z0-9]Tests?|UITests?)\.")  # CalcTests.cs, Featu
 _NOT_TESTS = ("__init__.py", "conftest.py")
 _NOT_CODE = (".md", ".markdown", ".txt", ".rst", ".json", ".yml", ".yaml", ".toml", ".lock", ".csv", ".snap", ".bin", ".xml",
              ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".pdf", ".html", ".log", ".ini", ".cfg", ".pyc", ".jsonl", ".tsv", ".sql", ".golden")
+_DOC_EXTENSIONS = (".md", ".markdown", ".rst", ".txt", ".adoc")
+_DOC_DIRS = ("docs", "doc")
+
+
+def _is_doc_path(rel: str) -> bool:
+    """True if rel looks like a documentation file or documentation directory."""
+    if not rel:
+        return False
+    entry = rel.replace("\\", "/").strip()
+    p = PurePosixPath(entry)
+    if any(part.lower() in _DOC_DIRS for part in p.parts):
+        return True
+    if p.suffix.lower() in _DOC_EXTENSIONS:
+        return True
+    if p.stem.lower() in planfile._ROOT_DOC_FILES:
+        return True
+    return False
+
+
+def _is_doc_task(scope: list[str], changed: list[str] | None = None) -> bool:
+    """True when the task's scope (and any committed changes) touch only documentation."""
+    if not scope and not changed:
+        return False
+    if scope and not all(_is_doc_path(s) for s in scope):
+        return False
+    if changed and not all(_is_doc_path(c) for c in changed):
+        return False
+    return True
+
+
+def _is_independent_review(arg: str) -> bool:
+    cleaned = " ".join(arg.strip().rstrip(".").split()).lower()
+    return (cleaned in ("verified by independent review", "verified by independent reviewer")
+            or cleaned.startswith(("verified by independent review:", "verified by independent review -",
+                                   "verified by independent reviewer:", "verified by independent reviewer -")))
 
 
 def _one_line(text: str, limit: int = 160) -> str:
@@ -87,7 +122,7 @@ def _one_line(text: str, limit: int = 160) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _parse_disposition(raw: str) -> tuple[dict | None, str]:
+def _parse_disposition(raw: str, severity: str = "") -> tuple[dict | None, str]:
     """(disposition, "") or (None, why it is malformed). `fixed` takes an optional test path, then
     `mutation=failed` (the test failed with the fix reverted), `dismissed` a reason, `contract-conflict`
     the ACCEPT line it would break; the rest take nothing."""
@@ -97,12 +132,17 @@ def _parse_disposition(raw: str) -> tuple[dict | None, str]:
         return None, f"disposition must be one of {', '.join(briefs.LEDGER_DISPOSITIONS)}"
     if kind == "fixed":
         words = arg.split()
-        if len(words) > 2:
-            return None, f"`fixed` takes `<test path> {_MUTATION}`"
         if words and words[0].startswith("mutation="):
             return None, f"`fixed` names the test path before {_MUTATION}"
-        if len(words) == 2 and words[1] != _MUTATION:
+        if any(w.startswith("mutation=") and w != _MUTATION for w in words):
             return None, f"the mutation result must be `{_MUTATION}`: revert the fix, the test must fail, restore it"
+        if severity != "low":
+            if _is_independent_review(arg):
+                pass
+            elif len(words) > 2:
+                return None, f"`fixed` takes `<test path> {_MUTATION}`"
+            elif len(words) == 2 and words[1] != _MUTATION:
+                return None, f"the mutation result must be `{_MUTATION}`: revert the fix, the test must fail, restore it"
     if kind in ("open", "out-of-scope") and arg:
         return None, f"`{kind}` takes no argument"
     if kind == "dismissed" and not arg:
@@ -163,7 +203,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
             sev, _, tail = head.strip().partition(" ")
             lens, _, location = tail.strip().partition(" ")
             location = location.strip()
-            disp, why = _parse_disposition(disp_raw) if sep and sep2 else (None, "")
+            disp, why = _parse_disposition(disp_raw, severity=sev) if sep and sep2 else (None, "")
             if not (sep and sep2):
                 bad("FINDING needs `<severity> <lens> <file:line> | <summary> | <disposition>`")
             elif sev not in briefs.LEDGER_SEVERITIES:
@@ -320,6 +360,18 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                 fix.append(f"ledger {what} is marked out-of-scope, but {_one_line(file, 80)} is inside SCOPE: fix it and "
                            f"mark it `{proof}`, or `dismissed <reason>`")
         elif f["kind"] == "fixed" and f["severity"] in _BLOCKERS:
+            if _is_independent_review(f["arg"]):
+                file = _finding_file(wt, f["location"])
+                is_doc_fix = file is not None and _is_doc_path(file)
+                if _is_doc_task(scope, changed) and is_doc_fix:
+                    continue
+                if not _is_doc_task(scope, changed):
+                    fix.append(f"ledger {what} is marked fixed without a test path: code tasks require a test path: "
+                               f"write the test, prove it fails without the fix, then `fixed <test path> {_MUTATION}`")
+                else:
+                    fix.append(f"ledger {what} is marked fixed without a test path: only doc fixes can be verified "
+                               f"by independent review: write the test, prove it fails without the fix, then `fixed <test path> {_MUTATION}`")
+                continue
             test, _, proof = f["arg"].partition(" ")
             if not test:
                 fix.append(f"ledger {what} is marked fixed without a test path: write the test, prove it fails "
