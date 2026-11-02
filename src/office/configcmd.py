@@ -256,6 +256,11 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
     edited tier produced. Raises OfficeError when the result is invalid."""
     root = _repo_root(cwd)
     files = cfg.read_files(root)
+    try:
+        old = yaml.safe_load(files.get(tier) or "") or {}
+    except yaml.YAMLError:
+        old = {}
+    old_roles = (old.get("roles") or {}) if isinstance(old, dict) and isinstance(old.get("roles"), dict) else {}
     files[tier] = yaml.safe_dump(new, sort_keys=False)
     try:
         effective, warnings = cfg.resolve(root, files=files)
@@ -268,14 +273,24 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
     policy = effective.get("cost_policy") or {}
     if policy.get("default") not in (policy.get("available") or []):
         raise _usage(f"cost_policy.default must be one of {', '.join(policy.get('available') or [])}")
-    # Only what this file sets: a shipped default is not the edit's to reject.
+    # Only what this edit changes: a shipped default, or a seed this edit leaves
+    # as it was, is not the edit's to reject (#874). Otherwise one stale entry
+    # blocks every write, including the write that removes it.
+    stale = []
     for role, conf in (new.get("roles") or {}).items():
-        problems = (validate_seed((conf or {}).get("preferred_seed") or [], role=role, config=effective)
-                    if isinstance(conf, dict) else [])
-        if problems:
-            raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
-                         next_step="office setup lists the known routes (type ? at a prompt)")
-    return [f"{w['key']}: {w['reason']}" for w in warnings if w.get("tier") == tier]
+        seed = (conf or {}).get("preferred_seed") or [] if isinstance(conf, dict) else []
+        problems = validate_seed(seed, role=role, config=effective) if seed else []
+        if not problems:
+            continue
+        before = old_roles.get(role)
+        if isinstance(before, dict) and (before.get("preferred_seed") or []) == seed:
+            stale.append(f"roles.{role}.preferred_seed: " + "; ".join(problems)
+                         + f" (already set; office config --{tier} roles.{role}.preferred_seed <routes> replaces it)")
+            continue
+        raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
+                     next_step=f"office config --{tier} roles.{role}.preferred_seed <routes> with only known routes; "
+                               "office setup lists them (type ? at a prompt)")
+    return stale + [f"{w['key']}: {w['reason']}" for w in warnings if w.get("tier") == tier]
 
 
 def _coerce(key: str, raw: str) -> Any:
