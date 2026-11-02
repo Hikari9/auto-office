@@ -616,7 +616,6 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     cfg = tmp_path / "settings.json"
     cfg.write_text("{}")
     monkeypatch.setitem(install.CONFIG, "claude", cfg)
-    monkeypatch.setitem(install.CONFIG, "gemini", tmp_path / "absent" / "settings.json")
     monkeypatch.setattr(install.read_scope, "sync", lambda data, ledger: ([], [], []))
     monkeypatch.setattr(install.read_scope, "load_ledger", lambda: [])
 

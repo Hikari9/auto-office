@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.25
+
+- chore(harness): remove the gemini harness; agy replaces it (#1028). agy's Gemini models, the gemini model-family floor and agy's ~/.gemini token paths stay.
+
 ## 3.15.24
 
 - fix(convergence): a lane finding code is unique across its gate kinds, so `office disposition L-T1:F11` cannot miss a same-coded visual finding (#398).

@@ -135,7 +135,6 @@ office doctor
 | Agent / harness | After `office install` |
 |---|---|
 | **Claude Code** | Installs managed `SessionStart`, `UserPromptSubmit`, and write-guard `PreToolUse` hooks in `~/.claude/settings.json`. |
-| **Gemini CLI** | Installs managed `SessionStart`, `BeforeAgent`, and write-guard `BeforeTool` hooks in `~/.gemini/settings.json`. |
 | **Codex** | No config is written; explicit `office` commands are the contract. |
 | **agy / Antigravity** | No session-start hook is available; the agent uses explicit `office` commands/status. |
 | **Hermes** | No automatic hook installation; use explicit `office` commands. |
@@ -161,7 +160,7 @@ codex	skills/codex-cli/SKILL.md	models/codex.json
 agy	skills/agy-cli/SKILL.md	models/agy.json
 ```
 
-The shipped template also includes `pi`, `hermes`, `kilo`, `opencode` and `gemini`.
+The shipped template also includes `pi`, `hermes`, `kilo` and `opencode`. The Gemini CLI harness was removed (Google retired it; agy replaces it, #1028).
 A `skills/...` path resolves against the packaged/source Office resources, while
 `models/...` resolves against the TSV's directory (normally `~/.config/auto-office`).
 Absolute and `~/...` paths are supported for user-managed files. `office harness
