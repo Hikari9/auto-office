@@ -91,7 +91,7 @@ def test_native_wake_emits_exit_two_only_for_real_action_and_observes_after_cont
                                       poll_seconds=0.01) == 2
     err = capsys.readouterr().err
     assert f"office --run {run['id']} context" in err
-    assert "Do not infer success" in err
+    assert err.startswith(f"Run {run['id'][:8]} (through event ") and "; next: " in err  # #1029 one-line wake
     intents = _intents(con, run)
     assert len(intents) == 1 and intents[0]["state"] == "delivered"
     assert intents[0]["delivered_at"] and not intents[0]["observed_at"]
