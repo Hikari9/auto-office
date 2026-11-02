@@ -49,6 +49,9 @@ from office.util import now_iso, short
 
 MODES = ("preview", "merge", "e2e")
 CHECKS_TIMEOUT = int(os.environ.get("OFFICE_PR_CHECKS_TIMEOUT", "1800"))
+# `gh pr checks` exits 1 both for a failing check and for a lookup GitHub did not answer (#772).
+CHECKS_LOOKUP_FAILED = re.compile(r"rate limit|abuse detection|graphql:|http (?:429|5\d\d)|could not resolve host|"
+                                  r"error connecting to|connection (?:reset|refused)|tls handshake|i/o timeout")
 
 
 def end_state(con, run: dict) -> dict:
@@ -935,6 +938,14 @@ def _wait_checks(run: dict, number: int) -> None:
                       next_step="office land again once they finish")
     out = (proc.stdout + proc.stderr).lower()
     if proc.returncode != 0 and "no required checks" not in out and "no checks reported" not in out:
+        # stderr only: a failing check's own name or description on stdout may say "timeout" or "HTTP 503".
+        if CHECKS_LOOKUP_FAILED.search(proc.stderr.lower()) and "fail" not in proc.stdout.lower():
+            # #772: GitHub did not answer; nothing on the task branch is wrong, so never point at a rerun.
+            raise Refused("checks-unavailable",
+                          f"could not read required checks on #{number}: {(proc.stderr or proc.stdout).strip()[:200]}",
+                          preserved="nothing merged by this lookup; the task stays accepted",
+                          next_step="office land again once GitHub answers; if `gh api rate_limit` shows quota left, "
+                                    "a stale gh response cache under ~/.cache/gh may be replaying the error")
         raise Refused("checks-failed", f"required checks failed on #{number}: {(proc.stdout or proc.stderr).strip()[:200]}",
                       next_step="fix it on the task branch (office rerun), then office land")
 
