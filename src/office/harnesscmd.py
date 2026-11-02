@@ -31,7 +31,7 @@ import yaml
 from office import adapters, cli_runtimes, paths, shipped_catalog, user_catalog
 from office.result import Result
 from office.state import OfficeError
-from office.util import now_iso
+from office.util import loads, now_iso
 
 ID_RE = re.compile(r"^[a-z0-9-]+$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -813,7 +813,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     for e in want:
         row = {"model_id": mid, "invocation_model_id": slug, "invocation_harness": harness,
                "invocation_source": f"unverified: added with office model add on {now_iso()[:10]}; unproven until "
-                                    "office harness smoke and conformance",
+                                    "office model verify cites an accepted, reviewed task it produced",
                "dispatchable": True, "source_identifier": None, "source_name": "user-overlay", "effort": e,
                "source_effort": None, "effort_confidence": "unknown", "benchmark_indexes": {}, "price_fields": None,
                "speed_fields": None, "release_date": None,
@@ -849,7 +849,9 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
                          policy_line, *([note] if note else [])],
-                  next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target), "allowed_roles": allowed})
+                  next=(f"office harness smoke {harness} --model {mid}; once it has an accepted, reviewed task, "
+                        f"office model verify {harness}/{mid} --evidence <run>/<task> clears role floors"),
+                  data={"added": added, "path": str(target), "allowed_roles": allowed})
 
 
 def model_list(harness: str | None = None) -> Result:
@@ -936,6 +938,91 @@ def model_enable(ident: str | None) -> Result:
     return Result(lines=[f"removed {removed} user-overlay disable(s) for {ident} from {target}",
                          "technical catalog gates and explicit denied_models still apply", *([note] if note else [])],
                   next="office model list", data={"changed": True, "removed": removed, "path": str(target)})
+
+
+VERIFIED_PREFIX = "local-evidence:"
+
+
+def _evidence_proof(con, ref: str, harness: str, row_by_effort: dict) -> dict:
+    """One `<run>/<task>` citation (#656): an accepted executor task of an independently reviewed run whose
+    accepted revision was produced on this harness and model. Returns {run, task, effort, revision}."""
+    run_part, sep, task_part = (ref or "").strip().partition("/")
+    if not sep or not run_part or not task_part:
+        raise _usage(f"--evidence {ref!r}: expected <run>/<task>, e.g. 7bafb981/T1", next_step="office list shows run ids")
+    from office import state
+    run = state.find_run(con, run_part)
+    if run is None:
+        raise OfficeError("evidence-rejected", f"{ref}: no run {run_part!r}", exit_code=1, next_step="office list")
+    task = state.get_task(con, run["id"], task_part.upper())
+    if task is None:
+        raise OfficeError("evidence-rejected", f"{ref}: run {run['id'][:8]} has no task {task_part}", exit_code=1)
+    if task["status"] != "accepted" or not task.get("accepted_revision_id"):
+        raise OfficeError("evidence-rejected", f"{ref}: {task['id']} is {task['status']}, not accepted", exit_code=1,
+                          next_step="cite a task whose revision was accepted")
+    if not (run.get("gates") or {}).get("code_review"):
+        raise OfficeError("evidence-rejected", f"{ref}: run {run['id'][:8]} ran without independent code review "
+                          f"(gear {run.get('gear')}), so its acceptance proves nothing about the model", exit_code=1)
+    rev = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (task["accepted_revision_id"],)).fetchone()
+    d = state.get_dispatch(con, rev["dispatch_id"]) if rev and rev["dispatch_id"] else None
+    if d is None:
+        raise OfficeError("evidence-rejected", f"{ref}: the accepted revision has no recorded dispatch", exit_code=1)
+    route = loads(d.get("route_json"), {}) or {}
+    cand = route.get("candidate") or {}
+    on_harness = harness in (d.get("harness"), d.get("adapter_id"))
+    row = row_by_effort.get(d.get("effort"))
+    on_model = row is not None and (d.get("model") == row.get("invocation_model_id")
+                                    or cand.get("model_id") == row.get("model_id"))
+    if not (on_harness and on_model):
+        wanted = ", ".join(f"{harness}/{r.get('model_id')}@{e}" for e, r in sorted(row_by_effort.items()))
+        raise OfficeError("evidence-rejected", f"{ref}: its accepted revision ran {d.get('triple')}, not {wanted}",
+                          exit_code=1, next_step="cite a task this route produced")
+    return {"run": run["id"][:8], "task": task["id"], "effort": d.get("effort"), "revision": task["accepted_revision_id"]}
+
+
+def model_verify(ident: str | None, evidence: list[str] | None) -> Result:
+    """Promote a user-added model's `invocation_source` to `local-evidence:` on cited, independently reviewed
+    acceptances (#656). Explicit only: nothing promotes a model on its own (Rico, 2026-11-02)."""
+    m = re.fullmatch(r"(?P<h>[a-z0-9-]+)/(?P<m>[A-Za-z0-9_.-]+)(?:@(?P<e>[a-z]+))?", (ident or "").strip())
+    if not m:
+        raise _usage("name the route as <harness>/<model>[@effort]", next_step="office model list")
+    harness, mid, effort = m["h"], m["m"], m["e"]
+    overlay = _overlay_for_write()
+    rows = [r for r in overlay["models"] if r.get("invocation_harness") == harness and r.get("model_id") == mid
+            and (not effort or r.get("effort") == effort)]
+    if not rows:
+        shipped = any(r.get("invocation_harness") == harness and r.get("model_id") == mid for r in _catalog_rows())
+        raise _usage(f"{ident} is not a row added with office model add" if shipped else f"{ident} names no catalog row",
+                     next_step="shipped rows keep their own invocation source; office model list" if shipped
+                     else f"office model list {harness}")
+    pending = {r.get("effort"): r for r in rows if not str(r.get("invocation_source") or "").startswith(VERIFIED_PREFIX)}
+    if not pending:
+        return Result(lines=[f"{ident} already has a {VERIFIED_PREFIX} invocation source"], data={"changed": False})
+    refs = [e.strip() for item in evidence or [] for e in str(item).split(",") if e.strip()]
+    if not refs:
+        raise _usage("--evidence names the accepted, independently reviewed tasks this route produced",
+                     next_step=f"office model verify {ident} --evidence <run>/<task>")
+    from office import db
+    con = db.connect()
+    try:
+        proofs = [_evidence_proof(con, ref, harness, pending) for ref in refs]
+    finally:
+        con.close()
+    covered = {p["effort"] for p in proofs}
+    promoted = [e for e in pending if e in covered]
+    stamp = f"office model verify on {now_iso()[:10]}"
+    for e in promoted:
+        cited = ", ".join(f"{p['run']}/{p['task']}" for p in proofs if p["effort"] == e)
+        pending[e]["invocation_source"] = f"{VERIFIED_PREFIX} {stamp}: accepted under independent review in {cited}"
+    target = user_catalog.save(overlay)
+    note = cli_runtimes.refresh_if_saved()
+    left = sorted(e for e in pending if e not in covered)
+    lines = [f"verified {', '.join(f'{harness}/{mid}@{e}' for e in promoted)} ({VERIFIED_PREFIX}) in {target}"]
+    if left:
+        lines.append(f"still unverified: {', '.join(f'{harness}/{mid}@{e}' for e in left)} (no cited task ran that effort)")
+    return Result(lines=[*lines, *([note] if note else [])],
+                  next="role floors that admit local-evidence: sources accept it from the next candidate build",
+                  data={"changed": True, "verified": promoted, "unverified": left, "evidence": proofs,
+                        "path": str(target)})
 
 
 def d_as_row(entry: dict) -> dict:

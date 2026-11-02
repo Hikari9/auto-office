@@ -71,7 +71,7 @@ Auto Office {ver}
                                     user-issued one-off deny override (interactive terminal only)
   office route migrate [--apply|--rollback]
                                     dry-run, apply or roll back the legacy trust/deny -> role policy migration
-  office model add|list|disable|enable|registry|policy|ceiling|unceil
+  office model add|list|disable|enable|verify|registry|policy|ceiling|unceil
                                     catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
@@ -431,13 +431,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--wildcard", action="store_true", help="deliberately apply broad route/role rule")
     s.add_argument("--size", help="task size scope: XS|S|M|L|XL (policy: show that size; allow/neutral/deny/clear: comma list)")
     s = sp.add_parser("model", parents=[common])
-    s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
+    s.add_argument("action", choices=["add", "list", "disable", "enable", "verify", "registry", "policy", "ceiling", "unceil"])
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
     s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
     s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
     s.add_argument("--role", action="append", help="add: also allow the new rows for executor or reviewer (code and plan review); repeat or comma-separate")
     s.add_argument("--reason", help="disable: why the row is off")
     s.add_argument("--through", help="ceiling: inclusive generation (e.g. 5.6)")
+    s.add_argument("--evidence", action="append",
+                   help="verify: <run>/<task> an accepted, independently reviewed task this route produced (repeat or comma-separate)")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -961,6 +963,8 @@ def _run(args, unknown) -> int:
             return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
         if args.action == "enable":
             return emit(harnesscmd._with_affected(harnesscmd.model_enable(args.ident)), args)
+        if args.action == "verify":
+            return emit(harnesscmd._with_affected(harnesscmd.model_verify(args.ident, args.evidence)), args)
         if args.action in ("ceiling", "unceil"):
             return emit(harnesscmd._with_affected(harnesscmd.model_ceiling(
                 args.ident, through=args.through if args.action == "ceiling" else None)), args)
