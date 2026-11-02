@@ -128,7 +128,41 @@ def _vetted_pi(args: list[str]) -> bool:
 PI_WORKER_TOKENS = frozenset({"--print", "--no-approve", "--no-extensions", "--no-mcp", "--model", "--thinking",
                               "--no-session", "{model}", "{effort}"})
 
-VETTED_READONLY_ARGS = {"pi": (_vetted_pi, PI_WORKER_TOKENS)}
+PI_FLAGS = frozenset({"--print", "--no-approve", "--no-extensions", "--no-mcp", "--no-session"})
+
+
+def _pi_rendered_ok(argv: list[str]) -> bool:
+    """The complete rendered pi reviewer argv: the vetted --tools pair first, then only the closed flag set and
+    the values of --model and --thinking. Anything else (a second --tools, -t, --tools=x, assigned-session or
+    resume args, a value that looks like a flag) is rejected."""
+    if len(argv) < 2 or not _vetted_pi(argv[:2]):
+        return False
+    rest, i = argv[2:], 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in PI_FLAGS:
+            i += 1
+        elif tok in ("--model", "--thinking") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            i += 2
+        else:
+            return False
+    return True
+
+
+VETTED_READONLY_ARGS = {"pi": (_vetted_pi, PI_WORKER_TOKENS, _pi_rendered_ok)}
+
+
+def check_rendered_reviewer_argv(adapter: dict, prof: dict | None, argv: list[str]) -> None:
+    """Final gate on a derived read-only reviewer launch: the whole rendered argv (profile argv plus any
+    assigned-session or resume args the runtime appended) must pass the harness's vetted checker."""
+    if not (prof or {}).get("derived_readonly"):
+        return
+    exe = os.path.basename(executable(adapter) or "")
+    vetted = VETTED_READONLY_ARGS.get(exe)
+    # build_argv's list starts with the executable; the flags are everything after it.
+    if vetted is None or not vetted[2](argv[1:] if argv and os.path.basename(argv[0]) == exe else argv):
+        raise AdapterError(f"adapter {adapter.get('id')} derived read-only reviewer argv {argv} is not a vetted "
+                           "read-only form; refusing to launch it")
 
 
 def readonly_args_problem(adapter: dict) -> str | None:
@@ -137,7 +171,7 @@ def readonly_args_problem(adapter: dict) -> str | None:
     if args is None:
         return None
     exe = os.path.basename(executable(adapter) or "")
-    vet, worker_tokens = VETTED_READONLY_ARGS.get(exe, (None, frozenset()))
+    vet, worker_tokens, _ = VETTED_READONLY_ARGS.get(exe, (None, frozenset(), None))
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
         return "reviewer_readonly_args must be a non-empty list of strings"
     if vet is None:
@@ -146,6 +180,9 @@ def readonly_args_problem(adapter: dict) -> str | None:
                 "office_profiles.reviewer only for a harness with a verified read-only sandbox")
     if not vet(args):
         return f"reviewer_readonly_args {args} is not a vetted read-only form for {exe} (pi accepts --tools with only read,grep,find,ls)"
+    if session_spec(adapter).get("id") == "assigned" or session_spec(adapter).get("assign_arg"):
+        return ("the adapter assigns session ids (session.assign_arg), which the runtime would append after the vetted "
+                "read-only flags; a derived reviewer is never session-bearing. Write an explicit office_profiles.reviewer")
     worker = ((adapter.get("office_profiles") or {}).get("worker") or {}).get("argv")
     extra = [str(t) for t in worker or [] if str(t) not in worker_tokens]
     if extra:
@@ -169,10 +206,12 @@ def derive_reviewer_profile(adapter: dict) -> dict | None:
     if "reviewer" in profiles or not isinstance(worker, dict) or not isinstance(worker.get("argv"), list) \
             or not args or readonly_args_problem(adapter):
         return None
-    derived = {k: v for k, v in worker.items() if k not in ("argv", "herdr_kind", "interactive")}
-    derived["argv"] = [*[str(a) for a in args], *worker["argv"]]
-    derived["output"] = "stdout"
-    derived["verify_worktree_unchanged"] = True
+    # Closed construction: nothing is copied from the worker profile except the prompt transport and the wall
+    # cap. include_arg, headless_resume_argv, interactive, agent_file and any other field never carry over.
+    derived = {"argv": [*[str(a) for a in args], *[str(t) for t in worker["argv"]]], "prompt": worker.get("prompt"),
+               "output": "stdout", "verify_worktree_unchanged": True, "derived_readonly": True}
+    if isinstance(worker.get("max_minutes"), (int, float)) and not isinstance(worker.get("max_minutes"), bool):
+        derived["max_minutes"] = worker["max_minutes"]
     return derived
 
 
@@ -499,6 +538,7 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     if session_id and assigns_session(adapter):
         argv.extend(str(a).replace("{session_id}", session_id) for a in session_spec(adapter)["assign_arg"])
     argv.extend(str(a) for a in resume_args or [])
+    check_rendered_reviewer_argv(adapter, prof, argv)
     return argv, prof
 
 

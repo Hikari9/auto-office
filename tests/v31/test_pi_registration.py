@@ -11,6 +11,7 @@ harness — no test here calls a real model.
 """
 from __future__ import annotations
 
+import copy
 import os
 import stat
 import sys
@@ -479,16 +480,16 @@ def test_role_executor_allows_the_same_rows_for_executor_only(monkeypatch):
     assert "pi/gpt-6-luna@high: allow" not in _effective("code_reviewer", monkeypatch)
 
 
-def _user_adapter(tmp_path, monkeypatch, *, exe, args, caps=("builder",), worker_argv=None):
+def _user_adapter(tmp_path, monkeypatch, *, exe, args, caps=("builder",), worker_argv=None, extra=None, worker_extra=None):
     import yaml
     adir = tmp_path / "adapters"
     adir.mkdir(exist_ok=True)
     (adir / "acme.yaml").write_text(yaml.safe_dump({
         "id": "acme", "invocation": {"executable": exe}, "capabilities": list(caps),
-        "effort_mapping": {"high": "high"}, "reviewer_readonly_args": args,
+        "effort_mapping": {"high": "high"}, "reviewer_readonly_args": args, **(extra or {}),
         "office_profiles": {"worker": {"argv": worker_argv or ["--print", "--no-approve", "--model", "{model}", "--thinking", "{effort}"],
                                        "prompt": "stdin", "output": "stdout", "herdr_kind": "acme",
-                                       "interactive": {"argv": ["--model", "{model}"]}}}}))
+                                       "interactive": {"argv": ["--model", "{model}"]}, **(worker_extra or {})}}}))
     monkeypatch.setattr(adapters, "user_adapter_files", lambda: sorted(adir.glob("*.yaml")))
     return adapters.load_all()["acme"]
 
@@ -713,3 +714,46 @@ def test_a_worker_argv_that_could_override_the_allowlist_derives_no_reviewer(tmp
     assert adapters.profile(acme, "reviewer") is None
     assert "review" not in acme["capabilities"]
     assert "worker argv carries" in adapters.readonly_args_problem(acme)
+
+
+# F1 round 3: assigned-session args, resume args and other worker fields can never widen a derived reviewer.
+
+def test_an_adapter_that_assigns_session_ids_derives_no_reviewer(tmp_path, monkeypatch):
+    acme = _user_adapter(tmp_path, monkeypatch, exe="pi", args=["--tools", "read,grep"],
+                         extra={"session": {"id": "assigned", "assign_arg": ["--tools", "edit"]}})
+    assert adapters.profile(acme, "reviewer") is None and "review" not in acme["capabilities"]
+    assert "session.assign_arg" in adapters.readonly_args_problem(acme)
+
+
+def test_worker_fields_are_never_copied_into_a_derived_reviewer(tmp_path, monkeypatch):
+    acme = _user_adapter(tmp_path, monkeypatch, exe="pi", args=["--tools", "read,grep"],
+                         worker_extra={"headless_resume_argv": ["--tools", "edit", "--resume", "{session_id}"],
+                                       "include_arg": ["--tools", "edit"], "agent_file": {"format": "opencode", "name": "x"}})
+    prof = adapters.profile(acme, "reviewer")
+    assert set(prof) == {"argv", "prompt", "output", "verify_worktree_unchanged", "derived_readonly", "max_minutes"} \
+        or set(prof) == {"argv", "prompt", "output", "verify_worktree_unchanged", "derived_readonly"}, prof
+    assert adapters.headless_resume_args(acme, "reviewer", "S1") is None
+
+
+@pytest.mark.parametrize("resume", [["--tools", "edit"], ["--tools=edit"], ["-t", "write"], ["--yolo"]])
+def test_the_complete_rendered_reviewer_argv_is_validated_including_resume_args(tmp_path, resume):
+    adapter = _adapter()
+    ok, _ = adapters.build_argv(adapter, "reviewer", model="openai/gpt-6-luna", effort="high", cwd=tmp_path,
+                                output=tmp_path / "reply.md")
+    assert ok[1:3] == ["--tools", "read,grep,find,ls"]
+    with pytest.raises(adapters.AdapterError):
+        adapters.build_argv(adapter, "reviewer", model="openai/gpt-6-luna", effort="high", cwd=tmp_path,
+                            output=tmp_path / "reply.md", resume_args=resume)
+
+
+def test_a_session_assign_arg_appended_at_launch_is_refused_for_a_derived_reviewer(tmp_path):
+    adapter = copy.deepcopy(_adapter())
+    adapter["session"] = {"id": "assigned", "assign_arg": ["--tools", "edit"]}
+    with pytest.raises(adapters.AdapterError):
+        adapters.build_argv(adapter, "reviewer", model="openai/gpt-6-luna", effort="high", cwd=tmp_path,
+                            output=tmp_path / "reply.md", session_id="S1")
+
+
+def test_the_worker_form_is_unaffected_by_the_reviewer_argv_check(tmp_path):
+    argv, _ = adapters.build_argv(_adapter(), "worker", model="openai/gpt-6-luna", effort="high", cwd=tmp_path)
+    assert "--tools" not in argv and "--print" in argv
