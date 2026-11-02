@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.20
+
+- fix(preflight): the stale-ledger line never prints two identical shas (#806).
+
 ## 3.15.19
 
 - fix(convergence): a full sha matches an abbreviated composed commit (#893), and a stated commit with the composed commit's tree is the same review (#782).
