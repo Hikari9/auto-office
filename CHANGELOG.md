@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.5
+
+- fix(config): a stale preferred_seed entry in another role no longer blocks config writes or `office route allow`. Only seeds the edit changes are validated, and an unchanged stale seed is a warning naming the command that replaces it (#874).
+
 ## 3.15.4
 
 - fix(land): a GitHub error while reading required checks (rate limit, 5xx, network) is `checks-unavailable` with a retry and stale-gh-cache hint, never `checks-failed` pointing at `office rerun` (#772).
