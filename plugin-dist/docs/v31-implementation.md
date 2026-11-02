@@ -205,7 +205,7 @@ form, because both travel in the stored route.
 
 `office amend route T1 --as <route> --quote "<user's words>"` can record the next executor's route while
 T1 is accepted. It launches nothing and preserves the submitted producer's route and all accepted
-evidence. The next legal reopen uses the declared route. Revoking an amendment worker preserves the
+evidence. The next legal reopen uses the declared route. `office amend route T1 --auto --quote "<user's words>"` clears a declared route on a task with no live agent and records the change; its next dispatch routes from the approved plan's slate again, and a rerun of a task that already ran takes `--fresh --reroute` (#977). Revoking an amendment worker preserves the
 need to satisfy newly added acceptance criteria; only the previously accepted revision remains audit evidence.
 Reused routes are checked against current factual gates before a new lease or launch is scheduled,
 including the run repository's live denial policy when a background caller runs elsewhere.
