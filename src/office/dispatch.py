@@ -2118,11 +2118,14 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
-        # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
+        # The repo's own install, before the agent's first prompt. A failure is surfaced, not fatal, except a
+        # setup command that is not on PATH at all (exit 127), which stops the dispatch (#364).
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
         if setup:
             atomic_write_json(ddir / "setup.json", setup)
+            if setup["exit"] == worktree_setup.COMMAND_NOT_FOUND and not setup.get("timed_out"):
+                raise worktree_setup.not_found_refusal(setup, dispatch["task_id"])
             if setup["exit"] != 0:
                 _launch_notice(run, dispatch, worktree_setup.failure_text(setup))
     packet = build_packet(con, run, dispatch, role, payload)
