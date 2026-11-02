@@ -97,3 +97,6 @@ def test_probe_reports_empty_or_malformed_metadata_as_unclear(tmp_path):
     assert result_empty.returncode == 0 and result_empty.stdout.strip() == "unclear origin"
     result_malformed = _probe(tmp_path / "malformed", "{malformed json")
     assert result_malformed.returncode == 0 and result_malformed.stdout.strip() == "unclear origin"
+    for name, content in (("list", "[]"), ("null", "null"), ("string", '"file:///x"')):
+        result = _probe(tmp_path / name, content)
+        assert result.returncode == 0 and result.stdout.strip() == "unclear origin", name
