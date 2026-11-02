@@ -419,6 +419,8 @@ def _slate_notes(entry: dict) -> list[str]:
         notes.append("planner choice" + (", departs from ranking" if plan.get("departs_from_ranking") else ""))
     if plan.get("planner_error"):
         notes.append(f"planner route ignored: {plan['planner_error']}")
+    if plan.get("planner_notice"):
+        notes.append(plan["planner_notice"])
     disc = entry.get("discovery") or {}
     if disc.get("intent") == "trial":
         notes.append(f"trial route {disc.get('candidate')}, fallback {disc.get('fallback')}")
