@@ -957,6 +957,11 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         lane_receipt.write_text(json.dumps({"scope": scope["id"], "commit": st["commit"], "receipts": receipts,
                                             "frames": frames}, indent=2, sort_keys=True))
         state.record_evidence(con, run["id"], "capture_receipt", lane_receipt, revision_id=rev["id"], gate_id=gate["id"])
+    # A scripted step the capture could not complete is evidence for the vision reviewer, not a verdict (#384):
+    # only measured failures (HTTP status, overflow, clipping) still short-circuit to RECHECK.
+    scripted = [f for f in failures if f.get("kind") == visual.INTERACTION]
+    if len(scripted) == len(failures):
+        failures = []
     if failures:
         outcome = {"status": contract.COMPLETED, "verdict": "RECHECK", "evidence_status": "COMPARABLE",
                    "route": "deterministic-capture", "summary": f"{len(failures)} deterministic UI failure(s); visual "
@@ -971,7 +976,9 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     for f in frames:
         if f.get("screenshot"):
             images.append(Path(f["screenshot"]))
-            lines.append(f"{f['task']} candidate {f['viewport']} state {f['state']}: {Path(f['screenshot']).name}")
+            lines.append(f"{f['task']} candidate {f['viewport']} state {f['state']}"
+                         + (" (as the failed scripted step left it)" if f.get("failed_step") else "")
+                         + f": {Path(f['screenshot']).name}")
         if f.get("reference_screenshot"):
             images.append(Path(f["reference_screenshot"]))
             lines.append(f"{f['task']} reference {f['viewport']} state {f['state']}: {Path(f['reference_screenshot']).name}")
@@ -983,6 +990,9 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         "REFERENCES " + ("; ".join(f"{r['name']} v{r['version']}" for r in references if r)
                          or "none — fidelity is unmeasured; judge behaviour and usability only"),
         "IMAGES:", *lines,
+        *(["SCRIPTED STEP FAILURES (the capture script could not complete these steps; evidence for you, not a "
+           "verdict: judge from the images whether the product is at fault or the step does not apply there):",
+           *[f"- {f['owners'][0]} {f.get('location')}: {f.get('summary')}" for f in scripted]] if scripted else []),
         "DOM MEASUREMENTS (measured, css-px):" if measurements else "DOM MEASUREMENTS: none",
         *[json.dumps(m, sort_keys=True) for m in measurements[:60]],
         *briefs.used_codes_line(gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"]))),
