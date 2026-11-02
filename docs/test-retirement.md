@@ -57,11 +57,7 @@ Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at
 
 ## Open pull requests that edit the same test files
 
-Listed by `gh pr list --repo Hikari9/auto-office --state open` and each open PR's files (`gh api repos/Hikari9/auto-office/pulls/<n>/files`) on 2026-10-31. Every open PR other than this one was checked against all 12 test files this change deletes, edits or adds. Only the row below overlaps. That run needs a rebase after this lands.
-
-| PR | File |
-|---|---|
-| #951 | `tests/v31/test_issue809_regression.py` |
+Listed by `gh pr list --repo Hikari9/auto-office --state open` and each open PR's files (`gh api repos/Hikari9/auto-office/pulls/<n>/files`) on 2026-11-02. Every open PR other than this one was checked against all 13 test files this change deletes, edits or adds. None overlaps, so no open run needs a rebase for these files.
 
 ## Function-level traceability
 
