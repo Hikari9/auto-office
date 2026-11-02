@@ -1568,12 +1568,27 @@ def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
     return bool(ended)
 
 
+REVOKED_KIND = "dispatch.revoked"
+
+
+def was_revoked(con, d: dict) -> bool:
+    """The orchestrator revoked this dispatch: its end, however the process exit was classified, is not a failure."""
+    return d.get("terminal_classification") == "revoked" or con.execute(
+        "SELECT 1 FROM events WHERE dispatch_id=? AND kind=? LIMIT 1", (d["id"], REVOKED_KIND)).fetchone() is not None
+
+
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
                   notes: list[str] | None = None) -> bool:
     """Record the end of a dispatch Office can no longer wait on. Closes its
     gate when nothing else can finish it. Returns False when it had ended."""
     if d.get("ended_at") or d["status"] not in ("launching", "running"):
         return False
+    if classification == "revoked":
+        # Recorded before the stop: stop_dispatch records the end itself (a signal exit), and the reviewer's own job
+        # must still read this end as the orchestrator's revoke, never as a route failure to fall back from (#1007).
+        with db.transaction(con):
+            state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {why}", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=d["id"])
     if stop and d.get("launcher") not in (None, "external", "sync"):
         stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
     if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
