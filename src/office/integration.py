@@ -95,13 +95,19 @@ def final_commit(con, run: dict) -> str | None:
     return s.get("commit") if s.get("status") == "accepted" else None
 
 
+def _integration_hold(con, run_id: str) -> str | None:
+    from office import queuecmd  # a paused run's integrate job waits for office queue resume (#800)
+    return queuecmd.integration_hold(con, run_id)
+
+
 def maybe_queue(con, run: dict) -> None:
     """Queue composition once per accepted set. Caller holds tx."""
     tasks = accepted_set(con, run)
     if tasks is None:
         return
     key = _set_key(con, tasks)
-    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
+    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
 
 
 LOCK_WAIT_SECONDS = 7200.0  # a compose runs the run checks, which can take their whole timeout
@@ -145,7 +151,8 @@ def retrigger(con, run: dict) -> bool:
         return False
     key = _set_key(con, tasks)
     state.enqueue(con, run, "integrate", {"key": key},
-                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2)
+                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
     return True
 
 

@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.16
+
+- feat(queue): `office queue pause run:<id>` holds the run's automatic integration checks until `office queue resume` (#800).
+
 ## 3.15.15
 
 - fix(watchdog): a dispatch in a reused pane reads only the output below its own setup line, so a revoked executor's usage limit never stalls it (#753).
