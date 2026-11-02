@@ -394,7 +394,7 @@ def test_integration_missing_offers_three_actions_for_the_current_harness_only(h
     assert integ["state"] == "missing"
     assert data["harness"]["offer"] == ["install-recommended", "review-individually", "skip"]
     assert data["commands"]["install_recommended"] == "office install --only claude"
-    assert [i["id"] for i in integ["items"]] == ["session.start", "prompt.submit", "tool.pre", "read-rules"]
+    assert [i["id"] for i in integ["items"]] == ["session.start", "prompt.submit", "tool.pre", "turn.stop", "read-rules"]
     assert all(i["state"] == "missing" and i["change"] for i in integ["items"])
     assert "SessionStart hook in" in integ["items"][0]["change"]
     assert not h.claude_settings.exists() and not h.gemini_settings.exists()  # status never writes
@@ -414,7 +414,8 @@ def test_review_individually_applies_only_the_accepted_items(h):
     integ = h.status()["harness"]["integration"]
     assert integ["state"] == "partial"
     assert {i["id"]: i["state"] for i in integ["items"]} == {
-        "session.start": "current", "prompt.submit": "missing", "tool.pre": "missing", "read-rules": "missing"}
+        "session.start": "current", "prompt.submit": "missing", "tool.pre": "missing", "turn.stop": "missing",
+        "read-rules": "missing"}
     code, out = h.office("install", "--only", "claude", "--item", "read-rules")
     assert code == 0 and "settings updated" in out, out
     assert "Bash(ls)" in json.loads(h.claude_settings.read_text())["permissions"]["allow"]

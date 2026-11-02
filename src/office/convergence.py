@@ -1419,7 +1419,8 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                 else:
                     ready.append(t)
             if live and not ready:
-                return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live)
+                note = f"; {'; '.join(held)}" if held else ""  # #561: still name the dependents the live repair holds
+                return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live) + note
             if ready:
                 from office import rerun
                 what = " in parallel" if len(ready) > 1 else ""

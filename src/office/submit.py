@@ -561,12 +561,15 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     from office import preflight
     base, dep_bases = attribution(con, run, task, d, head)  # `commit` below is HEAD plus the worktree: same ancestry
     tier = briefs.run_self_review_tier(run)
+    # #938 retires the inline review tier, not the trivial/mechanical exemption: a low-risk run still qualifies by
+    # the gear and blast radius that used to make it inline (#309).
+    exempt_tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
     reason = preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
     if exempt and not has_ledger and enforced and task["scope"] and any(preflight._in_scope_changes(
             wt, task, preflight.committed_changes(wt, base, head, dep_bases))):
-        _check_exemption(task, exempt, reason, tier)  # empty, read-only and v3.1 work needs no exemption
+        _check_exemption(task, exempt, reason, exempt_tier)  # empty, read-only and v3.1 work needs no exemption
     ledger_stop, ledger_fix, signaled = preflight.ledger_gate(
         con, run, task, d, wt, base, head, dep_bases, stop=[], fix=[], submission=True,
         require=enforced and not (exempt and not has_ledger))
@@ -581,7 +584,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
             next_step = (f"write {briefs.LEDGER_FILE} (format in your brief's LEDGER lines) after your last commit with "
                          f"COMMIT {head}, then office submit"
                          + ('; a trivial or mechanical change may instead run: office submit --self-review-exempt '
-                            'trivial|mechanical -- "<reason>"' if tier == "inline" else ""))
+                            'trivial|mechanical -- "<reason>"' if exempt_tier == "inline" else ""))
         raise Refused(category, f"{task['id']} self-review ledger refused submission: {details}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
     from office import self_review_proof
@@ -591,7 +594,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
         raise Refused("self-review-proof", f"{task['id']}: {proof['reason']}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)",
                       next_step="run office preflight (it runs the revert-and-fail proof), then office submit")
-    receipt = _self_review_receipt(wt, task, run, head, tree, tier, enforced, exempt, reason,
+    receipt = _self_review_receipt(wt, task, run, head, tree, exempt_tier if exempt and not has_ledger else tier,
+                                   enforced, exempt, reason,
                                    preflight.committed_changes(wt, base, head, dep_bases), preflight)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
