@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.37
+
+Plan submit now shows a planner route entry that routing dropped as a notice, and office queue help says pausing a whole run also holds its integration checks.
+
 ## 3.15.36
 
 A dependent task's base now composes sibling tasks' appends to the same declared shared: registry as their union instead of refusing the dispatch with dependency-conflict (#537).
