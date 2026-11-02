@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.7
+
+- fix(review): a reviewer routes from the run's current pin, not the snapshot its job loaded, so an `--apply-routing` re-pin reaches self-review subagents inside an in-flight convergence job.
+
 ## 3.15.6
 
 - fix(config): `office config --run <id> --apply-routing --quote` re-pins the `quota` block too, so a lowered `quota.reserve_percent` reaches a live run.
