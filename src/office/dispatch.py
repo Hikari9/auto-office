@@ -5813,8 +5813,14 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                 and submit.block_id(con, d["id"]) == payload.get("block_id")
                 and current and current["amendment_id"] == payload.get("amendment_id")):
             return
+        from office import raising
+        covered = [r for r in raising.open_raises(con, run, dispatch_id=d["id"]) if raising.scope_covers(con, r)]
+        how = (f'office answer {tid} -- "{payload.get("amendment_id")} added the requested paths to your scope" '
+               "delivers it and resumes the worker, or office revoke "
+               if covered else "office revoke ")
         state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
-                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
+                   f"to {d['id']}; its blocker stays: {how}{tid}, then office rerun {tid} --resume|--fresh",
+                   task_id=tid, dispatch_id=d["id"])
 
 
 def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:
