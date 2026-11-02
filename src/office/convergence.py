@@ -605,6 +605,12 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
         return False
     if prior == "reviewing" and not latest:
         return False
+    approved = st.get("approved") or {}
+    if prior in CONVERGED and approved.get("versions") is not None \
+            and approved["versions"] != _contract_versions(con, run, scope):
+        # #768: the same bytes do not satisfy a changed contract or acceptance criteria. The
+        # earlier review judged the old ones, so the recomposition is reviewed again.
+        return False
     if old != new:
         con.execute("UPDATE gates SET input_key=? WHERE run_id=? AND subject='lane' AND scope=? AND input_key=? "
                     "AND status IN ('queued','running','done')",
