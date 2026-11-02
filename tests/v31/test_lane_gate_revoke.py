@@ -309,3 +309,37 @@ def test_a_worker_cannot_revoke_a_lane_review(env):
     assert gate["status"] == "running" and gate["review_status"] is None, gate
     assert _q(env, "SELECT status FROM outbox WHERE id='Jrev'")[0]["status"] == "queued"
     assert _q(env, "SELECT ended_at FROM dispatches WHERE id='Drev'")[0]["ended_at"] is None
+
+
+def test_a_capture_only_amendment_recaptures_without_reopening_the_task(env, monkeypatch, tmp_path):
+    """#728: changing only visual.url (or start) after a spec-defect capture keeps T1 accepted, launches no
+    executor and creates no revision; the lane's visual capture re-runs on the same composition."""
+    from test_convergence_contract import PLAN_VISUAL as PLAN
+    _capture_with(monkeypatch, tmp_path, [{"cause": "spec", "location": "page @ desktop",
+                                           "summary": "port 3999 already bound"}])
+    _visual_run(env)
+    assert _gates(env, "visual")[0]["evidence_status"] == "SPEC_DEFECT"
+    dispatches = _q(env, "SELECT COUNT(*) AS n FROM dispatches WHERE task_id='T1'")[0]["n"]
+    revisions = _q(env, "SELECT COUNT(*) AS n FROM revisions WHERE task_id='T1'")[0]["n"]
+    _capture_with(monkeypatch, tmp_path, [])
+    env.write_plan(PLAN.replace("http://localhost:3999/", "http://localhost:4000/"))
+    code, out = env.office("amend", "T1", "--contract", "--", "capture port change")
+    assert code == 0 and "visual capture re-run" in out and "no executor launched" in out, out
+    task = _q(env, "SELECT status, visual_json FROM tasks WHERE id='T1'")[0]
+    assert task["status"] == "accepted" and "4000" in task["visual_json"], task
+    assert _q(env, "SELECT COUNT(*) AS n FROM dispatches WHERE task_id='T1'")[0]["n"] == dispatches
+    assert _q(env, "SELECT COUNT(*) AS n FROM revisions WHERE task_id='T1'")[0]["n"] == revisions
+    assert not _q(env, "SELECT 1 FROM deliveries WHERE task_id='T1'")
+    env.office("resume", check=None)
+    latest = _gates(env, "visual")[-1]
+    assert len(_gates(env, "visual")) == 2 and latest["evidence_status"] != "SPEC_DEFECT", latest
+
+
+def test_a_visual_change_beyond_the_capture_still_reopens_the_task(env, monkeypatch, tmp_path):
+    from test_convergence_contract import PLAN_VISUAL as PLAN
+    _capture_with(monkeypatch, tmp_path, [{"cause": "spec", "location": "page @ desktop", "summary": "bad"}])
+    _visual_run(env)
+    env.write_plan(PLAN.replace("viewports: desktop", "viewports: desktop, mobile"))
+    code, out = env.office("amend", "T1", "--contract", "--", "add mobile")
+    assert code == 0 and "visual capture re-run" not in out, out
+    assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] != "accepted"

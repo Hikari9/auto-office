@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.41
+
+An amendment that changes only a task's visual.url or visual.start keeps the accepted task accepted and reruns its lane's visual capture, with no executor and no round spent (#728).
+
 ## 3.15.40
 
 office close --handoff <pr> closes a run whose blocked integration was composed by hand, recording integration_composed_by_hand; the close refusal names the unapplied amendment (#729).

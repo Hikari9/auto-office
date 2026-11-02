@@ -355,10 +355,11 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
                     (run["id"], version, "ordinary", new_text, dumps(parsed.tasks), dumps(parsed.requirements),
                      "orchestrator", now_iso(), sha256_bytes(new_text.encode()), run["plan_version"], amendment_id))
         before = _snapshot(con, run)
-        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True)
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, rerun_checks=True, capture_only=True)
         _audit(con, run, amendment_id, before, version, delta)
-        # A checks-only change to an accepted task reruns its checks instead of reopening it.
-        rerun = sync["checks_only"]
+        # A checks-only change to an accepted task reruns its checks instead of reopening it; a capture-only
+        # visual change reruns its lane's visual capture (#728).
+        rerun = sync["checks_only"] + sync["capture_only"]
         # Added tasks are the only affected ones when the plan merely grows: a running task's contract is untouched.
         affected = sorted((set(scope_ids) | set(sync["acceptance"]) | set(sync["contract"]) | set(sync["added"])) - set(rerun))
         if not scope_ids and not affected and not rerun:
@@ -370,7 +371,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
-        rechecked = [tid for tid in rerun if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
+        rechecked = [tid for tid in sync["checks_only"] if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
+        recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
         from office import contract
@@ -397,6 +399,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     if delivered:
         parts.append(f"delivering to {','.join(delivered)}")
     res.add(" | ".join(parts))
+    for line in recaptured:
+        res.add(line)
     old_tasks = {t["id"]: t for t in current.get("tasks") or []}
     for task in parsed.tasks:
         prior = old_tasks.get(task["id"]) or {}
@@ -485,16 +489,17 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
                      now_iso(), sha256_bytes(text.encode()), run["plan_version"], amendment_id))
         before = _snapshot(con, run)
         prior_graph = {t["id"]: t["depends"] for t in state.tasks(con, run["id"])}
-        sync = plans.sync_tasks(con, run, parsed.tasks, version)
+        sync = plans.sync_tasks(con, run, parsed.tasks, version, capture_only=True)
         _audit(con, run, amendment_id, before, version, delta)
         _sync_leases(con, run, sync["contract"])
         state.update_run(con, run["id"], plan_version=version)
         run = state.get_run(con, run["id"])
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
-        affected = set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])
+        affected = (set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])) - set(sync["capture_only"])
         ripple = _ripple(con, run, prior_graph, sync)
         affected -= set(ripple)
+        recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version,
                  hold=_amended_holds(con, run, affected))
@@ -509,13 +514,28 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
             plans.queue_plan_review(con, run, version, escalated=plans.plan_review_ended(con, run))
         state.emit(con, run, "plan.amended", f"plan p{version} ({amendment_id}, contract)", audience="runtime")
     jobs.kick(con, run["id"])
-    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *redirect_lines]
+    lines = [f"plan p{version} | {amendment_id} contract | affected {','.join(affected) or 'none'}", *recaptured,
+             *redirect_lines]
     if flagged:
         lines.append(f"new authority entries need user authorization: {', '.join(flagged)}")
     res = Result(lines=lines, next=('ask the user (native question tool) for authorization, then office approve ' + flagged[0] + ' --quote "<words>"')
                  if flagged else "exceptions only; office status")
     plans.show_diagram(con, state.get_run(con, run["id"]), version, parsed.tasks, plan_path, res)
     return res
+
+
+def _recapture(con, run: dict, task_ids: list[str], amendment_id: str) -> list[str]:
+    """A capture-only visual amendment (#728): the accepted task is not reopened; its lane recaptures. Caller holds tx."""
+    from office import contract, convergence
+    lines = []
+    for tid in task_ids:
+        state.emit(con, run, "task.capture_amended", f"{tid} visual capture contract changed by {amendment_id}; "
+                   "the task stays accepted", task_id=tid, audience="runtime")
+        if contract.is_convergence(run):
+            lines += convergence.recapture_visual(con, run, tid, amendment_id)
+        else:
+            lines.append(f"{tid} visual capture contract updated by {amendment_id}; its next visual capture uses it")
+    return lines
 
 
 def _task_changed(cur: dict, planned: dict | None) -> bool:
