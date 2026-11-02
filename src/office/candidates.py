@@ -7,6 +7,7 @@ a live quota probe, then hands them to office.routing.route unchanged.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -306,7 +307,9 @@ def _run_probe(argv: list[str], unknown) -> dict:
     from office import gates
     for attempt in (1, 2):
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+            # stdin is closed so a credential prompt exits instead of hanging into a timeout (#941).
+            proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                  timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
@@ -381,9 +384,10 @@ _LAST_GOOD_TTL = 600.0
 
 def _last_good_ttl() -> float:
     try:
-        return max(0.0, float(os.environ.get("OFFICE_QUOTA_LAST_GOOD_TTL", _LAST_GOOD_TTL)))
+        ttl = float(os.environ.get("OFFICE_QUOTA_LAST_GOOD_TTL", _LAST_GOOD_TTL))
     except ValueError:
         return _LAST_GOOD_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _LAST_GOOD_TTL
 
 
 def _shared_cache_path() -> Path:
@@ -398,37 +402,71 @@ def _shared_entry(harness: str) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _stamp(value) -> float | None:
+    """A cache timestamp, or None when the file holds a corrupt one."""
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    return stamp if math.isfinite(stamp) else None
+
+
 def _shared_cache_get(harness: str) -> dict | None:
     entry = _shared_entry(harness)
     if not entry or not isinstance(entry.get("result"), dict):
         return None
     ok = entry["result"].get("status") == "ok"
     ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
-    if time.time() - float(entry.get("at", 0)) < ttl:
+    at = _stamp(entry.get("at"))
+    if at is not None and time.time() - at < ttl:
         return entry["result"]
     return None
+
+
+def _valid_reading(reading: dict) -> bool:
+    """A stored ok reading whose percents are finite numbers. The cache file is not trusted:
+    a bad value would otherwise reach the reserve check as an uncaught float() error."""
+    families = reading.get("families")
+    fams = [f for f in families.values() if isinstance(f, dict) and f.get("status") == "ok"] \
+        if isinstance(families, dict) else []
+    try:
+        return reading.get("status") == "ok" and all(
+            math.isfinite(float(r["tightest_remaining_percent"])) for r in [reading, *fams])
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _shared_last_good(harness: str) -> tuple[float, dict] | None:
     """(age seconds, reading) of the last ok probe for this harness, if within the TTL."""
     last = (_shared_entry(harness) or {}).get("last_good")
-    if not isinstance(last, dict) or not isinstance(last.get("result"), dict):
+    if not isinstance(last, dict) or not isinstance(last.get("result"), dict) \
+            or not _valid_reading(last["result"]):
         return None
-    age = max(0.0, time.time() - float(last.get("at", 0)))
-    return (age, last["result"]) if age < _last_good_ttl() else None
+    at = _stamp(last.get("at"))
+    if at is None:
+        return None
+    age = time.time() - at
+    # A future stamp means the clock moved back: the reading's age is unknowable, so it is not used.
+    return (age, last["result"]) if 0 <= age < _last_good_ttl() else None
 
 
 def _stale_fallback(harness: str, result: dict) -> dict:
-    """A timed-out probe becomes the last good reading, marked stale. Any other failure
-    stays as it is: a stale value never stands in for an auth or parse failure."""
-    if not result.get("timed_out"):
-        return result
-    last = _shared_last_good(harness)
+    """A timed-out probe becomes the harness's last good reading, marked stale, with each ok agy
+    family marked too (quota_for_candidate hands a family result on alone). Any other result is
+    returned without the internal `timed_out` marker. A stale value never stands in for an auth
+    or parse failure."""
+    last = _shared_last_good(harness) if result.get("timed_out") else None
     if last is None:
-        return result
+        return {k: v for k, v in result.items() if k != "timed_out"}
     age, reading = last
-    return {**reading, "stale": True, "stale_age_s": round(age),
-            "cause": f"probe timed out; last good reading {round(age)}s old"}
+    stale = {"stale": True, "stale_age_s": round(age),
+             "cause": f"probe timed out; last good reading {round(age)}s old"}
+    families = reading.get("families")
+    if isinstance(families, dict):
+        reading = {**reading, "families": {
+            name: {**fam, **stale} if isinstance(fam, dict) and fam.get("status") == "ok" else fam
+            for name, fam in families.items()}}
+    return {**reading, **stale}
 
 
 def _shared_cache_put(harness: str, result: dict) -> None:
