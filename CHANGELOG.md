@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.27
+
+- feat(brief): one neutral executor-brief line allows the harness's subagents for the task itself at the executor's discretion. Scope, checks and submit stay its responsibility (#1031).
+
 ## 3.15.26
 
 - feat(wake): the root-wake prompt is one line, `Run <id> (through event N): <what changed>; next: <action>. Run office --run <id> context.`. The standing rules moved to SKILL.md (#1029).
