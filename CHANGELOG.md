@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.32
+
+A task's worktree setup that exits 127 (command not found) now stops the dispatch with an office doctor hint instead of launching an agent without dependencies; other setup failures stay a notice (#364).
+
 ## 3.15.31
 
 Resubmitting a task's accepted tree unchanged (for example after an amendment demoted it) is empty work: no self-review ledger is owed, and the revision records an empty exemption (#781).
