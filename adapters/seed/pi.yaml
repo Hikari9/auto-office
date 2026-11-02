@@ -86,14 +86,7 @@ source_notes: >-
   Herdr tracks and Office still does not read).
 session:
   id: none
-capabilities: [builder]
-# Generic read-only reviewer (code and plan review only; pi has no vision profile). Office derives the
-# reviewer launch form from the worker form below plus these flags: --tools is an allowlist of
-# read/grep/find/ls, so edit, write and bash are never enabled. bash is left out on purpose because pi
-# cannot restrict it to read-only commands. pi has no sandbox, so Office also fingerprints the worktree
-# (HEAD, tracked diff, untracked files) before and after each review and fails the route as degraded
-# when it changed (verify_worktree_unchanged, set on every derived reviewer profile).
-reviewer_readonly_args: [--tools, "read,grep,find,ls"]
+capabilities: [builder, review]
 office_profiles:
   worker:
     argv: [--print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
@@ -107,4 +100,20 @@ office_profiles:
       argv: [--no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}"]
     # pi has no timeout of its own in --print mode, so the supervisor's wall cap
     # stops a stuck dispatch instead of holding the task open forever.
+    max_minutes: 60
+  # Code and plan reviewer (pi has no vision profile). Reviewers launch like executors (Rico, 2026-11-02,
+  # #1027): in a Herdr pane by default, headless when Herdr is unusable or the pane fails. --tools is an
+  # allowlist, and bash is never enabled because pi cannot restrict it to read-only commands. The headless
+  # CLI form is read-only: its reply is stdout. The pane form must write its reply file, so it also gets
+  # `write` (Q22): reply.txt sits in the dispatch dir outside the checkout. pi has no sandbox, so Office
+  # fingerprints the worktree (HEAD, tracked diff, untracked files) before and after each review and fails
+  # the route as degraded when it changed (verify_worktree_unchanged).
+  reviewer:
+    argv: [--tools, "read,grep,find,ls", --print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
+    prompt: stdin
+    output: stdout
+    herdr_kind: pi
+    verify_worktree_unchanged: true
+    interactive:
+      argv: [--tools, "read,grep,find,ls,write", --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}"]
     max_minutes: 60

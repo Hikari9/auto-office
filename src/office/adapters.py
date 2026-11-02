@@ -153,11 +153,14 @@ VETTED_READONLY_ARGS = {"pi": (_vetted_pi, PI_WORKER_TOKENS, _pi_rendered_ok)}
 
 
 def check_rendered_reviewer_argv(adapter: dict, prof: dict | None, argv: list[str]) -> None:
-    """Final gate on a derived read-only reviewer launch: the whole rendered argv (profile argv plus any
-    assigned-session or resume args the runtime appended) must pass the harness's vetted checker."""
-    if not (prof or {}).get("derived_readonly"):
-        return
+    """Final gate on a read-only headless reviewer launch: the whole rendered argv (profile argv plus any
+    assigned-session or resume args the runtime appended) must pass the harness's vetted checker. It covers a
+    derived profile and an explicit one on a vetted harness that relies on the worktree guard instead of a
+    sandbox (pi's explicit reviewer, #1027). The pane form is built separately and may also write its reply."""
     exe = os.path.basename(executable(adapter) or "")
+    if not ((prof or {}).get("derived_readonly")
+            or ((prof or {}).get("verify_worktree_unchanged") and exe in VETTED_READONLY_ARGS)):
+        return
     vetted = VETTED_READONLY_ARGS.get(exe)
     # build_argv's list starts with the executable; the flags are everything after it.
     if vetted is None or not vetted[2](argv[1:] if argv and os.path.basename(argv[0]) == exe else argv):
@@ -288,6 +291,14 @@ def adapter_hash(adapter: dict) -> str:
 
 def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
+
+
+def pane_capable(adapter: dict | None, kind: str) -> bool:
+    """Whether this profile has a Herdr pane form (`herdr_kind` plus `interactive`); without one it runs headless.
+    Executors and reviewers launch the same way (Rico, 2026-11-02; #1027): a reviewer profile is pane-capable
+    exactly when the harness's worker profile is."""
+    prof = profile(adapter or {}, kind) or {}
+    return bool(prof.get("herdr_kind") and isinstance(prof.get("interactive"), dict))
 
 
 def terminal_statuses_without_reply(adapter: dict | None, kind: str) -> set[str]:

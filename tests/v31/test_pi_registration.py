@@ -395,9 +395,17 @@ def test_pi_reviewer_profile_is_a_read_only_allowlist_for_code_and_plan_review_o
     assert "--approve" not in argv
     assert prof["prompt"] == "stdin" and prof["output"] == "stdout"
     assert prof["verify_worktree_unchanged"] is True
-    assert "herdr_kind" not in prof and "interactive" not in prof, "no pane form: the headless allowlist is the only launch"
     assert argv[len(argv) - len(_adapter()["office_profiles"]["worker"]["argv"]):] == _adapter()["office_profiles"]["worker"]["argv"]
     assert "review" in adapter["capabilities"] and "planning" not in adapter["capabilities"]
+    # #1027 (Rico, 2026-11-02): it runs in a Herdr pane like the executor; the headless form above is the CLI
+    # fallback. The pane form writes its reply file (Q22), never edits or bash; the worktree guard still applies.
+    assert prof["herdr_kind"] == "pi"
+    pane = prof["interactive"]["argv"]
+    tools = set(pane[pane.index("--tools") + 1].split(","))
+    assert tools == {"read", "grep", "find", "ls", "write"} and not {"edit", "bash"} & tools
+    for flag in ("--no-approve", "--no-extensions", "--no-mcp"):
+        assert flag in pane, flag
+    assert pane[pane.index("--model") + 1] == "{model}" and pane[pane.index("--thinking") + 1] == "{effort}"
 
 
 def _git_repo(tmp_path):
