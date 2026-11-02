@@ -152,6 +152,7 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
   `office amend requirements --quote "<words>" -- "<change>"` (`--drop-criterion` / `--add-criterion` edit done criteria; `--drop-non-goal` / `--add-non-goal` edit non-goals; reauthorize the new version).
 - A paused or blocked task names its blocker and what was preserved: resolve it, or take the decision to the user. A missing or denied route
   shows a route notice; only the user changes role policy (`office route allow|deny|neutral <route>[,<route>...] --role <role>`). A user allow dispatches with no proof gate; a route that fails at runtime is logged (`route.failed`), demoted for a TTL and replaced by the next eligible route (`route.fallback`).
+- `office queue pause --run <id>` holds a whole run: no new dispatches and no queued integration checks until `office queue resume --run <id>` (#800). `--task T` holds one task only.
 
 ## Review
 

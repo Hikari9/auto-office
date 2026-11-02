@@ -210,6 +210,9 @@ def show_diagram(con, run: dict, version: int, tasks: list[dict], plan_path: Pat
         problem = (entry.get("route_plan") or {}).get("planner_error")
         if problem:
             res.notices.append(f"{tid} route: {problem}; the ranked slate stands")
+        notice = (entry.get("route_plan") or {}).get("planner_notice")
+        if notice:  # entries the planner chose that routing could not use (#875): said at submit, not only in inspect
+            res.notices.append(f"{tid} route: {notice}")
     full = plan_view.render(run, version, pv)
     if plan_path is not None:
         plan_view.write_into(plan_path, version, full)
