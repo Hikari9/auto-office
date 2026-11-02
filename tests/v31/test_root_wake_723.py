@@ -374,7 +374,7 @@ def test_723_durable_worker_stop_is_actionable_while_guide_says_wait(env, monkey
                    dispatch_id=d, payload={"reason": "self-review cap", "source": "preflight"})
     assert root_wake.poll(con, run) == "delivered"
     assert len(sent) == 1
-    assert "Auto Office run" in sent[0][1]
+    assert sent[0][1].startswith(f"Run {run['id'][:8]} (through event ") and "; next: " in sent[0][1]
 
 
 def test_723_unrelated_root_event_records_activity_not_completion(env, monkeypatch):
@@ -582,6 +582,10 @@ def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypat
     monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(text) or "landed")
     assert root_wake.poll(con, run) == "delivered"
     assert "HUMAN DECISION REQUIRED" in sent[0] and "No authorization" in sent[0]
+    # #1029: one line naming what changed and the next action; the standing rules live in SKILL.md.
+    first = sent[0].split(" HUMAN DECISION")[0]
+    assert first.startswith(f"Run {run['id'][:8]} (through event ") and "; next: " in first and "\n" not in first, first
+    assert "may be a duplicate" not in sent[0] and "lifecycle transitions" not in sent[0]
 
 
 @pytest.mark.parametrize("action,human", [
