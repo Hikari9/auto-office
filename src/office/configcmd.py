@@ -447,6 +447,34 @@ def _applies_next() -> str:
 
 # ------------------------------------------------------------------ a run's routing (#308)
 
+def _repin_target(con, run_arg: str | None, quote: str | None, flag: str) -> tuple[dict, Path, dict, dict]:
+    """The running run a re-pin moves, with its repo, config files and live resolved config. Only the
+    orchestrator re-pins, only on the user's words, and only a live run."""
+    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
+        what = "routing" if flag == "--apply-routing" else "verification limits"
+        raise Refused(f"worker-cannot-{flag[2:]}", f"a worker cannot re-pin a run's {what}; the orchestrator does, on the user's words")
+    if not run_arg:
+        raise _usage(f"{flag} needs --run <id>", next_step="office list shows run ids")
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    if not (quote or "").strip():
+        raise _usage(f'{flag} records the user\'s words (--quote "<words>")',
+                     next_step=f"office config --run {run['id'][:8]} {flag} --quote \"<words>\"")
+    if state.is_terminal(run):
+        raise Refused("run-terminal", f"run is {run['phase']}; its pinned config is no longer used")
+    root = Path(run["repo_root"]) if run.get("repo_root") else None
+    if root is None or not root.is_dir():
+        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
+                          next_step="restore the repository, then retry")
+    files = cfg.read_files(root)
+    try:
+        live, _ = cfg.resolve(root, files=files)
+    except ValueError as exc:
+        raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
+    return run, root, files, live
+
+
 def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     """Re-pin a run's `roles`, `routing` and `quota` from the current config files:
     the one opt-in that moves a running run off the values it pinned at start.
@@ -454,28 +482,7 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     nothing left to report for those blocks. `quota` is here because route choice
     reads the run's pinned `quota.reserve_percent`: without it a lowered reserve
     could never reach a live run. `quote` is the user's words authorizing it."""
-    if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
-        raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
-    if not run_arg:
-        raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
-    run = state.find_run(con, run_arg)
-    if run is None:
-        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
-    if not (quote or "").strip():
-        raise _usage('--apply-routing records the user\'s words (--quote "<words>")',
-                     next_step=f"office config --run {run['id'][:8]} --apply-routing --quote \"<words>\"")
-    if state.is_terminal(run):
-        raise Refused("run-terminal", f"run is {run['phase']}; its routing is no longer used")
-    root = Path(run["repo_root"]) if run.get("repo_root") else None
-    if root is None or not root.is_dir():
-        raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
-                          next_step="restore the repository, then retry")
-    repo = root
-    files = cfg.read_files(repo)
-    try:
-        live, _ = cfg.resolve(repo, files=files)
-    except ValueError as exc:
-        raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
+    run, repo, files, live = _repin_target(con, run_arg, quote, "--apply-routing")
     policy = dict(run.get("policy") or {})
     blocks = ("roles", "routing", "quota")
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
@@ -514,6 +521,68 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     return Result(lines=[line],
                   next="later dispatches of this run route from the re-pinned policy" if changed else None,
                   data={"run": run["id"], "changed": changed})
+
+
+# The verification limits a running run may re-pin (#755): how long a check may run and how many run at once.
+# Retry, recapture and round caps stay pinned: they decide verdicts, not whether a check can finish.
+VERIFICATION_REPIN = ("check_timeout_seconds", "full_suite_timeout_seconds", "check_concurrency")
+
+
+def apply_run_verification(con, run_arg: str | None, quote: str | None) -> Result:
+    """Re-pin a run's check timeouts and check concurrency from the current config files, on the user's words.
+    A suite that outgrew the timeout pinned at start (#755) otherwise exits 124 on every retry, and raising
+    the value in a config file never reaches the run. Later checks of the run use the re-pinned values."""
+    run, _repo, _files, live = _repin_target(con, run_arg, quote, "--apply-verification")
+    policy = dict(run.get("policy") or {})
+    pinned = dict(policy.get("verification") or {})
+    want = live.get("verification") or {}
+    # Only a limit the live config states moves: a key it leaves out never overwrites the pinned value with None.
+    changed = {k: {"from": pinned.get(k), "to": want[k]} for k in VERIFICATION_REPIN
+               if k in want and pinned.get(k) != want[k]}
+    short = run["id"][:8]
+    if not changed:
+        return Result(lines=[f"run {short} already uses the current verification limits; nothing changed"])
+    pinned.update({k: v["to"] for k, v in changed.items()})
+    policy["verification"] = pinned
+    moved = ", ".join(f"verification.{k} {v['from']} -> {v['to']}" for k, v in changed.items())
+    with db.transaction(con):
+        state.update_run(con, run["id"], policy=policy)
+        state.emit(con, run, "run.verification_applied", f"run {short} re-pinned {moved} from the config files",
+                   payload={"quote": quote.strip(), "changed": changed})
+    return Result(lines=[f"run {short} re-pinned {moved} (\"{quote.strip()}\")"],
+                  next="later checks of this run use the re-pinned limits; office status names how to re-run a timed-out gate",
+                  data={"run": run["id"], "changed": changed})
+
+
+def run_get(con, run_arg: str, key: str, origin: bool, cwd: Path) -> Result:
+    """`office config --run <id> <key>`: the value the run pinned at start, which is what its gates use (#755).
+    When the config files now say something else, a notice names the live value and how it would reach the run."""
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    short = run["id"][:8]
+    ok, value = _get_path(state.pinned_config(run), key.split("."))
+    if not ok:
+        raise OfficeError("not-set", f"{key} is not pinned in run {short}", exit_code=1,
+                          next_step=f"office config {key} shows the live config value")
+    text = _show(key, value)
+    where = f"run {short} (pinned)"
+    res = Result(lines=[f"{where}\t{text}" if origin else text],
+                 data={"key": key, "value": value, "origin": where, "run": run["id"]})
+    try:
+        live_ok, live_value, live_where = _effective_with_origin(key, None, Path(run.get("repo_root") or cwd))
+    except (OfficeError, OSError, ValueError, yaml.YAMLError):
+        return res
+    if live_ok and live_value != value:
+        top, _, leaf = key.partition(".")
+        how = (f"office config --run {short} --apply-verification --quote \"<user's words>\""
+               if top == "verification" and leaf in VERIFICATION_REPIN
+               else f"office config --run {short} --apply-routing --quote \"<user's words>\""
+               if top in ("roles", "routing", "quota") else None)
+        res.notices.append(f"note: the config files now say {_show(key, live_value)} ({live_where}); the run keeps its "
+                           "pinned value" + (f" until {how}" if how else ""))
+        res.data["live"] = {"value": live_value, "origin": live_where}
+    return res
 
 
 # ------------------------------------------------------------------ office setup
