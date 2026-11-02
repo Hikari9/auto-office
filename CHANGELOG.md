@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.44
+
+When a contract amendment already covers a worker's scope request but could not be confirmed delivered, status, the undelivered notice and office answer now name office answer as the way to resume the worker instead of contradicting each other (#799).
+
 ## 3.15.43
 
 A herdr agent that is working on its brief, with the pointer no longer in its composer, no longer triggers a 'brief pointer did not land, re-prompt it' notice (#583).
