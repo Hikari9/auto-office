@@ -307,6 +307,13 @@ def review_required(run: dict) -> bool:
     return bool((run.get("gates") or {}).get("code_review"))
 
 
+def sensitive_lane(con, run: dict, scope: dict) -> bool:
+    """A new run's lane changes a security-sensitive path: its one convergence reviewer must cover security (#938)."""
+    from office import self_review_subagents
+    return contract.is_convergence(run) and self_review_subagents.security_relevant(
+        f for tid in scope["tasks"] for f in _changed(con, run, state.get_task(con, run["id"], tid)))
+
+
 def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
     """(task, applicability) for each task in a lane whose acceptance is
     user-visible. Planner-declared, runtime-guarded: acceptance that reads
@@ -561,7 +568,7 @@ def job_converge(con, run: dict, job: dict) -> dict:
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
                    hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
         made = []
-        if review_required(run):
+        if review_required(run) or sensitive_lane(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
         if visual_tasks(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "visual", round_no, cycle))
@@ -791,6 +798,11 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
             dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
+        if sensitive_lane(con, run, scope):
+            brief += ("\nSECURITY: this lane changes a security-sensitive path and the executors did not review security. "
+                      "Cover it in your one verdict: secrets and token exposure, auth and permission bypass, missing "
+                      "server-side revalidation, path or symlink escapes, unsafe input parsing, repeated or unauthorized "
+                      "production writes.\n")
         # #809: funded self-review subagents precede the ONE independent convergence verdict. A missing,
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
         from office import self_review_subagents
@@ -1390,9 +1402,11 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             # A rerun can be refused by the same live scope lease that dispatch enforces.
             # Never offer a stacked dependent while its parent is still repairing (#561).
             from office import dispatch
-            waiting = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
-            waiting = [t for t in waiting if t and t["status"] == "changes_required"
-                       and not gates.worker_live(con, t.get("current_dispatch_id"))]
+            tasks_in_scope = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
+            live = [t for t in tasks_in_scope if t and t["status"] == "changes_required"
+                    and (gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], t["id"])))]
+            waiting = [t for t in tasks_in_scope if t and t["status"] == "changes_required"
+                       and not (gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], t["id"])))]
             ready, held = [], []
             for t in waiting:
                 owner = dispatch.scope_holder(con, run, t)
@@ -1404,12 +1418,17 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                     held.append(f"{t['id']} waits for {owner}'s repair session to end")
                 else:
                     ready.append(t)
+            if live and not ready:
+                note = f"; {'; '.join(held)}" if held else ""  # #561: still name the dependents the live repair holds
+                return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live) + note
             if ready:
                 from office import rerun
                 what = " in parallel" if len(ready) > 1 else ""
                 note = f"; {'; '.join(held)}" if held else ""
+                live_prompts = [f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live]
+                parts = [*live_prompts, *(rerun.recovery_hint(con, run, t['id']) for t in ready)]
                 return (f"{sid} RECHECK repairs ready{what}: "
-                        + " ; ".join(rerun.recovery_hint(con, run, t['id']) for t in ready) + note)
+                        + " ; ".join(parts) + note)
             if held:
                 held_rechecks.append(f"{sid} RECHECK: {'; '.join(held)}")
 
@@ -2125,10 +2144,17 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         blocking = [r for r in rows if r["state"] == "open" and not owned]
         coowner_fix = _coowner_accepted_fix(con, run, blocking) if blocking and how == "fixed" else []
         if blocking and how == "fixed" and not coowner_fix:
+            owner = next((r["task_id"] for r in blocking if r.get("task_id")), "<owner>")
+            owner_live = False
+            if owner != "<owner>":
+                otask = state.get_task(con, run["id"], owner)
+                if otask and (gates.worker_live(con, otask.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], owner))):
+                    owner_live = True
+            repair_cmd = f'office prompt {owner} -- "fix {spec}, then office submit"' if owner_live else f"office rerun {owner} --resume|--fresh"
             raise Refused("fix-unverified", f"{spec} is blocking: no accepted later revision from a "
                           "co-owner proves it fixed. A fix is not a dismissal; the independent lane "
                           "recheck must still verify the correction", scope=scope_id,
-                          next_step="office rerun <owner> --resume|--fresh after its repair, or "
+                          next_step=f"{repair_cmd} after its repair, or "
                                     f'office disposition {spec} dismissed --quote "<user\'s words>" '
                                     "only if the user chooses to waive it")
         if blocking and how != "fixed" and (how != "dismissed" or not quote):
@@ -2167,9 +2193,17 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         if how == "fix":
             for tid in sorted({r["task_id"] for r in rows if r.get("task_id")}, key=_tid_key):
                 t = state.get_task(con, run["id"], tid)
-                if t and t["status"] == "accepted":
-                    state.update_task(con, run["id"], tid, status="changes_required",
-                                      pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
+                if t:
+                    if t["status"] == "accepted":
+                        state.update_task(con, run["id"], tid, status="changes_required",
+                                          pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
+                    is_live = gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], tid))
+                    if is_live and t.get("current_dispatch_id"):
+                        state.enqueue(con, run, "notify_worker", {
+                            "dispatch_id": t["current_dispatch_id"],
+                            "task_id": tid,
+                            "text": f"APPROVED cleanup: fix {', '.join(codes)}, then office submit.",
+                        }, dedup_key=f"notify:{scope_id}:{tid}:{uuid.uuid4().hex[:6]}", max_attempts=1)
                     reopened.append(tid)
         settled = None
         if coowner_fix:
@@ -2193,13 +2227,27 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
     if settled or coowner_fix:
         from office import jobs
         jobs.kick(con, run["id"])
-    nxt = (" ; ".join(f"office rerun {t} --resume|--fresh" for t in reopened) if reopened
-           else "exceptions only; office status")
+    deliv_note = ""
+    if reopened:
+        nxt_parts = []
+        for tid in reopened:
+            task = state.get_task(con, run["id"], tid)
+            is_live = task and (gates.worker_live(con, task.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], tid)))
+            if is_live:
+                nxt_parts.append(f'office prompt {tid} -- "fix {", ".join(codes)}, then office submit"')
+            else:
+                nxt_parts.append(f"office rerun {tid} --resume|--fresh")
+        nxt = " ; ".join(nxt_parts)
+        if any("office prompt" in p for p in nxt_parts):
+            deliv_note = "; finding delivered to the live worker"
+    else:
+        nxt = "exceptions only; office status"
     return Result(lines=[f"{scope_id}:{','.join(codes)} {how}"
                          + (f" on the user's authority ({quote[:80]})" if blocking and not coowner_fix else "")
                          + (f"; accepted co-owner revision {', '.join(rev for _, rev in coowner_fix)}; recheck required"
                             if coowner_fix else "")
                          + (f"; cleanup routed to {', '.join(reopened)}" if reopened else "")
+                         + deliv_note
                          + (f"; {settled}" if settled else "")], next=nxt)
 
 

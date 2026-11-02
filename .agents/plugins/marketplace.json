@@ -8,7 +8,7 @@
       "name": "auto-office",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./plugin-dist"
       },
       "policy": {
         "installation": "AVAILABLE",

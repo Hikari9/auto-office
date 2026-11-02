@@ -1,0 +1,30 @@
+# Canonical model generations in the shipped catalog. Explicit identity is separate
+# from the broader model_family() vendor grouping used for reviewer independence.
+# These are migrated *shipped records*, not a claim of freshly probed availability.
+# New generations require a reviewed mapping and release provenance at publication.
+schema_version: 1
+generations:
+  claude-sonnet-5-5: {lineage_key: anthropic/claude-sonnet, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
+  claude-haiku-5-5: {lineage_key: anthropic/claude-haiku, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
+  claude-opus-5-5: {lineage_key: anthropic/claude-opus, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
+  gpt-5.6-sol: {lineage_key: openai/gpt-sol, generation_version: '5.6', release_status: released, provenance: shipped-catalog}
+  gpt-6.1-sol: {lineage_key: openai/gpt-sol, generation_version: '6.1', release_status: released, provenance: shipped-catalog}
+  gpt-5.6-luna: {lineage_key: openai/gpt-luna, generation_version: '5.6', release_status: released, provenance: shipped-catalog}
+  gpt-6-luna: {lineage_key: openai/gpt-luna, generation_version: '6', release_status: released, provenance: shipped-catalog}
+  gpt-6-astra: {lineage_key: openai/gpt-astra, generation_version: '6', release_status: released, provenance: shipped-catalog}
+  gpt-5.6-terra: {lineage_key: openai/gpt-terra, generation_version: '5.6', release_status: released, provenance: shipped-catalog}
+  gpt-6.1-terra: {lineage_key: openai/gpt-terra, generation_version: '6.1', release_status: released, provenance: 'OpenAI release 2026-10-26'}
+  gpt-5-codex: {lineage_key: openai/gpt-codex, generation_version: '5', release_status: released, provenance: shipped-catalog}
+  gemini-3.8-flash: {lineage_key: google/gemini-flash, generation_version: '3.8', release_status: released, provenance: shipped-catalog}
+  gemini-4-argon: {lineage_key: google/gemini-argon, generation_version: '4', release_status: released, provenance: shipped-catalog}
+  muse-spark-1.3-contributor-free: {lineage_key: meta/muse-spark, generation_version: '1.3', release_status: released, provenance: shipped-catalog}
+  step-5-preview-free: {lineage_key: stepfun/step, generation_version: '5', release_status: preview, provenance: 'local-evidence: Kilo Gateway launch recorded 2026-10-14; model identity not read back'}
+
+# Alias names are model-series labels, NOT regex-derived model generations.
+# They may resolve only to explicit released generations in the registry.
+aliases:
+  sonnet: anthropic/claude-sonnet
+  haiku: anthropic/claude-haiku
+  opus: anthropic/claude-opus
+  astra: openai/gpt-astra
+  luna: openai/gpt-luna

@@ -84,7 +84,7 @@ Auto Office turns those into runtime behavior rather than hoping every agent rem
 
 ### Install the skills as a plugin
 
-This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills, including the root `auto-office` entry skill. If `office` is missing, that skill asks once per session whether to install the CLI from GitHub (`uv tool install git+https://github.com/Hikari9/auto-office`) or use `auto-office-lean`, until a choice is saved. Section 1 is the manual CLI install.
+This repo is a plugin marketplace for both Claude Code and Codex / ChatGPT. The plugin ships the skills only; you still need the CLI above.
 
 ```bash
 # Claude Code
@@ -95,7 +95,15 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it and the plugin manifests carry no version. `scripts/check_ecosystem.py` enforces it.
+Both marketplaces install the generated `./plugin-dist` package, which exposes **exactly 16 skills**, including the full root `auto-office`. Verified against Claude Code 2.1.316 and codex-cli 0.163.0: a plugin skill is invoked only by its namespaced name, so the root skill is `/auto-office:auto-office` in Claude Code. A bare `/auto-office` is not available from a plugin (a same-named `commands/` entry or a plugin-root `SKILL.md` was tried and does not add it), and the plugin does not claim it. The skill documentation in the `/auto-office` form applies to a standalone skill install. The skill is discoverable before the `office` CLI is installed.
+
+`disable-model-invocation: true` (Claude Code) keeps the full hub, Lean, Intake and Takeover manual-only. `/auto-review` sets it too: it stays explicitly invocable, and model auto-invocation is disabled. Codex may not honor this flag; that is untested.
+
+Without the CLI, the root skill asks once whether to install it or use Lean. It hands off to Lean only on the user's choice, and saves that choice until reset.
+
+The repo-root `SKILL.md` and `skills/` are canonical. `python3 scripts/build_plugin_distribution.py --sync` regenerates `plugin-dist/`, the marketplace source; `--check` and `scripts/check_ecosystem.py` fail when it drifts. Eight retired skills keep their source paths for pinned runs but are not in the plugin.
+
+Verify after install: `claude plugin details auto-office@auto-office` lists 16 skills including `auto-office`. Plugin installation does not install the `office` CLI; run `office doctor` separately.
 
 ### 1. Install the CLI
 
@@ -122,7 +130,7 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The separately installed `/auto-office` skill offers `office install --no-hooks` during its explicit first-run onboarding. `office install` registers the CLI runtime and optional harness hooks, **not plugin skills**.
 
 | Agent / harness | After `office install` |
 |---|---|
@@ -354,7 +362,7 @@ flowchart TB
 
 The runtime then evaluates the current revision through the gates funded by the run:
 
-- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
+- deterministic task checks (the executor has already self-reviewed: one focused round for a new run, four lenses and 3 rounds for a run pinned to v3.1; Office has also proved each named fix test by reverting source);
 - dependency/current-amendment checks;
 - once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
 - later, run-level integration checks.
@@ -723,9 +731,11 @@ office submit                         planner/executor: submit a plan or work
 office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
 office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend options --prs|--no-prs --quote "<user approval>" --confirm   amend live task PR publishing
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
+office land --batch batch.json          ordered run/PR lanes, one version owner, one full suite before any merge
 office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
@@ -741,6 +751,16 @@ office doctor [--fix]
 office prune [-f]
 office cleanup --older|--run <id> [--apply|--decline]
 ```
+
+The `--no-prs` choice at `office start` is no longer permanent. If write access arrives while
+an Office run is in progress, the user can explicitly authorize
+`office amend options --prs --quote "<user's exact approval>" --confirm` (omit `--confirm` on an interactive
+terminal to accept the `y/N` prompt). Office records the old/new settings and authorization in `runs.db`
+(`office inspect events` / `office inspect run`), and queues PR synchronization for work already submitted.
+To switch **off**, use `office amend options --no-prs` with the same confirmation: Office refuses if an
+executor is still working with PR instructions or any PR/PR-sync operation already exists. Other start-only
+options remain frozen; a refused amendment explains why without changing the run. GitHub availability is
+checked before enabling, but a later push can still fail if repository write permissions are missing.
 
 Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
 

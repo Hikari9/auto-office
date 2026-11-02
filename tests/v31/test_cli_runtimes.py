@@ -48,7 +48,8 @@ def test_sync_saves_manifest_and_canonical_models_without_modifying_seed(isolate
     # More harnesses may have been registered since this draft was created.
     assert {"claude", "codex", "agy"} <= {e["key"] for e in statuses if e["configured"]}
     assert next(e for e in statuses if e["key"] == "opencode")["adapter"] == "registered"
-    assert next(e for e in statuses if e["key"] == "pi")["skill"] == "missing"
+    assert next(e for e in statuses if e["key"] == "pi")["skill"] == "ok"  # #926 ships skills/pi-cli
+    assert next(e for e in statuses if e["key"] == "gemini")["skill"] == "missing"
     for entry in entries:
         model_file = cli_runtimes.resolve(entry, "models")
         actual = json.loads(model_file.read_text(encoding="utf-8"))

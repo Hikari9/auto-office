@@ -21,7 +21,8 @@ def test_submit_refuses_open_round_three_finding_and_signals_the_orchestrator(en
     code, out = env.office("submit", cwd=wt, env=wenv)
 
     assert code == 4 and "self-review ledger refused submission" in out, out
-    assert "round 3 ended with a finding still open" in out, out
+    # #938: a new run's focused tier has a one-round cap, so a round-3 ledger is past it.
+    assert "ended with a finding still open" in out and "the round cap is spent" in out, out
     assert not env.con().execute("SELECT 1 FROM revisions WHERE task_id='T1'").fetchone()
     assert (wt / "OFFICE_SELF_REVIEW.md").exists(), "a refused submission must preserve its ledger"
     event = env.con().execute(

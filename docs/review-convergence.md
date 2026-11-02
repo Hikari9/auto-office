@@ -47,7 +47,7 @@ office start ──> plan ──> initial plan review ────────�
                                                                         │
           approve plan ──> dispatch tasks (parallel / stacked) <────────┘
                                │
-         executor: build in envelope -> checks -> four-lens self-review (<=3 rounds) -> preflight -> submit
+         executor: build in envelope -> checks -> focused self-review (1 round; v3.1: four lenses, <=3) -> preflight -> submit
                                │
                     task accepted on deterministic checks (no per-task independent review)
                                │
@@ -246,9 +246,16 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
   envelope. The seams (declared interfaces, dependencies, `accept:`, requirements, authority, other
   tasks' scope) are not theirs: when doing the work right needs a seam to move, they ask (`QUESTIONS`)
   instead of working around it.
-- Each task runs its deterministic checks and a four-lens self-review (security, edge cases,
-  platform and build, test strength) with a 3-round cap. `office preflight` enforces the ledger and
-  the cap; this mechanism is unchanged from 3.2.
+- Each task of a new run runs its deterministic checks and one focused self-review round (edge cases
+  and test strength, plus platform and build when the diff touches it). Security is not an executor lens:
+  the one convergence review of a lane that changes a security-sensitive path (matched by whole
+  path-segment words, so `product.py` and `writer.py` do not match) is told to cover it, and a sensitive
+  lane gets that review even when the run would not otherwise fund one. Office proves each medium or high
+  fix's named test by running it alone on a disposable copy of the commit with the task's non-test source
+  reverted: only a test failure counts as red (a collection error, timeout or missing command does not),
+  and it must pass unreverted. No named test or no pytest command in the task's checks records an
+  exemption instead of blocking. A run pinned to v3.1 keeps the four-lens self-review with a 3-round cap
+  and its tiers.
 - A task is accepted on its own deterministic checks. There is no routine per-task independent code
   review and no per-task visual gate; both moved to the lane.
 - **Pre-existing check failures.** When a task check fails, Office runs the same command on a checkout
