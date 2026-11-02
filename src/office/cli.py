@@ -98,7 +98,10 @@ Auto Office {ver}
                                     while plan review is open: re-pin the plan reviewer and re-run only that review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office config --run <id> --apply-routing --quote "<user's words>"
-                                    re-pin one run's roles and routing from the current config files
+                                    re-pin one run's roles, routing and quota from the current config files
+  office config --run <id> --apply-verification --quote "<user's words>"
+                                    re-pin one run's check timeouts and check concurrency
+  office config --run <id> <key>    the value that run pinned at start (what its gates use)
   office queue list|add|pause|resume|priority|demote|auto
                                     the machine-level scheduler queue (--run <id> [--task T] for a run)
   office web start|stop|status|serve [--port N] [--fixture small|large]
@@ -447,8 +450,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
     s.add_argument("--apply-routing", action="store_true",
-                   help="with --run: re-pin roles and routing from the current config files into that run")
-    s.add_argument("--quote", help="with --apply-routing: the user's words authorizing the re-pin")
+                   help="with --run: re-pin roles, routing and quota from the current config files into that run")
+    s.add_argument("--apply-verification", action="store_true",
+                   help="with --run: re-pin the check timeouts and check concurrency from the current config files")
+    s.add_argument("--quote", help="with --apply-routing or --apply-verification: the user's words authorizing the re-pin")
     s = sp.add_parser("queue", parents=[common])
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
@@ -898,13 +903,26 @@ def _run(args, unknown) -> int:
             raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
         return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard,
                                     sizes=[v.strip().upper() for v in args.size.split(",")] if args.size is not None else None), args)
-    if cmd == "config" and args.apply_routing:
+    if cmd == "config" and (args.apply_routing or args.apply_verification):
         from office import configcmd
-        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
-            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
+        flag = "--apply-routing" if args.apply_routing else "--apply-verification"
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path or \
+                (args.apply_routing and args.apply_verification):
+            raise OfficeError("usage", f"{flag} re-pins a run; it takes only --run and --quote", exit_code=2)
+        apply = configcmd.apply_run_routing if args.apply_routing else configcmd.apply_run_verification
         con = _con()
         try:
-            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
+            return emit(apply(con, getattr(args, "run_arg", None), args.quote), args)
+        finally:
+            con.close()
+    if cmd == "config" and getattr(args, "run_arg", None) and args.key:
+        from office import configcmd
+        if args.value is not None or args.unset or args.tier:
+            raise OfficeError("usage", "a run's pinned config is read-only: office config --run <id> <key> reads it; "
+                              "--apply-routing or --apply-verification re-pins from the config files", exit_code=2)
+        con = _con()
+        try:
+            return emit(configcmd.run_get(con, args.run_arg, args.key, args.origin, cwd), args)
         finally:
             con.close()
     if cmd == "config":
