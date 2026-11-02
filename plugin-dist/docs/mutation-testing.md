@@ -16,7 +16,7 @@ browser in the way:
 
 | Module | Functions audited | Tests that exercise them |
 | --- | --- | --- |
-| `scoring` | capability floor, reward tie-break, harness major, triple normalisation | `test_scoring_properties`, `test_trust_major`, `test_intelligence_floor`, `test_sonnet_5_5`, `test_haiku_5_5` |
+| `scoring` | capability floor, reward tie-break, harness major, triple normalisation | `test_scoring_properties`, `test_trust_major`, `test_intelligence_floor`, `test_sonnet_5_5` |
 | `routing` | `route`, `candidate_id`, `preferred_rank` | `test_routing_properties`, `test_adaptive_routing`, `test_quota_routing`, `test_task_aware_routing`, `test_alias_resolution` |
 | `scheduler` | scoring, ready order, admission | `test_scheduler` |
 | `guide` | dependency readiness | `test_dependency_readiness` |
