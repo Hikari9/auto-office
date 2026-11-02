@@ -127,6 +127,6 @@ An accepted trial revision teaches effectiveness through the existing attributio
 
 Set `routing.discovery.enabled: false` at the user tier (`office config routing.discovery.enabled false`) or the repo tier (add `--repo`) to disable discovery for future runs. A repo-tier value wins over the user tier, so read back the effective value and its source with `office config routing.discovery.enabled --show-origin`. This leaves stored evidence and trust state intact and needs no code change.
 
-Existing runs keep their pinned config. If the user authorizes a live-run routing change, `office config --run <id> --apply-routing --quote "<words>"` re-pins it from the current config files. Inspect the result before further dispatch. A config edit alone does not change a live run or stop a live worker.
+Existing runs keep their pinned config. If the user authorizes a live-run routing change, `office config --run <id> --apply-routing --quote "<words>"` re-pins its roles, routing and quota (including `quota.reserve_percent`) from the current config files. Inspect the result before further dispatch. A config edit alone does not change a live run or stop a live worker.
 
 Pre-#494 runs retain discovery-off behavior and their old ceiling. Their 3.0 and v3.1 paths and stored decisions stay readable and replayable, and discovery-off decisions preserve their prior hashes. Rolling back discovery does not rewrite history, resurrect retired models or waive a safety gate.
