@@ -378,6 +378,8 @@ def check_full(adapter: dict, rows: list[dict] | None = None) -> tuple[list[str]
         problems.append(f"invocation.executable {exe} is a shell: a prompt would pass through shell parsing")
     if (adapter.get("safe_prompt_passing") or {}).get("shell") is True:
         problems.append("safe_prompt_passing.shell is true: the prompt must never pass through a shell")
+    if (bad := adapters.readonly_args_problem(adapter)):
+        problems.append(bad)
     profiles = adapter.get("office_profiles")
     if not isinstance(profiles, dict) or not profiles:
         problems.append("office_profiles declares no launch form (worker, reviewer or vision)")

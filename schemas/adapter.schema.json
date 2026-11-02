@@ -204,7 +204,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Harness flags that leave a reviewer only read tools. With a worker profile and no reviewer profile, Office derives a headless reviewer profile (worker argv prefixed with these flags, verify_worktree_unchanged on, no vision). Declare it only for a harness with no verified read-only sandbox."
+      "description": "Harness flags that leave a reviewer only read tools. With a worker profile and no reviewer profile, Office derives a headless reviewer profile (worker argv prefixed with these flags, verify_worktree_unchanged on, no vision). Office accepts it only for read-only forms it has vetted per harness (pi: --tools with only read,grep,find,ls); any other value is ignored and fails `office harness validate`."
     }
   }
 }

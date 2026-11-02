@@ -479,26 +479,48 @@ def test_role_executor_allows_the_same_rows_for_executor_only(monkeypatch):
     assert "pi/gpt-6-luna@high: allow" not in _effective("code_reviewer", monkeypatch)
 
 
-def test_a_user_adapter_gets_a_derived_read_only_reviewer_from_one_line(tmp_path, monkeypatch):
-    """A harness with a worker form and `reviewer_readonly_args` needs no hand-written reviewer profile."""
+def _user_adapter(tmp_path, monkeypatch, *, exe, args, caps=("builder",)):
     import yaml
-    from office import harnesscmd
     adir = tmp_path / "adapters"
-    adir.mkdir()
+    adir.mkdir(exist_ok=True)
     (adir / "acme.yaml").write_text(yaml.safe_dump({
-        "id": "acme", "invocation": {"executable": "acme"}, "capabilities": ["builder"],
-        "effort_mapping": {"high": "high"}, "reviewer_readonly_args": ["--read-only"],
+        "id": "acme", "invocation": {"executable": exe}, "capabilities": list(caps),
+        "effort_mapping": {"high": "high"}, "reviewer_readonly_args": args,
         "office_profiles": {"worker": {"argv": ["run", "--model", "{model}", "--effort", "{effort}"],
                                        "prompt": "stdin", "output": "stdout", "herdr_kind": "acme",
                                        "interactive": {"argv": ["--model", "{model}"]}}}}))
     monkeypatch.setattr(adapters, "user_adapter_files", lambda: sorted(adir.glob("*.yaml")))
-    acme = adapters.load_all()["acme"]
+    return adapters.load_all()["acme"]
+
+
+def test_a_user_adapter_for_a_vetted_harness_gets_a_derived_read_only_reviewer(tmp_path, monkeypatch):
+    from office import harnesscmd
+    acme = _user_adapter(tmp_path, monkeypatch, exe="pi", args=["--tools", "read,grep"])
     prof = adapters.profile(acme, "reviewer")
-    assert prof["argv"] == ["--read-only", "run", "--model", "{model}", "--effort", "{effort}"]
+    assert prof["argv"] == ["--tools", "read,grep", "run", "--model", "{model}", "--effort", "{effort}"]
     assert prof["verify_worktree_unchanged"] is True and "interactive" not in prof and "herdr_kind" not in prof
     assert "review" in acme["capabilities"] and adapters.profile(acme, "vision") is None
     result = harnesscmd.model_add("acme/vendor/m1", ["high"], roles=["reviewer"])
     assert result.data["allowed_roles"] == ["code_reviewer", "plan_reviewer"]
+
+
+@pytest.mark.parametrize("exe,args", [
+    ("acme", ["--read-only"]),                      # an unvetted harness: its own text is never trusted
+    ("pi", ["--tools", "read,edit"]),               # a write tool
+    ("pi", ["--tools", "read,bash"]),               # bash cannot be limited to read-only
+    ("pi", ["--tools", "read", "--approve"]),       # extra flags ride along
+    ("pi", ["--yolo", "--tools", "read"]),
+    ("pi", ["--tools", ""]),
+])
+def test_unvetted_or_write_capable_reviewer_args_derive_nothing_and_fail_validation(tmp_path, monkeypatch, exe, args):
+    from office import harnesscmd
+    acme = _user_adapter(tmp_path, monkeypatch, exe=exe, args=args)
+    assert adapters.profile(acme, "reviewer") is None, "no reviewer profile is derived"
+    assert "review" not in acme["capabilities"], "the review capability is not granted"
+    assert adapters.readonly_args_problem(acme)
+    with pytest.raises(Exception) as exc:
+        harnesscmd.model_add("acme/vendor/m1", ["high"], roles=["reviewer"])
+    assert "no reviewer launch profile" in str(exc.value)
 
 
 def test_an_explicit_reviewer_profile_is_never_overridden_by_the_derived_form():
@@ -546,3 +568,76 @@ def test_a_failed_policy_write_rolls_the_registration_back(monkeypatch):
     assert not [r for r in _rows() if r.get("model_id") == "gpt-6-luna"], "the catalog rows were rolled back"
     monkeypatch.setattr(routecmd, "change", real)
     assert "pi/gpt-6-luna@high: allow" not in "\n".join(routecmd.policy(role="code_reviewer", effective=True).lines)
+
+
+# ---------------------------------------------------------------- end to end: a pi reviewer through gates.run_reviewer
+
+LUNA = "pi/openai/gpt-6-luna@high"
+PI_LUNA_ENV = {"FAKE_PI_MODELS": "openai/gpt-6-luna 1.0M 131.1K yes yes"}
+
+
+def _pi_review(env, reviewer, *, review_as=True):
+    """A codex executor, then a code review pinned to the registered pi/gpt-6-luna@high reviewer."""
+    from office import harnesscmd
+    _install_pi(env)
+    harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=reviewer)
+    args = ["dispatch", "T1", "--as", "codex/gpt-6-luna@high"]
+    if review_as:
+        args += ["--review-as", LUNA]
+    return env.office(*args, env=PI_LUNA_ENV, check=0)
+
+
+def _events(env, name):
+    con = env.con()
+    try:
+        return [dict(r) for r in con.execute("SELECT * FROM events WHERE kind=?", (name,)).fetchall()]
+    finally:
+        con.close()
+
+
+def _pi_reviews(env):
+    return [c for c in env.calls() if c.get("role") == "convergence_reviewer" and c.get("harness") == "pi"]
+
+
+@pytest.mark.approved
+def test_a_pi_reviewer_launches_with_the_read_only_tool_allowlist_and_its_reply_is_ingested(env):
+    _pi_review(env, [PASS])
+    calls = _pi_reviews(env)
+    assert calls, env.calls()
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--tools") + 1] == "read,grep,find,ls", argv
+    assert "--print" in argv and "--no-approve" in argv and "--approve" not in argv
+    assert not _events(env, "review.worktree_changed")
+    con = env.con()
+    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+    assert gate["verdict"] == "APPROVED" and "pi" in (gate["route"] or ""), gate
+
+
+@pytest.mark.approved
+def test_a_pi_reviewer_that_changes_the_worktree_is_degraded_and_its_verdict_is_not_used(env):
+    _pi_review(env, [{"write": {"planted.txt": "the reviewer wrote this"}, "reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    assert _events(env, "review.worktree_changed"), "the change is recorded"
+    con = env.con()
+    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+    assert gate["verdict"] != "APPROVED", gate
+    d = dict(con.execute("SELECT * FROM dispatches WHERE role='code_reviewer' ORDER BY started_at DESC").fetchone())
+    assert d["outcome"] == "environment_failure", d
+
+
+@pytest.mark.approved
+def test_a_pi_reviewer_with_an_empty_reply_is_not_approved(env):
+    _pi_review(env, [{"exit": 0}, {"exit": 0}, {"exit": 0}])
+    assert _pi_reviews(env), "the pi reviewer was the route that ran"
+    con = env.con()
+    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+    assert gate["verdict"] != "APPROVED", gate
+
+
+@pytest.mark.approved
+def test_a_pi_reviewer_with_a_malformed_reply_is_not_approved(env):
+    _pi_review(env, [{"reply": "looks fine to me"}, {"reply": "still fine"}, {"reply": "ok"}])
+    assert _pi_reviews(env), "the pi reviewer was the route that ran"
+    con = env.con()
+    gate = dict(con.execute("SELECT * FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC").fetchone())
+    assert gate["verdict"] != "APPROVED", gate
