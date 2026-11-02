@@ -61,9 +61,16 @@ def _send_is_report(after: str) -> bool:
 
 
 _OTHER_TERMS = re.compile(
-    r"\b(?<!\w-)(?:deploy|publish|release|email|notify users|delete|drop table|truncate|"
+    r"\b(?<!\w-)(?:deploy|publish|release|notify users|delete|drop table|truncate|"
     r"force.?push|merge (?:to|into) main|migrat(?:e|ion) (?:prod|production)|payment|charge|"
     r"rotate (?:key|secret)|credentials?)\b(?!-\w)", re.I)
+# Emailing people is an authority action; naming an email field, address or error key is not (#543).
+_EMAIL_OUTBOUND = re.compile(
+    r"\b(?:(?:bulk|mass)[ -]e-?mails?|e-?mail (?:blast|campaign)s?|"
+    r"e-?mail(?:s|ed|ing)? (?:out\b|to (?:the |all |every |our |each )?(?:users?|customers?|members?|people|team|everyone|"
+    r"subscribers?|recipients?|list|attendees?|donors?|staff)\b)|"
+    r"e-?mail(?:s|ed|ing)? (?:the |all |every |our |each )?(?:users?|customers?|members?|people|team|everyone|subscribers?|"
+    r"recipients?|attendees?|donors?|staff|list)\b)", re.I)
 _PROD_FLAG = re.compile(r"(?<![\w-])--prod\b", re.I)
 _SEND_WORD = re.compile(r"\b(?<!\w-)send\b(?!-\w)", re.I)
 
@@ -74,9 +81,9 @@ class _AuthorityTerms:
 
     def search(self, text: str):
         found = _OTHER_TERMS.search(text)
-        prod_flag = _PROD_FLAG.search(text)
-        if prod_flag and (found is None or prod_flag.start() < found.start()):
-            found = prod_flag
+        for extra in (_PROD_FLAG.search(text), _EMAIL_OUTBOUND.search(text)):
+            if extra and (found is None or extra.start() < found.start()):
+                found = extra
         for m in _SEND_WORD.finditer(text):
             after = text[m.end():].lstrip(" \t")
             if not _send_is_report(after) and (found is None or m.start() < found.start()):
