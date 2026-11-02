@@ -599,16 +599,15 @@ def _finish(con, run_id: str, seqs: list[int], token: str, state_name: str, erro
                              error[:300], until, attempts - 1 if defer else attempts, run_id, seq, token))
 
 
-def _wake_message(run: dict, seqs: list[int], action: str, human: bool) -> str:
-    """The same authority-guarded continuation for both verified transports."""
+def _wake_message(run: dict, seqs: list[int], action: str, human: bool, change: str = "new lifecycle transitions") -> str:
+    """The same authority-guarded continuation for both verified transports. #1029 (Rico, 2026-11-02): one
+    line naming what changed and the authorized next action; the standing rules (follow only that action, a
+    submit is not success, a wake may be a duplicate) live in the orchestrator skill, read once."""
     guard = (" HUMAN DECISION REQUIRED: ask the user and stop. No authorization, "
              "waiver, approval, or merge may be inferred." if human else "")
-    msg = (f"Auto Office run {run['id']} has new lifecycle transitions (through event {max(seqs)}). "
-           f"Read `office --run {run['id']} context`, then follow only its authorized next action; "
-           "continue through checks, independent reviews and closeout until a genuine wait or human decision. "
-           "Do not infer success from a submit. This notification may be a duplicate; use fresh Office state."
-           + guard)
-    if action.startswith(("ctx-high:", "office.reinstalled:")):
+    appendix = action.startswith(("ctx-high:", "office.reinstalled:"))
+    msg = wake_line(run["id"], change, "office context" if appendix else action, through=max(seqs)) + guard
+    if appendix:
         msg += "\n\n" + action
     return msg
 
@@ -672,7 +671,7 @@ def poll(con, run: dict) -> str:
                 _finish(con, run["id"], seqs, token, "settled", "transition was settled before delivery")
                 return "no-action"
             signature, action, human = current
-            msg = _wake_message(run, seqs, action, human)
+            msg = _wake_message(run, seqs, action, human, _what_changed(con, run["id"], seqs))
             # Herdr prompt landed != root observation. The next `office context`
             # advances the distinct observed cursor; no repeated model keepalives.
             landed = dispatch.submit_prompt(binding["agent_name"], msg, pane=binding["pane_id"])
@@ -689,6 +688,33 @@ def poll(con, run: dict) -> str:
         _finish(con, run["id"], seqs, token, "awaiting_attachment",
                 f"ambiguous prompt transport {type(exc).__name__}: {exc}; inspect pane")
         return "unknown"
+
+
+WAKE_CHANGE_MAX = 100
+WAKE_NEXT_MAX = 160
+
+
+def _one_line(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _what_changed(con, run_id: str, seqs: list[int]) -> str:
+    """The newest triggering event's summary, the transition the root has not seen yet."""
+    keys = ",".join("?" for _ in seqs)
+    row = con.execute(f"SELECT summary FROM events WHERE run_id=? AND seq IN ({keys}) ORDER BY seq DESC LIMIT 1",
+                      (run_id, *seqs)).fetchone() if seqs else None
+    return (row[0] if row else None) or "new lifecycle transitions"
+
+
+def wake_line(run_id: str, change: str, action: str, *, through: int | None = None) -> str:
+    """`Run 67dcc801 (through event 812): T4 submitted; next: review L-egress. Run office --run <id> context.`
+    The event id is the coalescing contract (#988: one wake carries the latest event); the command names the
+    full run id so it never resolves to another run."""
+    nxt = _one_line(str(action or "office context").removeprefix("next:").strip(), WAKE_NEXT_MAX).rstrip(".")
+    seen = f" (through event {through})" if through is not None else ""
+    return (f"Run {run_id[:8]}{seen}: {_one_line(change, WAKE_CHANGE_MAX).rstrip('.')}; next: {nxt}. "
+            f"Run `office --run {run_id} context`.")
 
 
 def observe(con, run: dict) -> None:
@@ -959,7 +985,7 @@ def _native_poll(con, run: dict, key: str, session: str, generation: int) -> str
         try:
             # Documented Claude Code asyncRewake contract: exit 2 and stderr
             # become a system reminder in the *existing idle* session.
-            sys.stderr.write(_wake_message(run, seqs, action, human) + "\n")
+            sys.stderr.write(_wake_message(run, seqs, action, human, _what_changed(con, run["id"], seqs)) + "\n")
             sys.stderr.flush()
         except OSError as exc:
             _finish(con, run["id"], seqs, token, "awaiting_attachment",
