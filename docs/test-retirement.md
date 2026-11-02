@@ -8,13 +8,13 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 
 | | Before | After |
 |---|---:|---:|
-| Test modules outside `tests/contracts/` | 298 | 295 |
-| Collected nodes (`pytest --all --collect-only tests`) | 6,407 | 6,247 |
-| Nodes removed | 224 | |
-| Nodes added | | 64 (all in `PDC`) |
-| Test functions deleted (rows below) | | 55 (0 rewritten) |
+| Test modules outside `tests/contracts/` | 307 | 306 |
+| Collected nodes (`pytest --all --collect-only tests`) | 6,733 | 6,576 |
+| Nodes removed | 225 | |
+| Nodes added | | 68 (64 in `PDC`, 1 rewritten node in `test_lineage_supersession_811.py`, 3 in `test_test_retirement_inventory.py`) |
+| Test functions deleted or rewritten (rows below) | | 56 (55 deleted, 1 rewritten) |
 
-Check the row count against `git diff --stat`: 3 modules deleted (16 functions) plus 39 functions removed from 7 retained modules is 55 removed `def test_` lines, and no function is rewritten. `PDC` adds 21 functions (64 nodes).
+Before is the rebased base `5030f91f` (main after #988). Check the row count against `git diff --stat`: 3 modules deleted (16 functions), 39 functions removed from 7 retained modules and 1 function replaced in `test_lineage_supersession_811.py` is 56 removed `def test_` lines. `PDC` adds 21 functions (64 nodes), the 811 rewrite adds 1 and `test_test_retirement_inventory.py` adds 3.
 
 ## Baseline failure name
 
@@ -30,6 +30,12 @@ Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at
 | Missing or non-numeric score passes a size floor | `benchmark_gate`: numeric-score check disabled | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value`, `PDC::test_a_floor_exception_waives_only_its_exact_scope` |
 | Slate order | `ideal_seed` returns the slate reversed | `PDC::test_the_router_follows_the_preferred_slate_order_and_falls_through_it` (5 nodes), `PDC::test_the_preference_summary_reports_each_slate_route_once` (5 nodes) |
 | Planner gear table | `candidates._preferred_seed`: planner branch disabled | `PDC::test_a_planner_follows_its_gear_table_in_data_order` (3 nodes) |
+| Planner entry loses its harness | `executor_slates._seed_entry`: `harness` dropped from the copied keys | `PDC::test_a_planner_follows_its_gear_table_in_data_order` (3 nodes) |
+| Gated catalog row reported available | `route_policy.row_status`: every row `available` | `test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` |
+| Catalog row's source effort disagrees with its effort | `catalog/routes.tsv`: `gpt-6.1-terra@high` `source_effort` set to `low` | `test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` |
+| Test module added without an inventory row | inventory row for `PDC` removed | `tests/test_test_retirement_inventory.py::test_the_inventory_lists_exactly_the_test_modules_that_exist_plus_the_retired_ones` |
+| Retired module still marked retire after returning | `test_haiku_5_5.py` row set to `keep` | `tests/test_test_retirement_inventory.py::test_the_inventory_lists_exactly_the_test_modules_that_exist_plus_the_retired_ones` |
+| Inventory totals drift from rows | Totals line `retire` raised by one | `tests/test_test_retirement_inventory.py::test_the_inventory_totals_match_its_rows` |
 | Restriction by harness | `model_restriction`: `allowed_harnesses` check disabled | `PDC::test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data[claude-sonnet-5-5]` |
 | Restriction by size | `model_restriction`: `allowed_sizes` check disabled | `PDC::test_model_restrictions_bind_exactly_the_sizes_and_harnesses_in_data[claude-opus-5-5]` |
 | Floor exception ignores effort | `floor_exception`: effort comparison removed | `PDC::test_a_floor_exception_waives_only_its_exact_scope` (2 nodes) |
@@ -118,10 +124,11 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_alias_high_now_invokes_sonnet_5_5` | 1 | deleted | `tests/test_alias_resolution.py::test_alias_is_offered_at_every_effort_of_the_newest_member` (generic alias resolution). Obsolete part: the shipped Sonnet alias's invocation target and score are catalog data and are no longer asserted. |
 | `tests/v31/test_issue811_terra_supersession.py::test_six_terra_rows_are_present_and_only_probed_efforts_dispatch` | 1 | deleted | Obsolete: pins six catalog rows and their scores. Eligible-but-undispatchable rule: `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
 | `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
+| `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` | 1 | rewritten | `tests/v31/test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` (every catalog row: source effort matches its effort, a `dispatchable: false` row is never `available`); `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`. Obsolete part: the six-effort score table and the per-effort dispatchable roster are catalog data. |
 
 ## Module inventory
 
-Every test module under `tests/` except `tests/contracts/`, at the base commit. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
+Every test module under `tests/` except `tests/contracts/`: the base commit's modules, the nine modules main added after the inventory base, and the two modules this change adds. `keep` means no change; the reason column is filled for every other disposition. `historical-diagnostic` is a classification only: nothing was moved, marked or skipped.
 
 | Module | Disposition | Reason |
 |---|---|---|
@@ -163,6 +170,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/test_session_end_hook.py` | keep |  |
 | `tests/test_shipped_catalog_tables.py` | keep |  |
 | `tests/test_spoke_receipt_integrity.py` | keep |  |
+| `tests/test_test_retirement_inventory.py` | keep | added by this change: checks this inventory against the modules that exist |
 | `tests/test_trust_alias_625.py` | keep |  |
 | `tests/test_trust_conformance.py` | keep |  |
 | `tests/test_v3_instruction_contract.py` | keep |  |
@@ -283,6 +291,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_issue_712_deploy_artifacts.py` | keep |  |
 | `tests/v31/test_issue_714_topological_restack.py` | keep |  |
 | `tests/v31/test_issue_721_accepted_route.py` | keep |  |
+| `tests/v31/test_issue_730_run_base.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_issue_734_fetched_base.py` | keep |  |
 | `tests/v31/test_issue_740_recovery.py` | keep |  |
 | `tests/v31/test_issue_740_review_correctness.py` | keep |  |
@@ -298,6 +307,13 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_issue_845_user_allow.py` | keep |  |
 | `tests/v31/test_issue_856_stale_accepted_restack.py` | keep |  |
 | `tests/v31/test_issue_860_quota_pool_reroute.py` | keep |  |
+| `tests/v31/test_issue_895_false_stalls.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_896_amend_contract_route.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_897_full_suite_timeout.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_918_busy_reply_ingest.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_920_reinstall_wake.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_921_route_recovered.py` | keep | added on main after the inventory base; untouched by this change |
+| `tests/v31/test_issue_922_919_wake_default.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_job_ownership.py` | keep |  |
 | `tests/v31/test_kilo_registration.py` | keep |  |
 | `tests/v31/test_land.py` | keep |  |
@@ -305,7 +321,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_landing_gaps.py` | keep |  |
 | `tests/v31/test_lane_gate_revoke.py` | keep |  |
 | `tests/v31/test_launch_argv_evidence.py` | keep |  |
-| `tests/v31/test_lineage_supersession_811.py` | keep |  |
+| `tests/v31/test_lineage_supersession_811.py` | consolidate | the Terra score and effort-roster node is replaced by a data-driven catalog property |
 | `tests/v31/test_live_delivery_stall.py` | keep |  |
 | `tests/v31/test_model_floor.py` | keep |  |
 | `tests/v31/test_model_lineages_610.py` | keep |  |
@@ -326,6 +342,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_plan_path.py` | keep |  |
 | `tests/v31/test_plan_review_lifecycle.py` | keep |  |
 | `tests/v31/test_planner_amend_serial.py` | keep |  |
+| `tests/v31/test_policy_data_contracts.py` | keep | added by this change: data-driven replacement for the retired roster tests |
 | `tests/v31/test_preexisting_checks.py` | keep |  |
 | `tests/v31/test_preflight.py` | keep |  |
 | `tests/v31/test_prompt_landed_baseline.py` | keep |  |
@@ -392,6 +409,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/v31/test_visual_port_conflict.py` | keep |  |
 | `tests/v31/test_visual_preflight.py` | keep |  |
 | `tests/v31/test_wait.py` | keep |  |
+| `tests/v31/test_wake_coalesce.py` | keep | added on main after the inventory base; untouched by this change |
 | `tests/v31/test_worktree_setup.py` | keep |  |
 | `tests/web/browser/test_agents.py` | historical-diagnostic | drives a real browser through Playwright and skips without it; kept for on-demand UI diagnosis |
 | `tests/web/browser/test_allocation.py` | historical-diagnostic | drives a real browser through Playwright and skips without it; kept for on-demand UI diagnosis |
@@ -424,7 +442,7 @@ Every test module under `tests/` except `tests/contracts/`, at the base commit. 
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 266, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 277, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 

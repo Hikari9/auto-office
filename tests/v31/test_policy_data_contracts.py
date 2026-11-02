@@ -122,8 +122,9 @@ def test_the_preference_summary_reports_each_slate_route_once(size):
 def test_a_planner_follows_its_gear_table_in_data_order(gear):
     flat = [{"model_id": "synthetic-flat", "effort": "medium", "harness": "claude"}]
     seed = candidates._preferred_seed({"preferred_seed": flat}, {"gear": gear}, "S", role="planner")
-    assert [(row["model_id"], row["effort"]) for row in seed] == [
-        (row["model_id"], row["effort"]) for row in POLICY["planner_preferred"][gear]]
+    # The harness is compared too: an entry the data pins to a harness must keep it, and an entry with none must not gain one.
+    assert [(row["model_id"], row["effort"], row.get("harness")) for row in seed] == [
+        (row["model_id"], row["effort"], row.get("harness")) for row in POLICY["planner_preferred"][gear]]
 
 
 @pytest.mark.parametrize("gear", [None, *config.LEGACY_GEARS,
