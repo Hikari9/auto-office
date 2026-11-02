@@ -172,7 +172,8 @@ def parse_normalized(path: Path) -> list[dict]:
             "model": entry.get("model"), "occurred_at": entry.get("occurred_at"),
             "role": entry.get("role"), "phase": entry.get("phase"),
             **{f: _int(entry.get(f)) for f in TOKEN_FIELDS},
-            "cost_usd": float(cost) if isinstance(cost, (int, float)) and kind != "unknown" else None,
+            "cost_usd": (float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                         and kind != "unknown" else None),
             "cost_kind": kind, "quota_units": entry.get("quota_units"),
             "source": "normalized-file", "source_path": str(path),
         })
@@ -218,10 +219,10 @@ _UPSERT = (
     f", cost_usd=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_usd ELSE cost_usd END"
     f", cost_kind=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_kind ELSE cost_kind END"
     ", run_id=CASE WHEN attribution='office' THEN run_id ELSE excluded.run_id END"
-    ", dispatch_id=CASE WHEN attribution='office' THEN dispatch_id ELSE excluded.dispatch_id END"
-    ", task_id=CASE WHEN attribution='office' THEN task_id ELSE excluded.task_id END"
-    ", role=CASE WHEN attribution='office' THEN role ELSE excluded.role END"
-    ", phase=CASE WHEN attribution='office' THEN phase ELSE excluded.phase END"
+    ", dispatch_id=CASE WHEN attribution='office' THEN COALESCE(dispatch_id, excluded.dispatch_id) ELSE excluded.dispatch_id END"
+    ", task_id=CASE WHEN attribution='office' THEN COALESCE(task_id, excluded.task_id) ELSE excluded.task_id END"
+    ", role=CASE WHEN attribution='office' THEN COALESCE(role, excluded.role) ELSE excluded.role END"
+    ", phase=CASE WHEN attribution='office' THEN COALESCE(phase, excluded.phase) ELSE excluded.phase END"
     ", attribution=CASE WHEN attribution='office' THEN attribution ELSE excluded.attribution END"
 )
 
@@ -361,9 +362,14 @@ def _missing(rows: list[dict]) -> dict:
     return {f: sum(1 for r in rows if r[f] is None) for f in TOKEN_FIELDS}
 
 
+def _task_of(row: dict) -> str | None:
+    """A row belongs to a task only through its dispatch. A usage file can name a task; it cannot pick one."""
+    return row["task_id"] if row["dispatch_id"] else None
+
+
 def _task_ids(rows: list[dict], task_ids: list[str]) -> list[str]:
-    """The listed tasks, then any task a usage row names: a cancelled task keeps its spend visible."""
-    return [*task_ids, *sorted({r["task_id"] for r in rows if r["task_id"]} - set(task_ids))]
+    """The listed tasks, then any task a dispatch-linked row names: a cancelled task keeps its spend visible."""
+    return [*task_ids, *sorted({_task_of(r) for r in rows if _task_of(r)} - set(task_ids))]
 
 
 def _cost(rows: list[dict]) -> str:
@@ -390,6 +396,11 @@ def _labelled(rows: list[dict]) -> str:
             f"cost {_cost(rows)}")
 
 
+def _listed_tasks(con, run: dict) -> list[str]:
+    from office import state
+    return [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
+
+
 def _office_rows(con, run_id: str) -> list[dict]:
     if not has_table(con):
         return []
@@ -407,26 +418,28 @@ def status_lines(con, run: dict, task_ids: list[str]) -> tuple[list[str], list[s
     lines = [f"usage: {_labelled(rows)}"]
     lines += [f"usage run/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(rows).items())]
     for tid in _task_ids(rows, task_ids):
-        mine = [r for r in rows if r["task_id"] == tid]
+        mine = [r for r in rows if _task_of(r) == tid]
         if not mine:
             lines.append(f"usage {tid}: unknown (no usage attributed to this task)")
         lines += [f"usage {tid}/{role}: {_labelled(rs)}" for role, rs in sorted(_by_role(mine).items())]
+    if not on:
+        lines.append("usage: collection is off; figures are from when it was on")
     return lines, []
 
 
 def inspect(con, run: dict) -> Result:
     """Measured usage only. Disabled or empty says so; nothing is estimated."""
-    from office import state
     on = enabled(run)
+    task_ids = _listed_tasks(con, run)
     if not has_table(con):
         msg = ("economics collection is disabled (economics.collect: false); no usage data" if not on
                else "no usage recorded for this run yet")
-        return Result(lines=[msg], next=("office economics ingest" if on else
-                                         "office config economics.collect true  # opt in"),
+        unknown = [f"task {tid}: unknown (no usage attributed to this task)" for tid in task_ids] if on else []
+        return Result(lines=[msg, *unknown], next=("office economics ingest" if on else
+                                                   "office config economics.collect true  # opt in"),
                       data={"enabled": on, "rows": 0})
     rows = [dict(r) for r in con.execute("SELECT * FROM usage_events WHERE run_id=?", (run["id"],))]
     office_rows = [r for r in rows if r["attribution"] == "office"]
-    task_ids = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"]
     lines = [f"economics: collection {'enabled' if on else 'disabled (showing data recorded while enabled)'}"]
     if not office_rows:
         lines.append("no Office-attributed usage recorded for this run")
@@ -445,7 +458,7 @@ def inspect(con, run: dict) -> Result:
     by_task, unmeasured = [], []
     lines.append("task/role: turns | input | output | cache read | cache write | cost")
     for tid in _task_ids(office_rows, task_ids):
-        mine = [r for r in office_rows if r["task_id"] == tid]
+        mine = [r for r in office_rows if _task_of(r) == tid]
         if not mine:
             unmeasured.append(tid)
             lines.append(f"  task {tid}: unknown (no usage attributed to this task)")
