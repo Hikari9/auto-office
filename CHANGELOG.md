@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.12
+
+- feat(review): reviewers launch like executors. pi reviews in a Herdr pane (its pane form may write only its reply, and the worktree guard still applies), and its read-only headless form is the CLI fallback. A pane-capable reviewer that ran headless is announced in status (#1027).
+
 ## 3.15.11
 
 - fix(routing): an exhausted route (0% headroom) is never within the quota reserve, even when a run pins `quota.reserve_percent: 0`, so Codex at 0% weekly no longer stays the first reviewer.
