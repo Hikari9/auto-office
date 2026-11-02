@@ -637,6 +637,13 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
+        if code != 0 and (runner := _missing_runner(command, out)):
+            # #739: the interpreter this check ran with has no test runner. That is the
+            # environment, not the code: say so instead of CHANGES_REQUIRED.
+            return {"verdict": "UNAVAILABLE", "results": results,
+                    "summary": f"`{command}`: the interpreter it ran with has no `{runner}` module; run the check "
+                               f"in the repository's environment (for example `uv run python -m {runner}` or "
+                               f"`.venv/bin/python -m {runner}`) by amending the check, then office resume"}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
             why = f"check {timed_out}" if killed else f"check failed (exit {code})"
@@ -649,6 +656,22 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def _missing_runner(command: str, out: str) -> str | None:
+    """The module a check runs as its tool (`python -m X`, or a bare `X` command) when the
+    output says that very module is missing; None otherwise, so a test's own failed
+    import stays a real failure."""
+    missing = re.search(r"No module named '?([A-Za-z0-9_.]+)'?", out[-2000:])
+    if not missing:
+        return None
+    name = missing.group(1)
+    # The whole `-m` target or command word, so `No module named 'pkg.sub'` from inside
+    # `python -m pkg.tests` (the project's own import) is never read as a missing tool.
+    end = r"(?=$|[\s;&|])"
+    runs = (re.search(rf"(?:^|[\s;&|])-m\s+{re.escape(name)}{end}", command)
+            or re.match(rf"\s*{re.escape(name)}{end}", command))
+    return name if runs else None
 
 
 class _TimedOut(str):
