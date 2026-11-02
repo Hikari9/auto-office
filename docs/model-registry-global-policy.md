@@ -71,7 +71,9 @@ office model add pi/openai/gpt-6-luna --effort high --role reviewer   # register
 role `allow` in one step. A reviewer runs on the adapter's `reviewer` launch form, or one derived from
 its worker form plus `reviewer_readonly_args` (read-only tools only, headless, never vision). Derived
 forms set `verify_worktree_unchanged`: a review that changed HEAD, the tracked diff or untracked files
-fails that route as degraded and the next reviewer runs. See `skills/auto-adapter/SKILL.md`.
+fails that route as degraded and the next reviewer runs. The check does not cover gitignored files or `.git/`, and a plan review runs in the repo checkout, so an
+edit by anyone else during it also reads as a change. A directory that is not a git checkout cannot be
+fingerprinted, so the route fails as degraded instead of passing unchecked. See `skills/auto-adapter/SKILL.md`.
 
 The `enable` command removes **legacy user-overlay** disables set by
 `office model disable`; it never bypasses an existing technical

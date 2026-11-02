@@ -15,6 +15,8 @@ changes that (#837). `smoke` writes launch evidence only, never conformance.
 """
 from __future__ import annotations
 
+import copy
+import contextlib
 import json
 import os
 import re
@@ -804,6 +806,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
         raise OfficeError("row-exists", f"{harness}/{mid}@{','.join(dupes)} is already a catalog row", exit_code=1,
                           next_step=f"office model list {harness}")
     overlay = _overlay_for_write()
+    original = copy.deepcopy(overlay)
     added = []
     for e in want:
         row = {"model_id": mid, "invocation_model_id": slug, "invocation_harness": harness,
@@ -821,13 +824,26 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     allowed = []
     if policy_roles:
         from office import routecmd
-        for pr in policy_roles:
-            routecmd.change("allow", role=pr, route=",".join(added))
-            allowed.append(pr)
-    policy_line = ("policy: neutral for every role (eligible, not denied); change it with office route allow|deny"
-                   if not allowed else f"policy: allowed for {', '.join(allowed)}; every other role stays neutral. "
-                   + ("A reviewer on a harness without verified isolation runs with read-only tools only and fails as "
-                      "degraded if it changes the worktree" if any(r.endswith("reviewer") for r in allowed) else ""))
+        try:
+            for pr in policy_roles:
+                routecmd.change("allow", role=pr, route=",".join(added))
+                allowed.append(pr)
+        except Exception:
+            # One registration, all or nothing: undo the allows already written and the catalog rows.
+            for pr in allowed:
+                with contextlib.suppress(Exception):
+                    routecmd.change("clear", role=pr, route=",".join(added))
+            with contextlib.suppress(Exception):
+                user_catalog.save(original)
+                cli_runtimes.refresh_if_saved()
+            raise
+    if not allowed:
+        policy_line = "policy: neutral for every role (eligible, not denied); change it with office route allow|deny"
+    else:
+        policy_line = f"policy: allowed for {', '.join(allowed)}; every other role stays neutral."
+        if any(r.endswith("reviewer") for r in allowed):
+            policy_line += (" A reviewer on a harness without verified isolation runs with read-only tools only and "
+                            "fails as degraded if it changes the worktree.")
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
                          policy_line, *([note] if note else [])],

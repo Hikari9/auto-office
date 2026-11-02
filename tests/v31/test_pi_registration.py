@@ -518,3 +518,31 @@ def test_role_reviewer_is_refused_for_a_harness_without_read_only_args_or_profil
     with pytest.raises(Exception) as exc:
         harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], roles=["planner"])
     assert "--role takes" in str(exc.value)
+
+
+def test_worktree_guard_fails_closed_outside_a_git_checkout(tmp_path):
+    from office import gates
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", plain)
+    assert "could not be fingerprinted" in guard(guard(None))
+
+
+def test_a_failed_policy_write_rolls_the_registration_back(monkeypatch):
+    from office import harnesscmd, routecmd
+    real = routecmd.change
+    calls = []
+
+    def flaky(action, **kw):
+        calls.append((action, kw["role"]))
+        if action == "allow" and kw["role"] == "plan_reviewer":
+            raise RuntimeError("user routing config must be a mapping")
+        return real(action, **kw)
+
+    monkeypatch.setattr(routecmd, "change", flaky)
+    with pytest.raises(RuntimeError):
+        harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
+    assert ("clear", "code_reviewer") in calls
+    assert not [r for r in _rows() if r.get("model_id") == "gpt-6-luna"], "the catalog rows were rolled back"
+    monkeypatch.setattr(routecmd, "change", real)
+    assert "pi/gpt-6-luna@high: allow" not in "\n".join(routecmd.policy(role="code_reviewer", effective=True).lines)

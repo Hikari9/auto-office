@@ -860,13 +860,13 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         if guard and (changed := guard(before)):
             # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
             # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
-            reason = f"{triple}: degraded, the reviewer changed the worktree ({changed})"
+            reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the reviewer is the "
+                      "likely cause, but an edit made by anyone else while it ran trips the same check")
             failures.append(reason)
             last_failed = (triple, reason)
             dispatch_mod.reclaim_pane(run, dispatch_id)
-            if pinned:
-                break
-            excluded.add(triple)
+            if not pinned:
+                excluded.add(triple)
             with db.transaction(con):
                 state.emit(con, run, "review.worktree_changed", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
                            f"{role} {dispatch_id} on {triple}: {changed}", task_id=gate.get("task_id"),
@@ -874,6 +874,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
                 con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
                             (dispatch_id,))
+            if pinned:
+                break  # the user named this reviewer; never substitute another
             continue
         text = _reply_text(d, ddir, output)
         parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
@@ -1008,8 +1010,11 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
         return None
 
     def git(*args: str) -> str:
-        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
-        return f"rc={proc.returncode}\n{proc.stdout}" if proc.returncode else proc.stdout
+        try:
+            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+        except OSError as exc:
+            return f"unverifiable: {exc}"
+        return f"unverifiable: git exited {proc.returncode}" if proc.returncode else proc.stdout
 
     def fingerprint() -> dict:
         untracked = sha256_bytes(b"".join(
@@ -1024,6 +1029,8 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
         now = fingerprint()
         if before is None:
             return now
+        if str(now["HEAD"]).startswith("unverifiable") or str(before["HEAD"]).startswith("unverifiable"):
+            return "the worktree could not be fingerprinted (not a git checkout or git failed), so the review cannot be trusted"
         return ", ".join(k for k in now if now[k] != before[k]) or None
     return guard
 
