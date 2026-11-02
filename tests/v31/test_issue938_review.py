@@ -222,6 +222,10 @@ def test_more_named_tests_than_the_proof_runs_blocks_instead_of_proving_a_subset
                                     execute=True)
     assert not result["ok"] and result["status"] == "blocked"
     assert f"names {count} tests" in result["reason"] and f"at most {self_review_proof._MAX_TESTS}" in result["reason"]
+    no_runner = {**task, "checks": ["scripts/validate.sh --pr"]}
+    result = self_review_proof.gate(None, NEW_RUN, no_runner, wt, base, head, ["calc.py", "tests/test_calc.py"],
+                                    execute=True)
+    assert result["ok"] and result["status"] == "exempt" and "no pytest command" in result["reason"]
 
 
 def test_a_v31_run_and_a_test_only_change_need_no_proof(tmp_path):

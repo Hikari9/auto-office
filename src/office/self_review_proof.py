@@ -151,15 +151,15 @@ def gate(con, run: dict, task: dict, wt: Path, base: str, head: str, changed: li
     if not applicable(run) or not _sources(changed) or not task.get("scope"):
         return {"ok": True, "status": "not-required", "reason": "no non-test source change to revert"}
     tests = named_tests(submit._read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS))
-    if len(tests) > _MAX_TESTS:  # proving only some of them would let the rest pass unproven
-        return {"ok": False, "status": "blocked",
-                "reason": f"revert-and-fail proof: the ledger names {len(tests)} tests for medium or high fixes; "
-                          f"the proof runs at most {_MAX_TESTS}, so name only the tests that prove each fix"}
     runner = _runner(task)
     if not tests or runner is None:
         why = ("the ledger names no test for a medium or high fix" if not tests
                else "the task's checks hold no pytest command to run a named test with")
         return {"ok": True, "status": "exempt", "reason": f"revert-and-fail proof exempt: {why}"}
+    if len(tests) > _MAX_TESTS:  # proving only some of them would let the rest pass unproven
+        return {"ok": False, "status": "blocked",
+                "reason": f"revert-and-fail proof: the ledger names {len(tests)} tests for medium or high fixes; "
+                          f"the proof runs at most {_MAX_TESTS}, so name only the tests that prove each fix"}
     key = sha256_obj({"task": task["id"], "base": base, "head": head, "changed": sorted(changed),
                       "tests": tests, "runner": runner, "version": _VERSION})
     row = con.execute("SELECT * FROM gates WHERE run_id=? AND task_id=? AND kind='self_review_proof' "
