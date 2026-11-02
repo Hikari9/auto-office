@@ -1484,6 +1484,13 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             # scope's bounded status detail may cut off the install command.
             from office import visual
             capture = _latest(con, run, sid, s["commit"]).get("visual") or {}
+            if not (capture.get("review_status") == contract.EVIDENCE_BLOCKED
+                    or (capture.get("evidence_status") or "COMPARABLE") != "COMPARABLE"):
+                # #870: the block is not the visual capture (a self-review subagent that never ran, a reply
+                # about another commit). There is no capture contract to correct: re-run the review.
+                return (f"{sid} evidence_blocked: {s['detail']}; this is the review's runtime evidence, not a visual "
+                        f"capture (no round spent): office resume re-runs the review; if it repeats, office inspect "
+                        f"lane {sid} shows the failing step; a waiver needs landing authority")
             install = (visual.missing_browser_install(capture.get("summary") or "")
                        if capture.get("evidence_status") == "CAPTURE_BLOCKED" else None)
             if install:
