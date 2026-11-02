@@ -867,6 +867,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         triple = routing.candidate_id(cand)
         with db.transaction(con):
             dispatch_id = _reviewer_dispatch(con, run, gate, role, decision)
+            from office import dispatch as dispatch_budget
+            dispatch_budget.note_daily_budget(con, run, cand, task_id=gate.get("task_id"))
             if last_failed and last_failed[0] != triple:
                 review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
             elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):

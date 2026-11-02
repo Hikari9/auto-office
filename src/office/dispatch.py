@@ -736,7 +736,29 @@ def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
     return f"office inspect route {tid}"
 
 
+BUDGET_WARNING_KIND = "route.budget_warning"
+
+
+def note_daily_budget(con, run: dict, cand: dict | None, *, task_id: str | None = None) -> None:
+    """Once a day per route, tell the orchestrator a dispatch reached 80% of the route's daily dispatch budget
+    (#831). At the budget itself routing already treats the route as quota-exhausted. Caller holds the tx."""
+    b = ((cand or {}).get("quota") or {}).get("daily_budget")
+    if not b:
+        return
+    used = int(b["used"]) + 1  # this dispatch
+    if used < routing.BUDGET_WARN_AT * int(b["budget"]):
+        return
+    today = con.execute("SELECT payload_json FROM events WHERE kind=? AND created_at>=?",
+                        (BUDGET_WARNING_KIND, routing.local_midnight_utc())).fetchall()
+    if any((loads(r[0], {}) or {}).get("key") == b["key"] for r in today):
+        return
+    state.emit(con, run, BUDGET_WARNING_KIND, f"route {routing.candidate_id(cand)} used {used}/{b['budget']} of its daily "
+               f"dispatch budget ({b['key']}); at {b['budget']} it reads as quota-exhausted until local midnight",
+               task_id=task_id, payload={"key": b["key"], "used": used, "budget": b["budget"]})
+
+
 def _record_routing(con, run: dict, decision: dict) -> None:
+    note_daily_budget(con, run, decision.get("candidate"))
     req = decision.get("request") or {}
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)",

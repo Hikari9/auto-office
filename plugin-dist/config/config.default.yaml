@@ -34,6 +34,10 @@ quota:
   reserve_percent: 5
   # Block a route after a quota wall when the provider gives no reset time.
   cooldown_minutes: 15
+  # Opt-in per-route daily dispatch budget (#831), for credit-limited routes: {"<harness>/<model>[@effort]": N}.
+  # Dispatches started on the route since local midnight (all runs) count against N; at N the route reads as
+  # quota-exhausted, so a reviewer chain falls through to its next route. A warning is recorded at 80%. Empty: none.
+  daily_dispatch_budget: {}
 cost_policy:
   default: balanced
   # Legacy: planner and reviewer routing only. Executor and worker routing (#300)

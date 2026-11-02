@@ -157,6 +157,61 @@ class TestDerivedRouting(unittest.TestCase):
         self.assertEqual(replay['rejected'], result['rejected'])
         assert_quota_gate_rejects(replay)
 
+    def _budget_world(self, used_today, used_yesterday=0):
+        target = cand('opencode', 'deepseek-flash', effort='high', money=0)
+        target.update(invocation_model_id='opencode/deepseek-flash')
+        fallback = cand('agy', 'fallback', money=0)
+        for t in ('opencode@1/deepseek-flash@high', 'agy@1/fallback@high'):
+            scoring.record_trust_act(self.db_path, t, 'proven', 'rico', 'operator-verified route')
+        from office import db as office_db
+        office_db.connect(Path(self.db_path)).close()
+        import sqlite3
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO runs(id, phase, status) VALUES ('run-b', 'executing', 'running')")
+        today = datetime.now(timezone.utc).isoformat()
+        old = (datetime.now().astimezone().replace(hour=0, minute=0) - timedelta(hours=2)).astimezone(timezone.utc).isoformat()
+        rows = [today] * used_today + [old] * used_yesterday
+        for i, at in enumerate(rows):
+            con.execute("INSERT INTO dispatches(id, run_id, role, holder_id, triple, status, harness, model, effort, "
+                        "started_at, ended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (f'b{i}', 'run-b', 'code_reviewer', f'h{i}', 'opencode@1/deepseek-flash@high', 'exited',
+                         'opencode', 'opencode/deepseek-flash', 'high', at, at))
+        con.commit(); con.close()
+        return {'role': 'executor', 'playbook': 'Change', 'runs_db': self.db_path, 'candidates': [target, fallback],
+                'policy': {'daily_dispatch_budget': {'opencode/deepseek-flash': 4}}}, target
+
+    def test_a_route_at_its_daily_dispatch_budget_reads_quota_exhausted_and_falls_back(self):
+        """#831: four of four dispatches today spend the budget; the route reads 0% left and is passed over."""
+        request, target = self._budget_world(used_today=4, used_yesterday=3)
+        result = current_routing.route(request)
+        self.assertEqual(result['selected'], 'agy@1/fallback@high')
+        self.assertEqual(target['quota']['tightest_remaining_percent'], 0)
+        self.assertIn('daily-dispatch-budget 4/4', target['quota']['cause'])
+        self.assertEqual(request['daily_budget_snapshot']['opencode@1/deepseek-flash@high']['used'], 4)
+        replay = current_routing.route(request)  # the recorded counts make the replay identical
+        self.assertEqual(replay['selected'], result['selected'])
+
+    def test_yesterdays_dispatches_do_not_count_against_todays_budget(self):
+        request, target = self._budget_world(used_today=1, used_yesterday=9)
+        current_routing.route(request)
+        self.assertEqual(target['quota']['tightest_remaining_percent'], 75.0)
+        self.assertEqual(target['quota']['daily_budget'], {'key': 'opencode/deepseek-flash', 'budget': 4, 'used': 1})
+
+    def test_a_budget_never_clears_a_quota_wall(self):
+        request, target = self._budget_world(used_today=1)
+        target['quota'] = {'status': 'unavailable', 'tightest_remaining_percent': None, 'cause': 'host overloaded'}
+        request['daily_budget_snapshot'] = {'opencode@1/deepseek-flash@high': {'key': 'opencode/deepseek-flash', 'budget': 4, 'used': 1}}
+        current_routing._daily_budget_snapshot(request, None)
+        self.assertEqual(target['quota']['status'], 'unavailable')
+        self.assertIsNone(target['quota']['tightest_remaining_percent'])
+
+    def test_no_budget_configured_leaves_quota_untouched(self):
+        request, target = self._budget_world(used_today=9)
+        request['policy'] = {}
+        current_routing.route(request)
+        self.assertNotIn('daily_budget', target['quota'])
+        self.assertEqual(target['quota']['tightest_remaining_percent'], 80)
+
     def test_one_live_dispatch_below_cap_keeps_route_and_cost_score(self):
         target = cand('opencode', 'glm-5.3-flash-free', effort='high', money=0)
         target.update(invocation_model_id='opencode/glm-5.3-flash-free', max_concurrent=2,
