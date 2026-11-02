@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.46
+
+office dispatch and inspect warn when a --review-as pin has no effect because the run's gear runs no code review (#727).
+
 ## 3.15.45
 
 Orchestrator guidance adds idle-only outcome QA: progress and required gates first, small optional QA slices only while waiting, never a gate (#904).
