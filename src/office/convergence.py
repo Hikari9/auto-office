@@ -307,6 +307,13 @@ def review_required(run: dict) -> bool:
     return bool((run.get("gates") or {}).get("code_review"))
 
 
+def sensitive_lane(con, run: dict, scope: dict) -> bool:
+    """A new run's lane changes a security-sensitive path: its one convergence reviewer must cover security (#938)."""
+    from office import self_review_subagents
+    return contract.is_convergence(run) and self_review_subagents.security_relevant(
+        f for tid in scope["tasks"] for f in _changed(con, run, state.get_task(con, run["id"], tid)))
+
+
 def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
     """(task, applicability) for each task in a lane whose acceptance is
     user-visible. Planner-declared, runtime-guarded: acceptance that reads
@@ -561,7 +568,7 @@ def job_converge(con, run: dict, job: dict) -> dict:
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
                    hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
         made = []
-        if review_required(run):
+        if review_required(run) or sensitive_lane(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
         if visual_tasks(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "visual", round_no, cycle))
@@ -791,6 +798,11 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
             dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
+        if sensitive_lane(con, run, scope):
+            brief += ("\nSECURITY: this lane changes a security-sensitive path and the executors did not review security. "
+                      "Cover it in your one verdict: secrets and token exposure, auth and permission bypass, missing "
+                      "server-side revalidation, path or symlink escapes, unsafe input parsing, repeated or unauthorized "
+                      "production writes.\n")
         # #809: funded self-review subagents precede the ONE independent convergence verdict. A missing,
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
         from office import self_review_subagents

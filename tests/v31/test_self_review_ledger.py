@@ -836,6 +836,7 @@ def _dispatch(env, plan=None):
     return wenv, wt, d
 
 
+@pytest.mark.review_contract("v3.1")
 @pytest.mark.integration
 def test_preflight_walks_missing_stale_open_then_ready_and_submit_consumes_the_ledger(env):
     from conftest import PLAN_ONE

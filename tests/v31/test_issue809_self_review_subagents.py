@@ -85,12 +85,13 @@ def test_an_s_run_launches_one_subagent_before_the_one_convergence_review(env):
     assert "is the commit under review" in sub_brief and sub["reviewer_dispatch_id"] != conv["reviewer_dispatch_id"]
 
 
-def test_an_l_run_launches_its_specialists_and_keeps_the_initial_plan_review(env):
+def test_an_l_run_launches_one_combined_subagent_and_keeps_the_initial_plan_review(env):
+    """#938: a new run funds one subagent per task at every funded gear, never specialists."""
     _s_run(env, gear="L")
-    assert len(_subagent_gates(env)) == 2
-    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"edge-cases", "test-strength"}
+    assert len(_subagent_gates(env)) == 1
+    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"combined"}
     roles = _roles(env)
-    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 2
+    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 1
     assert roles.count("convergence_reviewer") == 1
 
 

@@ -354,7 +354,7 @@ flowchart TB
 
 The runtime then evaluates the current revision through the gates funded by the run:
 
-- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
+- deterministic task checks (the executor has already self-reviewed: one focused round for a new run, four lenses and 3 rounds for a run pinned to v3.1; Office has also proved each named fix test by reverting source);
 - dependency/current-amendment checks;
 - once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
 - later, run-level integration checks.

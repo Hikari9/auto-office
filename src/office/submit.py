@@ -560,7 +560,7 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     # use the same ledger gate as preflight against committed and pending work.
     from office import preflight
     base, dep_bases = attribution(con, run, task, d, head)  # `commit` below is HEAD plus the worktree: same ancestry
-    tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
+    tier = briefs.run_self_review_tier(run)
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
     reason = preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
@@ -584,6 +584,13 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
                             'trivial|mechanical -- "<reason>"' if tier == "inline" else ""))
         raise Refused(category, f"{task['id']} self-review ledger refused submission: {details}",
                       scope=task["id"], preserved="your worktree (nothing was submitted)", next_step=next_step)
+    from office import self_review_proof
+    proof = self_review_proof.gate(con, run, task, wt, base, head,
+                                   preflight.committed_changes(wt, base, head, dep_bases), execute=False)
+    if not proof["ok"]:
+        raise Refused("self-review-proof", f"{task['id']}: {proof['reason']}",
+                      scope=task["id"], preserved="your worktree (nothing was submitted)",
+                      next_step="run office preflight (it runs the revert-and-fail proof), then office submit")
     receipt = _self_review_receipt(wt, task, run, head, tree, tier, enforced, exempt, reason,
                                    preflight.committed_changes(wt, base, head, dep_bases), preflight)
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"

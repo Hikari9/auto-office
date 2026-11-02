@@ -113,6 +113,9 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
   workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
 - An executor that cannot finish stops with `office raise --kind question|blocker|scope-request [--path P] -- "<text>"`, not `submit`; its task stays blocked. Answer with `office answer <task> -- "<text>"`. Grant a scope-request only by `office amend <scope> --contract`, which also unblocks it.
+- New runs self-review in one focused round (one subagent, edge cases and test strength, platform when the diff needs it);
+  security is covered by the single convergence reviewer when a lane changes a sensitive path, and Office proves each named
+  test by running it alone on a copy with the non-test source reverted. Runs pinned to v3.1 keep the four lenses below.
 - Executors simplify (behavior-preserving, in SCOPE), self-review on four lenses at a depth Office sets from the run's
   gear and risk (`inline`, `single`, or `deep`; an unset blast radius is never `inline`), record every finding in
   `OFFICE_SELF_REVIEW.md` (severity as found; low findings are fixed but do not trigger a re-review; a medium or high fix
