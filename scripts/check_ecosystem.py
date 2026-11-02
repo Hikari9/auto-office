@@ -22,14 +22,16 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # #484 first-run onboarding gate (office onboard) between the install check and Start: 197 -> 209.
 # 3.15.1 batch (#970): live-run options, batch landing, greenfield gear, the executor context cap, non-Herdr
 # wake and one-round self-review each add hub guidance: 210 -> 247. Trimming back is tracked separately.
-HUB_LINE_BUDGET = 247
+# Later 3.15.x hub guidance (kabusecha queue, through 3.15.45): 247 -> 250. Trim tracked in #1025.
+HUB_LINE_BUDGET = 250
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
     'skills/auto-office-lean/SKILL.md': 60,
     'skills/agy-cli/SKILL.md': 46,
     # #499: the 3.1+ office harness/model checklist, trust posture and Herdr form requirement.
-    'skills/auto-adapter/SKILL.md': 53,
+    # #656 (3.15.x): office model verify promotes unverified rows: 53 -> 55.
+    'skills/auto-adapter/SKILL.md': 55,
     'skills/auto-closeout/SKILL.md': 67,
     'skills/auto-execution/SKILL.md': 23,
     'skills/auto-intake/SKILL.md': 51,

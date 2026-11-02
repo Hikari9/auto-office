@@ -2,6 +2,11 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.49
+
+- test: retire the exhaustive model-roster and duplicate tests, with a traceability record in `docs/test-retirement.md` and an inventory check (#871 PR C, #1037).
+- chore(ecosystem): raise the hub (247 -> 250) and auto-adapter (53 -> 55) skill line budgets to what main ships; the trim is tracked in #1025.
+
 ## 3.15.48
 
 Credit-limited routes can carry an opt-in daily dispatch budget (quota.daily_dispatch_budget); at the budget the route reads as quota-exhausted so reviewer chains fall through, with a warning at 80% (#831).
