@@ -74,7 +74,7 @@ The baseline failure `test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs
 
 ## Fault injection
 
-Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at the copy), the listed tests failed, and the file was restored from the checked-out tree. The restored copy then passed all of `PDC`.
+Each mutation was applied in a scratch copy of the tree (`PYTHONPATH` pointed at the copy), the listed tests failed, and the file was restored from the checked-out tree. The restored copy then passed all of `PDC`. Covering tests outside `PDC` were run separately on the restored tree with `pytest --all -p no:cacheprovider` and all passed (5 passed): `tests/v31/test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available`, `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs`, and the three tests in `tests/test_test_retirement_inventory.py` (including the exact-modules and totals tests named below). In the table, `test_lineage_supersession_811.py` means `tests/v31/test_lineage_supersession_811.py`.
 
 | Failure class | Mutation | Failing covering test |
 |---|---|---|
