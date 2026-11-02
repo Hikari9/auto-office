@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.28
+
+- feat(review): `office review submit` (stdin or --file) lets a reviewer hand back its verdict for any review kind. It validates the reply for its gate, records it at once and ends the reviewer's wait. Reviewers get only a per-dispatch submit secret, no other Office authority (#1030).
+
 ## 3.15.27
 
 - feat(brief): one neutral executor-brief line allows the harness's subagents for the task itself at the executor's discretion. Scope, checks and submit stay its responsibility (#1031).
