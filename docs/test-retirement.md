@@ -428,10 +428,9 @@ Totals: {'keep': 266, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3
 
 ## Left alone on purpose
 
+- `docs/mutation-testing.md:19` still cites the deleted `tests/v31/test_haiku_5_5.py`. It is outside this run's scope, so it is a follow-up.
 - Modules and nodes named in `SAFETY_SMOKE` or `SPECIAL` in `scripts/select_pr_tests.py`, the nodes cited in `docs/contract-suite.md`, and everything in `tests/contracts/`.
 - `tests/test_derived_routing.py` is synthetic (`'m'`, `'fallback'`) and tests the retained 3.0 runtime, so it is classified historical-diagnostic, not retired.
 - `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`: `adaptive.py` hard-codes the Sonnet claude-to-agy hoist, so this is its only guard.
 - `tests/v31/test_issue809_real_routes.py::test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback`: it is the only test of the `Temporary Sonnet Medium M fallback` disclosure.
 - `tests/test_alias_resolution.py` and `tests/v31/test_intelligence_floor.py` still pin some shipped model names. They are `SPECIAL` modules for `catalog/` and `config/` changes, so they stay.
-- `docs/contract-suite.md` still says every legacy module is `keep`. It is outside this task's scope and now out of date.
-- `docs/mutation-testing.md:19` still cites the deleted `tests/v31/test_haiku_5_5.py`. It is outside this run's scope, so it is a follow-up.
