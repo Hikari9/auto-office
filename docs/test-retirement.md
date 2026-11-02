@@ -8,21 +8,23 @@ Base: `origin/main` `d1402697`. Scope: tests that assert specific shipped model,
 
 ### Same-host comparison
 
-Measured on 2026-11-02 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CPython 3.14.8. The baseline is the run's `origin/main` base `d14026977392289164d1e09fe454728c71f65b28` in a separate checkout with its own dependencies; the after revision is this branch at `fe99d1fa`, which contains T1's accepted revision, plus `tests/test_test_retirement_record.py` (one module, one node; counts include it, wall time was measured at `fe99d1fa` without it). The after tree also contains the modules that reached main after the baseline, so the module and node deltas are net of those additions. Each timing run was sequential, but a separate `scripts/validate.sh --full` was running on the host (load average about 12 to 15), so wall times are load-dependent and are not a controlled speedup.
+Measured on 2026-11-02 and 2026-11-03 on an Apple M5 Pro Mac, macOS 26.7.1, 18 logical CPUs, CPython 3.14.8, with `-n 2`. Before is the run's `origin/main` base `d14026977392289164d1e09fe454728c71f65b28`; after is T1's accepted revision R13, commit `441e6ff6aac82e51aa3c0e8306d3a1599ce26a2d`. Each is a clean detached checkout with its own dependencies. The after tree contains the modules that reached main after the baseline, so module and node deltas are net of those additions.
 
-| Tier and measure | Before | After |
+| Tier and measure | Before `d1402697` | After `441e6ff6` |
 |---|---:|---:|
-| Default: test modules with collected nodes | 202 | 208 |
+| Default: test modules with collected nodes | 202 | 207 |
 | Default: test functions with collected nodes | 2,169 | 2,269 |
 | Default: collected nodes | 4,016 | 4,073 |
-| Default: wall time | 365.54 s | 360.80 s |
-| `--all`: test modules with collected nodes | 305 | 314 |
+| Default: wall time | 317.37 s | 331.92 s |
+| `--all`: test modules with collected nodes | 305 | 313 |
 | `--all`: test functions with collected nodes | 4,317 | 4,524 |
 | `--all`: collected nodes | 6,407 | 6,577 |
 
-From each checkout, collection used `uv run --frozen --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the resulting node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not a count of every function defined in source.
+Commands, run from each checkout: `uv run --frozen --offline --extra test pytest -n 2 --collect-only -q tests` and `uv run --frozen --offline --extra test pytest -n 2 --all --collect-only -q tests`. Module counts are distinct paths in the node IDs; function counts are distinct node IDs after removing parametrization suffixes. These are collected functions, not every function defined in source. Wall time: `/usr/bin/time -p uv run --frozen --offline --extra test pytest -n 2 -q tests`, before then after, back to back in one session.
 
-Wall time was measured once per checkout with `/usr/bin/time -p uv run --frozen --extra test pytest -n 2 -q tests`. The baseline reported 4,013 passed, 2 failed, 2 skipped; the after revision reported 4,071 passed, 0 failed, 2 skipped. The baseline failures are `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` (missing `dispatchable` key) and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest summary totals one more than its collection count; that discrepancy was not investigated. The default-tier run is not the full suite.
+Conditions for the wall times: another run's `scripts/validate.sh --full` was running on the host throughout, so these are load-dependent and not a controlled speedup. The before run started with no `validate.sh` process visible and load averages 5.83 / 8.51 / 10.90 (1, 5, 15 min); two `validate.sh` processes were present by its end. The after run started with two present and load averages 9.09 / 9.28 / 10.57, ending at 9.38 / 9.60 / 10.28. An earlier pair of runs under unequal load gave 298.56 s before (load 16.37 / 20.00 / 14.86, a full suite running) and 312.86 s after (load 7.96 / 12.46 / 12.86, no suite seen), which also shows after as slower. The before run reported 4,013 passed, 2 failed, 2 skipped; the after run 4,072 passed, 2 skipped. The before failures are `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` (missing `dispatchable` key) and `tests/v31/test_issue809_run_gear.py::test_sonnet_claude_to_agy_self_fallback_applies_only_to_xs_xl_runs`. Each pytest summary totals one more than its collection count (the after run by one as well); that was not investigated. The default-tier run is not the full suite.
+
+Supplemental, not part of the comparison above: adding this task's `tests/test_test_retirement_record.py` to the after tree is one module and one node (default 208 modules / 4,074 nodes is not re-measured; `--all` collects 6,578 nodes). No wall time was measured with it.
 
 ### Full suite
 
