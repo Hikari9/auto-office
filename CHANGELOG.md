@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.13
+
+- test(review): three route-refusal tests use kilo, a harness with no reviewer profile, as their builder-only example. #993 gave pi a read-only reviewer profile, so the old pi example launched and failed preflight instead of being refused.
+
 ## 3.15.12
 
 - feat(review): reviewers launch like executors. pi reviews in a Herdr pane (its pane form may write only its reply, and the worktree guard still applies), and its read-only headless form is the CLI fallback. A pane-capable reviewer that ran headless is announced in status (#1027).
