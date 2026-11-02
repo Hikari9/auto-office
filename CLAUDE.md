@@ -18,7 +18,7 @@ scripts/validate.sh                                # explicit full regression su
 
 python3 scripts/check_ecosystem.py                 # static ecosystem/contract check
 scripts/validate.sh --pr                           # local pre-push gate for each PR
-scripts/validate.sh --full                         # optional full regression/release suite
+scripts/validate.sh --full                         # full regression; required for releases and test infrastructure changes
 VALIDATE_BUILD=1 scripts/validate.sh               # also builds the wheel and checks bundled resources
 git config core.hooksPath .githooks                # enable the pre-push gate
 ```

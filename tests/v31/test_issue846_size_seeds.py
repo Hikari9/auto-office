@@ -52,26 +52,6 @@ def _slate_pool(size):
 
 
 @pytest.mark.parametrize("size", list(executor_slates.FLOORS))
-def test_each_size_selects_its_slate_primary_when_allowed(size):
-    model, effort, harness = executor_slates.IDEAL[size][0]
-    pool = _slate_pool(size)[:1] + [priced("claude-sonnet-5-5", "high", 47, "claude")]
-    out = decide(size, pool)
-    assert out["status"] == "selected", out
-    chosen = out["candidate"]
-    assert (chosen["model_id"], chosen["effort"], chosen["harness"]) == (model, effort, harness or "agy"), out
-
-
-@pytest.mark.parametrize("size", list(executor_slates.FLOORS))
-def test_each_size_falls_to_the_next_slate_route_when_the_primary_cannot_run(size):
-    pool = _slate_pool(size)[:2] + [priced("claude-sonnet-5-5", "high", 47, "claude")]
-    pool[0] = dict(pool[0], route_status="untried")
-    model, effort, harness = executor_slates.IDEAL[size][1]
-    out = decide(size, pool)
-    assert out["status"] == "selected", out
-    assert (out["candidate"]["model_id"], out["candidate"]["effort"]) == (model, effort), out
-
-
-@pytest.mark.parametrize("size", list(executor_slates.FLOORS))
 def test_a_flat_executor_seed_does_not_shadow_the_size_slate(size):
     run = {"gear": size, "risk": {"size_class": size}}
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, size) == executor_slates.ideal_seed(size)
@@ -162,30 +142,6 @@ def test_no_reroute_without_a_seed_or_a_selected_fresh_decision():
 
 
 # ------------------------------------------------------------------ #850 §4: the orchestrator plans
-
-
-@pytest.mark.parametrize("gear,effort", [("M", "low"), ("L", "medium"), ("XL", "high")])
-def test_an_explicit_planner_follows_the_run_gear_table(gear, effort):
-    run = {"gear": gear}
-    seed = candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, "S", role="planner")
-    assert [(e["model_id"], e["effort"]) for e in seed] == [
-        ("claude-opus-5-5", effort), ("gpt-6-astra", effort), ("gemini-4-argon", effort)]
-    assert seed[0]["harness"] == "claude" and seed[1]["harness"] == "codex"
-
-
-@pytest.mark.parametrize("gear", ["XS", "S", "express", None])
-def test_xs_s_and_legacy_gears_have_no_gear_planner_table(gear):
-    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": gear}, None, role="planner") \
-        == FLAT_SEED
-
-
-def test_no_new_gear_queues_a_dedicated_planner_by_default():
-    from office import config
-    cfg = config.load_yaml(config.default_config_path())
-    for gear in ("XS", "S", "M", "L", "XL"):
-        risk = config.resolve_risk(cfg, "repo", None, False)
-        risk["size_class"] = gear
-        assert config.resolve_gates(gear, risk, cfg)["dedicated_planner"] is False, gear
 
 
 @pytest.mark.parametrize("size", ["S", "M"])

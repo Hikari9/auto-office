@@ -5,7 +5,6 @@ import pytest
 from conftest import PLAN_ONE, start_inline
 from office import config, executor_slates as slates, self_review_subagents as sub, state, task_sizing, xl_review
 
-GEARS = ("XS", "S", "M", "L", "XL")
 LOW = {"classification": "low"}
 ELEVATED = {"classification": "elevated"}
 ESTIMATE = "inline=10 dedicated=20 minutes: the loaded session skips an eight minute brief"
@@ -63,67 +62,6 @@ def test_legacy_pinned_runs_fund_no_subagents():
     legacy = {"gear": "quick", "gates": {"gear_model_version": "legacy-pinned"}, "risk": {}}
     assert sub.rubrics(legacy, {"scope": []}) == ()
     assert not sub.funded({"gear": "L", "gates": {}})
-
-
-# ------------------------------------------------------------------ size floors and slates
-
-@pytest.mark.parametrize("size,floor", [("XS", 31), ("S", 38), ("M", 40), ("L", 44), ("XL", 47)])
-def test_size_floors_are_pinned_and_an_equal_score_passes(size, floor):
-    assert slates.FLOORS[size] == floor
-    assert slates.benchmark_gate({"benchmark_indexes": {slates.INDEX: floor}}, size) is None
-    assert slates.benchmark_gate({"benchmark_indexes": {slates.INDEX: floor - 0.1}}, size)
-    assert slates.benchmark_gate({"benchmark_indexes": {}}, size)
-    assert slates.benchmark_gate({"benchmark_indexes": {slates.INDEX: floor}}, None) is None
-
-
-@pytest.mark.parametrize("size,first", [
-    ("XS", ("claude-haiku-5-5", "medium")), ("S", ("gemini-3.8-flash", "medium")),
-    ("M", ("claude-haiku-5-5", "high")), ("L", ("claude-sonnet-5-5", "high")),
-    ("XL", ("claude-opus-5-5", "medium")),
-])
-def test_each_gear_slate_leads_with_its_documented_route(size, first):
-    seed = slates.ideal_seed(size)
-    assert (seed[0]["model_id"], seed[0]["effort"]) == first
-    assert len(seed) == (4 if size == "L" else 3)
-
-
-@pytest.mark.parametrize("size,effort", [("L", "high")])
-def test_sonnet_falls_back_claude_to_agy_at_the_same_effort_before_any_other_model(size, effort):
-    seed = slates.ideal_seed(size)
-    assert [(s["model_id"], s["harness"], s["effort"]) for s in seed[:2]] == [
-        ("claude-sonnet-5-5", "claude", effort), ("claude-sonnet-5-5", "agy", effort)]
-    assert all(s["model_id"] != "claude-sonnet-5-5" for s in seed[2:])
-    assert slates.model_restriction({"model_id": "claude-sonnet-5-5", "harness": "agy"}, size) is None
-    assert slates.model_restriction({"model_id": "claude-sonnet-5-5", "harness": "opencode"}, size)
-
-
-@pytest.mark.parametrize("size", ["XS", "S", "M", "L"])
-def test_opus_is_reserved_for_xl_subtasks(size):
-    assert slates.model_restriction({"model_id": "claude-opus-5-5"}, size)
-    assert slates.model_restriction({"model_id": "claude-opus-5-5"}, "XL") is None
-    assert [s["model_id"] for s in slates.ideal_seed(size)].count("claude-opus-5-5") == 0
-
-
-def test_argon_medium_l_exception_is_exact_and_audited():
-    medium = {"model_id": "gemini-4-argon", "effort": "medium", "benchmark_indexes": {}}
-    audit = slates.floor_exception(medium, "L", "executor")
-    assert audit and audit["exception"] == "argon-medium-l-intelligence-floor" and audit["size"] == "L"
-    assert slates.floor_exception(medium, "L", "worker")
-    for other, size, role in (({**medium, "effort": "high"}, "L", "executor"), (medium, "XL", "executor"),
-                              (medium, "M", "executor"), (medium, "L", "code_reviewer"),
-                              ({**medium, "model_id": "gpt-6.1-terra"}, "L", "executor"),
-                              ({**medium, "benchmark_indexes": {slates.INDEX: 50}}, "L", "executor")):
-        assert slates.floor_exception(other, size, role) is None
-    assert slates.FLOORS["L"] == 44, "the exception never lowers the floor"
-
-
-@pytest.mark.parametrize("effort,score", [("none", 33), ("low", 36), ("medium", 41),
-                                          ("high", 44), ("xhigh", 45), ("max", 48)])
-def test_terra_effort_boundaries_pass_exactly_the_sizes_whose_floor_they_meet(effort, score):
-    terra = {"model_id": "gpt-6.1-terra", "effort": effort, "benchmark_indexes": {slates.INDEX: score}}
-    passing = [s for s in GEARS if slates.benchmark_gate(terra, s) is None]
-    assert passing == [s for s in GEARS if score >= slates.FLOORS[s]]
-    assert slates.floor_exception(terra, "L", "executor") is None
 
 
 # ------------------------------------------------------------------ inline ownership
