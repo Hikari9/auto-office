@@ -20,7 +20,9 @@ INIT_MARKERS=('TODO:', 'example_asset.txt', 'scripts/example.py', 'references/ap
 # Executor self-review, office preflight and the worker status line: 177 -> 182 lines, ~5% headroom.
 # The issue-only bug-report workflow adds a short pointer section to the hub.
 # #484 first-run onboarding gate (office onboard) between the install check and Start: 197 -> 209.
-HUB_LINE_BUDGET = 210
+# 3.15.1 batch (#970): live-run options, batch landing, greenfield gear, the executor context cap, non-Herdr
+# wake and one-round self-review each add hub guidance: 210 -> 247. Trimming back is tracked separately.
+HUB_LINE_BUDGET = 247
 # 3.1: each 3.0 spoke carries a three-line banner pointing 3.1 runs at the office CLI;
 # the per-spoke budgets below grew by exactly those lines.
 SKILL_LINE_BUDGETS = {
@@ -56,7 +58,8 @@ SKILL_LINE_BUDGETS = {
     # Steps 1-2 are pinned by tests (tiers, lenses, ledger format) and #421 will add self-review
     # evidence to step 2, so the file was compressed in steps 3-6 only (116 -> 106) and the budget is
     # set to that count until #421 lands and the section is reconciled.
-    'skills/office-submit/SKILL.md': 106,
+    # 3.15.1 (#938): the one-round self-review contract and revert-and-fail proof: 106 -> 114.
+    'skills/office-submit/SKILL.md': 114,
 }
 
 def frontmatter(path):
