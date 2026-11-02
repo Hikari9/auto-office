@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.40
+
+office close --handoff <pr> closes a run whose blocked integration was composed by hand, recording integration_composed_by_hand; the close refusal names the unapplied amendment (#729).
+
 ## 3.15.39
 
 office status keeps an open executor's stop signal, or an executor pane idle without submitting, as a blocker: line with its resolving next: until it resolves (#671).
