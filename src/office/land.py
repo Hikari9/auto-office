@@ -712,19 +712,76 @@ def _restack(con, run: dict, task: dict, up: dict, base: str) -> dict:
     d = state.get_dispatch(con, task["current_dispatch_id"])
     wt = Path(d["worktree"])
     old_parent = _accepted_commit(con, up)
+    accepted = _accepted_commit(con, task)
     _git(wt, "fetch", "-q", "origin", base)
+    remote = _remote_head(wt, d["branch"])
+    if remote and remote != accepted and _resolved_by_hand(wt, remote, accepted, base):
+        # #676: the user followed the restack-conflict next: line. Replaying the
+        # recorded revision again would conflict again, so adopt the pushed head.
+        pr = {**(task.get("pr") or {}), "restacked": {"commit": remote, "base": base, "adopted": True}}
+        with db.transaction(con):
+            state.update_task(con, run["id"], task["id"], pr=pr)
+            state.emit(con, run, "pr.restack_adopted",
+                       f"{task['id']} adopted hand-restacked head {remote[:12]} on {base}", task_id=task["id"])
+        return pr
+    lease = _restack_lease(d["branch"], accepted, remote, wt)
     proc = _git(wt, "rebase", "--onto", f"origin/{base}", old_parent)
     if proc.returncode != 0:
         _git(wt, "rebase", "--abort")
         raise Refused("restack-conflict", f"{task['id']} does not rebase cleanly onto {base} after {up['id']} merged",
-                      preserved=f"{task['id']} branch unchanged", next_step="resolve the rebase by hand, push, then office land")
-    ok, err = prs.push(run, d, force=True, expected=_accepted_commit(con, task))
+                      preserved=f"{task['id']} branch unchanged",
+                      next_step=f"push to {d['branch']} a head that contains origin/{base} and whose tree is "
+                                f"{accepted[:12]} merged with origin/{base}, then office land; or merge the PRs "
+                                f"by hand, then office close --landed-externally <PR>")
+    ok, err = prs.push(run, d, force=True, expected=lease)
     if not ok:
-        raise Refused("restack-push-failed", f"force-push of {d['branch']} failed: {err[:160]}")
+        raise Refused("restack-push-failed", f"force-push of {d['branch']} leased to {lease[:12]} failed: {err[:160]}")
     pr = {**(task.get("pr") or {}), "restacked": {"commit": paths.git(wt, "rev-parse", "HEAD"), "base": base}}
     with db.transaction(con):
         state.update_task(con, run["id"], task["id"], pr=pr)
     return pr
+
+
+def _remote_head(wt: Path, branch: str) -> str:
+    """The task branch's head on origin, fetched so it can be inspected; "" when unreadable."""
+    got = _git(wt, "ls-remote", "--heads", "origin", f"refs/heads/{branch}")
+    remote = got.stdout.split()[0] if got.returncode == 0 and got.stdout.strip() else ""
+    if remote and _git(wt, "fetch", "-q", "origin", f"refs/heads/{branch}").returncode != 0:
+        return ""
+    return remote
+
+
+def _resolved_by_hand(wt: Path, remote: str, accepted: str, base: str) -> bool:
+    """A pushed head already restacked onto `base` that carries the reviewed work:
+    it contains origin/`base`, and its tree is the accepted tree with `base`'s
+    changes merged in cleanly. A bare accepted-tree match is not enough: it would
+    revert anything `base` gained that the accepted revision lacks."""
+    if _git(wt, "merge-base", "--is-ancestor", f"origin/{base}", remote).returncode != 0:
+        return False
+    try:
+        merged, conflicts = _merge_tree(wt, paths.git(wt, "rev-parse", f"origin/{base}"), accepted)
+    except Refused:
+        return False
+    return conflicts is None and paths.git(wt, "rev-parse", f"{remote}^{{tree}}") == merged
+
+
+def _restack_lease(branch: str, accepted: str, remote: str, wt: Path) -> str:
+    """The remote head the restack force-push is leased to (#538).
+
+    Normally the accepted revision. When that revision's own push never reached
+    the remote, the branch still holds an ancestor of it: leasing to that head
+    loses nothing, because the accepted commit already contains it. Any other
+    head is someone else's work, so refuse before rebasing, naming both shas."""
+    if not remote or remote == accepted:
+        return accepted
+    if _git(wt, "merge-base", "--is-ancestor", remote, accepted).returncode == 0:
+        return remote
+    raise Refused("restack-push-failed",
+                  f"{branch} on origin is {remote[:12]}, not the accepted revision {accepted[:12]} "
+                  f"or an ancestor of it; Office will not overwrite it",
+                  preserved=f"{branch} unchanged on origin and locally",
+                  next_step=f"inspect {branch} on origin; if that head is not wanted, push {accepted[:12]} "
+                            f"to it, then office land")
 
 
 def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str] | None]:
