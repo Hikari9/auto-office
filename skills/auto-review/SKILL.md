@@ -1,6 +1,7 @@
 ---
 name: auto-review
 description: Explicit standalone independent review of a specific commit, PR, diff or plan. Dispatch a distinct read-only reviewer in a fresh Herdr pane or fresh CLI session, return SHA-bound APPROVED, RECHECK or INTAKE_GAP, and let the invoking agent coordinate up to three substantive rounds. Never auto-activate or start an Office run.
+disable-model-invocation: true
 ---
 
 # Auto Review — standalone, explicit only
