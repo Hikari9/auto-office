@@ -251,7 +251,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--interview", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--adversarial", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--set", action="append", help="config override key.path=value")
-    s.add_argument("--base", help=argparse.SUPPRESS)
+    s.add_argument("--base", help="Git ref to start from (use with --no-prs for an existing PR branch)")
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")

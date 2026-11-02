@@ -312,7 +312,11 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
     Policy evaluation is independent of technical availability, quotas and review safety.
     A list entry is exact unless its author deliberately set `wildcard: true`.
     """
+    # A preferred_seed allow never lifts a deny, the same refusal dispatch gives (#899).
+    seed_outranked = any(is_denied(cand, policy) for policy in policies)
     for policy in reversed(policies):
+        if seed_outranked and (policy.get("sources") or {}).get("role_rules") == "preferred_seed":
+            continue
         matching = [rule for rule in policy.get("role_rules", ())
                     if rule.get("role") in (role, "*") and _in_scope(rule, size)
                     and _rule_matches(cand, rule["route"], state=rule.get("state"))]

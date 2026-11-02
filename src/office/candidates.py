@@ -684,9 +684,11 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
-    `gemini-3.8-flash-medium` the harness actually accepts."""
-    from office import onboarding
+    `gemini-3.8-flash-medium` the harness actually accepts. `harness@2` pins the
+    installed major the way Office status prints it."""
+    from office import onboarding, scoring
     from office.state import Refused, Usage
+    harness, pin_sep, pinned_major = harness.partition("@")
     adapter = adapters.load_all().get(harness)
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
@@ -712,6 +714,11 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
     version = adapters.route_version(harness, adapter)
+    installed = scoring.harness_major(version)
+    if pin_sep and (not pinned_major.isdigit() or installed != str(int(pinned_major))):
+        raise Refused("harness-major-mismatch",
+                      f"{harness}@{pinned_major} pins a major, but the installed {harness} major is {installed}",
+                      next_step=f"office route policy --effective --role {role} shows each route under the installed {harness}")
     named = {"harness": harness, "harness_version": version, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
@@ -737,7 +744,8 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
                         if active_policy["source"] == "legacy-user-deny" else
                         f"it stays denied until you change the policy: office route neutral|allow {harness}/{model}@{named['effort']} --role {role}")
             raise state.Refused("route-denied", denied, next_step=(
-                f"{way_back}. A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
+                f"office route policy --effective --role {role} shows the verdict for every route; {way_back}. "
+                "A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
                 f"in their own terminal: office route override {harness}/{model}@{named['effort']} --role {role} "
                 "--run <run> --reason \"<why>\""))
     return {

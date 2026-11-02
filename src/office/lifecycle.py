@@ -155,7 +155,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]
     # HEAD and relative refs belong to the caller, even when its linked
     # checkout is disposable. All later Git work uses the durable anchor.
-    base_sha = _safe_start_base(caller_top, base)
+    base_sha = (paths.git(caller_top, "rev-parse", f"{base or 'HEAD'}^{{commit}}")
+                if no_prs else _safe_start_base(caller_top, base))
     top = paths.repository_anchor(common, checkout=caller_top)
     if top is None:
         raise Usage("repository-unavailable", f"cannot locate a durable repository root for {common}",

@@ -215,6 +215,11 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 
 ## Root context snapshot
 
+To start from an existing PR branch without creating task PRs, run
+`office start "<goal>" --no-prs --base <pr-branch>`. Office pins that ref's commit;
+the branch must be available in the caller's checkout. Without `--no-prs`, the
+run base must be safe for task PRs targeting the tracked default branch.
+
 `office start` resolves the base and pins configuration from the caller's checkout, then records the durable repository root
 identified by the shared Git directory. A removable linked caller such as `.claude/worktrees/agent-*` is not the run's Git cwd.
 Inline plan drafts live under the recorded root; use the path printed by `start` and `status` when operating from a linked checkout.
