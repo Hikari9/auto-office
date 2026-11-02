@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.14
+
+- fix(review): a FINDING that quotes `verdict ==` no longer hides the reply's VERDICT line (#894).
+
 ## 3.15.13
 
 - test(review): three route-refusal tests use kilo, a harness with no reviewer profile, as their builder-only example. #993 gave pi a read-only reviewer profile, so the old pi example launched and failed preflight instead of being refused.
