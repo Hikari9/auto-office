@@ -332,6 +332,11 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
+    from office import economics
+    usage, usage_verbose = economics.status_lines(con, run, [t["id"] for t in tasks if t["status"] != "cancelled"])
+    for line in usage:
+        res.add(line)
+    res.verbose.extend(usage_verbose)
     if not state.is_terminal(run):
         from office import gates as review_gates
         for line in review_gates.review_route_lines(con, run["id"], limit=3):
