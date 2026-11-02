@@ -369,3 +369,28 @@ def test_codex_validates_and_installs_the_plugin_manifest(tmp_path):
         done = subprocess.run(["codex", "plugin", *args], env=env, capture_output=True, text=True, timeout=180)
         assert done.returncode == 0, done.stdout + done.stderr
     assert _installed_skills(tmp_path / "plugins") == set(CFG["public_skills"])
+
+
+def test_root_skill_bundled_references_resolve_in_an_isolated_plugin_install(tmp_path):
+    """From a project with no Auto Office checkout, the documented plugin-relative paths resolve."""
+    import re
+
+    plugin = tmp_path / "plugin"
+    for rel, data in file_map(ROOT).items():
+        dest = plugin / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    project = tmp_path / "project"
+    project.mkdir()
+    skill = plugin / "skills" / "auto-office" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+
+    assert "`../auto-self-improve/SKILL.md`" in text
+    assert "two directories above this file" in text
+    assert (skill.parent / "../auto-self-improve/SKILL.md").resolve().is_file()
+    assert not (project / "skills" / "auto-self-improve" / "SKILL.md").exists()
+    body = text.split("\n", 1)[1]
+    refs = set(re.findall(r"`((?:docs|references|config|protocol)/[A-Za-z0-9_./-]+\.md|MANIFESTO\.md)`", body))
+    assert refs
+    for ref in sorted(refs):
+        assert (skill.parent / "../.." / ref).resolve().is_file(), ref
