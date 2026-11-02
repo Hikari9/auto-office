@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -320,3 +321,27 @@ def test_sync_cli_reports_a_symlink_as_fail_not_traceback(tmp_path):
     assert proc.returncode == 1, proc.stderr
     assert "FAIL: symlinks are not allowed" in proc.stdout
     assert "Traceback" not in proc.stderr
+
+
+def _installed_skills(root: Path) -> set[str]:
+    return {p.parent.name for p in root.rglob("SKILL.md") if p.parent.parent.name == "skills"}
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_real_claude_install_exposes_exactly_the_public_skills(tmp_path):
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)}
+    for args in (["marketplace", "add", str(ROOT)], ["install", "auto-office@auto-office"]):
+        done = subprocess.run(["claude", "plugin", *args], env=env, capture_output=True, text=True, timeout=180)
+        assert done.returncode == 0, done.stdout + done.stderr
+    installed = _installed_skills(tmp_path / "plugins")
+    assert installed == set(CFG["public_skills"])
+    assert "auto-office" in installed  # invoked as /auto-office:auto-office (namespaced only; see README)
+
+
+@pytest.mark.skipif(shutil.which("codex") is None, reason="codex CLI not installed")
+def test_codex_validates_and_installs_the_plugin_manifest(tmp_path):
+    env = {**os.environ, "CODEX_HOME": str(tmp_path)}
+    for args in (["marketplace", "add", str(ROOT)], ["add", "auto-office@auto-office"]):
+        done = subprocess.run(["codex", "plugin", *args], env=env, capture_output=True, text=True, timeout=180)
+        assert done.returncode == 0, done.stdout + done.stderr
+    assert _installed_skills(tmp_path / "plugins") == set(CFG["public_skills"])

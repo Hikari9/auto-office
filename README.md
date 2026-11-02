@@ -95,7 +95,7 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Both marketplaces install the generated `./plugin-dist` package, which exposes **exactly 16 skills**, including the full root `auto-office`. Claude Code namespaces it as `/auto-office:auto-office`; a bare `/auto-office` alias depends on the host. The skill is discoverable before the `office` CLI is installed.
+Both marketplaces install the generated `./plugin-dist` package, which exposes **exactly 16 skills**, including the full root `auto-office`. Verified against Claude Code 2.1.316 and codex-cli 0.163.0: a plugin skill is invoked only by its namespaced name, so the root skill is `/auto-office:auto-office` in Claude Code. A bare `/auto-office` is not available from a plugin (a same-named `commands/` entry or a plugin-root `SKILL.md` was tried and does not add it), and the plugin does not claim it. The skill documentation in the `/auto-office` form applies to a standalone skill install. The skill is discoverable before the `office` CLI is installed.
 
 `disable-model-invocation: true` (Claude Code) keeps the full hub, Lean, Intake and Takeover manual-only. `auto-review` does not set it, so an explicitly requesting agent can call it. Codex may not honor this flag; that is untested.
 
