@@ -794,6 +794,58 @@ def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
             subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", scratch], capture_output=True)
 
 
+def shared_paths(task: dict | None) -> set[str]:
+    """The literal files a task declares `shared:` (append-only registries); globs never qualify."""
+    return {x[1:] for x in (task or {}).get("scope") or [] if planfile.is_shared(x) and not any(c in x for c in "*?[]")}
+
+
+def _tree_blob(repo: str, commit: str, path: str) -> tuple[str, bytes] | None:
+    """(mode, bytes) of a regular UTF-8 text file at `commit`, or None for anything else."""
+    entry = subprocess.run(["git", "-C", repo, "ls-tree", commit, "--", path], capture_output=True)
+    if entry.returncode or not entry.stdout or b" blob " not in entry.stdout:
+        return None
+    mode = entry.stdout.split(b" ", 1)[0].decode("ascii", "replace")
+    raw = subprocess.run(["git", "-C", repo, "show", f"{commit}:{path}"], capture_output=True)
+    if mode not in ("100644", "100755") or raw.returncode or b"\0" in raw.stdout:
+        return None
+    try:
+        raw.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return mode, raw.stdout
+
+
+def _union_shared_appends(repo: str, a: str, b: str, tree: str, conflicts: list[str]) -> str | None:
+    """`tree` with each conflicting shared file replaced by its base plus both sides' appended records, kept
+    byte-exact and with their multiplicity (#537); None unless every conflict is a provable append on both
+    sides from one merge base. The same proof as finish_shared_append_merge, without a checkout."""
+    bases = paths.git(repo, "merge-base", "--all", a, b, check=False).split()
+    if len(bases) != 1:
+        return None
+    merged: dict[str, tuple[str, bytes]] = {}
+    for path in sorted(set(conflicts)):
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            return None
+        blobs = [_tree_blob(repo, c, path) for c in (bases[0], a, b)]
+        if any(x is None for x in blobs) or len({m for m, _ in blobs}) != 1:
+            return None
+        (mode, base), (_, left), (_, right) = blobs
+        if not left.startswith(base) or not right.startswith(base) or (base and not base.endswith(b"\n")):
+            return None
+        ours, theirs = left[len(base):], right[len(base):]
+        if any(v and not v.endswith(b"\n") for v in (ours, theirs)):
+            return None
+        merged[path] = (mode, base + ours + theirs)
+    with tempfile.TemporaryDirectory(prefix="office-union-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        paths.git(repo, "read-tree", tree, env=env)
+        for path, (mode, content) in merged.items():
+            blob = subprocess.run(["git", "-C", repo, "hash-object", "-w", "--stdin"], input=content,
+                                  capture_output=True, check=True).stdout.decode().strip()
+            paths.git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+        return paths.git(repo, "write-tree", env=env)
+
+
 def dependency_tips(run: dict, parents: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Keep distinct maximal heads before merging any ancestors (#714).
 
@@ -810,11 +862,16 @@ def dependency_tips(run: dict, parents: list[tuple[str, str]]) -> list[tuple[str
             if not any(commit != other and gates._is_ancestor(run, commit, other) for _, other in unique)]
 
 
-def combine(run: dict, parents: list[tuple[str, str]]) -> str:
+def combine(run: dict, parents: list[tuple[str, str]], *, shared: dict[str, set[str]] | None = None) -> str:
     """One commit containing every `(label, commit)` head. A head that is an ancestor of another adds
     nothing; the rest are merged without touching any worktree. Raises CombineConflict naming the
     conflicting pair and paths, or GitError when git cannot merge (merge-tree needs git 2.38). Each commit it
-    creates is anchored by a `refs/office/<run>/combine/<sha>` ref."""
+    creates is anchored by a `refs/office/<run>/combine/<sha>` ref.
+
+    `shared` maps a label to the files its task declares `shared:`. A conflict confined to files the incoming
+    head and an earlier head both declare is resolved as the union of their appends when that is provable
+    (#537): sibling tasks appending to one registry then compose instead of refusing the dependent task."""
+    shared = shared or {}
     repo = run["repo_root"]
     acc = None
     seen: list[tuple[str, str]] = []
@@ -827,6 +884,12 @@ def combine(run: dict, parents: list[tuple[str, str]]) -> str:
             acc = commit
         else:
             tree, conflicts = _merge_tree(repo, acc, commit)
+            mine = shared.get(label) or set()
+            earlier = set().union(*(shared.get(l) or set() for l, _ in seen)) if seen else set()
+            if conflicts and tree and set(conflicts) <= (mine & earlier):
+                unioned = _union_shared_appends(repo, acc, commit, tree, conflicts)
+                if unioned is not None:
+                    tree, conflicts = unioned, []
             if conflicts:
                 # Name the earlier head that collides, not the whole accumulated result.
                 culprit = next((l for l, c in seen if _merge_tree(repo, c, commit)[1]), None)

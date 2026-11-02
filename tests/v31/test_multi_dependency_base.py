@@ -170,6 +170,37 @@ def test_conflicting_parents_refuse_naming_both_tasks_and_paths(env):
     assert task_row(env, "T3")["status"] == "planned" and task_row(env, "T3")["current_dispatch_id"] is None
 
 
+def test_sibling_appends_to_a_shared_registry_compose_as_their_union(env):
+    """#537: two parents that both declare registry.txt shared: and each append records at its end compose
+    as the union (both sides' records, byte-exact and in order) instead of refusing the dependent task."""
+    fan_in_run(env)
+    c1 = accept_on_base(env, "T1", {"calc.py": GOOD_ADD, "registry.txt": REGISTRY + "t1 row\nshared row\n"})
+    c2 = accept_on_base(env, "T2", {"mul.py": GOOD_MUL, "registry.txt": REGISTRY + "t2 row\nshared row\n"})
+    code, out = env.office("dispatch", "T3", env=EXTERNAL)
+    assert code == 0 and "dependency-conflict" not in out, out
+    base = dispatch_base(env, "T3")
+    assert is_ancestor(env, c1, base) and is_ancestor(env, c2, base) and anchors(env, base)
+    union = env.git("show", f"{base}:registry.txt")
+    assert union == REGISTRY + "t1 row\nshared row\nt2 row\nshared row\n", union
+
+
+def test_a_shared_registry_edit_that_is_not_a_pure_append_still_refuses(env):
+    fan_in_run(env)
+    accept_on_base(env, "T1", {"calc.py": GOOD_ADD, "registry.txt": REGISTRY + "t1 row\n"})
+    accept_on_base(env, "T2", {"mul.py": GOOD_MUL, "registry.txt": edit_line(30, "rewritten") + "t2 row\n"})
+    code, out = env.office("dispatch", "T3", env=EXTERNAL)
+    assert code != 0 and "dependency-conflict" in out and "registry.txt" in out, out
+
+
+def test_appends_to_a_file_only_one_parent_declares_shared_still_refuse(env):
+    plan = PLAN_FAN_IN.replace("scope: mul.py\nshared: registry.txt\n", "scope: mul.py, registry.txt\n")
+    fan_in_run(env, plan=plan)
+    accept_on_base(env, "T1", {"calc.py": GOOD_ADD, "registry.txt": REGISTRY + "t1 row\n"})
+    accept_on_base(env, "T2", {"mul.py": GOOD_MUL, "registry.txt": REGISTRY + "t2 row\n"})
+    code, out = env.office("dispatch", "T3", env=EXTERNAL)
+    assert code != 0 and "dependency-conflict" in out, out
+
+
 def test_conflicting_parents_pause_a_stacked_dependent_instead_of_raising_out_of_acceptance(env):
     from office import db, dispatch, state
     fan_in_run(env)
