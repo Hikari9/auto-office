@@ -177,6 +177,16 @@ def review_pin(review_as: str | None, cli: str | None = None, external: bool = F
     return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
 
 
+def review_pin_inert(run: dict) -> str | None:
+    """Why a user's code-reviewer pin has no effect on this run, or None (#727): its gear runs no code review,
+    so a pinned route never reviews (a convergence lane that changes a security-sensitive path still gets one)."""
+    if (run.get("gates") or {}).get("code_review"):
+        return None
+    lane = " (a lane that changes a security-sensitive path still gets one convergence review)" \
+        if contract.is_convergence(run) else ""
+    return f"gear {run.get('gear') or 'unknown'} runs no code review, so the pinned reviewer never runs{lane}"
+
+
 def tried_reviewer_routes(con, where: str, params: tuple) -> list[str]:
     """Every route a reviewer dispatch already ran on the gates `where` selects (columns of `g`), so
     the next review of the same revision starts on another route."""

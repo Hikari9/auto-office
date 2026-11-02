@@ -177,6 +177,27 @@ def test_review_as_is_pinned_on_the_task(env):
     assert "review pinned by user: codex/gpt-6-luna@high (external)" in out, out
 
 
+def test_a_review_pin_on_a_gear_without_code_review_warns_it_has_no_effect(env):
+    """#727: the pin is still recorded, but dispatch and inspect say the gear runs no code review."""
+    approved_run(env)
+    con = env.con()
+    gates = json.loads(con.execute("SELECT gates_json FROM runs").fetchone()[0])
+    con.execute("UPDATE runs SET gates_json=?, gear='direct'", (json.dumps({**gates, "code_review": False}),))
+    con.commit()
+    code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
+                           "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
+    assert code == 0 and "--review-as codex/gpt-6-luna@high recorded, but gear direct runs no code review" in out, out
+    code, out = env.office("inspect", "task", "T1")
+    assert "review pinned by user: codex/gpt-6-luna@high (external); no effect: gear direct runs no code review" in out, out
+
+
+def test_a_review_pin_on_a_reviewed_gear_has_no_warning(env):
+    approved_run(env)
+    code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
+                           "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
+    assert code == 0 and "runs no code review" not in out, out
+
+
 @pytest.mark.approved
 def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
     """#337: --review-as pins the reviewer of the task's lane; it is still a fresh dispatch."""

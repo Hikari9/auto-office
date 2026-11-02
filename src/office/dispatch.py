@@ -329,6 +329,9 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             if review_as:
                 from office import gates
                 state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+                inert = gates.review_pin_inert(run)
+                if inert:
+                    res.notices.append(f"{tid} --review-as {review_as} recorded, but {inert}")
             if stack_after:
                 state.update_task(con, run["id"], tid, status="queued", stack_after=stack_after,
                                   pause_reason=f"stacked after {stack_after}")
