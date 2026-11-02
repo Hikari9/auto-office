@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.11
+
+- fix(routing): an exhausted route (0% headroom) is never within the quota reserve, even when a run pins `quota.reserve_percent: 0`, so Codex at 0% weekly no longer stays the first reviewer.
+
 ## 3.15.10
 
 - fix(routing): an ineligible planner `route:` entry drops alone with a notice. The eligible ones keep the planner's order and slots (#875).
