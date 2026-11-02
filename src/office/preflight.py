@@ -457,6 +457,17 @@ def committed_changes(wt: Path, base: str, head: str, dep_bases: list[str]) -> l
     return changed
 
 
+def review_changes(con, task: dict, wt: Path, base: str, head: str, dep_bases: list[str]) -> list[str]:
+    """The committed changes the producer self-review covers: `committed_changes`, or none when HEAD's tree is
+    the tree of the task's accepted revision. Resubmitting the accepted work unchanged (say, after an amendment
+    demoted the task) is empty work, which owes no ledger (#781). Uncommitted edits still count as pending."""
+    rid = task.get("accepted_revision_id")
+    row = con.execute("SELECT tree_sha FROM revisions WHERE id=?", (rid,)).fetchone() if rid else None
+    if row and row["tree_sha"] and _git(wt, "rev-parse", f"{head}^{{tree}}").strip() == row["tree_sha"]:
+        return []
+    return committed_changes(wt, base, head, dep_bases)
+
+
 def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
                 dep_bases: list[str], *, stop: list[str], fix: list[str],
                 submission: bool = False, require: bool = False) -> tuple[list[str], list[str], bool]:
@@ -465,7 +476,7 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
     `stop` and `fix` are preflight's other findings, so both commands choose the
     same signal verdict and reasons without duplicating the ledger gate.
     """
-    changed = committed_changes(wt, base, head, dep_bases)
+    changed = review_changes(con, task, wt, base, head, dep_bases)
     tier = briefs.run_self_review_tier(run)
     ledger_stop, ledger_fix = ledger_verdict(
         wt, task, changed, head, tier,
@@ -648,7 +659,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     if not (stop or fix or wait):
         from office import self_review_proof
         proof = self_review_proof.gate(con, run, task, wt, base, head,
-                                       committed_changes(wt, base, head, dep_bases), execute=True)
+                                       review_changes(con, task, wt, base, head, dep_bases), execute=True)
         if not proof["ok"]:
             fix.append("self-review: " + proof["reason"])
         res.data["self_review_proof"] = proof
