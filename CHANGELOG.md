@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.3
+
+- fix(land): restack reads the pushed task branch head. A failed accepted-revision push leaves an ancestor that is a safe lease (#538). A head pushed by hand per `next:` whose tree is the accepted revision merged with the base is adopted instead of re-conflicting, and `next:` names `office close --landed-externally` (#676).
+
 ## 3.15.2
 
 - fix(convergence): a stacked task's in-place edit of a `shared:` file composes when the composition still holds the file exactly as the task's recorded base (#773); sibling edits are still refused. The `next:` hint no longer says to serialize tasks that already depend on each other.
