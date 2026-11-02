@@ -464,6 +464,7 @@ def test_office_status_names_a_route_chosen_on_a_stale_reading(monkeypatch):
 
     from office import guide
     _good_reading_then_expire_fresh_cache(monkeypatch, percent=60)
+    _age_last_good(seconds=120)
     FakeProbe(monkeypatch, [TIMEOUT, TIMEOUT])
     quota = candidates.probe_quota(ADAPTER)
     payload = dispatch._route_payload({"candidate": {"adapter_id": "claude", "quota": quota}})
@@ -474,4 +475,4 @@ def test_office_status_names_a_route_chosen_on_a_stale_reading(monkeypatch):
 
     note = guide._quota_unknown_note(con, {"id": "T1", "current_dispatch_id": "D1"})
 
-    assert note == f"T1 routed on stale quota: claude: {quota['cause']}"
+    assert note == "T1 routed on stale quota: claude: probe timed out; last good reading 120s old"
