@@ -211,6 +211,19 @@ def test_no_named_test_or_no_pytest_command_records_an_exemption_not_a_block(tmp
     assert result["ok"] and result["status"] == "exempt" and "no pytest command" in result["reason"]
 
 
+def test_more_named_tests_than_the_proof_runs_blocks_instead_of_proving_a_subset(tmp_path):
+    wt, base, head = _repo(tmp_path, GOOD_TEST)
+    task = {"id": "T1", "scope": ["calc.py", "tests/**"], "checks": ["pytest -q"]}
+    count = self_review_proof._MAX_TESTS + 1
+    (wt / briefs.LEDGER_FILE).write_text(_ledger(*(
+        f"FINDING medium edge-cases calc.py:{i} | f{i} | fixed tests/test_calc.py::test_{i} mutation=failed"
+        for i in range(count))))
+    result = self_review_proof.gate(None, NEW_RUN, task, wt, base, head, ["calc.py", "tests/test_calc.py"],
+                                    execute=True)
+    assert not result["ok"] and result["status"] == "blocked"
+    assert f"names {count} tests" in result["reason"] and f"at most {self_review_proof._MAX_TESTS}" in result["reason"]
+
+
 def test_a_v31_run_and_a_test_only_change_need_no_proof(tmp_path):
     wt, base, head = _repo(tmp_path, GOOD_TEST)
     task = {"id": "T1", "scope": ["calc.py"], "checks": ["pytest -q"]}
