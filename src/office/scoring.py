@@ -378,6 +378,9 @@ def evaluate_capability_floor(candidate: dict, floor: dict | None, *,
     if allowed_sources:
         source = candidate.get("invocation_source")
         if not source or not any(str(source).startswith(p) for p in allowed_sources):
+            if str(source or "").startswith("unverified"):  # a row added with office model add (#656)
+                return False, ("invocation_source not permitted by role floor (unverified: office model verify "
+                               "<harness>/<model> --evidence <run>/<task> promotes it, or office route allow it for the role)")
             return False, "invocation_source not permitted by role floor"
 
     min_benchmark = floor.get("min_benchmark_index")

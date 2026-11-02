@@ -250,8 +250,22 @@ def probe_quota(adapter: dict) -> dict:
     """Tightest remaining quota percent, or unknown/unavailable with a safe cause.
 
     A timed-out probe falls back to the harness's last good reading within
-    `OFFICE_QUOTA_LAST_GOOD_TTL` (#941). Other failures stay unknown/unavailable."""
-    return _stale_fallback(adapter.get("id"), _probe_quota(adapter))
+    `OFFICE_QUOTA_LAST_GOOD_TTL` (#941). Other failures stay unknown/unavailable.
+
+    An adapter that sets `quota_probe.unknown_is_unlimited: true` declares a harness with no quota to
+    exhaust: an unknown result (no probe command, or a probe that cannot tell) reads as full headroom,
+    so routing does not set the route aside as quota-unknown (#1002). An unavailable result stays as is."""
+    return _unknown_as_unlimited(adapter, _stale_fallback(adapter.get("id"), _probe_quota(adapter)))
+
+
+UNLIMITED_CAUSE = "quota_probe.unknown_is_unlimited"
+
+
+def _unknown_as_unlimited(adapter: dict, result: dict) -> dict:
+    if result.get("status") != "unknown" or (adapter.get("quota_probe") or {}).get("unknown_is_unlimited") is not True:
+        return result
+    return {**result, "status": "ok", "tightest_remaining_percent": 100.0, "unlimited": True,
+            "cause": f"{UNLIMITED_CAUSE} (probe: {result.get('cause') or 'unknown'})"}
 
 
 def _probe_quota(adapter: dict) -> dict:

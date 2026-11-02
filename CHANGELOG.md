@@ -2,6 +2,66 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.43
+
+A herdr agent that is working on its brief, with the pointer no longer in its composer, no longer triggers a 'brief pointer did not land, re-prompt it' notice (#583).
+
+## 3.15.42
+
+The amendment authority filter no longer refuses text that names an email field or address; only outbound email phrasing (email the users, bulk email, emails to customers) counts as an authority action (#543).
+
+## 3.15.41
+
+An amendment that changes only a task's visual.url or visual.start keeps the accepted task accepted and reruns its lane's visual capture, with no executor and no round spent (#728).
+
+## 3.15.40
+
+office close --handoff <pr> closes a run whose blocked integration was composed by hand, recording integration_composed_by_hand; the close refusal names the unapplied amendment (#729).
+
+## 3.15.39
+
+office status keeps an open executor's stop signal, or an executor pane idle without submitting, as a blocker: line with its resolving next: until it resolves (#671).
+
+## 3.15.38
+
+A contract amendment's ripple delivery tells each dependant which task's contract changed and that it is not theirs, instead of telling it to apply the amendment (#960).
+
+## 3.15.37
+
+Plan submit now shows a planner route entry that routing dropped as a notice, and office queue help says pausing a whole run also holds its integration checks.
+
+## 3.15.36
+
+A dependent task's base now composes sibling tasks' appends to the same declared shared: registry as their union instead of refusing the dispatch with dependency-conflict (#537).
+
+## 3.15.35
+
+`office model verify <harness>/<model> --evidence <run>/<task>` promotes a model added with office model add to a local-evidence: source on cited acceptances under independent review; explicit only (#656).
+
+## 3.15.34
+
+`office amend route <task> --auto --quote "<words>"` clears a pending task's declared route so it routes automatically again, and records the change (#977).
+
+## 3.15.33
+
+`office config --run <id> --apply-verification --quote "<words>"` re-pins a running run's check timeouts and check concurrency from the config files, and `office config --run <id> <key>` shows the value the run pinned (#755).
+
+## 3.15.32
+
+A task's worktree setup that exits 127 (command not found) now stops the dispatch with an office doctor hint instead of launching an agent without dependencies; other setup failures stay a notice (#364).
+
+## 3.15.31
+
+Resubmitting a task's accepted tree unchanged (for example after an amendment demoted it) is empty work: no self-review ledger is owed, and the revision records an empty exemption (#781).
+
+## 3.15.30
+
+Adapters can set `quota_probe.unknown_is_unlimited: true` so an unknown quota reads as full headroom; routing stops skipping harnesses that have no probe (#1002).
+
+## 3.15.29
+
+- feat(review): narrow grant (Rico-approved). claude and codex reviewers may run exactly `office review submit --file <own dispatch dir>/review-submit.txt` and nothing else: an exact claude allow plus explicit read-only Bash denies, and a per-dispatch codex execpolicy rule. pi gets no grant (#1030).
+
 ## 3.15.28
 
 - feat(review): `office review submit` (stdin or --file) lets a reviewer hand back its verdict for any review kind. It validates the reply for its gate, records it at once and ends the reviewer's wait. Reviewers get only a per-dispatch submit secret, no other Office authority (#1030).

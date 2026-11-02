@@ -24,7 +24,10 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
    preflight/quota/version/model command resolves on this host.
 4. `office model add <id>/<provider/slug> --effort medium[,high]` appends rows to the user
    catalog overlay (`catalog.yaml` beside the user config), never the packaged seed. Scores
-   come later through `office benchmarks brief|submit`; there is no second path.
+   come later through `office benchmarks brief|submit`; there is no second path. The rows start
+   `unverified:`; once a task this route produced is accepted under independent review,
+   `office model verify <id>/<model> --evidence <run>/<task>` promotes them to `local-evidence:`
+   so `allowed_sources` role floors admit them (#656). It is explicit only.
 5. `office harness smoke <id> --model <m>`: one launch in a throwaway git repo, no run
    identity, no pty. Recorded in `harness-smoke.jsonl` as launch evidence only. It refuses
    a form with a permission/trust flag unless `--allow-unsafe-flags` is passed.

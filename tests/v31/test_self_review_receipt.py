@@ -268,3 +268,49 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     assert "EXECUTOR SELF-REVIEW LEDGER for T1" in brief
     assert "tests/test_guard.py mutation=failed" in brief
     assert "not an independent verdict" in brief
+
+
+def _relaunch_with_a_new_lease(env, d):
+    """A fresh session on the same task: a new lease, so the same tree is a new submission, not a replay."""
+    con = env.con()
+    lease = dict(con.execute("SELECT * FROM leases WHERE id=?", (d["lease_id"],)).fetchone())
+    lease["id"] = lease["id"] + "-relaunch"
+    con.execute(f"INSERT INTO leases({','.join(lease)}) VALUES({','.join('?' * len(lease))})", tuple(lease.values()))
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (lease["id"], d["id"]))
+    con.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_resubmitting_the_accepted_tree_unchanged_is_empty_work_without_a_ledger(env):
+    """#781: a task demoted only by an amendment is relaunched and submits the accepted revision's tree with no
+    code change. That is empty work: it owes no ledger and records an `empty` exemption."""
+    wenv, wt, d = _dispatch(env)
+    write_ledger(wt)
+    assert env.office("submit", cwd=wt, env=wenv)[0] == 0
+    first = _rev(env)
+    con = env.con()
+    con.execute("UPDATE tasks SET accepted_revision_id=? WHERE id='T1'", (first["id"],))
+    con.commit()
+    _relaunch_with_a_new_lease(env, d)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0 and "self-review exempt (empty" in out, out
+    second = _rev(env)
+    assert second["id"] != first["id"] and second["tree_sha"] == first["tree_sha"]
+    assert json.loads(second["self_review_json"])["type"] == "empty"
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_a_change_on_top_of_the_accepted_tree_still_owes_a_ledger(env):
+    wenv, wt, d = _dispatch(env)
+    write_ledger(wt)
+    assert env.office("submit", cwd=wt, env=wenv)[0] == 0
+    con = env.con()
+    con.execute("UPDATE tasks SET accepted_revision_id=? WHERE id='T1'", (_rev(env)["id"],))
+    con.commit()
+    _relaunch_with_a_new_lease(env, d)
+    (wt / "calc.py").write_text((wt / "calc.py").read_text() + "\n# after acceptance\n")
+    commit_all(wt, "more")
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code != 0 and "self-review ledger refused submission" in out, out

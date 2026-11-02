@@ -125,3 +125,46 @@ def test_handoff_leaves_a_pr_office_did_not_open_in_draft(monkeypatch):
     owned = closeout.mark_ready("/repo", "https://github.com/o/r/pull/3", {"3"})
     assert calls == [["gh", "pr", "ready", "https://github.com/o/r/pull/3"]] and "marked ready" in owned, (calls, owned)
     assert closeout.mark_ready("/repo", "#3", {"3"}) and len(calls) == 2
+
+
+def _blocked_integration(env):
+    """T1 accepted and converged, then integration blocked (rebase-conflict) with one amendment delta unapplied."""
+    import json
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    run_id, landing = con.execute("SELECT id, landing_json FROM runs").fetchone()
+    landing = json.loads(landing or "{}")
+    integ = landing.get("integration") or {}
+    assert integ.get("key"), landing
+    landing["integration"] = {**integ, "status": "blocked", "detail": "rebase-conflict on calc.py"}
+    con.execute("UPDATE runs SET landing_json=?", (json.dumps(landing),))
+    con.execute("INSERT INTO deliveries(id, run_id, amendment_id, task_id, target_version, status, content, created_at) "
+                "VALUES('dl1', ?, 'A9', 'T1', 2, 'queued', 'merge main', '2026-01-01')", (run_id,))
+    con.commit()
+
+
+def test_close_names_the_unapplied_amendment_and_offers_the_hand_composed_handoff(env):
+    """#729: the refusal names the amendment, and next: names the handoff close the recovery leads to."""
+    _blocked_integration(env)
+    code, out = env.office("close")
+    assert code == 4 and "A9 (T1)" in out and "integration blocked" in out, out
+    assert "office close --handoff <pr-url>" in out, out
+
+
+def test_handoff_closes_a_run_whose_integration_was_composed_by_hand(env):
+    import json
+    _blocked_integration(env)
+    code, out = env.office("close", "--handoff", "https://github.com/o/r/pull/9")
+    assert code == 0 and "integration composed by hand: https://github.com/o/r/pull/9" in out, out
+    run = env.con().execute("SELECT phase, landing_json FROM runs").fetchone()
+    by_hand = json.loads(run["landing_json"])["integration_composed_by_hand"]
+    assert run["phase"] == "closed" and by_hand["handoff"] == "https://github.com/o/r/pull/9", by_hand
+    assert any(b.startswith("integration blocked") for b in by_hand["settled"]), by_hand
+
+
+def test_a_handoff_that_is_not_a_pull_request_cannot_stand_in_for_the_integration(env):
+    _blocked_integration(env)
+    code, out = env.office("close", "--handoff", "my-branch")
+    assert code == 4 and "integration blocked" in out and "--handoff <pr-url>" in out, out

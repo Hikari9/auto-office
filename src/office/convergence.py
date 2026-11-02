@@ -1989,6 +1989,32 @@ def spec_defect_gate(con, run: dict, scope_id: str) -> dict | None:
     return next((g for g in _unreviewed_gates(con, run, scope_id) if g.get("evidence_status") == SPEC_DEFECT), None)
 
 
+def recapture_visual(con, run: dict, task_id: str, amendment_id: str) -> list[str]:
+    """Rerun the visual capture of the lane holding `task_id` on its current composition after a capture-only
+    amendment (#728): the task stays accepted, no executor starts and no round is spent. A lane whose visual
+    review has a verdict keeps it; the new capture contract applies to its next capture. Caller holds the tx."""
+    scope = next((s for s in all_scopes(con, run) if task_id in s["tasks"]), None)
+    if scope is None:
+        return [f"{task_id} visual capture contract updated by {amendment_id}; no lane holds it yet"]
+    blocked = [g for g in _unreviewed_gates(con, run, scope["id"]) if g["kind"] == "visual"]
+    if not blocked:
+        return [f"{task_id} visual capture contract updated by {amendment_id}; {scope['id']} has no blocked visual "
+                "capture, so its next capture uses it"]
+    st = scope_state(state.get_run(con, run["id"]), scope["id"])
+    lines = []
+    for g in blocked:
+        gid, _ = _new_gate(con, run, scope, _rev(scope["id"], st["commit"]), "visual", int(g["round"] or 1),
+                           int(g.get("cycle") or 1))
+        state.enqueue(con, run, "lane_visual", {"gate_id": gid, "scope": scope["id"], "review_only": True},
+                      dedup_key=f"visual:{gid}", max_attempts=2)
+        lines.append(f"{scope['id']} visual capture re-run on {st['commit'][:10]} with {task_id}'s new capture "
+                     f"contract (gate {gid}); {task_id} stays accepted, no executor launched, no round spent")
+    _set_scope(con, run, scope["id"], status="reviewing", detail=f"recapturing after {amendment_id}")
+    state.emit(con, run, "convergence.recapture", f"{scope['id']}: visual recapture after capture-only "
+               f"amendment {amendment_id} to {task_id}")
+    return lines
+
+
 def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[str]:
     """`office review <scope>[:convergence|visual] [--as <route>]`: re-dispatch only the review of the
     scope's current composition for each gate that returned no verdict, on the named route or the next

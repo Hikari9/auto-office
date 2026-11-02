@@ -1145,7 +1145,10 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
     else:
         pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
                    f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
-                   "Do not edit anything else.")
+                   + (f"If your tools allow running it, you may instead write the review to "
+                      f"{Path(output).parent / review_submit.SUBMIT_FILE} and run exactly: "
+                      f"{review_submit.submit_command(output)} . " if output else "")
+                   + "Do not edit anything else.")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
@@ -1201,7 +1204,8 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
     if onto != run["base_sha"]:
         parents_for_base.insert(0, ("rebased default branch", onto))
     try:
-        return integration.combine(run, parents_for_base)
+        return integration.combine(run, parents_for_base, shared={
+            h["task"]: integration.shared_paths(state.get_task(con, run["id"], h["task"])) for h in heads})
     except integration.CombineConflict as exc:
         raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
                       f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],
@@ -2115,11 +2119,14 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
-        # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
+        # The repo's own install, before the agent's first prompt. A failure is surfaced, not fatal, except a
+        # setup command that is not on PATH at all (exit 127), which stops the dispatch (#364).
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
         if setup:
             atomic_write_json(ddir / "setup.json", setup)
+            if setup["exit"] == worktree_setup.COMMAND_NOT_FOUND and not setup.get("timed_out"):
+                raise worktree_setup.not_found_refusal(setup, dispatch["task_id"])
             if setup["exit"] != 0:
                 _launch_notice(run, dispatch, worktree_setup.failure_text(setup))
     packet = build_packet(con, run, dispatch, role, payload)
@@ -2881,7 +2888,11 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
                    f"Write your complete review to {spec['output']}; Office reads only that file, never "
-                   "your terminal. Do not edit anything else.")
+                   "your terminal. "
+                   + (f"If your tools allow running it, you may instead write the review to "
+                      f"{Path(spec['output']).parent / review_submit.SUBMIT_FILE} and run exactly: "
+                      f"{review_submit.submit_command(spec['output'])} . " if spec.get("output") else "")
+                   + "Do not edit anything else.")
     from office import transcripts
     sent_at = time.time()
 
@@ -2963,6 +2974,11 @@ def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, p
     view = _pane_view(name)
     # No Enter for an agent herdr no longer reports: the key would go to the pane's shell.
     if sample is None or not _composer_holds(view, pointer):
+        if working:
+            # The pointer is gone from the composer and herdr says the agent is working on something: it most
+            # likely took the brief. Telling the orchestrator to re-prompt it would deliver the brief twice (#583).
+            spec["landing_unconfirmed_working"] = True
+            return False, None
         _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
         return False, None
     if working:

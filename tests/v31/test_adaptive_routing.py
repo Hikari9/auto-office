@@ -471,3 +471,19 @@ def test_a_zero_reserve_still_admits_a_route_with_headroom():
     request["policy"]["quota_reserve_percent"] = 0.0
     d = routing.route(request)
     assert not [r for r in d["rejected"] if r["candidate"].startswith("codex") and r["stage"] == 6], d["rejected"]
+
+
+def test_plan_submit_shows_the_planner_notice_beside_the_diagram(monkeypatch):
+    """#875 follow-up: a planner entry routing dropped is said when the plan is submitted, not only in inspect."""
+    import sqlite3
+
+    from office import plan_view, plans
+    from office.result import Result
+    preview = {"tasks": {"T1": {"route_plan": {"planner_notice": "dropped from the planner route: y/gone@low"}},
+                         "T2": {"route_plan": {}}}}
+    monkeypatch.setattr(plan_view, "preview", lambda con, run, tasks: preview)
+    monkeypatch.setattr(plan_view, "store", lambda *a: None)
+    monkeypatch.setattr(plan_view, "render", lambda run, version, pv: ["diagram"])
+    res = Result()
+    plans.show_diagram(sqlite3.connect(":memory:", isolation_level=None), {"id": "r1"}, 1, [], None, res)
+    assert res.notices == ["T1 route: dropped from the planner route: y/gone@low"], res.notices

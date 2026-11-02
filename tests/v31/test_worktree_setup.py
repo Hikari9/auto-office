@@ -130,6 +130,21 @@ def test_failing_setup_notifies_emits_setup_failed_and_still_launches(env):
     assert "worktree setup failed" in shown, shown
 
 
+def test_setup_command_not_found_stops_the_dispatch_with_the_doctor_hint(env):
+    """#364: exit 127 (command not found) fails the same way in every worktree, so no agent starts."""
+    _config(env, "office-no-such-setup-tool-364 install")
+    approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=None)
+    ddir = _dispatch_dir(env)
+    assert json.loads((ddir / "setup.json").read_text())["exit"] == 127
+    assert not (ddir / "brief.md").exists()  # stopped before the brief and the agent
+    con = env.con()
+    task = dict(con.execute("SELECT status, pause_reason FROM tasks WHERE id='T1'").fetchone())
+    assert task["status"] == "blocked", task
+    assert "command not found (exit 127)" in task["pause_reason"] and "office doctor" in task["pause_reason"], task
+    # Other nonzero exits stay a notice: test_failing_setup_notifies_emits_setup_failed_and_still_launches.
+
+
 def test_no_setup_configured_changes_nothing(env):
     approved_run(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch", "T1", check=0)

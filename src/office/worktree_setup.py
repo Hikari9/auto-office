@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from office import db, state
+from office.state import Refused
 from office.util import sha256_bytes
 
 KINDS = ("task", "integration", "check")
@@ -125,6 +126,22 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
     except OSError:
         pass
     return result
+
+
+COMMAND_NOT_FOUND = 127  # /bin/sh: the setup command (or a program it starts) is not on PATH
+
+
+def not_found_refusal(result: dict, task_id: str | None) -> Refused:
+    """Setup that cannot start at all (#364): it fails the same way in every worktree, so the executor would
+    work without its dependencies and its checks would fail confusingly. The dispatch stops instead."""
+    task = task_id or "<task>"
+    return Refused("worktree-setup-not-found",
+                   "worktree setup command not found (exit 127), so every worktree's setup would fail the same way; "
+                   f"office doctor names the missing program; install it or fix worktree.setup, then office rerun "
+                   f"{task} --fresh; log {result['log']}",
+                   scope=task_id, preserved="the worktree and setup log; no agent was started",
+                   next_step=f"office doctor; install the program or fix worktree.setup in .auto-office/config.yaml, "
+                             f"then office rerun {task} --fresh")
 
 
 def failure_text(result: dict) -> str:

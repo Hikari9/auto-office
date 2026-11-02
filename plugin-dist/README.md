@@ -742,7 +742,9 @@ office approve plan|merge|trust|waive|visual ... --quote "<user words>"
 office decide <scope> escalate|continue|waive|stop|review --quote "<user words>"
 office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"   dismissed of a blocking finding: --quote "<user words>"
-office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles and routing from config
+office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles, routing and quota from config
+office config --run <id> --apply-verification --quote "<user words>"   re-pin a run's check timeouts and check concurrency
+office config --run <id> <key> [--show-origin]   the value a run pinned at start (what its gates use)
 office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
 office list

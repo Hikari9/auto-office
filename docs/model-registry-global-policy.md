@@ -75,6 +75,13 @@ fails that route as degraded and the next reviewer runs. The check does not cove
 edit by anyone else during it also reads as a change. A directory that is not a git checkout cannot be
 fingerprinted, so the route fails as degraded instead of passing unchecked. See `skills/auto-adapter/SKILL.md`.
 
+A row added with `office model add` starts with an `unverified:` invocation source, which the role floors
+that admit only `local-evidence:` or `documented:` sources refuse. `office model verify
+<harness>/<model>[@effort] --evidence <run>/<task>` promotes it to `local-evidence:` (#656). Each cited
+task must be accepted, in a run with independent code review, with its accepted revision produced on
+that harness and model. Only the efforts the evidence ran are promoted. Nothing promotes a model on its
+own, and `office route allow` for a role remains the other way past a floor.
+
 The `enable` command removes **legacy user-overlay** disables set by
 `office model disable`; it never bypasses an existing technical
 `dispatchable: false` gate or a separately configured user denial.

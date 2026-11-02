@@ -41,6 +41,8 @@ Auto Office {ver}
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
+  office amend route <task> --auto --quote "<words>"
+                                    clear a pending task's declared route: it routes automatically again
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
@@ -69,7 +71,7 @@ Auto Office {ver}
                                     user-issued one-off deny override (interactive terminal only)
   office route migrate [--apply|--rollback]
                                     dry-run, apply or roll back the legacy trust/deny -> role policy migration
-  office model add|list|disable|enable|registry|policy|ceiling|unceil
+  office model add|list|disable|enable|verify|registry|policy|ceiling|unceil
                                     catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
@@ -98,9 +100,13 @@ Auto Office {ver}
                                     while plan review is open: re-pin the plan reviewer and re-run only that review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office config --run <id> --apply-routing --quote "<user's words>"
-                                    re-pin one run's roles and routing from the current config files
+                                    re-pin one run's roles, routing and quota from the current config files
+  office config --run <id> --apply-verification --quote "<user's words>"
+                                    re-pin one run's check timeouts and check concurrency
+  office config --run <id> <key>    the value that run pinned at start (what its gates use)
   office queue list|add|pause|resume|priority|demote|auto
-                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run);
+                                    pausing a whole run also holds its queued integration checks until resume
   office web start|stop|status|serve [--port N] [--fixture small|large]
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
@@ -211,7 +217,7 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
-# `amend route` takes only --as, --quote, and --restart. These amend the plan, so `amend route` refuses them
+# `amend route` takes only --as, --quote, --restart, and --auto. These amend the plan, so `amend route` refuses them
 # instead of dropping them (#896).
 _ROUTE_AMEND_ONLY_FLAGS = {
     "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
@@ -339,6 +345,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
                    help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
+    s.add_argument("--auto", dest="route_auto", action="store_true",
+                   help="amend route: clear the task's declared route so it routes automatically again; refused on any other amendment")
     prs_mode = s.add_mutually_exclusive_group()
     prs_mode.add_argument("--prs", action="store_true", help="amend options: enable task PR publishing")
     prs_mode.add_argument("--no-prs", action="store_true", help="amend options: disable task PR publishing")
@@ -424,13 +432,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--wildcard", action="store_true", help="deliberately apply broad route/role rule")
     s.add_argument("--size", help="task size scope: XS|S|M|L|XL (policy: show that size; allow/neutral/deny/clear: comma list)")
     s = sp.add_parser("model", parents=[common])
-    s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
+    s.add_argument("action", choices=["add", "list", "disable", "enable", "verify", "registry", "policy", "ceiling", "unceil"])
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
     s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
     s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
     s.add_argument("--role", action="append", help="add: also allow the new rows for executor or reviewer (code and plan review); repeat or comma-separate")
     s.add_argument("--reason", help="disable: why the row is off")
     s.add_argument("--through", help="ceiling: inclusive generation (e.g. 5.6)")
+    s.add_argument("--evidence", action="append",
+                   help="verify: <run>/<task> an accepted, independently reviewed task this route produced (repeat or comma-separate)")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -447,13 +457,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
     s.add_argument("--apply-routing", action="store_true",
-                   help="with --run: re-pin roles and routing from the current config files into that run")
-    s.add_argument("--quote", help="with --apply-routing: the user's words authorizing the re-pin")
+                   help="with --run: re-pin roles, routing and quota from the current config files into that run")
+    s.add_argument("--apply-verification", action="store_true",
+                   help="with --run: re-pin the check timeouts and check concurrency from the current config files")
+    s.add_argument("--quote", help="with --apply-routing or --apply-verification: the user's words authorizing the re-pin")
     s = sp.add_parser("queue", parents=[common])
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
     s.add_argument("value", nargs="?", help="the new priority (priority)")
-    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--task", help="with --run: one task of the run (pausing the whole run also holds its integration checks)")
     s.add_argument("--title")
     s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
     s.add_argument("--reason")
@@ -898,13 +910,26 @@ def _run(args, unknown) -> int:
             raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
         return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard,
                                     sizes=[v.strip().upper() for v in args.size.split(",")] if args.size is not None else None), args)
-    if cmd == "config" and args.apply_routing:
+    if cmd == "config" and (args.apply_routing or args.apply_verification):
         from office import configcmd
-        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
-            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
+        flag = "--apply-routing" if args.apply_routing else "--apply-verification"
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path or \
+                (args.apply_routing and args.apply_verification):
+            raise OfficeError("usage", f"{flag} re-pins a run; it takes only --run and --quote", exit_code=2)
+        apply = configcmd.apply_run_routing if args.apply_routing else configcmd.apply_run_verification
         con = _con()
         try:
-            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
+            return emit(apply(con, getattr(args, "run_arg", None), args.quote), args)
+        finally:
+            con.close()
+    if cmd == "config" and getattr(args, "run_arg", None) and args.key:
+        from office import configcmd
+        if args.value is not None or args.unset or args.tier:
+            raise OfficeError("usage", "a run's pinned config is read-only: office config --run <id> <key> reads it; "
+                              "--apply-routing or --apply-verification re-pins from the config files", exit_code=2)
+        con = _con()
+        try:
+            return emit(configcmd.run_get(con, args.run_arg, args.key, args.origin, cwd), args)
         finally:
             con.close()
     if cmd == "config":
@@ -939,6 +964,8 @@ def _run(args, unknown) -> int:
             return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
         if args.action == "enable":
             return emit(harnesscmd._with_affected(harnesscmd.model_enable(args.ident)), args)
+        if args.action == "verify":
+            return emit(harnesscmd._with_affected(harnesscmd.model_verify(args.ident, args.evidence)), args)
         if args.action in ("ceiling", "unceil"):
             return emit(harnesscmd._with_affected(harnesscmd.model_ceiling(
                 args.ident, through=args.through if args.action == "ceiling" else None)), args)
@@ -1111,7 +1138,11 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                           next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart, cwd=cwd)
+                                        restart=args.restart, cwd=cwd, auto=args.route_auto)
+    if cmd == "amend" and getattr(args, "route_auto", False):
+        from office.state import Refused
+        raise Refused("auto-without-route", "--auto applies to office amend route only; nothing was recorded",
+                      next_step='office amend route <task> --auto --quote "<user\'s words>"')
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
