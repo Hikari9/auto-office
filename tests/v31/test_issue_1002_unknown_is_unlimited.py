@@ -68,3 +68,23 @@ def test_shipped_seeds_keep_the_flag_false():
     for seed in seeds:
         flag = ((yaml.safe_load(seed.read_text()) or {}).get("quota_probe") or {}).get("unknown_is_unlimited")
         assert flag in (False, None), seed.name
+
+
+def test_a_dispatch_at_80_percent_of_a_daily_budget_warns_once_a_day(env):
+    """#831: the warning is recorded when a dispatch reaches 80% of the route's daily dispatch budget, once per day."""
+    from conftest import approved_run
+    from office import db, dispatch, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    cand = {"harness": "opencode", "harness_version": "1", "model_id": "deepseek-flash", "effort": "high",
+            "quota": {"daily_budget": {"key": "opencode/deepseek-flash", "budget": 10, "used": 6}}}
+    with db.transaction(con):
+        dispatch.note_daily_budget(con, run, cand)  # 7/10: below 80%
+    assert not con.execute("SELECT 1 FROM events WHERE kind=?", (dispatch.BUDGET_WARNING_KIND,)).fetchone()
+    cand["quota"]["daily_budget"]["used"] = 7
+    for _ in range(2):
+        with db.transaction(con):
+            dispatch.note_daily_budget(con, run, cand)  # 8/10, then again: still one warning today
+    rows = con.execute("SELECT summary FROM events WHERE kind=?", (dispatch.BUDGET_WARNING_KIND,)).fetchall()
+    assert len(rows) == 1 and "8/10" in rows[0][0] and "quota-exhausted" in rows[0][0], [r[0] for r in rows]

@@ -360,6 +360,73 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
                 }
 
 
+BUDGET_WARN_AT = 0.8
+
+
+def local_midnight_utc() -> str:
+    """Today's local midnight as a UTC ISO timestamp, comparable with recorded `started_at` values."""
+    from datetime import datetime, timezone
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(timezone.utc).isoformat()
+
+
+def budget_for(candidate: dict, budgets: dict) -> tuple[str, int] | None:
+    """(key, budget) of the most specific `quota.daily_dispatch_budget` entry naming this route, or None."""
+    h = candidate.get("harness")
+    for model in dict.fromkeys(m for m in (candidate.get("model_id"), candidate.get("invocation_model_id")) if m):
+        for key in (f"{h}/{model}@{candidate.get('effort')}", f"{h}/{model}"):
+            n = budgets.get(key)
+            if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                return key, n
+    return None
+
+
+def dispatches_today(con: sqlite3.Connection, candidate: dict, key: str) -> int:
+    """Dispatches started on this route since local midnight, across every run on this machine."""
+    model = candidate.get("invocation_model_id") or candidate.get("model_id")
+    sql = "SELECT COUNT(*) FROM dispatches WHERE harness=? AND model=? AND started_at>=?"
+    args: list = [candidate.get("harness"), model, local_midnight_utc()]
+    if "@" in key:
+        sql, args = sql + " AND effort=?", [*args, candidate.get("effort")]
+    return int(con.execute(sql, args).fetchone()[0])
+
+
+def _daily_budget_snapshot(request: dict, con: sqlite3.Connection | None) -> None:
+    """Read a route's opt-in daily dispatch budget as quota headroom (#831): used/N of the budget is spent, and at N
+    the route is quota-exhausted so the role's chain falls through. Recorded once, so a replay reads the same counts."""
+    budgets = (request.get("policy") or {}).get("daily_dispatch_budget") or {}
+    if not budgets:
+        return
+    snapshot = request.get("daily_budget_snapshot")
+    if snapshot is None:
+        snapshot = {}
+        if con is not None:
+            for c in request.get("candidates", []):
+                hit = budget_for(c, budgets)
+                if hit:
+                    snapshot[candidate_id(c)] = {"key": hit[0], "budget": hit[1],
+                                                 "used": dispatches_today(con, c, hit[0])}
+        request["daily_budget_snapshot"] = snapshot
+    for c in request.get("candidates", []):
+        b = snapshot.get(candidate_id(c))
+        if not b:
+            continue
+        left = max(0.0, (b["budget"] - b["used"]) * 100.0 / b["budget"])
+        q = dict(c.get("quota") or {})
+        cause = f"daily-dispatch-budget {b['used']}/{b['budget']} ({b['key']})"
+        # The budget only ever lowers headroom: a wall, cooldown, cap or unavailable probe keeps its own state.
+        gated = q.get("cause") in ("concurrency-cap", "rate-limited", "route-demoted")
+        known = q.get("status") == "ok" and q.get("tightest_remaining_percent") is not None
+        if not gated and q.get("status", "unknown") == "unknown":
+            q.update(status="ok", tightest_remaining_percent=left, cause=cause)
+        elif not gated and known and left < float(q["tightest_remaining_percent"]):
+            q.update(tightest_remaining_percent=left, cause=cause)
+        elif not gated and left == 0:
+            q.update(status="ok", tightest_remaining_percent=0.0, cause=cause)  # spent: exhausted whatever else
+        q["daily_budget"] = b
+        c["quota"] = q
+
+
 def route(request: dict, discovery_input: dict | None = None, *,
           connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
@@ -420,6 +487,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     con = connection if connection is not None else _connect(db_path)
     try:
         _concurrency_snapshot(request, con)
+        _daily_budget_snapshot(request, con)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.

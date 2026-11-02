@@ -129,4 +129,6 @@ Set `routing.discovery.enabled: false` at the user tier (`office config routing.
 
 Existing runs keep their pinned config. If the user authorizes a live-run routing change, `office config --run <id> --apply-routing --quote "<words>"` re-pins its roles, routing and quota (including `quota.reserve_percent`) from the current config files. Inspect the result before further dispatch. A config edit alone does not change a live run or stop a live worker.
 
+A credit-limited route can carry an opt-in daily dispatch budget, `quota.daily_dispatch_budget: {"<harness>/<model>[@effort]": N}` (#831). Dispatches started on that route since local midnight, across all runs, spend it: the route's quota reads as the unspent share, so at N it is quota-exhausted and a reviewer chain falls through to its next route. The first dispatch at 80% records a `route.budget_warning`. There is no default budget. A running run picks up a change through `--apply-routing`, which re-pins `quota`. Token budgets are a follow-up: Office keeps no per-dispatch token counts.
+
 Pre-#494 runs retain discovery-off behavior and their old ceiling. Their 3.0 and v3.1 paths and stored decisions stay readable and replayable, and discovery-off decisions preserve their prior hashes. Rolling back discovery does not rewrite history, resurrect retired models or waive a safety gate.

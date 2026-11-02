@@ -1169,6 +1169,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "required_capabilities": list(policy_cfg.get("required_capabilities") or []),
         "floor": policy_cfg.get("floor"),
         "quota_reserve_percent": float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT)),
+        "daily_dispatch_budget": dict((config.get("quota") or {}).get("daily_dispatch_budget") or {}),
         "balanced_money_band_percent": float((config.get("cost_policy") or {}).get(
             "balanced_money_band_percent", routing.DEFAULT_MONEY_BAND_PERCENT)),
         "cost_policy": cost_policy,
