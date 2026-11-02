@@ -205,6 +205,11 @@ def _rank(col: str) -> str:
 _NEW_COST_WINS = (f"({_rank('excluded.cost_kind')} > {_rank('cost_kind')} OR ({_rank('excluded.cost_kind')} = "
                   f"{_rank('cost_kind')} AND COALESCE(excluded.cost_usd, -1) > COALESCE(cost_usd, -1)))")
 
+# A stored office row with no dispatch link adopts the dispatch's link (task, role, phase) from a later in-window
+# transcript of the same run. An out-of-window or other-run writer never links a row, and a linked row keeps its link.
+_ADOPT = ("attribution='office' AND excluded.attribution='office' AND excluded.run_id=run_id "
+          "AND excluded.dispatch_id IS NOT NULL AND dispatch_id IS NULL")
+
 _UPSERT = (
     "INSERT INTO usage_events(harness, session_id, turn_id, event_id, run_id, dispatch_id, task_id, role, phase, model, "
     "attribution, occurred_at, source, source_path, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
@@ -219,10 +224,10 @@ _UPSERT = (
     f", cost_usd=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_usd ELSE cost_usd END"
     f", cost_kind=CASE WHEN {_NEW_COST_WINS} THEN excluded.cost_kind ELSE cost_kind END"
     ", run_id=CASE WHEN attribution='office' THEN run_id ELSE excluded.run_id END"
-    ", dispatch_id=CASE WHEN attribution='office' THEN COALESCE(dispatch_id, excluded.dispatch_id) ELSE excluded.dispatch_id END"
-    ", task_id=CASE WHEN attribution='office' THEN COALESCE(task_id, excluded.task_id) ELSE excluded.task_id END"
-    ", role=CASE WHEN attribution='office' THEN COALESCE(role, excluded.role) ELSE excluded.role END"
-    ", phase=CASE WHEN attribution='office' THEN COALESCE(phase, excluded.phase) ELSE excluded.phase END"
+    f", dispatch_id=CASE WHEN attribution='office' THEN CASE WHEN {_ADOPT} THEN excluded.dispatch_id ELSE dispatch_id END ELSE excluded.dispatch_id END"
+    f", task_id=CASE WHEN attribution='office' THEN CASE WHEN {_ADOPT} THEN excluded.task_id ELSE task_id END ELSE excluded.task_id END"
+    f", role=CASE WHEN attribution='office' THEN CASE WHEN {_ADOPT} THEN excluded.role ELSE role END ELSE excluded.role END"
+    f", phase=CASE WHEN attribution='office' THEN CASE WHEN {_ADOPT} THEN excluded.phase ELSE phase END ELSE excluded.phase END"
     ", attribution=CASE WHEN attribution='office' THEN attribution ELSE excluded.attribution END"
 )
 
@@ -443,7 +448,7 @@ def inspect(con, run: dict) -> Result:
     lines = [f"economics: collection {'enabled' if on else 'disabled (showing data recorded while enabled)'}"]
     if not office_rows:
         lines.append("no Office-attributed usage recorded for this run")
-        lines += [f"task {tid}: unknown (no usage attributed to this task)" for tid in task_ids]
+        lines += [f"task {tid}: unknown (no usage attributed to this task)" for tid in task_ids] if on else []
         return Result(lines=lines, next="office economics ingest" if on else None,
                       data={"enabled": on, "rows": 0, "outside_rows": len(rows)})
     by_group = []

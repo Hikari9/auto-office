@@ -33,11 +33,12 @@ def _enable(env, on=True):
     env.office("config", "economics.collect", "true" if on else "false", check=0)
 
 
-def _dispatch(env, did, *, role="executor", kind="executor", task="T1", harness="claude", sid=SID):
+def _dispatch(env, did, *, role="executor", kind="executor", task="T1", harness="claude", sid=SID, started_at=None):
     con = env.con()
     try:
-        con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, harness, session_id, resumed_from, status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)", (did, _run_id(env), role, kind, task, harness, sid, None, "ended"))
+        con.execute("INSERT INTO dispatches(id, run_id, role, kind, task_id, harness, session_id, resumed_from, status, "
+                    "started_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (did, _run_id(env), role, kind, task, harness, sid, None, "ended", started_at))
         con.commit()
     finally:
         con.close()
@@ -245,60 +246,138 @@ def test_normalized_quota_cost_without_amount_is_unknown_not_zero(env, tmp_path)
     assert group["cost"] == {"quota": {"count": 1, "usd": None}}, group
 
 
-def test_boolean_cost_is_not_a_price(env, tmp_path):
+@pytest.mark.parametrize("flag", [True, False])
+def test_boolean_cost_is_not_a_price(env, tmp_path, flag):
     approved_run(env)
     _enable(env)
     row = {"harness": "claude", "session_id": SID, "event_id": "b1", "role": "executor",
-           "cost_kind": "actual", "cost_usd": True}
+           "cost_kind": "actual", "cost_usd": flag}
     env.office("economics", "ingest", "--file", _usage_file(tmp_path / "usage.jsonl", [row]), check=0)
+    assert "cost actual unknown x1" in " ".join(_usage_lines(env)), _usage_lines(env)
     code, data = env.ojson("inspect", "economics")
     (group,) = data["data"]["groups"]
     assert group["cost"] == {"actual": {"count": 1, "usd": None}}, group
 
 
-def test_normalized_file_cannot_reattribute_usage_to_a_task(env, tmp_path):
+def test_disabled_inspect_without_a_table_prints_only_the_notice(env):
+    approved_run(env)
+    _add_task(env, "T2")
+    code, data = env.ojson("inspect", "economics")
+    assert data["lines"] == ["economics collection is disabled (economics.collect: false); no usage data"], data
+
+
+def test_cancelled_task_is_not_listed_on_a_run_without_usage(env):
     approved_run(env)
     _enable(env)
-    row = {"harness": "claude", "session_id": SID, "event_id": "a1", "task_id": "T9",
-           "input_tokens": 4, "cost_kind": "unknown"}
-    env.office("economics", "ingest", "--file", _usage_file(tmp_path / "usage.jsonl", [row]), check=0)
+    _add_task(env, "T3")
+    _set_task_status(env, "T3", "cancelled")
+    code, data = env.ojson("inspect", "economics")
+    assert data["lines"] == ["no usage recorded for this run yet", "task T1: unknown (no usage attributed to this task)"], data
+
+
+def _stored_row(env, event_id) -> dict:
     con = env.con()
     try:
-        task = con.execute("SELECT task_id FROM usage_events WHERE event_id='a1'").fetchone()[0]
+        return dict(con.execute("SELECT * FROM usage_events WHERE event_id=?", (event_id,)).fetchone())
     finally:
         con.close()
-    assert task is None, "a usage file cannot pick the task; only the run's own dispatch association does"
-    assert not any(line.startswith("usage T9") for line in _usage_lines(env)), _usage_lines(env)
+
+
+def _insert_office_row(env, *, event_id, run_id, task_id, dispatch_id=None, turn_id="req-m1", sid=SID):
+    """A pre-existing office row with no dispatch link, as an earlier writer would have left it."""
+    from office import economics
+    con = env.con()
+    try:
+        economics.ensure_schema(con)
+        con.execute("INSERT INTO usage_events(harness,session_id,turn_id,event_id,run_id,task_id,dispatch_id,role,"
+                    "attribution,source,input_tokens,cost_kind,ledger_version,recorded_at) "
+                    "VALUES('claude',?,?,?,?,?,?,'executor','office','fixture',4,'unknown',1,'2030-01-01T00:00:00Z')",
+                    (sid, turn_id, event_id, run_id, task_id, dispatch_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_normalized_file_never_sets_a_task(env):
+    from office import economics
+    path = env.home / "usage-parse.jsonl"
+    path.write_text(json.dumps({"harness": "claude", "session_id": SID, "event_id": "a1", "task_id": "T9",
+                                "input_tokens": 4, "cost_kind": "unknown"}) + "\n")
+    (row,) = economics.parse_normalized(path)
+    assert "task_id" not in row, "a usage file cannot name a task; only a dispatch link attributes one"
 
 
 def test_legacy_row_naming_a_task_without_a_dispatch_is_not_attributed(env):
     approved_run(env)
     _enable(env)
-    con = env.con()
-    try:
-        from office import economics
-        economics.ensure_schema(con)
-        con.execute("INSERT INTO usage_events(harness,session_id,turn_id,event_id,run_id,task_id,role,attribution,"
-                    "source,input_tokens,cost_kind,ledger_version,recorded_at) "
-                    "VALUES('claude',?,'t','legacy',?,'T9','executor','office','normalized-file',4,'unknown',1,"
-                    "'2030-01-01T00:00:00Z')", (SID, _run_id(env)))
-        con.commit()
-    finally:
-        con.close()
+    _insert_office_row(env, event_id="legacy", run_id=_run_id(env), task_id="T9")
     assert not any(line.startswith("usage T9") for line in _usage_lines(env)), _usage_lines(env)
 
 
-def test_file_usage_ingested_before_the_transcript_still_gets_the_task(env, tmp_path):
+def test_legacy_row_on_a_listed_task_without_a_dispatch_stays_unattributed(env):
     approved_run(env)
     _enable(env)
+    _insert_office_row(env, event_id="legacy-t1", run_id=_run_id(env), task_id="T1")
+    assert not any(line.startswith("usage T1/") for line in _usage_lines(env)), _usage_lines(env)
+    assert NO_TASK in _usage_lines(env), _usage_lines(env)
+    code, data = env.ojson("inspect", "economics")
+    assert data["data"]["unmeasured_tasks"] == ["T1"] and data["data"]["tasks"] == [], data
+
+
+def test_legacy_task_only_row_adopts_the_dispatch_link_when_linked(env):
+    approved_run(env)
+    _enable(env)
+    _insert_office_row(env, event_id="m1", run_id=_run_id(env), task_id="T9")
+    _dispatch(env, "D-944-adopt")
+    _claude_transcript(env, [_claude_entry("m1", input_tokens=4)])
+    env.office("economics", "ingest", check=0)
+    row = _stored_row(env, "m1")
+    assert (row["dispatch_id"], row["task_id"]) == ("D-944-adopt", "T1"), row
+    assert any(line.startswith("usage T1/executor:") for line in _usage_lines(env)), _usage_lines(env)
+    assert not any(line.startswith("usage T9") for line in _usage_lines(env)), _usage_lines(env)
+
+
+def test_file_usage_ingested_before_the_transcript_adopts_task_phase_and_role(env, tmp_path):
+    approved_run(env)
+    _enable(env)
+    # The file's role is a claim; the dispatch that links the row sets its role, task and phase.
     first = {"harness": "claude", "session_id": SID, "turn_id": "req-m1", "event_id": "m1",
-             "role": "executor", "input_tokens": 10, "output_tokens": 5, "cost_kind": "unknown"}
+             "role": "planner", "phase": "planning", "input_tokens": 10, "output_tokens": 5, "cost_kind": "unknown"}
     env.office("economics", "ingest", "--file", _usage_file(tmp_path / "usage.jsonl", [first]), check=0)
     _dispatch(env, "D-944-order")
     _claude_transcript(env, [_claude_entry("m1", input_tokens=10, output_tokens=5)])
     env.office("economics", "ingest", check=0)
     cells = "1 turn(s), input 10, output 5, cache read unknown, cache write unknown, cost unknown x1"
     assert f"usage T1/executor: {cells}" in _usage_lines(env), _usage_lines(env)
+    code, data = env.ojson("inspect", "economics")
+    assert [(g["role"], g["phase"], g["turns"]) for g in data["data"]["groups"]] == [("executor", "executor", 1)], data
+    assert [t["task"] for t in data["data"]["tasks"]] == ["T1"], data
+
+
+def test_out_of_window_transcript_does_not_link_a_file_row(env, tmp_path):
+    approved_run(env)
+    _enable(env)
+    first = {"harness": "claude", "session_id": SID, "turn_id": "req-m1", "event_id": "m1",
+             "role": "planner", "input_tokens": 10, "cost_kind": "unknown"}
+    env.office("economics", "ingest", "--file", _usage_file(tmp_path / "usage.jsonl", [first]), check=0)
+    # The dispatch starts after the turn, so the transcript turn is outside its window and must not link the row.
+    _dispatch(env, "D-944-late", started_at="2031-01-01T00:00:00Z")
+    _claude_transcript(env, [_claude_entry("m1", input_tokens=10)])
+    env.office("economics", "ingest", check=0)
+    row = _stored_row(env, "m1")
+    assert (row["attribution"], row["dispatch_id"], row["task_id"]) == ("office", None, None), row
+    assert not any(line.startswith("usage T1/") for line in _usage_lines(env)), _usage_lines(env)
+
+
+def test_other_run_row_is_not_linked_by_this_run(env):
+    approved_run(env)
+    _enable(env)
+    _insert_office_row(env, event_id="m1", run_id="other-run-id", task_id=None)
+    _dispatch(env, "D-944-other")
+    _claude_transcript(env, [_claude_entry("m1", input_tokens=4)])
+    env.office("economics", "ingest", check=0)
+    row = _stored_row(env, "m1")
+    assert row["run_id"] == "other-run-id" and (row["dispatch_id"], row["task_id"]) == (None, None), row
 
 
 def test_cancelled_task_keeps_its_spend_visible(env):
