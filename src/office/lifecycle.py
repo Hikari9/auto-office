@@ -485,6 +485,11 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
     warn = closeout.docs_warning(Path(run["repo_root"]), run.get("base_sha"), landing.get("commit") or landing.get("merge_commit"))
     if warn:
         res.notices.append(warn)
+    disclosures = closeout.visual_review_disclosures(con, run)
+    if disclosures:
+        res.lines.extend(disclosures)
+        res.data["visual_review_disclosures"] = disclosures
+    tail = "".join(f"; {line}" for line in disclosures)
     if handoff:
         owned = {str(t["pr"]["number"]) for t in state.tasks(con, run["id"])
                  if (t.get("pr") or {}).get("number")}
@@ -492,19 +497,19 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
         if note:
             res.add(note)
         res.add("handed off: base sync and worktree removal left for after the user merges")
-        res.final = closeout.done(f"handed off {handoff}, worktrees kept")
+        res.final = closeout.done(f"handed off {handoff}, worktrees kept" + tail)
         return
     merged = pr or landing.get("target") or str(landing.get("detail", "")).startswith("task PRs merged")
     if not merged:
         res.add(f"not merged ({landing.get('detail')}): base sync and worktree removal skipped")
-        res.final = closeout.done(f"closed without a merge ({landing.get('detail')}), worktrees kept")
+        res.final = closeout.done(f"closed without a merge ({landing.get('detail')}), worktrees kept" + tail)
         return
     lines, ask, summary = closeout.finish(con, run, landing, pr=pr)
     res.lines.extend(lines)
     if ask:
         res.next = ask
     res.data["closeout"] = {"summary": summary, "ask": ask}
-    res.final = closeout.done(summary)
+    res.final = closeout.done(summary + tail)
 
 
 LANDED_FORM = 'office close --landed-externally <merged PR URL> [--quote "<user\'s words>"]'
