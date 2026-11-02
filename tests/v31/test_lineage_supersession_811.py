@@ -78,10 +78,14 @@ def test_terra_61_rows_match_the_documented_scores_and_stay_gated():
     expected = {"max": 48, "xhigh": 45, "high": 44, "medium": 41, "low": 36, "none": 33}
     got = {e: ROWS[("gpt-6.1-terra", e)]["benchmark_indexes"][IDX] for e in expected}
     assert got == expected
+    probed = {"low", "medium", "high"}  # #909: dispatchable on recorded probe passes
     for e in expected:
         row = ROWS[("gpt-6.1-terra", e)]
-        # Benchmark presence is not execution proof: unprobed rows stay out of the eligible slate.
-        assert row["dispatchable"] is False and row["discovery"] == "eligible"
+        if e in probed:
+            assert row.get("dispatchable") is not False, e
+        else:
+            # Benchmark presence is not execution proof: unprobed rows stay out of the eligible slate.
+            assert row.get("dispatchable") is False and row["discovery"] == "eligible", e
         assert row["source_effort"] == ("non-reasoning" if e == "none" else e)
 
 

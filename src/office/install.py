@@ -166,7 +166,7 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
         entry = frontdoor.register_current()
         res.add(f"runtime {entry['office_version']} registered")
         if not shutil.which("office"):
-            res.add(f"launcher written: {_write_shim()} (add its directory to PATH, or uv tool install auto-office)")
+            res.add(f"launcher written: {_write_shim()} (add its directory to PATH, or uv tool install git+https://github.com/Hikari9/auto-office)")
         retained = legacy.retained_runtime(runtime_default.LEGACY_V3_FINAL)
         res.add("retained Auto Office 3.0 runtime for pinned runs and rollback: " + ("ok" if retained else "unavailable"))
     if not hooks:

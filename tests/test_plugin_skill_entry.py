@@ -70,13 +70,13 @@ def test_install_check_asks_once_before_installing():
 
     assert "ask once per session" in not_found
     assert not_found.index('cat "$CFG"') < not_found.index("ask once per session")
-    assert "uv tool install auto-office" not in not_found
+    assert "uv tool install git+https://github.com/Hikari9/auto-office" not in not_found
 
 
-def test_install_check_installs_from_pypi_then_onboards_and_stops_on_failure():
+def test_install_check_installs_from_github_then_onboards_and_stops_on_failure():
     section = _install_check()
 
-    assert "uv tool install auto-office" in section
+    assert "`uv tool install git+https://github.com/Hikari9/auto-office`" in section
     assert "office install --no-hooks" in section
     assert "office doctor" in section
     assert "Stop at the first failure" in section
@@ -115,7 +115,7 @@ def test_install_check_stops_on_uv_failure_before_checking_path():
     uv_failure = install.index("If it fails, stop")
     path_check = install.index("`command -v office`")
 
-    assert install.index("`uv tool install auto-office`") < uv_failure < path_check
+    assert install.index("`uv tool install git+https://github.com/Hikari9/auto-office`") < uv_failure < path_check
     assert "exit status" in install[:uv_failure]
     assert "lean hand-off" in install[uv_failure:path_check]
     assert install.index("`uv tool update-shell`") > path_check
@@ -175,7 +175,7 @@ def test_install_check_no_longer_stops_to_ask_approval():
 
     assert "stop and ask" not in section
     assert "approve installing" not in section
-    assert "only after the user picks **install the cli**, run `uv tool install auto-office`" in section
+    assert "only after the user picks **install the cli**, run `uv tool install git+https://github.com/hikari9/auto-office`" in section
 
 
 def test_install_check_explains_resetting_the_saved_choice():
@@ -255,3 +255,76 @@ def test_ecosystem_check_rejects_non_list_skills(tmp_path):
     _write_manifest(tmp_path, "./")
 
     assert check_plugin_skills(tmp_path) == [".claude-plugin/plugin.json: skills must be a list of paths"]
+
+
+# The only bare-name installs allowed are the README's two "never" warnings, matched by path and exact preceding text.
+ALLOWED_WARNINGS = {("README.md", "unrelated project, so never `"), ("README.md", "never `uv tool install auto-office` or `")}
+INSTALL = re.compile(r"(?:uv tool install|uv pip install|pipx install|pip install)\b(?:\\\n|[^`\n)])*")
+BARE_REQUIREMENT = re.compile(r"(?<![\w/@.+-])['\"]?auto-office(?:\[[\w,]+\])?['\"]?(?![\w/-]|\.\w)")
+
+
+def _pypi_installs(text: str) -> list[tuple[int, str]]:
+    """Install commands that resolve the bare PyPI name: an `auto-office` requirement and no `git+` or `@` source."""
+    found = []
+    for command in INSTALL.finditer(text):
+        span = command.group(0)
+        if "git+" in span or " @ " in span:
+            continue
+        if BARE_REQUIREMENT.search(span):
+            found.append((command.start(), span.strip()))
+    return found
+
+
+def test_nothing_installs_or_checks_the_unrelated_pypi_auto_office():
+    """`auto-office` on PyPI is an unrelated project: no install command or update check may point at it (#924)."""
+    roots = [ROOT / "SKILL.md", ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
+    for folder, pattern in (("docs", "*.md"), ("skills", "*.md"), ("scripts", "*"), ("src", "*.py"), ("config", "*")):
+        roots += [p for p in (ROOT / folder).rglob(pattern) if p.is_file()]
+    offenders = []
+    for path in roots:
+        rel = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        offenders += [f"{rel}: {span}" for start, span in _pypi_installs(text)
+                      if not any(rel == name and text[:start].endswith(before) for name, before in ALLOWED_WARNINGS)]
+        if "pypi.org/pypi/auto-office" in text:
+            offenders.append(f"{rel}: pypi.org/pypi/auto-office")
+    assert not offenders
+
+
+def test_the_pypi_install_guard_catches_every_bare_shape():
+    for bare in ("run `uv tool install auto-office` and", "`uv tool install --force auto-office` for a release",
+                 "uv tool install 'auto-office[visual]'", "pipx install auto-office.", "uv pip install -U auto-office",
+                 "uv tool install --python 3.12 auto-office", "uv tool install --python=3.12 auto-office",
+                 'uv tool install --python "3.12" auto-office', "uv tool install --with playwright 'auto-office[visual]'",
+                 "uv tool install --reinstall-package auto-office auto-office", "pip install auto-office==0.0.3",
+                 "uv tool install \\\n  auto-office", "uv tool install --force \\\n    'auto-office[visual]'\n"):
+        assert _pypi_installs(bare), bare
+    for sourced in ('uv tool install --force --reinstall-package auto-office "auto-office[visual] @ <checkout>"',
+                    "uv tool install git+https://github.com/Hikari9/auto-office",
+                    "uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office'",
+                    "uv tool install --editable <path/to/auto-office checkout>",
+                    "uv tool install \\\n  git+https://github.com/Hikari9/auto-office"):
+        assert not _pypi_installs(sourced), sourced
+
+
+def test_update_check_reads_the_release_from_github_main(monkeypatch):
+    import io
+    from office import self_update
+
+    seen = []
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        seen.append(request.full_url)
+        return Response(b'"""Doc."""\n__version__ = "9.8.7"\n')
+
+    monkeypatch.setattr(self_update.urllib.request, "urlopen", fake_urlopen)
+    assert self_update._latest_release() == "9.8.7"
+    assert seen == [self_update.RELEASE_VERSION_URL]
+    assert seen[0].startswith("https://raw.githubusercontent.com/Hikari9/auto-office/main/")

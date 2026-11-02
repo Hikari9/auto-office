@@ -48,10 +48,28 @@ def _using_executor_policy(policy: dict):
         _executor_policy_context.reset(token)
 
 
+# Rejections that mean a route was avoided for a hard quota or auth failure (#921). Others (trust, capability, concurrency,
+# a projected quota reserve, a runtime demotion whose reason is not quota or auth) are not recovered when their route becomes
+# available again. A projected quota reserve is never recovery evidence: recovery does not re-run the reserve gate, so a
+# probe pass does not show that the reserve admits the route.
+QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited"})
+QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked"})
+
+
+def quota_auth_rejection(rejection: dict) -> bool:
+    """Whether a rejection avoided its route for quota or auth (#921): a quota or auth cooldown category, or a
+    reason class of a failed exact probe. A projected quota reserve is not one."""
+    return rejection.get("category") in QUOTA_AUTH_CATEGORIES or rejection.get("reason_class") in QUOTA_AUTH_REASON_CLASSES
+
+
 def candidate_id(c):
     """Route identity `harness@major/model_id@effort`. Trust keys on the harness major,
     so a point release never resets it; the full `harness_version` stays in disclosure."""
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
+
+
+# Parses a candidate id back into its harness, model id and effort (#921).
+CANDIDATE_ID_RE = re.compile(r"(?P<harness>[^@/]+)@[^/]*/(?P<model>[^@]+)@(?P<effort>.+)\Z")
 
 
 def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
@@ -577,11 +595,13 @@ def route(request: dict, discovery_input: dict | None = None, *,
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
+                                 "reason": "projected quota crosses reserve while safe alternative exists"})
             stage = safe + unknown
         elif unknown:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "known quota crosses reserve; only unknown candidates remain"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
+                                 "reason": "known quota crosses reserve; only unknown candidates remain"})
             stage = unknown
         else:
             _reject_pool(pool, rejected, "protected quota blocks every qualifying route")
@@ -695,12 +715,18 @@ def _pool_category(c: dict) -> tuple[str, str]:
     return "untried", c.get("status_reason") or "no fresh exact probe pass yet"
 
 
+def _probe_fields(c: dict) -> dict:
+    """The reason class of a failed exact probe, for the rejection of its route (#921)."""
+    probe = c.get("probe") or {}
+    return {"reason_class": probe.get("reason_class")} if probe.get("result") == "fail" else {}
+
+
 def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> None:
     """Every discovery candidate leaves the eligible slate with a category; none is dropped silently."""
     for c in pool:
         category, reason = _pool_category(c)
         rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category,
-                         "reason": f"{reason}; {why}" if why else reason})
+                         "reason": f"{reason}; {why}" if why else reason, **_probe_fields(c)})
 
 
 def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
@@ -785,11 +811,12 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     def drop(c, blocked, *, category="untried", stage=2, reason=None):
         block["blocked"] = blocked
         rejected.append({"candidate": candidate_id(c), "stage": stage, "category": category,
-                         "reason": reason or f"discovery: {blocked}"})
+                         "reason": reason or f"discovery: {blocked}", **_probe_fields(c)})
 
     def other(c):  # a candidate this decision is not trying
         category, reason = _pool_category(c)
-        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category, "reason": reason})
+        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category, "reason": reason,
+                         **_probe_fields(c)})
 
     for c in pool:
         if c not in scoped:

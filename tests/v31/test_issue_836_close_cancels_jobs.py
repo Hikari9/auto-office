@@ -404,3 +404,20 @@ def test_cancel_run_jobs_is_idempotent_and_reports_what_it_cancelled(env, monkey
     second = jobs.cancel_run_jobs(env.con(), job["run_id"])
     assert second["cancelled"] == 0 and second["kinds"] == [] and second["stopped"] == [], second
     assert _pending(env, job["run_id"]) == []
+
+
+def test_a_permanently_failed_attempt_keeps_its_claim_identity(env, monkeypatch):
+    """A failed row keeps the claim token and owner of the attempt that ended it;
+    only the live pid is released. #883 cleared all three."""
+    job, _ = _queued(env, monkeypatch, secs=1.0)
+    from office import gates, jobs, state
+
+    def refused(*args, **kwargs):
+        raise state.Refused("checks-refused", "checks cannot run")
+
+    monkeypatch.setattr(gates, "run_commands", refused)
+    con = env.con()
+    jobs.execute(con, job["id"])
+    row = _row(con, job["id"])
+    assert row["status"] == "failed" and row["claim_token"] and row["claimed_by"], row
+    assert row["claimed_pid"] is None, row

@@ -22,7 +22,7 @@ Auto Office {ver}
 
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
-  office resume --auto-wake         opt in to safe Claude/Herdr root wake-up (only when bound in its pane)
+  office resume --wake-off          turn off root wake-up; wake is on by default when bound in a Claude Herdr pane
   office status                     what matters now, ending with the next legal action
   office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
                                     question (5), or timeout (124)
@@ -204,6 +204,17 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
+# `amend route` takes only --as, --quote, and --restart. These amend the plan, so `amend route` refuses them
+# instead of dropping them (#896).
+_ROUTE_AMEND_ONLY_FLAGS = {
+    "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
+    "drop_criterion": "--drop-criterion", "add_criterion": "--add-criterion", "drop_non_goal": "--drop-non-goal",
+    "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
+    "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
+    "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+}
+
+
 def _parser() -> argparse.ArgumentParser:
     def flags(**default):
         f = argparse.ArgumentParser(add_help=False)
@@ -235,7 +246,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--interview", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--adversarial", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--set", action="append", help="config override key.path=value")
-    s.add_argument("--base", help=argparse.SUPPRESS)
+    s.add_argument("--base", help="Git ref to start from (use with --no-prs for an existing PR branch)")
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
@@ -258,7 +269,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
     wake = s.add_mutually_exclusive_group()
-    wake.add_argument("--auto-wake", action="store_true", help="opt in to verified Claude/Herdr root continuation")
+    wake.add_argument("--auto-wake", action="store_true",
+                      help="accepted for compatibility; root wake is armed by default (see --wake-off)")
     wake.add_argument("--wake-off", action="store_true", help="turn off autonomous root wake-up for this run")
     sp.add_parser("status", parents=[common])
     s = sp.add_parser("wait", parents=[common])
@@ -312,9 +324,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
     s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="amend route: the live dispatch's new model/effort (same harness)")
+                   help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
-                   help="amend route: interrupt the agent and relaunch it on the new route")
+                   help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -450,7 +462,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--probe-route", metavar="HARNESS[@MAJOR]/MODEL@EFFORT",
                    help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
-    s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
+    s.add_argument("--check", action="store_true", help="check the release on GitHub main and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
     s.add_argument("target", nargs="?", help="the run (default: this session's run)")
     s.add_argument("--to", metavar="X.Y", help="the release line (default: this runtime's)")
@@ -626,8 +638,24 @@ def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> in
 
 # ------------------------------------------------------------------ dispatch
 
+def _rebuilding_reason(argv: list[str]) -> str | None:
+    """A bad OFFICE_VERSION_OVERRIDE is configuration: `raw` and `hook` keep their fast path instead of raising (#920)."""
+    try:
+        return version.rebuilding_reason()
+    except RuntimeError:
+        if argv[:1] in (["raw"], ["hook"]):
+            return None
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Before the fast paths, so `raw` and `hook` fail fast during a rebuild too (#920). The root-wake supervisor skips
+    # the probe: it is a background process whose ticks already classify a failed import, and the probe would delay
+    # its first wake.
+    if argv[:1] != ["_wake_supervise"] and (reason := _rebuilding_reason(argv)):
+        print(version.rebuild_line(reason), file=sys.stderr)
+        return version.REBUILD_EXIT_CODE
     if argv and argv[0] == "raw":
         from office import compat
         return compat.raw(argv[1:])
@@ -980,12 +1008,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
         from office import lifecycle, root_wake, state
-        res = lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
-        if args.auto_wake or args.wake_off:
-            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=args.wake_off))
-            if args.auto_wake:
-                root_wake.ensure(state.get_run(con, run["id"]))
-        return res
+        def wake(con, current):
+            if args.wake_off:
+                return root_wake.attach(con, current, off=True)
+            if os.environ.get("OFFICE_DISPATCH_ID"):
+                return None
+            return root_wake.arm_on_resume(con, current, explicit=args.auto_wake)
+        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd, wake=wake)
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
@@ -1005,7 +1034,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         run = state.get_run(con, run["id"])
         if not os.environ.get("OFFICE_DISPATCH_ID"):
             root_wake.ensure(state.get_run(con, run["id"]))
-        return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
+        with guide.waiting(run["id"]):
+            return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
@@ -1025,9 +1055,16 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                              reason=" ".join(args.reason or []).strip())
     if cmd == "amend" and args.scope == "route":
         from office import routechange
+        from office.state import Refused
+        # An empty string is a given value (`--reason ""`), so only the unset defaults are skipped.
+        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name) not in (None, False, [])]
+        if given:
+            raise Refused("route-with-amendment-flags", f"{' '.join(given)} amend the plan, not a route; nothing was recorded",
+                          scope=args.delta[0] if args.delta else None, preserved="plan, contracts, and route unchanged",
+                          next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart)
+                                        restart=args.restart, cwd=cwd)
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
@@ -1040,7 +1077,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
                            drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
-                           no_review=args.no_review, reason=args.reason, edits=edits)
+                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as,
+                           restart=args.restart)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)

@@ -727,7 +727,7 @@ def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1
     monkeypatch.setattr(gates, "_agent_alive", lambda name: True)
     sent = []
     monkeypatch.setattr(dispatch, "submit_prompt",
-                        lambda name, text, pane=None: sent.append((name, text, pane, bool(in_fence))) or landed)
+                        lambda name, text, *, pane=None, guard=None, max_enter_tries=None: sent.append((name, text, pane, bool(in_fence), max_enter_tries)) or landed)
     monkeypatch.setattr(dispatch, "fenced_pane", fence)
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
@@ -736,7 +736,7 @@ def _reprompt(env, monkeypatch, fence, *, in_fence=(), gate_id=None, pane_id="w1
         run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
         run = {**run, "gates": {"review_reprompt_max": 1}}
         d = {"id": "D1", "launcher": "herdr", "pane_id": pane_id, "role": "code_reviewer", "task_id": "T1",
-             "triple": "codex/test@high", "gate_id": gate_id}
+             "harness": "codex", "triple": "codex/test@high", "gate_id": gate_id}
         got = gates._reprompt_until_valid(con, run, d, env.tmp, env.tmp / "reply.txt", review_parse.parse(""),
                                           plan_review=False, visual=False)
         events = [r["summary"] for r in con.execute("SELECT summary FROM events WHERE kind='review.reprompt'")]
@@ -763,6 +763,7 @@ def test_the_review_reprompt_is_sent_only_inside_the_pane_identity_fence(env, mo
 
     sent, _, events = _reprompt(env, monkeypatch, fence, in_fence=inside)
     assert entered == ["D1"] and len(sent) == 1 and sent[0][2] == "FENCED:p9" and sent[0][3] is True
+    assert sent[0][4] == 1, "codex reviewer recovery must be bounded to 1 Enter"
     assert events and "re-prompted 1/1" in events[0]
 
 
@@ -797,6 +798,7 @@ def test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command(env, mo
     gid = _gates(env, "convergence_review")[0]["id"]
     sent, (_, _, reason), _ = _reprompt(env, monkeypatch, _fenced, gate_id=gid, landed="held")
     assert len(sent) == 1 and "typed but unsubmitted" in reason, reason
+    assert sent[0][4] == 1, "codex reviewer recovery must be bounded to 1 Enter"
     assert "office review L-T1:convergence --as <harness>/<model>" in reason and "waive" not in reason, reason
 
 
@@ -843,3 +845,46 @@ def test_a_reviewer_with_no_recorded_pane_is_not_prompted(env, monkeypatch):
     _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
     sent, _, _ = _reprompt(env, monkeypatch, fence, pane_id=None)
     assert sent == [] and entered == []
+
+
+# ------------------------------------------------------------------ prefer_not gives way when it is the only route
+
+LUNA = {"harness": "codex", "model_id": "luna", "effort": "high"}
+
+
+def _only_code_reviewer(env, entry):
+    """A user policy under which `entry` is the only code reviewer route: the strict seed is the whole review order (#837)."""
+    (env.tmp / "user-config.yaml").write_text(json.dumps(
+        {"roles": {"code_reviewer": {"preferred_seed": [entry]}},
+         "routing": {"user_policy": {"strict_allow_roles": ["code_reviewer"]}}}))
+
+
+def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing(env):
+    from office import candidates, state
+    _only_code_reviewer(env, LUNA)
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    assert [(g["round"], g["review_status"]) for g in _gates(env, "convergence_review")] == [(1, "UNAVAILABLE")]
+    executors = _executor_calls(env)
+    tried_triples = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")}
+    con = env.con()
+    try:
+        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+        # the fixture: with the tried route out, no code reviewer route qualifies
+        left = candidates.route_role(con, state.pinned_config(run), run, "code_reviewer", exclude=tried_triples,
+                                     probe=False)
+    finally:
+        con.close()
+    assert left.get("status") != "selected", left
+    (tried,) = tried_triples
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    code, out = env.office("review", "L-T1:convergence", check=0)
+    assert code == 0, out
+    assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
+    assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
+        == [tried, tried], "the re-run starts on the route the failed round used"
+    assert _executor_calls(env) == executors
+    assert _scope(env, "L-T1")["status"] == "approved"
+    assert _pin(env) is None
+    payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='convergence_review' ORDER BY rowid")[-1]["payload_json"])
+    assert payload["exclude_routes"] == [tried] and "review_override" not in payload, payload

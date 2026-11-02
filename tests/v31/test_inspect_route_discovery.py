@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from office import candidates, inspect_cmd, plan_view, route_learning, route_probe, route_policy, scoring, state
+from office import candidates, guide, inspect_cmd, plan_view, route_learning, route_probe, route_policy, scoring, state
 from conftest import approved_run
 from test_route_discovery_consumer_contract import World, categories as decision_categories
 from test_route_learning_discovery import ALLOC, DIGEST, FALLBACK, Seed, at, probe_key
@@ -411,7 +411,8 @@ def test_the_next_line_and_routes_line_name_a_trial_through_the_cli(env):
     data = env.ojson("status")[1]["data"]
     assert data["routes"]["T1"] == f"{TRIPLE} (trial, fallback {FALLBACK})"
     assert f"T1 runs a discovery trial of {TRIPLE}, fallback {FALLBACK}" in data["next"]
-    assert data["next"].startswith("exceptions only; office status (")
+    # Work runs and no root wake is armed, so #922's `office wait` prefix leads the guide's line.
+    assert data["next"].removeprefix(f"{guide.NO_WAKE_WAIT}: ").startswith("exceptions only; office status (")
     con.execute("UPDATE route_trials SET status='accepted'")
     data = env.ojson("status")[1]["data"]
     assert "trial" not in data["next"] and "trial" not in data["routes"]["T1"]
@@ -667,5 +668,6 @@ def test_the_next_line_keeps_a_dependency_hold_beside_the_trial_note(env):
                 "policy_digest, reason, status, created_at, updated_at) VALUES('At',?,'T1','Dt','executor',?,?,?,?,'r',"
                 "'launched','t','t')", (run_id, TRIPLE, probe_key(), FALLBACK, DIGEST))
     nxt = env.ojson("status")[1]["data"]["next"]
-    assert nxt == (f"exceptions only; office status (T1 runs a discovery trial of {TRIPLE}, fallback {FALLBACK}; "
+    # Work runs and no root wake is armed, so #922's `office wait` prefix leads; the guide's line follows intact.
+    assert nxt == (f"{guide.NO_WAKE_WAIT}: exceptions only; office status (T1 runs a discovery trial of {TRIPLE}, fallback {FALLBACK}; "
                    "T2 waits for T1 to be accepted (T1 running))")
