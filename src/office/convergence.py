@@ -721,15 +721,43 @@ def reviewed_commit(text: str) -> str | None:
     return stated
 
 
-def commit_problem(commit: str, stated: str | None) -> str | None:
-    """Why `stated` is not the composed `commit` (a prefix of at least MIN_REVIEWED_HEX hex characters), else None."""
+FULL_SHA_LENGTHS = (40, 64)
+
+
+def commit_problem(commit: str, stated: str | None, *, repo: Path | None = None) -> str | None:
+    """Why `stated` is not the composed `commit` (a prefix of at least MIN_REVIEWED_HEX hex characters), else None.
+
+    A full sha stated for an abbreviated `commit` matches too (#893), and with `repo`, so
+    does a commit whose tree is the composed commit's tree: a same-tree recomposition keeps
+    the earlier review, so a reply naming the earlier commit reviewed this content (#782)."""
     if not stated:
         return "the reply has no REVIEWED_COMMIT line"
     if not re.fullmatch(r"[0-9a-f]+", stated.lower()) or len(stated) < MIN_REVIEWED_HEX:
         return f"REVIEWED_COMMIT {stated!r} is not a commit sha of at least {MIN_REVIEWED_HEX} hex characters"
-    if not commit.lower().startswith(stated.lower()):
-        return f"REVIEWED_COMMIT {stated} is not the composed commit {commit[:12]}"
-    return None
+    ours, theirs = commit.lower(), stated.lower()
+    if ours.startswith(theirs):
+        return None
+    if len(ours) not in FULL_SHA_LENGTHS and len(theirs) in FULL_SHA_LENGTHS and theirs.startswith(ours):
+        return None
+    if repo is not None and _same_tree(repo, commit, stated):
+        return None
+    return f"REVIEWED_COMMIT {stated} is not the composed commit {commit[:12]}"
+
+
+def _same_tree(repo: Path, commit: str, stated: str) -> bool:
+    trees = []
+    for rev in (commit, stated):
+        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{rev}^{{tree}}"],
+                              capture_output=True, text=True)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return False
+        trees.append(proc.stdout.strip())
+    return trees[0] == trees[1]
+
+
+def _repo(run: dict) -> Path | None:
+    root = run.get("repo_root")
+    return Path(root) if root and Path(root).is_dir() else None
 
 
 def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
@@ -740,7 +768,7 @@ def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
     reply = paths.run_dir(run["id"]) / "dispatches" / outcome["dispatch_id"] / "reply.txt"
     text = reply.read_text(encoding="utf-8", errors="replace") if reply.is_file() else ""
     outcome["reviewed_commit"] = reviewed_commit(text)
-    return commit_problem(commit, outcome["reviewed_commit"])
+    return commit_problem(commit, outcome["reviewed_commit"], repo=_repo(run))
 
 
 def job_convergence_review(con, run: dict, job: dict) -> dict:
@@ -1082,7 +1110,7 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     if gates._already_decided(con, run, gate, outcome):
         return  # one round, one result (#403)
     if gate["kind"] == "convergence_review" and "reviewed_commit" in outcome and outcome.get("status") == contract.COMPLETED:
-        problem = commit_problem(gate["input_key"].partition(":")[2], outcome["reviewed_commit"])
+        problem = commit_problem(gate["input_key"].partition(":")[2], outcome["reviewed_commit"], repo=_repo(run))
         if problem:
             # A review of another commit is no review of this one: no verdict, no finding, no round spent (#706).
             outcome = {**outcome, "status": contract.INVALID_RESULT, "verdict": None, "parsed": None,
