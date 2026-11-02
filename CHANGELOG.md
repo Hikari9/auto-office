@@ -2,7 +2,7 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.15.8
+## 3.15.12
 
 - feat(amend): a live run can amend its PR options after the user confirms (#937).
 - feat(land): ordered batch landing across runs and PRs composes and runs the full suite on a branch before advancing main (#943).
@@ -21,6 +21,22 @@ One line or short list per version, newest first. The version itself lives only 
 - fix(preflight): accept a low-risk `fixed` disposition without a test path (#908).
 - docs(onboarding): the missing-CLI question is asked once per session, and the origin probe tells GitHub, checkout and index installs apart (#927).
 - feat(plugin): the plugin ships a curated 16-skill set with the original full `/auto-office` and a standalone `/auto-review`, generated into `plugin-dist/` (#926).
+
+## 3.15.11
+
+- fix(routing): an exhausted route (0% headroom) is never within the quota reserve, even when a run pins `quota.reserve_percent: 0`, so Codex at 0% weekly no longer stays the first reviewer.
+
+## 3.15.10
+
+- fix(routing): an ineligible planner `route:` entry drops alone with a notice. The eligible ones keep the planner's order and slots (#875).
+
+## 3.15.9
+
+- fix(review): a Herdr pane reviewer that hit its harness quota wall (the adapter's own signature in the pane's last lines, e.g. opencode "Free usage limit reached") moves the chain to another harness before any re-prompt.
+
+## 3.15.8
+
+- fix(checks): a check whose interpreter lacks its own test runner (`python3 -m pytest` with no pytest) is UNAVAILABLE with the fix, not CHANGES_REQUIRED (#739).
 
 ## 3.15.7
 

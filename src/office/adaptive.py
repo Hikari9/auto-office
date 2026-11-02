@@ -711,7 +711,9 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
     if not choice or not choice.get("routes"):
         return out
     picked, rejected, unknown = [], [], []
-    for ref in choice["routes"][:capacity]:
+    for ref in choice["routes"]:  # a dropped entry must not use up a slot (#875)
+        if len(picked) >= capacity:
+            break
         r = resolve_route_ref(ref, rows)
         if r is None:
             reason = _rejected_route_ref(ref, audit.get("rejected") or [])
@@ -721,26 +723,25 @@ def apply_planner_choice(audit: dict, choice: dict | None) -> dict:
                 unknown.append(ref)
         elif r["route"] not in picked:
             picked.append(r["route"])
-    if rejected:
-        details = "; ".join(f"{ref} rejected at stage {entry['stage']}: {entry['reason']}"
-                             for ref, entry in rejected)
-        return {**out, "planner_error": details}
-    if unknown:
-        return {**out, "planner_error": f"not a candidate: {', '.join(unknown)}"}
+    dropped = "; ".join([f"{ref} rejected at stage {entry['stage']}: {entry['reason']}" for ref, entry in rejected]
+                        + ([f"not a candidate: {', '.join(unknown)}"] if unknown else []))
     if not picked:
-        return out
+        # Nothing the planner named can run: the router's slate stands.
+        return {**out, "planner_error": dropped} if dropped else out
+    # #875: an ineligible entry drops alone; the planner's eligible routes keep their order.
+    notice = {"planner_notice": f"dropped from the planner route: {dropped}"} if dropped else {}
     top_u = max((r["utility"] for r in rows), default=0.0)
     primary_row = next(r for r in rows if r["route"] == picked[0])
     gap = round(top_u - primary_row["utility"], 4)
     departs = gap > abs(top_u) * float(audit.get("competitive_band", 0.05))
     why = (choice.get("why") or "").strip()
     if departs and len(why.replace(" ", "")) < 10:
-        return {**out, "planner_error": (f"{primary_row['label']} is {gap:.3f} utility behind the best route; "
-                                         "a primary outside the close-call band needs route_why")}
+        return {**out, **notice, "planner_error": (f"{primary_row['label']} is {gap:.3f} utility behind the best route; "
+                                                   "a primary outside the close-call band needs route_why")}
     fallbacks = picked[1:] + [x for x in router if x not in picked]
     return {"chooser": "planner", "primary": picked[0], "fallbacks": fallbacks[:capacity - 1],
             "override": picked != router[:len(picked)],
-            "departs_from_ranking": departs, "gap_to_best": gap, "why": why or None}
+            "departs_from_ranking": departs, "gap_to_best": gap, "why": why or None, **notice}
 
 
 def slate_for(audit: dict, plan: dict) -> list[dict]:

@@ -637,6 +637,13 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
+        if code != 0 and (runner := _missing_runner(command, out)):
+            # #739: the interpreter this check ran with has no test runner. That is the
+            # environment, not the code: say so instead of CHANGES_REQUIRED.
+            return {"verdict": "UNAVAILABLE", "results": results,
+                    "summary": f"`{command}`: the interpreter it ran with has no `{runner}` module; run the check "
+                               f"in the repository's environment (for example `uv run python -m {runner}` or "
+                               f"`.venv/bin/python -m {runner}`) by amending the check, then office resume"}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
             why = f"check {timed_out}" if killed else f"check failed (exit {code})"
@@ -649,6 +656,22 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def _missing_runner(command: str, out: str) -> str | None:
+    """The module a check runs as its tool (`python -m X`, or a bare `X` command) when the
+    output says that very module is missing; None otherwise, so a test's own failed
+    import stays a real failure."""
+    missing = re.search(r"No module named '?([A-Za-z0-9_.]+)'?", out[-2000:])
+    if not missing:
+        return None
+    name = missing.group(1)
+    # The whole `-m` target or command word, so `No module named 'pkg.sub'` from inside
+    # `python -m pkg.tests` (the project's own import) is never read as a missing tool.
+    end = r"(?=$|[\s;&|])"
+    runs = (re.search(rf"(?:^|[\s;&|])-m\s+{re.escape(name)}{end}", command)
+            or re.match(rf"\s*{re.escape(name)}{end}", command))
+    return name if runs else None
 
 
 class _TimedOut(str):
@@ -888,8 +911,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         # Wall signatures come from the harness log, never from the review
         # itself (a review of quota code must not read as a quota wall).
         log_text = "" if wrote_file else _log_text(d, ddir)
+        # A pane agent prints its quota wall only in the pane. Read before any re-prompt, so a walled
+        # reviewer moves to another harness at once instead of minutes later (run 12922516, 2026-11-02).
+        pane_wall = None if wrote_file else _pane_quota_wall(d, ddir)
         launch_failed = ((d.get("terminal_classification") != "success" or pane_terminal_status) and not wrote_file) \
-            or _quota_signature(log_text) or _auth_signature(log_text)
+            or _quota_signature(log_text) or _auth_signature(log_text) or bool(pane_wall)
         if not parsed.valid and not launch_failed:
             # The reviewer answered (or ended cleanly) but its reply file is
             # missing or unparseable. Its work is not discarded and no other
@@ -983,9 +1009,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
         if pane_terminal_status:
             reason += f" (Herdr pane status {pane_terminal_status})"
-        wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+        wall = "quota" if pane_wall or _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
         if wall:
-            reason += f" [{wall}]"
+            reason += f" [{wall}" + (f": {pane_wall}" if pane_wall else "") + "]"
         failures.append(reason)
         last_failed = (triple, reason)
         if pinned:
@@ -1387,6 +1413,27 @@ def _last_block(text: str) -> str:
                                  review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
+
+
+PANE_WALL_LINES = 12
+
+
+def _pane_quota_wall(d: dict, ddir: Path) -> str | None:
+    """The id of an adapter quota failure signature (opencode's "Free usage limit reached")
+    among the last lines of a Herdr pane agent that wrote no reply, or None. Only the
+    adapter's own quota signatures, and only the pane's last lines, count: the agent's
+    review text above them may well discuss quota code."""
+    if d.get("launcher") != "herdr":
+        return None
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    sigs = [s for s in adapter.get("failure_signatures") or []
+            if isinstance(s, dict) and s.get("pattern") and _quota_signature(s["pattern"])]
+    if not sigs:
+        return None
+    lines = [line for line in _log_text(d, ddir, pane=True).splitlines() if line.strip()][-PANE_WALL_LINES:]
+    tail = "\n".join(lines).lower()
+    return next((s.get("id") or s["pattern"] for s in sigs if s["pattern"].lower() in tail), None)
 
 
 def _quota_signature(text: str) -> bool:
