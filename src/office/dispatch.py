@@ -32,7 +32,7 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, review_submit, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -2030,6 +2030,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
         "base_parents": extra.get("base_parents"),
+        "context_handoff": extra.get("context_handoff"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 
@@ -2076,7 +2077,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     predecessor = role == "executor" and dispatch.get("predecessor_dispatch_id")
     created = not (Path(dispatch["worktree"]) / ".git").exists()
     wt = ensure_worktree(run, dispatch, restack_existing=bool(predecessor))
-    if predecessor:
+    if predecessor and not payload.get("context_handoff"):
         # An amendment or manual dispatch reuses the old task branch. Its recorded base
         # can be stale after depends changes / dependency re-acceptance (#696).
         # Restack in this launch job (outside the amendment DB transaction), before
@@ -2461,9 +2462,12 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     harness's own per-dispatch settings (`_harness_env`)."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
-        # Reviewers get no Office authority: they cannot submit or ack.
+        # Reviewers get no Office authority: they cannot submit or ack. They may hand back their own review
+        # through `office review submit`, which honours only this dispatch's secret (#1030).
         for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
             wenv.pop(k, None)
+        if dispatch.get("role") in review_submit.REVIEW_ROLES and dispatch.get("gate_id"):
+            wenv.update(review_submit.token_env(run, dispatch))
     carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
     carry.update(harness_env or {})
     env_file = ddir / "agent.env"
@@ -3724,6 +3728,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                 return 0, "success"
         finally:
             con.close()
+        if review_submit.submitted(output):
+            return 0, "success"  # office review submit validated and stored it: no settle or idle heuristics (#1030)
         size = output.stat().st_size if output and output.is_file() else 0
         data = _reply_bytes(output) if size else None
         digest = hashlib.sha256(data).hexdigest() if data else None
@@ -4662,6 +4668,8 @@ def supervise(dispatch_id: str) -> int:
 
     # An in-process supervisor hands its caller's handlers back when the dispatch ends.
     previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    context_stop = threading.Event()
+    context_thread = None
     timer = None
     log_path = None
     try:
@@ -4671,6 +4679,11 @@ def supervise(dispatch_id: str) -> int:
             run = state.get_run(con, d["run_id"])
         finally:
             con.close()
+        if d.get("role") == "executor":
+            from office import executor_context
+            context_thread = threading.Thread(target=executor_context.monitor,
+                                              args=(dispatch_id, context_stop), daemon=True)
+            context_thread.start()
         if os.environ.get("OFFICE_SUPERVISOR_VIA") == "herdr" and d.get("launcher") != "herdr":
             # This pane command arrived after the launch fell back to a plain
             # process; running it too would mean two writers for one dispatch.
@@ -4723,6 +4736,8 @@ def supervise(dispatch_id: str) -> int:
             for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
                 env.pop(k, None)
             env["OFFICE_ROLE"] = "reviewer"
+            if d["role"] in review_submit.REVIEW_ROLES and d.get("gate_id"):
+                env.update(review_submit.token_env(run, d))  # its own review only (#1030)
         try:
             env.update(_harness_env(run, d, spec, strict=True))
         except adapters.AdapterError as exc:
@@ -4807,6 +4822,7 @@ def supervise(dispatch_id: str) -> int:
                 _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
                         empty_reply=empty_reply)
         finally:
+            context_stop.set()
             if timer:
                 timer.cancel()
             for s, handler in previous.items():
@@ -4864,7 +4880,7 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
                 con.execute("DELETE FROM route_cooldowns WHERE route=?",
                             (routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort")),))
-            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")
+            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal", "context_cap") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
             run = state.get_run(con, d["run_id"])
@@ -4928,6 +4944,13 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d.get("task_id") else None
     if task is None or task["current_dispatch_id"] != dispatch_id:
+        return
+    # #939: an orchestrator-requested rotation's job owns this end. Stopping the
+    # old writer is neither an executor failure nor a route failure, so never
+    # auto-retry it or consume a retry allowance.
+    from office import executor_context
+    if (executor_context.rotation_requested(d) and task["status"] in ("running", "launching")
+            and not con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone()):
         return
     if task["status"] == "changes_required":
         # Findings arrived while this session was alive and it ended without

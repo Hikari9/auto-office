@@ -288,9 +288,10 @@ def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
         monkeypatch.setattr(gates, "worker_live", lambda c, did: bool(did == t1["current_dispatch_id"])
                             or real_live(c, did))
         waiting = guide.next_action(con, run)
-        assert waiting.startswith("no action;"), waiting
+        # #913: the live parent is prompted, never rerun; the held dependent is named, never offered.
+        assert waiting.startswith('office prompt T1 -- "fix findings'), waiting
         assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
-        assert not guide._needs_orchestrator(con, run), waiting
+        assert guide._needs_orchestrator(con, run), waiting  # the prompt is the orchestrator's to send
 
         # When T1's lease really releases, T2 becomes the one legal repair.
         owner["T2"] = None
@@ -685,6 +686,18 @@ def test_an_identical_tree_recomposition_keeps_the_waiver_and_starts_no_review(e
     from office import convergence
     assert convergence.waiver_for(env.con(), _run_row(env), "L-T1", "convergence_review", after["commit"])
     assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
+
+
+def test_an_identical_tree_after_an_acceptance_change_is_reviewed_again(env):
+    """#768: an amendment changed T1's acceptance criteria; the resubmitted same tree is no proof of the new ones."""
+    _delegated_waiver(env)
+    gates_before = len(_gates(env, "convergence_review"))
+    con = env.con()
+    con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+    con.commit()
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.carried"), "a changed acceptance contract is not carried"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the recomposition is reviewed again"
 
 
 def test_a_waiver_without_a_tree_binds_its_commit_only(env):

@@ -126,3 +126,99 @@ def test_intake_flags_reach_the_diagram_when_the_plan_omits_them(env, monkeypatc
     code, out = env.office("submit")
     assert code == 0, out
     assert "deploy prod `make ship` -> verify `make smoke` -> closeout" in out and "end state: e2e" in out, out
+
+
+SQUASH_ONLY = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}, "mergeCommitAllowed": False,
+               "squashMergeAllowed": True, "rebaseMergeAllowed": False}
+
+
+def _task_branch(env, bare, tid: str) -> str:
+    refs = env.git("--git-dir", str(bare), "for-each-ref", "--format=%(refname:short)", "refs/heads/office/").split()
+    return next(r for r in refs if r.endswith(f"/{tid}"))
+
+
+def test_restack_leases_to_an_ancestor_left_by_a_failed_accepted_push(env, monkeypatch):
+    """#538: the accepted revision's push never reached the remote, so the branch
+    holds an ancestor of it. The restack must lease to that head, not refuse as stale."""
+    from test_task_prs import _accepted_commit
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), repo=SQUASH_ONLY)
+    branch = _task_branch(env, bare, "T2")
+    env.git("--git-dir", str(bare), "update-ref", f"refs/heads/{branch}", _accepted_commit(env, "T1"))
+    code, out = env.office("land")
+    assert code == 0 and "T2 #2 merged (squash)" in out, out
+    assert _main_tree(env, bare) == _integration_tree(env)
+
+
+def test_restack_refuses_a_foreign_remote_head_naming_both_shas(env, monkeypatch):
+    from test_task_prs import _accepted_commit
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), repo=SQUASH_ONLY)
+    branch = _task_branch(env, bare, "T2")
+    foreign = env.git("--git-dir", str(bare), "commit-tree", "-p", _accepted_commit(env, "T2"),
+                      "-m", "someone else", f"{_accepted_commit(env, 'T2')}^{{tree}}").strip()
+    env.git("--git-dir", str(bare), "update-ref", f"refs/heads/{branch}", foreign)
+    code, out = env.office("land")
+    assert code == 4 and "restack-push-failed" in out, out
+    assert foreign[:12] in out and _accepted_commit(env, "T2")[:12] in out, out
+    assert remote_head(bare, branch) == foreign
+
+
+def test_restack_adopts_a_hand_resolved_head_with_the_reviewed_tree(env, monkeypatch):
+    """#676: after a restack-conflict, the user pushes a head that contains main and
+    carries the reviewed tree. Land must adopt it, not replay the recorded revision."""
+    from office import land
+    from test_task_prs import _accepted_commit
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), repo=SQUASH_ONLY)
+    branch = _task_branch(env, bare, "T2")
+    real = land._restack
+
+    def hand_resolved_first(con, run, task, up, base):
+        if task["id"] == "T2":
+            env.git("fetch", "-q", "origin", "main")
+            head = env.git("commit-tree", "-p", "origin/main", "-m", "resolved by hand",
+                           f"{_accepted_commit(env, 'T2')}^{{tree}}").strip()
+            env.git("push", "-q", "-f", "origin", f"{head}:refs/heads/{branch}")
+        return real(con, run, task, up, base)
+
+    monkeypatch.setattr(land, "_restack", hand_resolved_first)
+    code, out = env.office("land")
+    assert code == 0 and "T2 #2 merged (squash)" in out, out
+    assert _main_tree(env, bare) == _integration_tree(env)
+    con = env.con()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM events WHERE kind='pr.restack_adopted'").fetchone()[0] == 1
+    finally:
+        con.close()
+
+
+def test_restack_never_adopts_a_head_that_drops_main_changes(env, monkeypatch):
+    """A pushed head with only the accepted tree would revert what main gained since; refuse it."""
+    from office import land
+    from test_landing_gaps import _advance_main
+    from test_task_prs import _accepted_commit
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), repo=SQUASH_ONLY)
+    branch = _task_branch(env, bare, "T2")
+    real = land._restack
+
+    def drops_main(con, run, task, up, base):
+        if task["id"] == "T2":
+            _advance_main(env, bare, "NOTES.md", "unrelated\n")
+            env.git("fetch", "-q", "origin", "main")
+            head = env.git("commit-tree", "-p", "origin/main", "-m", "drops NOTES.md",
+                           f"{_accepted_commit(env, 'T2')}^{{tree}}").strip()
+            env.git("push", "-q", "-f", "origin", f"{head}:refs/heads/{branch}")
+        return real(con, run, task, up, base)
+
+    monkeypatch.setattr(land, "_restack", drops_main)
+    code, out = env.office("land")
+    assert code == 4 and "restack-push-failed" in out and "will not overwrite" in out, out
+def test_a_rate_limited_checks_lookup_is_unavailable_not_failed(env, monkeypatch):
+    """#772: GitHub's rate-limit error from `gh pr checks` is not a failed check; never point at a rerun."""
+    bare, _, _ = _run(env, monkeypatch, _plan("merge"), checks_exit=1,
+                      checks_out="GraphQL: API rate limit already exceeded for user ID 1.")
+    before = remote_head(bare, "main")
+    code, out = env.office("land")
+    assert code == 4 and "checks-unavailable" in out and "checks-failed" not in out, out
+    assert "office rerun" not in out and "rate_limit" in out, out
+    assert remote_head(bare, "main") == before
+    code, data = env.ojson("status")
+    assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data

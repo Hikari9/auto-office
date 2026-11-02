@@ -6,7 +6,11 @@ verdict, a substantive round or an approval. The one authoritative acceptance ve
 convergence review. A missing, invalid or wrong-commit subagent report blocks that review
 (fail closed) and spends no round.
 
-Funding by run gear (pinned `run-gear-1` runs only; legacy-pinned runs keep their contract):
+New (convergence-v1) runs fund one subagent per task for every funded gear: edge cases and test strength in
+one read-only pass, plus platform/build only when the task's scope touches it. Security is not a task
+self-review: the single convergence reviewer covers it when a lane changes a sensitive path (#938).
+
+Funding by run gear (pinned `run-gear-1` runs; legacy-pinned runs keep the funding below):
   XS      none: the executor's inline four-lens self-check is the whole of it
   S, M    one four-lens subagent per task
   L, XL   up to four specialists per task (security, edge-cases, platform, test-strength),
@@ -16,6 +20,7 @@ rubric is reused on a later convergence round or a review-only re-run.
 """
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
@@ -25,6 +30,10 @@ from office.util import now_iso
 REVIEW_VERSION = "runtime-self-review-1"
 FUNDED_GEARS = ("S", "M", "L", "XL")
 RUBRICS = {
+    "combined": "Review edge cases and test strength in ONE pass: empty or null input, parser ambiguity, retries, restart "
+                "states, weak assertions, tests that still pass with the fix reverted, missing negative paths. Review "
+                "platform/build only when told the scope touches it. Security is covered by the convergence review. "
+                "Try to falsify the producer's claims using the actual checkout, without changing files.",
     "four-lens": "Review all four lenses independently: security, edge cases, platform/build, and test strength. "
                  "Try to falsify the producer's claims using the actual checkout, without changing files.",
     "security": "Security: secrets, token exposure, auth and permission bypass, missing server-side revalidation, "
@@ -48,10 +57,31 @@ def _security_relevant(run: dict, task: dict) -> bool:
                 or any(w in str(p).lower() for p in task.get("scope") or [] for w in _SECURITY_WORDS))
 
 
+def platform_relevant(files) -> bool:
+    """Whether any file is a script, CI, packaging or build file (an extension matches the whole suffix)."""
+    return any(p.endswith(m) if m.startswith(".") else m in p
+               for p in (str(f).lower() for f in files) for m in _PLATFORM_MARKS)
+
+
 def _platform_relevant(task: dict) -> bool:
-    scope = [str(p).lower() for p in task.get("scope") or []]
-    return (any(m in p for p in scope for m in _PLATFORM_MARKS)
-            or (task.get("descriptor") or {}).get("domain") == "infrastructure")
+    return platform_relevant(task.get("scope") or []) or (task.get("descriptor") or {}).get("domain") == "infrastructure"
+
+
+# A path is sensitive when one of its directory or file-name words is one of these. Whole words only:
+# `product.py` and `writer.py` are not `prod` or `write`.
+_SENSITIVE_WORDS = frozenset((
+    "auth", "authn", "authz", "authentication", "authorization", "oauth", "sso", "login",
+    "permission", "permissions", "acl", "rbac", "secret", "secrets", "token", "tokens", "credential", "credentials",
+    "password", "passwords", "crypto", "encryption", "security", "firewall"))
+
+
+def security_relevant(files) -> bool:
+    """Whether any changed path names a security-sensitive area, matched by path segment words."""
+    for path in files:
+        for segment in str(path).lower().replace("\\", "/").split("/"):
+            if _SENSITIVE_WORDS & set(re.split(r"[^a-z0-9]+", segment)):
+                return True
+    return False
 
 
 def funded(run: dict) -> bool:
@@ -62,6 +92,8 @@ def rubrics(run: dict, task: dict) -> tuple[str, ...]:
     """The independent subagent reviews this run's gear funds for one task."""
     if not funded(run):
         return ()
+    if contract.is_convergence(run):
+        return ("combined",)
     if run["gear"] in ("S", "M"):
         return ("four-lens",)
     picked = ["edge-cases", "test-strength"]
@@ -141,7 +173,9 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                                  "ORDER BY created_at DESC LIMIT 1", (rid,)).fetchone()
             brief = briefs.self_review_subagent_brief(run, task, rev, commit, diff,
                                                       checks["summary"] if checks else "none declared",
-                                                      str(checkout), rubric, RUBRICS[rubric])
+                                                      str(checkout), rubric, RUBRICS[rubric] + (
+                                                          " Platform/build IS in scope for this task." if rubric == "combined"
+                                                          and _platform_relevant(task) else ""))
             try:
                 outcome = reviewer(con, run, audit_gate, "code_reviewer", brief, cwd=checkout,
                                    include_dirs=[checkout], kind="reviewer")

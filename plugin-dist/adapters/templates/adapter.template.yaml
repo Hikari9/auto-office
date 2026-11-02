@@ -1,0 +1,38 @@
+id: example-harness
+verified_state: valid-unverified
+version_fingerprint:
+  command: [example, --version]
+  parser: first-line
+model_source:
+  type: catalog-plus-probe
+  command: null
+effort_mapping:
+  none: null
+  low: null
+  medium: null
+  high: null
+  xhigh: null
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: example
+  argv: []
+  prompt_transport: stdin
+  cwd_transport: process-cwd
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: command
+  command: null
+  unknown_is_unlimited: false
+shallow_review:
+  supported: false
+agentic_capability:
+  default: unknown
+failure_signatures: []
+conformance:
+  deterministic: untested
+  live: untested

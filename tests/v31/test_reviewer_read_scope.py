@@ -134,7 +134,7 @@ def _reviewer_argv(adapters, adapter_id, kind, env, **kw):
                                include_dirs=[env.repo], **kw)[0]
 
 
-@pytest.mark.parametrize("adapter_id,flag", [("claude", "--add-dir"), ("gemini", "--include-directories")])
+@pytest.mark.parametrize("adapter_id,flag", [("claude", "--add-dir"), ("agy", "--add-dir")])
 @pytest.mark.parametrize("kind", ["reviewer", "vision"])
 def test_reviewer_argv_includes_read_roots(scope, adapter_id, flag, kind):
     env, adapters, read_scope = scope
@@ -171,7 +171,7 @@ def test_read_roots_skip_missing_directories(scope):
     assert f"Read({env.home}/.claude/skills/**)" in read_scope.allow_rules()
 
 
-@pytest.mark.parametrize("adapter_id", ["claude", "codex", "gemini", "agy", "hermes"])
+@pytest.mark.parametrize("adapter_id", ["claude", "codex", "agy", "hermes"])
 def test_worker_argv_is_unchanged(scope, adapter_id):
     env, adapters, read_scope = scope
     adapter = adapters.load_all()[adapter_id]

@@ -322,6 +322,11 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
     if current is None:
         raise Refused("no-plan", "there is no plan to amend", next_step="office submit the plan first")
     new_text, parsed = _next_plan_text(current, plan_text, scope_ids, delta)
+    from office import greenfield
+    problems = greenfield.plan_problems(run, parsed.tasks)
+    if problems:
+        raise Refused("plan-invalid", "greenfield plan has problems: " + "; ".join(problems[:5]),
+                      scope=scope, preserved="current plan and phase contract are unchanged")
     # Only what the amendment adds can widen authority: an edited plan is judged
     # by its new lines (removing a line that names a deploy adds no action), a
     # delta-only amendment by its delta, which becomes plan text.
@@ -448,6 +453,8 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
                          plan_path: Path | None = None) -> Result:
     parsed = planfile.parse(text)
     planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
+    from office import greenfield
+    parsed.errors.extend(greenfield.plan_problems(run, parsed.tasks))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:5]),
                       next_step=f"fix {planpath.rel(run)}, then retry the amendment")

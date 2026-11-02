@@ -9,6 +9,7 @@ import re
 
 import pytest
 
+from office.util import now_iso
 from office import candidates, guide, inspect_cmd, plan_view, route_learning, route_probe, route_policy, scoring, state
 from conftest import approved_run
 from test_route_discovery_consumer_contract import World, categories as decision_categories
@@ -662,7 +663,7 @@ def test_the_next_line_keeps_a_dependency_hold_beside_the_trial_note(env):
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     con.execute("INSERT INTO dispatches(id, run_id, role, task_id, triple, harness, model, effort, started_at, status) "
-                "VALUES('Dt',?,'executor','T1',?,'codex','gpt-6.1-sol','high',?,'running')", (run_id, TRIPLE, at(1)))
+                "VALUES('Dt',?,'executor','T1',?,'codex','gpt-6.1-sol','high',?,'running')", (run_id, TRIPLE, now_iso()))  # started now: #917's oversize wall clock stays quiet
     con.execute("UPDATE tasks SET status='running', current_dispatch_id='Dt' WHERE id='T1'")
     con.execute("INSERT INTO route_trials(id, run_id, task_id, dispatch_id, role, route, probe_key, fallback_route, "
                 "policy_digest, reason, status, created_at, updated_at) VALUES('At',?,'T1','Dt','executor',?,?,?,?,'r',"

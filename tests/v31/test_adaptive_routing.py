@@ -223,6 +223,20 @@ def test_planner_choice_within_band_and_override_with_reason():
     assert "stage 6" in blocked["planner_error"] and "quota unknown" in blocked["planner_error"]
 
 
+def test_an_ineligible_planner_entry_drops_alone_and_the_eligible_primary_stands():
+    """#875: one rejected or unknown entry no longer discards the planner's whole route."""
+    cs = [cand("a", "m1", idx=50), cand("b", "m2", idx=50), cand("c", "m3", idx=49)]
+    audit = routing.route(req(cs, cfg={"competitive_band": 0.05}))["routing"]
+    second, third = audit["candidates"][1], audit["candidates"][2]
+    staged_out = {**audit, "rejected": [{"candidate": "z@2/none@medium", "stage": 4,
+                                          "reason": "L subtask requires index >= 44 (got 40)"}]}
+    plan = adaptive.apply_planner_choice(staged_out, {"routes": [second["label"], "z/none@medium", "y/gone@low",
+                                                                 third["label"]]})
+    assert plan["chooser"] == "planner" and plan["primary"] == second["route"]
+    assert plan["fallbacks"][0] == third["route"] and "planner_error" not in plan
+    assert "z/none@medium rejected at stage 4" in plan["planner_notice"] and "y/gone@low" in plan["planner_notice"]
+
+
 # ------------------------------------------------------------------ inline slate rendering
 
 @pytest.mark.parametrize("n", [1, 2, 3])
@@ -436,3 +450,24 @@ def test_accepting_the_router_slate_is_not_an_override():
     audit = routing.route(req(cs))["routing"]
     same = adaptive.apply_planner_choice(audit, {"routes": [e["label"] for e in audit["slate"]]})
     assert same["chooser"] == "planner" and same["override"] is False
+
+
+@pytest.mark.parametrize("reserve", [0.0, 5.0])
+def test_an_exhausted_route_is_never_within_the_reserve_even_at_zero(reserve):
+    """rsvp runs (2026-11-02) pinned quota.reserve_percent 0; Codex weekly at 0% left passed `0 >= 0` and
+    stayed the first reviewer. A route with no headroom left is never safe, at any reserve."""
+    exhausted = cand("codex", "luna", effort="high", idx=60, quota=0)
+    other = cand("claude", "opus", effort="low", idx=45, quota=76)
+    request = req([exhausted, other])
+    request["policy"]["quota_reserve_percent"] = reserve
+    d = routing.route(request)
+    assert d["candidate"]["model_id"] == "opus", d["selected"]
+    assert any(r["candidate"].startswith("codex") and r["stage"] == 6 for r in d["rejected"]), d["rejected"]
+
+
+def test_a_zero_reserve_still_admits_a_route_with_headroom():
+    route = cand("codex", "luna", effort="high", idx=60, quota=3)
+    request = req([route, cand("claude", "opus", effort="low", idx=45, quota=76)])
+    request["policy"]["quota_reserve_percent"] = 0.0
+    d = routing.route(request)
+    assert not [r for r in d["rejected"] if r["candidate"].startswith("codex") and r["stage"] == 6], d["rejected"]

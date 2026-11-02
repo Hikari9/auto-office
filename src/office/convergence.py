@@ -307,6 +307,13 @@ def review_required(run: dict) -> bool:
     return bool((run.get("gates") or {}).get("code_review"))
 
 
+def sensitive_lane(con, run: dict, scope: dict) -> bool:
+    """A new run's lane changes a security-sensitive path: its one convergence reviewer must cover security (#938)."""
+    from office import self_review_subagents
+    return contract.is_convergence(run) and self_review_subagents.security_relevant(
+        f for tid in scope["tasks"] for f in _changed(con, run, state.get_task(con, run["id"], tid)))
+
+
 def visual_tasks(con, run: dict, scope: dict) -> list[tuple[dict, dict]]:
     """(task, applicability) for each task in a lane whose acceptance is
     user-visible. Planner-declared, runtime-guarded: acceptance that reads
@@ -512,7 +519,7 @@ def _compose(con, run: dict, scope: dict) -> dict:
                     wt, {**t, "base_commit": task_base or run["base_sha"]}, previous, env=genv)
             except integration.SharedAppendUnsafe as exc:
                 return {"status": "conflict", "detail":
-                        f"{t['id']}: shared append integrity unverified: {exc}; serialize tasks or repair the append-only history, then office resume"}
+                        f"{t['id']}: shared append integrity unverified: {exc}; {integration.shared_append_next(t, previous)}"}
             previous.append(t)
         commit = paths.git(wt, "rev-parse", "HEAD")
         tree = paths.git(wt, "rev-parse", "HEAD^{tree}")
@@ -561,7 +568,7 @@ def job_converge(con, run: dict, job: dict) -> dict:
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
                    hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
         made = []
-        if review_required(run):
+        if review_required(run) or sensitive_lane(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
         if visual_tasks(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "visual", round_no, cycle))
@@ -597,6 +604,12 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
                                       for g in latest.values()):
         return False
     if prior == "reviewing" and not latest:
+        return False
+    approved = st.get("approved") or {}
+    if prior in CONVERGED and approved.get("versions") is not None \
+            and approved["versions"] != _contract_versions(con, run, scope):
+        # #768: the same bytes do not satisfy a changed contract or acceptance criteria. The
+        # earlier review judged the old ones, so the recomposition is reviewed again.
         return False
     if old != new:
         con.execute("UPDATE gates SET input_key=? WHERE run_id=? AND subject='lane' AND scope=? AND input_key=? "
@@ -714,15 +727,43 @@ def reviewed_commit(text: str) -> str | None:
     return stated
 
 
-def commit_problem(commit: str, stated: str | None) -> str | None:
-    """Why `stated` is not the composed `commit` (a prefix of at least MIN_REVIEWED_HEX hex characters), else None."""
+FULL_SHA_LENGTHS = (40, 64)
+
+
+def commit_problem(commit: str, stated: str | None, *, repo: Path | None = None) -> str | None:
+    """Why `stated` is not the composed `commit` (a prefix of at least MIN_REVIEWED_HEX hex characters), else None.
+
+    A full sha stated for an abbreviated `commit` matches too (#893), and with `repo`, so
+    does a commit whose tree is the composed commit's tree: a same-tree recomposition keeps
+    the earlier review, so a reply naming the earlier commit reviewed this content (#782)."""
     if not stated:
         return "the reply has no REVIEWED_COMMIT line"
     if not re.fullmatch(r"[0-9a-f]+", stated.lower()) or len(stated) < MIN_REVIEWED_HEX:
         return f"REVIEWED_COMMIT {stated!r} is not a commit sha of at least {MIN_REVIEWED_HEX} hex characters"
-    if not commit.lower().startswith(stated.lower()):
-        return f"REVIEWED_COMMIT {stated} is not the composed commit {commit[:12]}"
-    return None
+    ours, theirs = commit.lower(), stated.lower()
+    if ours.startswith(theirs):
+        return None
+    if len(ours) not in FULL_SHA_LENGTHS and len(theirs) in FULL_SHA_LENGTHS and theirs.startswith(ours):
+        return None
+    if repo is not None and _same_tree(repo, commit, stated):
+        return None
+    return f"REVIEWED_COMMIT {stated} is not the composed commit {commit[:12]}"
+
+
+def _same_tree(repo: Path, commit: str, stated: str) -> bool:
+    trees = []
+    for rev in (commit, stated):
+        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{rev}^{{tree}}"],
+                              capture_output=True, text=True)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return False
+        trees.append(proc.stdout.strip())
+    return trees[0] == trees[1]
+
+
+def _repo(run: dict) -> Path | None:
+    root = run.get("repo_root")
+    return Path(root) if root and Path(root).is_dir() else None
 
 
 def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
@@ -733,7 +774,7 @@ def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
     reply = paths.run_dir(run["id"]) / "dispatches" / outcome["dispatch_id"] / "reply.txt"
     text = reply.read_text(encoding="utf-8", errors="replace") if reply.is_file() else ""
     outcome["reviewed_commit"] = reviewed_commit(text)
-    return commit_problem(commit, outcome["reviewed_commit"])
+    return commit_problem(commit, outcome["reviewed_commit"], repo=_repo(run))
 
 
 def job_convergence_review(con, run: dict, job: dict) -> dict:
@@ -791,6 +832,11 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
             dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
+        if sensitive_lane(con, run, scope):
+            brief += ("\nSECURITY: this lane changes a security-sensitive path and the executors did not review security. "
+                      "Cover it in your one verdict: secrets and token exposure, auth and permission bypass, missing "
+                      "server-side revalidation, path or symlink escapes, unsafe input parsing, repeated or unauthorized "
+                      "production writes.\n")
         # #809: funded self-review subagents precede the ONE independent convergence verdict. A missing,
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
         from office import self_review_subagents
@@ -1070,7 +1116,7 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
     if gates._already_decided(con, run, gate, outcome):
         return  # one round, one result (#403)
     if gate["kind"] == "convergence_review" and "reviewed_commit" in outcome and outcome.get("status") == contract.COMPLETED:
-        problem = commit_problem(gate["input_key"].partition(":")[2], outcome["reviewed_commit"])
+        problem = commit_problem(gate["input_key"].partition(":")[2], outcome["reviewed_commit"], repo=_repo(run))
         if problem:
             # A review of another commit is no review of this one: no verdict, no finding, no round spent (#706).
             outcome = {**outcome, "status": contract.INVALID_RESULT, "verdict": None, "parsed": None,
@@ -1093,7 +1139,8 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
         return
     if status == contract.COMPLETED and parsed is not None:
         where, params = "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"])
-        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings)
+        foreign = gates.finding_codes(con, "run_id=? AND scope=? AND gate_kind!=?", (run["id"], scope["id"], gate["kind"]))
+        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings, foreign=foreign)
         gates.mark_current(con, where, params, parsed.resolved, ("open",), "resolved")
         gates.mark_current(con, where, params, [r["code"] for r in parsed.retracted], ("open", "nonblocking"), "retracted")
         restated = {f["code"] for f in parsed.findings}
@@ -1390,9 +1437,11 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             # A rerun can be refused by the same live scope lease that dispatch enforces.
             # Never offer a stacked dependent while its parent is still repairing (#561).
             from office import dispatch
-            waiting = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
-            waiting = [t for t in waiting if t and t["status"] == "changes_required"
-                       and not gates.worker_live(con, t.get("current_dispatch_id"))]
+            tasks_in_scope = [state.get_task(con, run["id"], tid) for tid in s["tasks"]]
+            live = [t for t in tasks_in_scope if t and t["status"] == "changes_required"
+                    and (gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], t["id"])))]
+            waiting = [t for t in tasks_in_scope if t and t["status"] == "changes_required"
+                       and not (gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], t["id"])))]
             ready, held = [], []
             for t in waiting:
                 owner = dispatch.scope_holder(con, run, t)
@@ -1404,12 +1453,17 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
                     held.append(f"{t['id']} waits for {owner}'s repair session to end")
                 else:
                     ready.append(t)
+            if live and not ready:
+                note = f"; {'; '.join(held)}" if held else ""  # #561: still name the dependents the live repair holds
+                return " ; ".join(f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live) + note
             if ready:
                 from office import rerun
                 what = " in parallel" if len(ready) > 1 else ""
                 note = f"; {'; '.join(held)}" if held else ""
+                live_prompts = [f'office prompt {t["id"]} -- "fix findings, then office submit"' for t in live]
+                parts = [*live_prompts, *(rerun.recovery_hint(con, run, t['id']) for t in ready)]
                 return (f"{sid} RECHECK repairs ready{what}: "
-                        + " ; ".join(rerun.recovery_hint(con, run, t['id']) for t in ready) + note)
+                        + " ; ".join(parts) + note)
             if held:
                 held_rechecks.append(f"{sid} RECHECK: {'; '.join(held)}")
 
@@ -1437,6 +1491,13 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
             # scope's bounded status detail may cut off the install command.
             from office import visual
             capture = _latest(con, run, sid, s["commit"]).get("visual") or {}
+            if not (capture.get("review_status") == contract.EVIDENCE_BLOCKED
+                    or (capture.get("evidence_status") or "COMPARABLE") != "COMPARABLE"):
+                # #870: the block is not the visual capture (a self-review subagent that never ran, a reply
+                # about another commit). There is no capture contract to correct: re-run the review.
+                return (f"{sid} evidence_blocked: {s['detail']}; this is the review's runtime evidence, not a visual "
+                        f"capture (no round spent): office resume re-runs the review; if it repeats, office inspect "
+                        f"lane {sid} shows the failing step; a waiver needs landing authority")
             install = (visual.missing_browser_install(capture.get("summary") or "")
                        if capture.get("evidence_status") == "CAPTURE_BLOCKED" else None)
             if install:
@@ -2125,10 +2186,17 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         blocking = [r for r in rows if r["state"] == "open" and not owned]
         coowner_fix = _coowner_accepted_fix(con, run, blocking) if blocking and how == "fixed" else []
         if blocking and how == "fixed" and not coowner_fix:
+            owner = next((r["task_id"] for r in blocking if r.get("task_id")), "<owner>")
+            owner_live = False
+            if owner != "<owner>":
+                otask = state.get_task(con, run["id"], owner)
+                if otask and (gates.worker_live(con, otask.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], owner))):
+                    owner_live = True
+            repair_cmd = f'office prompt {owner} -- "fix {spec}, then office submit"' if owner_live else f"office rerun {owner} --resume|--fresh"
             raise Refused("fix-unverified", f"{spec} is blocking: no accepted later revision from a "
                           "co-owner proves it fixed. A fix is not a dismissal; the independent lane "
                           "recheck must still verify the correction", scope=scope_id,
-                          next_step="office rerun <owner> --resume|--fresh after its repair, or "
+                          next_step=f"{repair_cmd} after its repair, or "
                                     f'office disposition {spec} dismissed --quote "<user\'s words>" '
                                     "only if the user chooses to waive it")
         if blocking and how != "fixed" and (how != "dismissed" or not quote):
@@ -2167,9 +2235,17 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
         if how == "fix":
             for tid in sorted({r["task_id"] for r in rows if r.get("task_id")}, key=_tid_key):
                 t = state.get_task(con, run["id"], tid)
-                if t and t["status"] == "accepted":
-                    state.update_task(con, run["id"], tid, status="changes_required",
-                                      pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
+                if t:
+                    if t["status"] == "accepted":
+                        state.update_task(con, run["id"], tid, status="changes_required",
+                                          pause_reason=f"APPROVED cleanup: fix {', '.join(codes)} (no re-review)")
+                    is_live = gates.worker_live(con, t.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], tid))
+                    if is_live and t.get("current_dispatch_id"):
+                        state.enqueue(con, run, "notify_worker", {
+                            "dispatch_id": t["current_dispatch_id"],
+                            "task_id": tid,
+                            "text": f"APPROVED cleanup: fix {', '.join(codes)}, then office submit.",
+                        }, dedup_key=f"notify:{scope_id}:{tid}:{uuid.uuid4().hex[:6]}", max_attempts=1)
                     reopened.append(tid)
         settled = None
         if coowner_fix:
@@ -2193,13 +2269,27 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
     if settled or coowner_fix:
         from office import jobs
         jobs.kick(con, run["id"])
-    nxt = (" ; ".join(f"office rerun {t} --resume|--fresh" for t in reopened) if reopened
-           else "exceptions only; office status")
+    deliv_note = ""
+    if reopened:
+        nxt_parts = []
+        for tid in reopened:
+            task = state.get_task(con, run["id"], tid)
+            is_live = task and (gates.worker_live(con, task.get("current_dispatch_id")) or bool(gates.live_task_session(con, run["id"], tid)))
+            if is_live:
+                nxt_parts.append(f'office prompt {tid} -- "fix {", ".join(codes)}, then office submit"')
+            else:
+                nxt_parts.append(f"office rerun {tid} --resume|--fresh")
+        nxt = " ; ".join(nxt_parts)
+        if any("office prompt" in p for p in nxt_parts):
+            deliv_note = "; finding delivered to the live worker"
+    else:
+        nxt = "exceptions only; office status"
     return Result(lines=[f"{scope_id}:{','.join(codes)} {how}"
                          + (f" on the user's authority ({quote[:80]})" if blocking and not coowner_fix else "")
                          + (f"; accepted co-owner revision {', '.join(rev for _, rev in coowner_fix)}; recheck required"
                             if coowner_fix else "")
                          + (f"; cleanup routed to {', '.join(reopened)}" if reopened else "")
+                         + deliv_note
                          + (f"; {settled}" if settled else "")], next=nxt)
 
 

@@ -58,6 +58,8 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     text = planfile.strip_generated(plan_path.read_text(encoding="utf-8"))
     parsed = planfile.parse(text)
     planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
+    from office import greenfield
+    parsed.errors.extend(greenfield.plan_problems(run, parsed.tasks))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
                       scope="plan", preserved=f"{plan_path} is unchanged",
@@ -337,6 +339,12 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
     is reported under `checks_only` instead of `acceptance`: it is not reopened, its checks are rerun
     (`rerun_accepted_checks`)."""
     existing = {t["id"]: t for t in state.tasks(con, run["id"])}
+    from office import greenfield
+    # Plans are inserted just before syncing; fetch the *previous* pinned version,
+    # not the latest row. A changed phase list is changed acceptance work and must
+    # reopen an accepted greenfield build instead of silently reusing its review.
+    old = state.get_plan(con, run["id"], run["plan_version"]) if greenfield.enabled(run) else None
+    previous_phases = {t["id"]: t.get("phases") or [] for t in (old or {}).get("tasks") or []}
     seen = set()
     changes = {"added": [], "contract": [], "acceptance": [], "checks_only": [], "cancelled": []}
     now = now_iso()
@@ -358,7 +366,8 @@ def sync_tasks(con, run: dict, planned: list[dict], plan_version: int, *, rerun_
         contract = (cur["scope"] != p["scope"] or (cur["interfaces"] or []) != p["interfaces"])
         checks_changed = cur["checks"] != checks
         other_acceptance = (cur["accept"] != p["accept"] or cur["visual"] != p["visual"]
-                            or cur["depends"] != p["depends"] or cur["title"] != p["title"])
+                            or cur["depends"] != p["depends"] or cur["title"] != p["title"]
+                            or (greenfield.enabled(run) and previous_phases.get(p["id"], []) != (p.get("phases") or [])))
         acceptance = checks_changed or other_acceptance
         checks_only = (rerun_checks and checks_changed and not (contract or other_acceptance)
                        and cur["status"] == "accepted" and cur["accepted_revision_id"]

@@ -95,13 +95,19 @@ def final_commit(con, run: dict) -> str | None:
     return s.get("commit") if s.get("status") == "accepted" else None
 
 
+def _integration_hold(con, run_id: str) -> str | None:
+    from office import queuecmd  # a paused run's integrate job waits for office queue resume (#800)
+    return queuecmd.integration_hold(con, run_id)
+
+
 def maybe_queue(con, run: dict) -> None:
     """Queue composition once per accepted set. Caller holds tx."""
     tasks = accepted_set(con, run)
     if tasks is None:
         return
     key = _set_key(con, tasks)
-    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
+    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
 
 
 LOCK_WAIT_SECONDS = 7200.0  # a compose runs the run checks, which can take their whole timeout
@@ -145,7 +151,8 @@ def retrigger(con, run: dict) -> bool:
         return False
     key = _set_key(con, tasks)
     state.enqueue(con, run, "integrate", {"key": key},
-                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2)
+                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
     return True
 
 
@@ -336,7 +343,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 wt, {**t, "base_commit": revs[t["id"]].get("base_commit") or run["base_sha"]},
                 previous, env=genv)
         except SharedAppendUnsafe as exc:
-            detail = f"{t['id']}: shared append integrity unverified: {exc}; resolve shared edits or serialize tasks, then office resume"
+            detail = f"{t['id']}: shared append integrity unverified: {exc}; {shared_append_next(t, previous)}"
             with db.transaction(con):
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
@@ -543,6 +550,26 @@ class SharedAppendUnsafe(Exception):
     """An append-only shared file cannot be proved safe to compose."""
 
 
+def shared_append_next(task: dict, previous: list[dict]) -> str:
+    """The `next:` advice for an unverified shared append. Telling an orchestrator to serialize tasks
+    that already depend on each other has no action behind it (#773)."""
+    shared = {x for x in task.get("scope") or [] if planfile.is_shared(x)}
+    by_id = {t["id"]: t for t in previous}
+    reach, todo = set(), list(task.get("depends") or [])
+    while todo:
+        dep = todo.pop()
+        if dep not in reach:
+            reach.add(dep)
+            todo.extend((by_id.get(dep) or {}).get("depends") or [])
+    rivals = {t["id"] for t in previous if shared & {x for x in t.get("scope") or [] if planfile.is_shared(x)}}
+    if rivals <= reach:
+        return ("the tasks that declare it are already serialized by depends, so this is an edit made after "
+                f"{task['id']}'s base that its stack does not contain: restack {task['id']} onto its dependencies "
+                "(or repair the shared file's history), then office resume")
+    return ("serialize the tasks that declare it with depends or repair the append-only history, "
+            "then office resume")
+
+
 def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
     """Verify *every* shared path after a clean merge, not just conflict cases.
 
@@ -625,6 +652,11 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
         base_mode, base = base_blob
         if len({base_mode, left_mode, right_mode, merged_mode}) != 1:
             raise SharedAppendUnsafe(f"{path}: shared file mode changed")
+        if left == base and merged == right:
+            # The composition has not touched this file since the task's recorded base (#773): the earlier
+            # stacked tasks left it alone or are already part of that base, so nothing can have been appended
+            # concurrently. The task's own edit, in place or not, is the file's only change.
+            continue
         if not left.startswith(base) or not right.startswith(base):
             raise SharedAppendUnsafe(f"{path}: non-append edit or truncated shared file")
         if base and not base.endswith(b"\n") and (left != base or right != base):

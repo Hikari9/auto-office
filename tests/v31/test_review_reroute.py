@@ -528,10 +528,21 @@ def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin
     assert _last_triple(env, "visual_reviewer") not in tried, _triples(env, "visual_reviewer")
 
 
+BUILDER_ONLY = "kilo/some-model@high"  # a harness with no reviewer launch profile
+
+
+def test_the_builder_only_example_has_no_reviewer_profile():
+    """The three refusal tests below need a harness that cannot review; keep the example honest."""
+    from office import adapters
+    kilo = adapters.load_all()["kilo"]
+    assert "reviewer" not in (kilo.get("office_profiles") or {}) and not kilo.get("reviewer_readonly_args")
+
+
 @V31
 def test_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(env):
     _blocked(env, GARBAGE)
-    code, out = env.office("review", "T1", "--as", "pi/some-model@high")  # a builder-only harness
+    # kilo has a worker profile only. pi was the example until #993 gave it a read-only reviewer profile.
+    code, out = env.office("review", "T1", "--as", BUILDER_ONLY)
     assert code == 4 and "capability-missing" in out, out
     assert _pin(env) is None and len(_code_gates(env)) == 1
 
@@ -539,7 +550,7 @@ def test_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(
 def test_a_lane_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(env):
     _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
     env.office("dispatch", "T1", check=0)
-    code, out = env.office("review", "L-T1", "--as", "pi/some-model@high")
+    code, out = env.office("review", "L-T1", "--as", BUILDER_ONLY)
     assert code == 4 and "capability-missing" in out, out
     assert _pin(env) is None and len(_gates(env, "convergence_review")) == 1
 
@@ -711,7 +722,7 @@ def test_rerun_review_as_needs_a_mode_when_the_task_is_not_blocked_on_its_review
 
 def test_rerun_validates_the_review_route_before_it_pins_anything(env):
     approved_run(env)
-    code, out = env.office("rerun", "T1", "--fresh", "--review-as", "pi/some-model@high")
+    code, out = env.office("rerun", "T1", "--fresh", "--review-as", BUILDER_ONLY)
     assert code == 4 and "capability-missing" in out, out
     assert _pin(env) is None
 

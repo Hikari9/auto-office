@@ -1,0 +1,36 @@
+schema_version: 3
+kind: shipped-seed-catalog
+notes: 'The active routing catalog contains version-following spec aliases and concrete model/effort rows with version-pinned
+  benchmark snapshots from cited sources. Unavailable index, price, speed, or release fields remain null, never inferred.
+  Benchmark metadata and documented model IDs do not prove local harness support.
+
+  `model_id` is the spec''s canonical name; `invocation_model_id` is the slug the named harness actually accepts on the command
+  line. They are not interchangeable — the spec name `luna` is rejected by codex, which wants `gpt-5.6-luna` — and a row that
+  leaves `invocation_model_id` null makes the router dispatch the canonical name unverified. When a dispatch fails on an unknown
+  model, record it with `office_runtime.py route-defect` and file an evidence-backed GitHub issue through `auto-self-improve`;
+  never silently patch the catalog or generate a PR.
+
+  Verified non-dispatchable on this account (2026-09-23, run 8cb62cce, defects b13bc3e4 and c10c0577): `gpt-5.1-codex-max`
+  via the codex harness. `codex` accepts `-c model=gpt-5.1-codex-max` at startup, then the first turn fails with HTTP 400
+  `invalid_request_error: ''gpt-5.1-codex-max'' model is not supported when using Codex with a ChatGPT account`. There is
+  deliberately no row for it below: it is not a slug to correct, it is a model this account tier cannot reach. Do not add
+  one without local-evidence proof from `codex debug models --bundled` on an account that can.
+
+  Two failure shapes, one lesson. Passing no `-c model=` leaves the harness on its configured default (here `gpt-5.6-luna`),
+  so a route notice naming any other model is a false disclosure that nothing will contradict — the dispatch simply succeeds
+  on the wrong identity. Pinning a model the account cannot reach fails loudly instead. Always pin `-c model=<invocation_model_id>`
+  when a route notice names one, and only ever name a model that has a row below.
+
+  `invocation_source` records machine-readable slug provenance across three states: ''local-evidence:*'' (slug proven against
+  a local harness command), ''documented:*'' (slug documented in authoritative sources but unproven against local harness),
+  and ''unverified:*'' (with null invocation_model_id, canonical name unverified). Maintainer decision 2026-10-08: superseded
+  inactive models were moved to catalog/archive/legacy-nonrouting-2026-10-08.yaml outside the router''s seed. A successful
+  model-level CLI report is not proof for every effort setting. Benchmark-only routes remain disabled until exact model/effort
+  conformance.'
+benchmark_index_version: Artificial Analysis Intelligence Index v4.3.2
+benchmark_index_notes: Scores use index version v4.3.2 (September 2026); the initial seed snapshot was current as of 2026-09-27,
+  and per-row source metadata records later refreshes. Scores are NOT comparable to v4.3, v4.3.1, v4.2 or v4.1.1. v4.3.1 refreshed
+  the AA-Briefcase and GDPval-AA v2 pairwise judge panels to Claude Opus 5, GPT-5.6 Sol and Gemini 3.8 Flash. v4.3.2 moved
+  GDPval-AA to v2.1 (Elo re-anchored to DeepSeek V4.1 Flash (max) at 1600, Crowd-BT fit) and AA-Briefcase to v1.1 (anchor
+  unchanged at GPT-5.5 (medium) = 1000, Crowd-BT fit per pairwise scope). v4.3 replaced tau3-Banking with AutomationBench-AA
+  and Terminal-Bench 2.1 with 4.0. Never compare raw scores across index versions.

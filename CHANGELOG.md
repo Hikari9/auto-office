@@ -2,8 +2,134 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.28
+
+- feat(review): `office review submit` (stdin or --file) lets a reviewer hand back its verdict for any review kind. It validates the reply for its gate, records it at once and ends the reviewer's wait. Reviewers get only a per-dispatch submit secret, no other Office authority (#1030).
+
+## 3.15.27
+
+- feat(brief): one neutral executor-brief line allows the harness's subagents for the task itself at the executor's discretion. Scope, checks and submit stay its responsibility (#1031).
+
+## 3.15.26
+
+- feat(wake): the root-wake prompt is one line, `Run <id> (through event N): <what changed>; next: <action>. Run office --run <id> context.`. The standing rules moved to SKILL.md (#1029).
+
+## 3.15.25
+
+- chore(harness): remove the gemini harness; agy replaces it (#1028). agy's Gemini models, the gemini model-family floor and agy's ~/.gemini token paths stay.
+
+## 3.15.24
+
+- fix(convergence): a lane finding code is unique across its gate kinds, so `office disposition L-T1:F11` cannot miss a same-coded visual finding (#398).
+
+## 3.15.23
+
+- test(convergence): the retract-in-ingest test expects four convergence reviews, since #768 re-reviews a same-tree recomposition after a contract change.
+
+## 3.15.22
+
+- fix(convergence): a same-tree recomposition after a contract or acceptance change is reviewed again, not carried (#768).
+
+## 3.15.21
+
+- fix(convergence): an EVIDENCE_BLOCKED lane whose block is not the visual capture names `office resume`, not a visual capture amend (#870).
+
+## 3.15.20
+
+- fix(preflight): the stale-ledger line never prints two identical shas (#806).
+
+## 3.15.19
+
+- fix(convergence): a full sha matches an abbreviated composed commit (#893), and a stated commit with the composed commit's tree is the same review (#782).
+
+## 3.15.18
+
+- feat(amend): a live run can amend its PR options after the user confirms (#937).
+- feat(land): ordered batch landing across runs and PRs composes and runs the full suite on a branch before advancing main (#943).
+- feat(gear): opt-in greenfield lean gear with one strong executor and a final convergence review (#936).
+- feat(executor): a per-executor context cap (default 200k) signals the orchestrator; Office never rotates on its own, and `office executor-context <task> rotate | continue | threshold` records the decision with a durable handoff (#939).
+- fix(plans): a check with command substitution is no longer misreported by the plan validator (#905).
+- feat(wake): auto-wake for non-Herdr Claude Code orchestrators through the bound root's Stop hook (#940).
+- fix(doctor): fail when headless Chromium cannot launch, and disclose a skipped visual review at closeout (#942).
+- feat(closeout): label each acceptance criterion as verified live or against fakes (#945).
+- fix(route): `office route policy --effective` agrees with `dispatch --as` (#899).
+- fix(quota): retry a 20s quota probe timeout and fall back to the last known quota (#941).
+- feat(status): per-task tokens and cost in `office status`, Codex included (#944).
+- fix(guide): the `next:` line names a rerun while the worker is still live (#913).
+- refactor(review): new runs default to one-round, one-subagent executor self-review with a test-strength lens and an automatic revert-and-fail proof; security review moves into convergence; v3.1-pinned runs are unchanged (#938).
+- feat(status): a nonblocking `oversize:` signal when a dispatch's observed context, wall time or cost outgrows its size class (#917).
+- fix(preflight): accept a low-risk `fixed` disposition without a test path (#908).
+- docs(onboarding): the missing-CLI question is asked once per session, and the origin probe tells GitHub, checkout and index installs apart (#927).
+- feat(plugin): the plugin ships a curated 16-skill set with the original full `/auto-office` and a standalone `/auto-review`, generated into `plugin-dist/` (#926).
+
+## 3.15.17
+
+- fix(panes): a vision conformance probe pane is labelled "vision probe" and closed once its reply is read (#910).
+
+## 3.15.16
+
+- feat(queue): `office queue pause run:<id>` holds the run's automatic integration checks until `office queue resume` (#800).
+
+## 3.15.15
+
+- fix(watchdog): a dispatch in a reused pane reads only the output below its own setup line, so a revoked executor's usage limit never stalls it (#753).
+
+## 3.15.14
+
+- fix(review): a FINDING that quotes `verdict ==` no longer hides the reply's VERDICT line (#894).
+
+## 3.15.13
+
+- test(review): three route-refusal tests use kilo, a harness with no reviewer profile, as their builder-only example. #993 gave pi a read-only reviewer profile, so the old pi example launched and failed preflight instead of being refused.
+
+## 3.15.12
+
+- feat(review): reviewers launch like executors. pi reviews in a Herdr pane (its pane form may write only its reply, and the worktree guard still applies), and its read-only headless form is the CLI fallback. A pane-capable reviewer that ran headless is announced in status (#1027).
+
+## 3.15.11
+
+- fix(routing): an exhausted route (0% headroom) is never within the quota reserve, even when a run pins `quota.reserve_percent: 0`, so Codex at 0% weekly no longer stays the first reviewer.
+
+## 3.15.10
+
+- fix(routing): an ineligible planner `route:` entry drops alone with a notice. The eligible ones keep the planner's order and slots (#875).
+
+## 3.15.9
+
+- fix(review): a Herdr pane reviewer that hit its harness quota wall (the adapter's own signature in the pane's last lines, e.g. opencode "Free usage limit reached") moves the chain to another harness before any re-prompt.
+
+## 3.15.8
+
+- fix(checks): a check whose interpreter lacks its own test runner (`python3 -m pytest` with no pytest) is UNAVAILABLE with the fix, not CHANGES_REQUIRED (#739).
+
+## 3.15.7
+
+- fix(review): a reviewer routes from the run's current pin, not the snapshot its job loaded, so an `--apply-routing` re-pin reaches self-review subagents inside an in-flight convergence job.
+
+## 3.15.6
+
+- fix(config): `office config --run <id> --apply-routing --quote` re-pins the `quota` block too, so a lowered `quota.reserve_percent` reaches a live run.
+
+## 3.15.5
+
+- fix(config): a stale preferred_seed entry in another role no longer blocks config writes or `office route allow`. Only seeds the edit changes are validated, and an unchanged stale seed is a warning naming the command that replaces it (#874).
+
+## 3.15.4
+
+- fix(land): a GitHub error while reading required checks (rate limit, 5xx, network) is `checks-unavailable` with a retry and stale-gh-cache hint, never `checks-failed` pointing at `office rerun` (#772).
+
+## 3.15.3
+
+- fix(land): restack reads the pushed task branch head. A failed accepted-revision push leaves an ancestor that is a safe lease (#538). A head pushed by hand per `next:` whose tree is the accepted revision merged with the base is adopted instead of re-conflicting, and `next:` names `office close --landed-externally` (#676).
+
+## 3.15.2
+
+- fix(convergence): a stacked task's in-place edit of a `shared:` file composes when the composition still holds the file exactly as the task's recorded base (#773); sibling edits are still refused. The `next:` hint no longer says to serialize tasks that already depend on each other.
+
 ## 3.15.1
 
+- fix(start): `--no-prs` skips the unsafe-run-base refusal, and explicit `--base` is documented and shown in `office start --help` (#730).
+- feat(model): `office model add --role` registers a reviewer like an executor; `pi/gpt-6-luna@high` is a read-only reviewer whose whole rendered command is allowlisted (#993).
 - fix(wake): stop duplicate "new lifecycle transitions" wakes. A newer actionable wake is held (default 180s, `OFFICE_WAKE_COALESCE_SECONDS`) while the previous one is delivered but unobserved, then one wake carries the latest event id when the root observes or the window ends; queued/running gate progress no longer changes the wake signature. #723's at-least-once delivery is kept (docs/root-wake.md).
 - fix(install): Auto Office is not on PyPI, and the `auto-office` name there is an unrelated project. The install check, README, docs and CLI hints install from `git+https://github.com/Hikari9/auto-office`, and `office update --check` reads the release from GitHub main instead of PyPI.
 - docs: point run gear executor slates to policy and clarify the truncated Sonnet fallback (#963).
