@@ -1571,12 +1571,16 @@ def _fresh_code(code: str, taken: set[str]) -> str:
     return f"{prefix}{n}"
 
 
-def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=()) -> list[dict]:
+def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=(),
+                 foreign=()) -> list[dict]:
     """One review reply's findings under codes that still name what they named. A code the scope already
     holds for a finding with a different fingerprint is recorded under a fresh code; a code reused for the
     same finding keeps it. Findings recorded before fingerprints existed carry none and keep their code.
-    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
-    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
+    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take. `foreign` are codes
+    another gate of the same scope already holds (#398: a visual F11 beside a convergence F11 left one of
+    them unreachable by `office disposition L-T1:F11`): a finding new to this gate kind never takes one."""
+    foreign = set(foreign)
+    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved) | foreign
     seen: dict[str, str] = {}
     renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
     out = []
@@ -1587,9 +1591,14 @@ def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict]
             row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
                               "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
             known = row[0] if row else None
-        if known is not None and known != fp and (f["code"], fp) in renamed:
+        # A code another gate kind holds collides only when this gate kind never held it (a row recorded
+        # before fingerprints existed keeps its code).
+        collides = (known is not None and known != fp) or (
+            f["code"] in foreign and f["code"] not in seen and con.execute(
+                f"SELECT 1 FROM findings WHERE {where} AND code=? LIMIT 1", (*params, f["code"])).fetchone() is None)
+        if collides and (f["code"], fp) in renamed:
             f = {**f, "code": renamed[(f["code"], fp)]}
-        elif known is not None and known != fp:
+        elif collides:
             fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
             taken.add(fresh)
             state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "

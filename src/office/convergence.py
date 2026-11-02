@@ -1139,7 +1139,8 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
         return
     if status == contract.COMPLETED and parsed is not None:
         where, params = "run_id=? AND scope=? AND gate_kind=?", (run["id"], scope["id"], gate["kind"])
-        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings)
+        foreign = gates.finding_codes(con, "run_id=? AND scope=? AND gate_kind!=?", (run["id"], scope["id"], gate["kind"]))
+        parsed.findings[:] = gates.stable_codes(con, run, where, params, parsed.findings, foreign=foreign)
         gates.mark_current(con, where, params, parsed.resolved, ("open",), "resolved")
         gates.mark_current(con, where, params, [r["code"] for r in parsed.retracted], ("open", "nonblocking"), "retracted")
         restated = {f["code"] for f in parsed.findings}

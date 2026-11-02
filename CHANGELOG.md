@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.24
+
+- fix(convergence): a lane finding code is unique across its gate kinds, so `office disposition L-T1:F11` cannot miss a same-coded visual finding (#398).
+
 ## 3.15.23
 
 - test(convergence): the retract-in-ingest test expects four convergence reviews, since #768 re-reviews a same-tree recomposition after a contract change.
