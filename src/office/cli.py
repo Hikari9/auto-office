@@ -406,6 +406,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
     s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
     s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
+    s.add_argument("--role", action="append", help="add: also allow the new rows for executor or reviewer (code and plan review); repeat or comma-separate")
     s.add_argument("--reason", help="disable: why the row is off")
     s.add_argument("--through", help="ceiling: inclusive generation (e.g. 5.6)")
     s = sp.add_parser("inspect", parents=[common])
@@ -910,7 +911,7 @@ def _run(args, unknown) -> int:
     if cmd == "model":
         from office import harnesscmd
         if args.action == "add":
-            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id)), args)
+            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id, roles=args.role)), args)
         if args.action == "disable":
             return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
         if args.action == "enable":
