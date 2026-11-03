@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.57
+
+Executors on a harness whose adapter sets subagents: false (opencode) are told to do their task and self-review in their own session, instead of starting a subagent that can hang (#1074).
+
 ## 3.15.56
 
 A free-tier route that hits its usage limit again the same day, with no known reset time, now gets a doubling cooldown (capped at local midnight) instead of being re-picked every half hour (#860).
