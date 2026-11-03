@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.53
+
+In a v3.1 run, a superseded plan-review round's late result no longer queues a review for a revision the orchestrator vetoed with --no-review (#962).
+
 ## 3.15.52
 
 A just-queued self-review subagent gate is no longer reported as a stall: its lane's convergence review job owns it (#961).
