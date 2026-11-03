@@ -2306,6 +2306,14 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='integrate' "
                            "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
                            (run["id"], gate["created_at"])).fetchall()
+    elif gate["kind"] == "self_review_subagent":
+        # A self-review subagent gate is created and run inline by its lane's convergence review job, whose
+        # payload names the lane gate, not this one: that job is its owner (#961). Only a lane holding its task.
+        from office import convergence
+        lanes = {s["id"] for s in convergence.all_scopes(con, run) if gate["task_id"] in s["tasks"]}
+        rows = [r for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='convergence_review' "
+                                       "AND status IN ('queued','claimed')", (run["id"],)).fetchall()
+                if (json.loads(r["payload_json"] or "{}") or {}).get("scope") in lanes]
     else:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()

@@ -202,3 +202,30 @@ def test_a_task_with_no_accepted_revision_blocks(env):
     con, run, tasks, commit = _after_run(env)
     out = srs.audit_scope(con, run, [{**tasks[0], "accepted_revision_id": None}], env.repo, commit)
     assert out["status"] == contract.EVIDENCE_BLOCKED and "no accepted revision" in out["reason"]
+
+
+def test_a_queued_self_review_gate_is_owned_by_its_lane_convergence_job(env):
+    """#961: the convergence review job runs a self-review gate inline but names the lane gate in its payload, so a
+    just-queued self-review gate read as 'no job is queued or running' and fired a false stall."""
+    import json
+    from conftest import approved_run
+    from office import gates, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, created_at) "
+                "VALUES('Gsr1', ?, 'T1', 'T1', 'self_review_subagent', 'R1:c:combined:v', 'queued', '2026-01-01')",
+                (run["id"],))
+    con.commit()
+    gate = dict(con.execute("SELECT * FROM gates WHERE id='Gsr1'").fetchone())
+    assert gates.owner_state(con, run, gate)[0] == "none"
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at) VALUES('Jother', ?, 'convergence_review', 'k-o', ?, ?, 'queued', 0, 2, '2026-01-01')",
+                (run["id"], json.dumps({"gate_id": "Gother", "scope": "L-T9"}), run["office_version"]))
+    con.commit()
+    assert gates.owner_state(con, run, gate)[0] == "none", "another lane's review job does not own it"
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at) VALUES('Jcv', ?, 'convergence_review', 'k-cv', ?, ?, 'queued', 0, 2, '2026-01-01')",
+                (run["id"], json.dumps({"gate_id": "Glane", "scope": "L-T1"}), run["office_version"]))
+    con.commit()
+    assert gates.owner_state(con, run, gate)[0] == "queued"

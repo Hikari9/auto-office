@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.52
+
+A just-queued self-review subagent gate is no longer reported as a stall: its lane's convergence review job owns it (#961).
+
 ## 3.15.51
 
 A lane convergence review whose job failed or ended without settling it is now settled UNAVAILABLE, so office resume and the fallback can run it again instead of it staying queued (#1022).
