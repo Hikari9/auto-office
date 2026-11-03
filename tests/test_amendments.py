@@ -410,5 +410,27 @@ def test_the_v31_path_honours_the_veto(veto_env):
     assert [g["plan_version"] for g in _plan_gates(env)] == [1, 3], "without the veto p3 queues review as before"
 
 
+@pytest.mark.parametrize("veto_env", ["v3.1"], indirect=True)
+def test_a_stale_round_result_queues_no_round_for_a_vetoed_revision(veto_env):
+    """#962: p1's round is in flight when p2 is amended with --no-review. When p1's stale CHANGES_REQUIRED lands it
+    must not queue a round for the vetoed p2."""
+    from office import db, plans, state
+    env = veto_env
+    _start(env, approved=False)
+    assert _veto(env)[0] == 0 and _plan_version(env) == 2
+    con = env.con()
+    try:
+        run = state.get_run(con, _rows(env, "SELECT id FROM runs")[0]["id"])
+        gate = _rows(env, "SELECT id FROM gates WHERE kind='plan_review' AND plan_version=1")[0]["id"]
+        with db.transaction(con):
+            plans.ingest_plan_review(con, run, gate, {"verdict": "CHANGES_REQUIRED", "status": "COMPLETED",
+                                                      "summary": "stale p1 result", "parsed": None})
+    finally:
+        con.close()
+    assert [g["plan_version"] for g in _plan_gates(env)] == [1], _plan_gates(env)
+    skipped = _rows(env, "SELECT summary FROM events WHERE kind='plan.review_skipped' ORDER BY seq")
+    assert len(skipped) == 2 and "queues no round" in skipped[-1]["summary"], skipped
+
+
 if __name__ == "__main__":
     unittest.main()
