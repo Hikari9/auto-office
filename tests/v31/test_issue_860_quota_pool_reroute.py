@@ -229,3 +229,37 @@ def test_actual_router_skips_same_pool_fallback_then_recovers_after_ttl():
     con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (key,))
     after = choose()
     assert after["selected"] == "opencode@1/glm-5.3-flash-free@max", after
+
+
+def test_repeated_usage_limits_with_no_known_reset_escalate_the_cooldown(env):
+    """#860 (553f1ddc on 3.15.29): a free pool with an unknown reset lapsed after its base TTL, was re-picked and
+    walled again within seconds, four times an afternoon. Each repeat today doubles the cooldown, capped at the next
+    local midnight; yesterday's hits do not count."""
+    from conftest import approved_run
+    from office import guide
+    approved_run(env)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    now = datetime.now(timezone.utc)
+    base = timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES)
+    pool, route = "pool:opencode:free", "opencode@1/glm-5.3-flash-free@max"
+    next_midnight = datetime.fromisoformat(routing.local_midnight_utc()) + timedelta(days=1)
+    cap = lambda ttl: min(ttl, max(base, next_midnight - now))  # noqa: E731
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base)
+
+    def hit(at):
+        con.execute("INSERT INTO events(run_id, kind, audience, summary, payload_json, office_version, created_at) "
+                    "VALUES(?, 'route.failed', 'orchestrator', 'x', ?, '3', ?)",
+                    (run_id, json.dumps({"reason": "usage_limit", "quota_pool": pool, "route": route}), at))
+        con.commit()
+
+    hit((datetime.fromisoformat(routing.local_midnight_utc()) - timedelta(hours=1)).isoformat())  # yesterday
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base)
+    hit(now.isoformat())
+    hit(now.isoformat())
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base * 4)
+    for _ in range(12):
+        hit(now.isoformat())
+    assert guide._usage_limit_cooldown(con, now, pool, route) == max(base, next_midnight - now)
+    # Another pool's hits never escalate this one.
+    assert guide._usage_limit_cooldown(con, now, "pool:other", "other@1/m@high") == cap(base)

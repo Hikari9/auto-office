@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.56
+
+A free-tier route that hits its usage limit again the same day, with no known reset time, now gets a doubling cooldown (capped at local midnight) instead of being re-picked every half hour (#860).
+
 ## 3.15.55
 
 The self-review revert proof now finds the pytest command in checks like 'uv run --with pytest pytest ...' instead of taking --with's package value as the runner (#1072).
