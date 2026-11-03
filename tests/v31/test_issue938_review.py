@@ -198,6 +198,18 @@ def test_the_runner_keeps_the_checks_prefix_and_drops_selectors_and_paths():
     assert self_review_proof._runner({"checks": ["scripts/validate.sh --pr", "make test"]}) is None
 
 
+def test_the_runner_takes_the_pytest_command_not_an_options_value():
+    """#1072: `--with pytest` names pytest as uv's dependency; the command is the next pytest word."""
+    task = {"checks": ["uv run --with pytest pytest -q tests/test_x.py"]}
+    assert self_review_proof._runner(task) == ["uv", "run", "--with", "pytest", "pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["python -m pytest -q tests/a.py"]}) == ["python", "-m", "pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["uv run --with pytest python app.py"]}) is None
+    # A boolean flag before the command takes no value: the command is still found.
+    assert self_review_proof._runner({"checks": ["uv run --frozen pytest -q tests/a.py"]}) == ["uv", "run", "--frozen", "pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["uv run --with pytest --frozen pytest tests/a.py"]}) == [
+        "uv", "run", "--with", "pytest", "--frozen", "pytest"]
+
+
 def test_no_named_test_or_no_pytest_command_records_an_exemption_not_a_block(tmp_path):
     wt, base, head = _repo(tmp_path, GOOD_TEST)
     task = {"id": "T1", "scope": ["calc.py", "tests/**"], "checks": ["pytest -q"]}
