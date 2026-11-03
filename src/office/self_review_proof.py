@@ -57,6 +57,9 @@ def named_tests(ledger_text: str | None) -> list[str]:
     return tests
 
 
+_PACKAGE_OPTIONS = ("--with", "-w", "--with-editable", "--from")  # uv/uvx options whose value is a package
+
+
 def _runner(task: dict) -> list[str] | None:
     """The pytest invocation the task's own checks use, minus test selection, or None."""
     for check in task.get("checks") or []:
@@ -66,9 +69,13 @@ def _runner(task: dict) -> list[str] | None:
             words = shlex.split(check)
         except ValueError:
             continue
-        if "pytest" not in words:
+        # The pytest *command* word, not the value of an option that names a package to install:
+        # `uv run --with pytest pytest ...` names it twice (#1072). Boolean flags (`--frozen`) take no value.
+        commands = [i for i, w in enumerate(words) if w == "pytest"
+                    and not (i > 0 and words[i - 1] in _PACKAGE_OPTIONS)]
+        if not commands:
             continue
-        start = words.index("pytest")
+        start = commands[0]
         kept, skip = words[:start + 1], False
         for word in words[start + 1:]:
             if skip:
