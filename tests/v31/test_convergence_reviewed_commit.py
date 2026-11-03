@@ -59,6 +59,8 @@ def test_the_brief_names_the_commit_and_retires_earlier_checkouts():
     assert "REVIEWED_COMMIT <the full commit sha you reviewed" in brief  # the reply format
     assert "checkout path named in an earlier round or reply is stale and must not be used" in brief
     assert "/tmp/checkout-now" in brief
+    # #1044: an environment the reviewer cannot provision is not a finding against the work.
+    assert "Office's record for this composition" in brief and "NEXT line instead" in brief
 
 
 # ------------------------------------------------------------------ through the gate

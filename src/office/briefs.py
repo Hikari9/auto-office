@@ -734,6 +734,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
             "stale and must not be used: review only the checkout above. A reply whose REVIEWED_COMMIT is missing "
             "or is not this commit is rejected unread (no round is spent) and you are asked again.",
             f"DETERMINISTIC CHECKS {checks_summary}",
+            "Those results are Office's record for this composition. Your read-only checkout has no provisioned "
+            "environment (no .venv, installed packages or package index): do not report a check that fails only for "
+            "that reason as a blocking finding against the work; name it on your NEXT line instead (#1044).",
             "Each executor already ran its checks and a four-lens self-review (security, edge cases, platform/build, "
             "test strength). Judge the composed result: does it meet the acceptance and requirements together, are the "
             "seams between tasks sound, and is anything unsafe."]
