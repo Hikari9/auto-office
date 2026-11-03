@@ -289,6 +289,17 @@ def _builds_on(con, run: dict, packet: dict) -> list[str]:
 
 SUBAGENTS_LINE = ("SUBAGENTS your harness's subagents may work on this task itself if you judge that useful. You stay "
                   "responsible for SCOPE, the checks and office submit, and the scope guard covers everything they change.")
+# A harness whose adapter sets `subagents: false` (#1074): its subagents hung executors (opencode, GLM free pool).
+NO_SUBAGENTS_LINE = ("SUBAGENTS none: do this task and its self-review yourself, in this session. Do not start a "
+                     "subagent: on this harness they can hang the session.")
+
+
+def harness_subagents(con, packet: dict) -> bool:
+    """Whether the executor's harness may use subagents: false only when its adapter says `subagents: false`."""
+    from office import adapters
+    d = state.get_dispatch(con, packet.get("dispatch_id")) if con is not None and packet.get("dispatch_id") else None
+    adapter = adapters.load_all().get((d or {}).get("adapter_id") or (d or {}).get("harness") or "") or {}
+    return adapter.get("subagents") is not False
 
 
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
@@ -315,7 +326,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
                    "requirements, authority and other tasks' scope. If doing the work right needs a seam to move, "
                    "ask (QUESTIONS) instead of working around it.")
     # #1031 (Rico, 2026-11-02): neutral, neither pushing nor discouraging; self-review subagents are separate.
-    out.append(SUBAGENTS_LINE)
+    subagents = harness_subagents(con, packet)
+    out.append(SUBAGENTS_LINE if subagents else NO_SUBAGENTS_LINE)
     if any(planfile.is_shared(p) for p in packet["scope"]):
         out.append("SHARED (+) entries are registries other tasks also edit: add your own entries only, never "
                    "reorder, reformat, or remove others'; append where a conflict is easy to resolve.")
@@ -423,7 +435,7 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
             "your contract: a scope-request needs a contract amendment. Do not guess past a scope or requirement "
             "doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
-    out += simplify_lines(base) + self_review_lines(base, run_self_review_tier(run))
+    out += simplify_lines(base) + self_review_lines(base, run_self_review_tier(run), subagents=subagents)
     out += runtime_review_lines(run)
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
             "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
@@ -523,12 +535,12 @@ def runtime_review_lines(run: dict) -> list[str]:
             "claim them because your harness lacks nested agents. A missing or invalid report blocks acceptance."]
 
 
-def self_review_lines(base: str, tier: str = "deep") -> list[str]:
+def self_review_lines(base: str, tier: str = "deep", *, subagents: bool = True) -> list[str]:
     """The adversarial pass a producer runs on its own diff before it submits. The tier sets how much
     review that is. It is a pass, never an approval: independent (v3.1: per-task; convergence: per-lane) review
     still decides."""
     if tier == FOCUSED:
-        return focused_review_lines(base)
+        return focused_review_lines(base, subagents=subagents)
     if tier not in SELF_REVIEW_TIERS:
         tier = "deep"
     head = f"SELF-REVIEW before submitting (tier: {tier}), review your whole change adversarially: `git diff {base}` (committed and"
@@ -549,6 +561,9 @@ def self_review_lines(base: str, tier: str = "deep") -> list[str]:
         intro = ["    uncommitted). Make one fresh pass per lens yourself, with no delegation, one lens at a time:"]
         skip = ["    You may skip a lens that clearly does not",
                 "    apply, with a one-line reason in your report."]
+    elif not subagents:
+        intro = ["    uncommitted). Make one fresh pass per lens yourself, in this session (no subagent on this harness):"]
+        skip = []
     elif tier == "single":
         intro = ["    uncommitted). Start exactly one subagent if your harness has one, given only the diff and all four",
                  "    lenses below; otherwise make one fresh pass per lens yourself:"]
@@ -560,13 +575,16 @@ def self_review_lines(base: str, tier: str = "deep") -> list[str]:
     return [head] + intro + lenses + skip + [tail] + ledger_lines()
 
 
-def focused_review_lines(base: str) -> list[str]:
+def focused_review_lines(base: str, *, subagents: bool = True) -> list[str]:
     """The one-round producer pass of a new run: edge cases and test strength, platform only when the diff needs it.
     Security is not an executor lens: the convergence reviewer covers it."""
     return [
         f"SELF-REVIEW before submitting (tier: {FOCUSED}), review your whole change adversarially: `git diff {base}`",
-        "    (committed and uncommitted). Start exactly one subagent if your harness has one, given only the diff and",
-        "    the lenses below; otherwise make one fresh pass yourself. One round only: no re-review of your fixes.",
+        *(["    (committed and uncommitted). Start exactly one subagent if your harness has one, given only the diff and",
+           "    the lenses below; otherwise make one fresh pass yourself. One round only: no re-review of your fixes."]
+          if subagents else
+          ["    (committed and uncommitted). Make one fresh pass yourself, in this session (no subagent on this",
+           "    harness). One round only: no re-review of your fixes."]),
         "    (a) edge cases: empty or null input, parser ambiguity, retry, restart and interaction paths",
         "    (b) test strength: weak assertions, tests that still pass with the fix reverted, missing negative paths",
         "    (c) platform and build, only when the diff touches scripts, CI, packaging or OS/process code",

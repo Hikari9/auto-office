@@ -114,6 +114,8 @@ session:
   id: detected
   sources: [herdr, transcript]
 capabilities: [builder]
+# Subagents on this harness hung executors on the GLM free pool (run 553f1ddc): self-review stays inline (#1074).
+subagents: false
 office_profiles:
   worker:
     argv: [run, --model, "{model}#{effort}"]
