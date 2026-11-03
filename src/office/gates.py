@@ -2334,16 +2334,18 @@ def owner_state(con, run: dict, gate) -> tuple[str, str]:
 
 
 def orphaned_gates(con, run: dict) -> list[tuple[dict, dict]]:
-    """Open task gates whose job already failed, with no other owner: left by a
-    runtime that failed a dead worker's job without settling its gate (#404).
-    [(gate, failed job)]"""
+    """Open task and lane gates whose job already failed, with no other owner: left by a
+    runtime that failed a dead worker's job without settling its gate (#404). A lane gate also counts when
+    its job finished without settling it: nothing else ever runs that review, so it would stay queued with no
+    next step (#1022). [(gate, ended job)]"""
     out = []
-    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND subject='task' AND status IN ('queued','running')",
+    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND subject IN ('task','lane') AND status IN ('queued','running')",
                          (run["id"],)).fetchall():
         g = dict(g)
         if owner_state(con, run, g)[0] != "none":
             continue
-        row = con.execute("SELECT id FROM outbox WHERE run_id=? AND status='failed' AND payload_json LIKE ? "
+        ended = "('failed','done')" if g["subject"] == "lane" else "('failed')"
+        row = con.execute(f"SELECT id FROM outbox WHERE run_id=? AND status IN {ended} AND payload_json LIKE ? "
                           "ORDER BY finished_at DESC LIMIT 1", (run["id"], f'%"{g["id"]}"%')).fetchone()
         if row is not None:
             out.append((g, state.get_job(con, row["id"])))

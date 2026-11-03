@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import GOOD_ADD
 from test_convergence_contract import (APPROVED, PLAN_VISUAL, _fake_capture, _gates, _q, _run_row, _scope, _start,
                                        _status, recheck, finding)
@@ -404,3 +406,28 @@ def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env,
     _visual_run(env)
     gate = _gates(env, "visual")[0]
     assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
+
+
+@pytest.mark.parametrize("job_status", ["failed", "done"])
+def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, job_status):
+    """#1022: the lane review's job failed (or finished without settling it) while the gate stayed queued, with no
+    reviewer and no job left. Reconcile settles it UNAVAILABLE, so the scope's fallback and office resume apply."""
+    from office import db, lifecycle, state
+    _unavailable_lane(env)
+    gid = _rewind_to_running(env, live_reviewer=False, queued_job=False)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("UPDATE gates SET status='queued' WHERE id=?", (gid,))
+    con.execute("DELETE FROM dispatches WHERE gate_id=?", (gid,))
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at, finished_at, error) VALUES('Jend', ?, 'convergence_review', 'k-end', ?, ?, ?, "
+                "2, 2, '2026-01-01', '2026-01-01', ?)",
+                (run_id, json.dumps({"gate_id": gid, "scope": "L-T1"}), _run_row(env)["office_version"], job_status,
+                 "self-review subagent reviewer out of quota" if job_status == "failed" else None))
+    con.commit()
+    with db.transaction(con):
+        notes = lifecycle.reconcile(con, state.get_run(con, run_id))
+    assert any(gid in n for n in notes), notes
+    gate = _gate(env, gid)
+    assert (gate["status"], gate["review_status"]) == ("done", "UNAVAILABLE"), gate
+    assert _scope(env, "L-T1")["status"] == "unavailable"
