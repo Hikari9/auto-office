@@ -835,12 +835,12 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
             con.execute("UPDATE dispatches SET stall_kind=?, resets_at=?, limit_label=?, limit_fingerprint=? "
                         "WHERE id=?", (*updates.values(), d["id"]))
         if episode or reset_resolved:
-            expires_at = resets_at if resets_at and resets_at > now else (
-                now + timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES))
-            expires = expires_at.isoformat()
             model = d.get("invocation_model_id") or d.get("model")
-            keys = [routing.demotion_key(d.get("harness"), model, d.get("effort"))]
             pool = routing.shared_quota_pool_key(d.get("harness"), model)
+            expires_at = resets_at if resets_at and resets_at > now else (
+                now + _usage_limit_cooldown(con, now, pool, d.get("triple")))
+            expires = expires_at.isoformat()
+            keys = [routing.demotion_key(d.get("harness"), model, d.get("effort"))]
             if pool:
                 keys.append(pool)
             for key in keys:
@@ -866,6 +866,26 @@ def _usage_limit_stall(con, run: dict, d: dict, act: dict, limit: dict, who: str
 
 
 SIGNAL_LINES = 10
+
+
+def _usage_limit_cooldown(con, now, pool: str | None, route: str | None):
+    """How long a usage_limit with no known reset keeps its route (and shared pool) out of routing (#860). The
+    first hit of the day gets the base TTL; each repeat today, across every run, doubles it, capped at the next
+    local midnight. A free tier whose reset time is unknown otherwise lapsed after an hour, was re-picked by the
+    next reroute and walled again within seconds, four times in one afternoon (run 553f1ddc)."""
+    from datetime import timedelta
+    from office import routing, route_policy
+    from office.util import parse_iso
+    base = timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES)
+    midnight = routing.local_midnight_utc()
+    hits = 0
+    for (raw,) in con.execute("SELECT payload_json FROM events WHERE kind='route.failed' AND created_at>=?", (midnight,)):
+        p = json.loads(raw or "{}") or {}
+        if p.get("reason") == "usage_limit" and ((pool and p.get("quota_pool") == pool) or (route and p.get("route") == route)):
+            hits += 1
+    ttl = base * (2 ** min(hits, 10))
+    next_midnight = parse_iso(midnight) + timedelta(days=1)
+    return min(ttl, max(base, next_midnight - now))
 
 
 def worker_signals(con, run: dict) -> tuple[list[str], int]:
