@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.55
+
+The self-review revert proof now finds the pytest command in checks like 'uv run --with pytest pytest ...' instead of taking --with's package value as the runner (#1072).
+
 ## 3.15.54
 
 The convergence review brief now tells reviewers that a check failing only because their read-only checkout has no provisioned environment (.venv, packages) is not a blocking finding against the work (#1044).
