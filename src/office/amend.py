@@ -386,7 +386,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         if veto_reason:
             # The orchestrator's veto: p+1 queues no plan review. A gate already queued or running for an earlier
             # version is left to finish.
-            state.emit(con, run, "plan.review_skipped", f"plan p{version}: review vetoed by the orchestrator: {veto_reason}")
+            state.emit(con, run, "plan.review_skipped", f"plan p{version}: review vetoed by the orchestrator: {veto_reason}",
+                       payload={"plan_version": version, "reason": veto_reason})
         elif contract.is_convergence(run):
             rereview = plans.review_after_revision(con, run, version)
             rereview = rereview if "queued" in rereview else None

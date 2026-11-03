@@ -43,7 +43,7 @@ from pathlib import Path
 from office import briefs, candidates, contract, db, jobs, planfile, planpath, review_parse, risk, routing, state
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, sha256_bytes, short
+from office.util import dumps, loads, now_iso, sha256_bytes, short
 
 PLAN_SUBJECT = "plan"
 
@@ -472,6 +472,18 @@ def plan_gates(con, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def review_vetoed(con, run: dict, version: int) -> bool:
+    """The orchestrator vetoed plan review of plan `version` (office amend --no-review), as recorded at amend time."""
+    for (raw, summary) in con.execute("SELECT payload_json, summary FROM events WHERE run_id=? AND kind='plan.review_skipped'",
+                                      (run["id"],)).fetchall():
+        p = loads(raw, {}) or {}
+        if p.get("stale_gate"):
+            continue
+        if p.get("plan_version") == version or (not p and summary.startswith(f"plan p{version}: review vetoed")):
+            return True
+    return False
+
+
 def review_in_flight(con, run: dict) -> bool:
     """A plan-review round is queued or running for any revision of the run."""
     return any(g["status"] in ("queued", "running") for g in plan_gates(con, run["id"]))
@@ -698,6 +710,12 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
                                  "ended_reason": f"PASS on p{gate['plan_version']} (superseded by p{current['plan_version']})"})
                 state.emit(con, current, "plan.pass", f"PLAN PASS p{gate['plan_version']} (superseded by "
                            f"p{current['plan_version']}): plan review ends")
+            elif review_vetoed(con, current, current["plan_version"]):
+                # The orchestrator vetoed review of the current revision (office amend --no-review): a stale round's
+                # result never queues one for it behind the veto (#962).
+                state.emit(con, current, "plan.review_skipped", f"plan p{current['plan_version']}: a superseded round's "
+                           f"{verdict} queues no round: this revision's review was vetoed", audience="runtime",
+                           payload={"plan_version": current["plan_version"], "stale_gate": gate_id})
             elif not review_in_flight(con, current) and queue_plan_review(con, current, current["plan_version"]) is None:
                 # A round still in flight already covers the current revision (Q14, S3); only a spent budget closes.
                 pr = dict(_pr(current))
