@@ -36,6 +36,7 @@ class Parsed:
     defects: list[dict] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
     retracted: list[dict] = field(default_factory=list)
+    observations: list[dict] = field(default_factory=list)  # visual: one {screenshot, text} per screenshot (#1078)
     cleared: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Convergence contract only.
@@ -83,10 +84,11 @@ def normalize_verdict(raw: str) -> str | None:
     return v if v in VERDICTS else None
 
 
-def parse(text: str, *, plan_review: bool = False, visual: bool = False, contract: str | None = None) -> Parsed:
+def parse(text: str, *, plan_review: bool = False, visual: bool = False, contract: str | None = None,
+          screenshots: list[str] | None = None) -> Parsed:
     from office import contract as contract_mod
     if (contract or contract_mod.LEGACY) == contract_mod.CONVERGENCE:
-        return parse_convergence(text, visual=visual)
+        return parse_convergence(text, visual=visual, screenshots=screenshots)
     out = Parsed()
     if not text or not text.strip():
         out.errors.append("empty reply")
@@ -186,7 +188,7 @@ _BLOCKING = {"blocking": True, "block": True, "non-blocking": False, "nonblockin
 _LABELLED = re.compile(r"^(owner|owners|seam|root[-_ ]?cause|method)\s*:\s*(.*)$", re.I)
 
 
-def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
+def parse_convergence(text: str, *, visual: bool = False, screenshots: list[str] | None = None) -> Parsed:
     """APPROVED | RECHECK | INTAKE_GAP. The rules the runtime relies on:
 
     - APPROVED carries no blocking finding and no finding whose repair crosses a
@@ -239,6 +241,10 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
             out.errors.append(f"{m.group(1)}: DEFECT lines are not part of this contract; write a FINDING "
                               "(root-cause: <class>) and choose RECHECK or INTAKE_GAP")
             continue
+        m = re.match(r"^OBSERVATION\s+(.+?)\s*\|\s*(.+)$", line, re.I) if visual else None
+        if m:
+            out.observations.append({"screenshot": m.group(1).strip(), "text": m.group(2).strip()})
+            continue
         m = re.match(r"^RESOLVED\s+" + _ID, line, re.I)
         if m:
             out.resolved.append(finding_code(m.group(1)))
@@ -259,6 +265,17 @@ def parse_convergence(text: str, *, visual: bool = False) -> Parsed:
         out.errors.append(f"no EVIDENCE_STATUS value: use {', '.join(EVIDENCE_STATUSES)}")
     if out.verdict is None and not not_comparable:
         out.errors.append("no VERDICT line")
+    # `screenshots` is the reviewer's images; [] means it was given none, None (a report) still owes observations.
+    if visual and out.verdict is not None and not not_comparable and screenshots != []:
+        # A verdict on screenshots nobody described is not a review (#1078: a bare two-line APPROVED passed).
+        seen = {o["screenshot"].rsplit("/", 1)[-1] for o in out.observations}
+        missing = [s for s in (screenshots or []) if s.rsplit("/", 1)[-1] not in seen]
+        if not out.observations:
+            out.errors.append("no OBSERVATION lines: write one `OBSERVATION <screenshot file> | <what is on screen>` "
+                              "per screenshot before the verdict")
+        elif missing:
+            out.errors.append(f"no OBSERVATION line for {', '.join(missing[:6])}"
+                              + (f" and {len(missing) - 6} more" if len(missing) > 6 else ""))
     if out.verdict is not None and not out.next_action:
         out.errors.append("no NEXT line (the recommended next action)")
     blocking = out.blocking

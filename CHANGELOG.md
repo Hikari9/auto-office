@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.59
+
+A lane visual review now needs one OBSERVATION line per screenshot (no bare APPROVED), and the reviewer infers which UI sections must be shown from the acceptance and plan, reporting uncovered ones as findings (#1078).
+
 ## 3.15.58
 
 Orchestrator guidance: walk a UI lane yourself while its convergence and visual reviews run, then route your findings with the reviewers' (#1077).

@@ -872,10 +872,14 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
 VISUAL_FORMAT = """\
 Reply with ONLY these lines:
 EVIDENCE_STATUS: COMPARABLE | INVALID_COMPARISON
+OBSERVATION <screenshot file name> | <what is on screen: layout, content, states; call out empty widgets, controls disabled with no explanation, and data that contradicts itself or the acceptance>   (one line per screenshot, every screenshot; required before a verdict)
 VERDICT: APPROVED | RECHECK | INTAKE_GAP          (omit only when EVIDENCE_STATUS is INVALID_COMPARISON)
 FINDING <U-id> | high|medium|low | blocking|non-blocking | <region @ viewport/state> | <observation> | <smallest fix> | owner: <T-id> [| method: dom|image_estimate <values>]
 NEXT <recommended next action>
 DECISION <the user decision>   AFFECTS <scope>   WHY <why evidence cannot settle it>   (INTAKE_GAP only)
+COVERAGE From the tasks' acceptance and the plan, work out which UI sections and states a user would see, as a
+person reading them would. A section or state that no screenshot shows is a FINDING (blocking when the acceptance
+depends on it), not something to assume works.
 INVALID_COMPARISON is evidence state, not judgment: use it only when candidate and reference are not in
 comparable states (wrong viewport, wrong auth/state, stale or partial capture, missing font). A broken layout
 or interaction is a finding. Block on what meaningfully changes layout, readability, hierarchy, interaction,

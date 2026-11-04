@@ -596,3 +596,35 @@ def test_absent_selector_reported_as_cause_spec(env):
     assert "selector '[data-test=nonexistent]' absent" in g["summary"]
     assert _task(con)["status"] == "blocked"
 
+
+
+def test_a_visual_verdict_needs_an_observation_for_every_screenshot():
+    """#1078 (rsvp 54ee9833): a bare two-line APPROVED passed review while three obvious defects were on screen.
+    A visual verdict now needs one OBSERVATION per screenshot it was given; otherwise the reply is invalid."""
+    from office import contract, gates, review_parse
+    shots = ["desktop-default.png", "mobile-printing.png"]
+    bare = "EVIDENCE_STATUS: COMPARABLE\nVERDICT: APPROVED\nNEXT proceed"
+    parsed = review_parse.parse(bare, visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert not parsed.valid and any("no OBSERVATION" in e for e in parsed.errors), parsed.errors
+    one = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | queue table lists 3 jobs\nVERDICT: APPROVED\nNEXT proceed"
+    parsed = review_parse.parse(gates._last_block(one), visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert not parsed.valid and any("mobile-printing.png" in e for e in parsed.errors), parsed.errors
+    both = one.replace("VERDICT", "OBSERVATION /evidence/mobile-printing.png | print button disabled, no reason shown\nVERDICT")
+    parsed = review_parse.parse(gates._last_block(both), visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert parsed.valid and [o["screenshot"] for o in parsed.observations] == [
+        "desktop-default.png", "/evidence/mobile-printing.png"], parsed.errors
+    spaced = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION Screen Shot 1.png | empty queue\nVERDICT: APPROVED\nNEXT proceed"
+    assert review_parse.parse(gates._last_block(spaced), visual=True, contract=contract.CONVERGENCE,
+                              screenshots=["Screen Shot 1.png"]).valid
+    assert review_parse.parse(bare, visual=True, contract=contract.CONVERGENCE, screenshots=[]).valid  # given no images
+    # Evidence that is not comparable gives no verdict and needs no observations.
+    blocked = "EVIDENCE_STATUS: INVALID_COMPARISON\nNEXT recapture"
+    assert review_parse.parse(blocked, visual=True, contract=contract.CONVERGENCE, screenshots=shots).valid
+
+
+def test_the_visual_format_asks_the_reviewer_to_infer_coverage_from_the_plan_text():
+    """#1078, Rico 2026-11-04: no visual.sections list; the reviewer infers sections from the text like a human."""
+    from office import convergence
+    assert "OBSERVATION <screenshot file name>" in convergence.VISUAL_FORMAT
+    assert "COVERAGE From the tasks' acceptance and the plan" in convergence.VISUAL_FORMAT
+    assert "no screenshot shows is a FINDING" in convergence.VISUAL_FORMAT
