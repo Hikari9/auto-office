@@ -285,6 +285,8 @@ one composed commit and runs, on that same commit and in parallel:
   (`independent_code_review` in the gear preset, recorded on the run as `code_review`);
 - one specialist visual review, when a task in the lane has user-visible acceptance. Shared scopes
   get no visual review.
+  The orchestrator walks a UI lane itself while these reviews run (in parallel, never as a gate before them)
+  and routes its own findings with the reviewers' (#1077, Rico 2026-11-04).
 
 A shared scope is queued after all its member lanes converged, and gets one more convergence review of
 the shared composition. Integration starts only after every lane and shared scope converged
