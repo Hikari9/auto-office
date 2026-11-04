@@ -839,7 +839,7 @@ def test_visual_review_is_a_lane_gate_with_its_own_round_cap(env, monkeypatch, t
     parallel with the convergence review on the same composed lane; RECHECK x3 escalates."""
     _fake_capture(monkeypatch, tmp_path)
     adds = [GOOD_ADD + f"# r{i}\n" for i in range(4)]
-    vis = "EVIDENCE_STATUS: COMPARABLE\n" + recheck(finding("U1", where="header @ desktop", what="clipped"))
+    vis = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + recheck(finding("U1", where="header @ desktop", what="clipped"))
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": vis}], probe=[{"reply": "auto"}])
     env.office("dispatch", "T1", check=0)
@@ -860,7 +860,7 @@ def test_visual_fallback_cannot_approve_uninspected_evidence(env, monkeypatch, t
     env.office("dispatch", "T1", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     report = tmp_path / "vis.txt"
-    report.write_text("EVIDENCE_STATUS: COMPARABLE\n" + APPROVED)
+    report.write_text("EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED)
     code, out = env.office("review", "L-T1:visual", "--report", str(report))
     assert code == 4 and "cannot-inspect-evidence" in out or "inspect every" in out, out
     assert all(g["verdict"] is None for g in _gates(env, "visual"))

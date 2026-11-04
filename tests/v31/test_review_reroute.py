@@ -514,7 +514,7 @@ def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin
     tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer'")}
     code, out = env.office("review", "L-T1:visual", "--as", _reviewer(env))
     assert code == 4 and "no-visual-override" in out and _pin(env) is None, out
-    env.script(visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\n" + APPROVED}])
+    env.script(visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}])
     code, out = env.office("review", "L-T1:visual", env=MANUAL)
     assert code == 0 and "visual review re-run" in out and "next fallback reviewer route" in out, out
     assert _pin(env) is None

@@ -926,7 +926,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 break  # the user named this reviewer; never substitute another
             continue
         text = _reply_text(d, ddir, output)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc,
+                                    screenshots=[Path(i).name for i in images or []] if visual else None)
         wrote_file = output.is_file() and output.stat().st_size > 0
         pane_terminal_status = _reviewer_pane_terminal_without_reply(d, output)
         # Wall signatures come from the harness log, never from the review
@@ -947,7 +948,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # and a headless reply may have come from the harness log rather than the file (#399).
             replied = bool(text.strip())
             text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
-                                                            plan_review=plan_review, visual=visual)
+                                                            plan_review=plan_review, visual=visual,
+                                                            screenshots=[Path(i).name for i in images or []] if visual else None)
             never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
             if never_replied:
                 with db.transaction(con):
@@ -1210,7 +1212,7 @@ def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
 
 
 def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
-                          visual: bool) -> tuple[str, "review_parse.Parsed", str | None]:
+                          visual: bool, screenshots: list[str] | None = None) -> tuple[str, "review_parse.Parsed", str | None]:
     """Ask the same reviewer to rewrite its reply file until it parses, up to
     gates.review_reprompt_max. Returns (text, parsed, attention reason or None)."""
     from office import dispatch as dispatch_mod
@@ -1259,7 +1261,8 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                                   f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
                                   f"Enter) or re-run only the review: {_review_only_hint(con, d)}")
         text = _await_file(output, wait_s, poll)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run))
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run),
+                                    screenshots=screenshots)
         if parsed.valid:
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
@@ -1448,7 +1451,7 @@ def _last_block(text: str) -> str:
     if not idx:
         return text
     start = idx[-1]
-    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT|NEXT|DECISION|WHY|AFFECTS)",
+    while start > 0 and re.match(r"^(EVIDENCE_STATUS|OBSERVATION|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT|NEXT|DECISION|WHY|AFFECTS)",
                                  review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])

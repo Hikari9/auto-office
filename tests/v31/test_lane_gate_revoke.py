@@ -212,7 +212,7 @@ def _capture_with(monkeypatch, tmp_path, failures):
 
 def _visual_run(env):
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-           convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\n" + APPROVED}],
+           convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}],
            probe=[{"reply": "auto"}])
     env.office("dispatch", "T1", check=0)
 
@@ -239,7 +239,7 @@ def test_a_spec_failure_is_unavailable_with_the_spec_named_and_no_producer_findi
     from office import convergence
     assert not convergence.summary(env.con(), _run_row(env))[0]["fallback_available"]
     report = tmp_path / "vis.txt"
-    report.write_text("EVIDENCE_STATUS: COMPARABLE\n" + APPROVED)
+    report.write_text("EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED)
     code, out = env.office("review", "L-T1:visual", "--report", str(report), "--inspected", "desktop-default.png")
     assert code != 0 and "fallback-not-allowed" in out, out
     assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
