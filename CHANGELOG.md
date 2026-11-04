@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.58
+
+Orchestrator guidance: walk a UI lane yourself while its convergence and visual reviews run, then route your findings with the reviewers' (#1077).
+
 ## 3.15.57
 
 Executors on a harness whose adapter sets subagents: false (opencode) are told to do their task and self-review in their own session, instead of starting a subagent that can hang (#1074).
