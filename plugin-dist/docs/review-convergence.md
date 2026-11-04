@@ -287,7 +287,7 @@ one composed commit and runs, on that same commit and in parallel:
   get no visual review.
   The orchestrator walks a UI lane itself while these reviews run (in parallel, never as a gate before them)
   and routes its own findings with the reviewers' (#1077, Rico 2026-11-04).
-  Its reply lists one `OBSERVATION <screenshot> | <what is on screen>` line per screenshot it was given,
+  The visual reviewer's reply lists one `OBSERVATION <screenshot> | <what is on screen>` line per screenshot it was given,
   calling out empty widgets, unexplained disabled controls and contradictory data. A verdict missing any
   of them is invalid and is re-prompted, with no round spent, so a bare APPROVED cannot pass (#1078).
   The reviewer also infers the UI sections and states from the acceptance and plan text, as a person would, and
