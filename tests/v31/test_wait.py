@@ -1012,3 +1012,12 @@ def test_idle_outcome_qa_guidance_keeps_progress_first_and_qa_optional():
     for phrase in ("a landing gate", "a second code review", "QA is skipped",
                    "preempts QA"):
         assert phrase in section, phrase
+
+
+def test_ui_lane_walkthrough_guidance_is_parallel_not_a_gate():
+    """#1077, Rico 2026-11-04: the orchestrator walks a UI lane while its reviews run and routes both sets of findings."""
+    root = Path(__file__).resolve().parents[2]
+    bullet = next(l for l in (root / "SKILL.md").read_text().splitlines() if l.startswith("- UI lanes:"))
+    assert "at the same time, not before" in bullet and "office inspect evidence <gate>" in bullet
+    assert "route your findings and the reviewers' together" in bullet and "start its executor at once" in bullet
+    assert "never as a gate before them" in (root / "docs" / "review-convergence.md").read_text()
