@@ -36,6 +36,7 @@ import hashlib
 import math
 
 from office import executor_slates, model_lineages, route_learning, task_descriptors
+from office import config as office_config
 from office.util import sha256_obj
 
 POLICY_VERSION = "adaptive-2-task"
@@ -212,7 +213,8 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
     from office.routing import candidate_id
     evidence = (request.get("evidence") or {}).get("routes") or {}
     descriptor = _task_descriptor(request)
-    reserve = float((request.get("policy") or {}).get("quota_reserve_percent", 5.0))
+    reserve = float((request.get("policy") or {}).get(
+        "quota_reserve_percent", office_config.shipped_quota_reserve_percent(request.get("role"))))
     k = float(((request.get("evidence") or {}).get("pooling") or {}).get(
         "prior_strength", route_learning.DEFAULTS["prior_strength"]))
     pri = s["priors"]

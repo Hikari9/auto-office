@@ -123,6 +123,17 @@ Each attempt gets an `attempt_id` before a dispatch exists. Immutable `route_dis
 
 An accepted trial revision teaches effectiveness through the existing attribution, maturity and held-out replay rules. A single accepted trial does not grant learned eligibility. Launch, harness, adapter, environment, quota and brief failures keep their actual cause and are not charged to the model. `trial-accepted` is written by the learner when the run closes. A trial row that ended `abandoned` records no `trial-accepted` event even if someone else later submits and the task is accepted. The learner still reads that dispatch as landed. Discovery never writes `adapter_trust_acts`, grants `proven` or clears quarantine.
 
+## Quota reserve by role
+
+A route is skipped for a role when its projected quota would fall below that role's protected reserve. The reserve is read from `quota.reserve_percent_by_role`, keyed by role family:
+
+- `executor`: `executor` and `worker` (shipped default 20)
+- `reviewer`: `plan_reviewer` and `code_reviewer` (shipped default 5)
+
+A role not listed, or a missing key, uses `quota.reserve_percent` (shipped default 5). A user who sets only `quota.reserve_percent` does not change the executor or reviewer reserve, because the per-role keys ship with values. Set the key itself to change one family. Discovery trials use the executor reserve.
+
+Each run pins the `quota` block at start, so a run's reserves are the values in effect then. The protected-reserve notice names the role and its pinned value. A live run picks up an edit through `--apply-routing`.
+
 ## Rollback and pinned runs
 
 Set `routing.discovery.enabled: false` at the user tier (`office config routing.discovery.enabled false`) or the repo tier (add `--repo`) to disable discovery for future runs. A repo-tier value wins over the user tier, so read back the effective value and its source with `office config routing.discovery.enabled --show-origin`. This leaves stored evidence and trust state intact and needs no code change.

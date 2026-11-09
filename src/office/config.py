@@ -7,6 +7,7 @@ pinned snapshot, never from the live files.
 """
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -423,8 +424,26 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
     return gates
 
 
-def quota_reserve_percent(config: dict) -> float:
-    return float(((config.get("quota") or {}).get("reserve_percent", 5)))
+# quota.reserve_percent_by_role key that protects each routed role. Roles not listed fall back to quota.reserve_percent.
+RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor",
+                       "plan_reviewer": "reviewer", "code_reviewer": "reviewer"}
+
+
+def quota_reserve_percent(config: dict | None, role: str | None = None) -> float:
+    """The protected quota reserve for `role`, read from a config or a pinned run policy:
+    quota.reserve_percent_by_role under the role's key, else quota.reserve_percent."""
+    quota = (config or {}).get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role") or {}
+    key = RESERVE_KEY_BY_ROLE.get(role or "")
+    if key is not None and by_role.get(key) is not None:
+        return float(by_role[key])
+    return float(quota.get("reserve_percent", 5))
+
+
+@functools.lru_cache(maxsize=None)
+def shipped_quota_reserve_percent(role: str | None = None) -> float:
+    """The shipped default reserve for `role`, for callers that hold no pinned policy."""
+    return quota_reserve_percent(load_yaml(default_config_path()) or {}, role)
 
 
 def balanced_money_band_percent(config: dict) -> float:

@@ -33,6 +33,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
 from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, review_submit, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import config as office_config
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -559,7 +560,7 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
         quota = candidates.quota_for_candidate(
             decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
         decision["candidate"]["quota"] = quota
-        reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+        reserve = office_config.quota_reserve_percent(config, "executor")
         if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
                 and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
             raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
@@ -1022,7 +1023,7 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
         return "trial-cap"
     if alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
         return "rolling-cap"
-    if route_probe._quota_refusal(cand, config):
+    if route_probe._quota_refusal(cand, config, "executor"):
         return "quota-reserve"
     probe = route_probe.status(con, cand)
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
