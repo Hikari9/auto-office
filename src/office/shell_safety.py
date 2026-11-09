@@ -79,15 +79,17 @@ _BARE_WORD = r"[A-Za-z_][\w.+-]*"
 # Words that put a following `source` in command position ("run source publish").
 # A lead may carry trailing punctuation ("Run: source publish", "Run, source publish").
 _COMMAND_LEAD_WORDS = frozenset({"run", "execute", "then", "and", "or", "first", "please", "just"})
-_TRAILING_PUNCT = ".,;:!?)"
+_EDGE_PUNCT = ".,;:!?)*_"  # trailing punctuation and emphasis marks around a lead word
 _LEAD_ALTERNATION = "|".join(sorted(_COMMAND_LEAD_WORDS))
 _BARE_SOURCE_PROSE = re.compile(
-    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})[{re.escape(_TRAILING_PUNCT)}]*\s+)"
+    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})[{re.escape(_EDGE_PUNCT)}]*\s+)"
     rf"[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
 # The push token after a bare-word script run: the exact word, with trailing punctuation.
-_PUSH_WORD = re.compile(rf"push[{re.escape(_TRAILING_PUNCT)}]*", re.I)
+_PUSH_WORD = re.compile(rf"push[{re.escape(_EDGE_PUNCT)}]*", re.I)
 # A sourced path may push under any inflection, or inside a flag (`--push-tags`). It does not
 # match a word that merely contains push and continues (`test_pusher.py`, `pushover`).
+# A quoted script operand may hold a space ("my dir/release.sh"); the unbalanced-quote fallback needs it too.
+_QUOTED_SCRIPT = r"[\"'][^\"'\n]*?\.(?:sh|bash|zsh|ksh|env)(?![\w+-])"
 _PUSH_FORM = re.compile(r"push(?:es|ed|ing)?(?![A-Za-z])", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
@@ -110,7 +112,7 @@ def _bare_source_runs(tokens: list[str], i: int) -> bool:
     if i + 1 >= len(tokens) or re.match(_BARE_WORD, tokens[i + 1]) is None:
         return False
     return i in _command_starts(tokens) or (
-        i > 0 and tokens[i - 1].lower().rstrip(_TRAILING_PUNCT) in _COMMAND_LEAD_WORDS)
+        i > 0 and tokens[i - 1].lower().strip(_EDGE_PUNCT) in _COMMAND_LEAD_WORDS)
 
 
 def _is_dynamic(token: str) -> bool:
@@ -276,7 +278,7 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             if re.search(r"\bpush\b", command, re.I) and _BARE_SOURCE_PROSE.search(command):
                 return True
             pushed = re.search(r"push", command, re.I)
-            sourced = re.search(rf"\bsource\s+{_SOURCE_OPERAND.pattern}", command, re.I)
+            sourced = re.search(rf"\bsource\s+(?:{_SOURCE_OPERAND.pattern}|{_QUOTED_SCRIPT})", command, re.I)
             return bool(sourced and (pushed or "$" in command))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:

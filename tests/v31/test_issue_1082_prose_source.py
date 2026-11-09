@@ -168,3 +168,30 @@ def test_sourced_check_naming_pusher_word_stays_allowed(command):
 def test_sourced_script_with_push_flag_or_form_stays_refused():
     assert shell_safety.unsafe_manual_push("source ./env.sh && ./release --push")
     assert shell_safety.unsafe_manual_push("source ./env.sh && ./release.sh pushes")
+
+
+def test_lead_and_source_noun_with_push_is_refused_by_design():
+    """Fail-closed by design (self-review medium; owner answer: keep the refusal).
+
+    `and` and `first` are command leads, so a `source` after them is read as a script
+    run. A noun there plus a separate `push` token is refused too. That false positive
+    costs a rephrase, and the refusal names the line. Dropping the leads would let
+    "Build the app and source publish to push the tag" through, so the refusal is pinned.
+    """
+    assert shell_safety.unsafe_manual_push("Update the docs and source code, then push the branch.", prose=True)
+    assert planfile._unsafe_force_push_instruction("Update the docs and source code, then push the branch.")
+    assert shell_safety.unsafe_manual_push("Build the app and source publish to push the tag", prose=True)
+
+
+# Self-review lows: markdown emphasis around a lead word, and a quoted script operand with a space
+# after a non-lead word in the unbalanced-quote fallback.
+LOW_BYPASS_PROSE = [
+    "**Run:** source publish to push the tag",
+    "**Run**: source publish to push the tag",
+    "_Run_: source publish to push the tag",
+    "Done. source \"my dir/release.sh and push the tag",
+]
+@pytest.mark.parametrize("prose", LOW_BYPASS_PROSE)
+def test_emphasis_and_quoted_operand_prose_is_refused(prose):
+    assert shell_safety.unsafe_manual_push(prose, prose=True)
+    assert planfile._unsafe_force_push_instruction(prose)
