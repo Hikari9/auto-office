@@ -87,6 +87,7 @@ def test_amend_requirements_is_not_scope_held_by_a_revoked_lease(env):
     code, out = env.office(*AMEND, env=EXTERNAL)
     assert code == 0 and "scope-held" not in out and "requirements r3 recorded" in out, out
     assert "T1 waits for office rerun (lease revoked)" in out, out
+    assert "delivered to T2" in out and "delivered to T1" not in out, out
     assert task_row(env, "T1")["status"] == "paused", task_row(env, "T1")
     assert _live_t1_leases(env) == 0, "the amendment relaunched the revoked T1 and gave it a live lease"
     queued = env.con().execute("SELECT COUNT(*) FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()[0]
@@ -165,7 +166,7 @@ def test_revoked_without_live_lease_reads_the_newest_lease(env):
     assert holds_back(), "the revoked newest lease, no live session"
     con.execute("UPDATE leases SET revoke_reason='superseded' WHERE task_id='T1' AND revoked_at IS NOT NULL")
     con.commit()
-    assert not holds_back(), "a lease superseded by a relaunch is not an orchestrator revoke"
+    assert holds_back(), "the free-text revoke reason does not change the newest revoked lease"
     con.execute("UPDATE leases SET revoke_reason='orchestrator revoke' WHERE task_id='T1' AND revoked_at IS NOT NULL")
     con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, "
                 "dispatch_id, renewed_at) VALUES('Lnew', ?, 'executor', '[\"calc.py\"]', 'Dnew', '2026-01-01', "
@@ -175,16 +176,13 @@ def test_revoked_without_live_lease_reads_the_newest_lease(env):
 
 
 @pytest.mark.review_contract("v3.1")
-def test_a_live_unrevoked_lease_still_holds_its_scope(env):
-    """Guard for the lookup: the revoke fix leaves scope_holder unchanged."""
-    from office import dispatch, state
+def test_revoked_lease_with_a_live_session_is_not_held_back(env, monkeypatch):
+    """A revoked lease whose task still has a live session is not treated as ended: the session is real."""
+    from office import dispatch, gates
     _t2_submitted_and_ended(env)
     con = env.con()
-    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-    con.execute("UPDATE tasks SET status='running' WHERE id='T1'")
-    con.commit()
-    t2 = state.get_task(con, run["id"], "T2")
-    assert dispatch.scope_holder(con, run, t2) == "T1"
-    con.execute("UPDATE leases SET revoked_at='2026-01-01T00:00:00+00:00', revoke_reason='test' WHERE task_id='T1'")
-    con.commit()
-    assert dispatch.scope_holder(con, run, t2) is None
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    env.office("revoke", "T1", env=EXTERNAL)
+    assert dispatch.revoked_without_live_lease(con, run_id, "T1")
+    monkeypatch.setattr(gates, "live_task_session", lambda *a, **k: "Dlive")
+    assert not dispatch.revoked_without_live_lease(con, run_id, "T1"), "a live session of T1 keeps its lease"

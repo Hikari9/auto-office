@@ -1372,7 +1372,7 @@ def revoked_without_live_lease(con, run_id: str, task_id: str) -> bool:
     fresh lease on its scope and blocks overlapping tasks (#1085)."""
     row = con.execute("SELECT revoked_at, revoke_reason FROM leases WHERE run_id=? AND task_id=? "
                       "ORDER BY fencing DESC LIMIT 1", (run_id, task_id)).fetchone()
-    if row is None or row["revoked_at"] is None or row["revoke_reason"] == "superseded":
+    if row is None or row["revoked_at"] is None:
         return False
     from office import gates
     return gates.live_task_session(con, run_id, task_id) is None

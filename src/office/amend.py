@@ -259,7 +259,8 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
                                                to=to, with_targets=True,
                                                drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
         held = _waiting_on_rerun(con, run, targets)
-        delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
+        ready = [t for t in targets if t not in held]
+        delivery = f"delivered to {', '.join(ready)}" if ready else "not delivered to live tasks"
         if held:
             delivery += f"; {', '.join(held)} waits for office rerun (lease revoked)"
         state.emit(con, run, "requirements.changed",
