@@ -100,10 +100,13 @@ def test_a_sized_view_shows_no_by_size_breakdown(isolated):
 
 def test_a_route_change_says_running_runs_apply_the_rule_after_the_existing_lines(isolated):
     result = routecmd.change("allow", role="executor", route=PLAIN)
-    assert result.lines[0].startswith("executor/") and result.lines[0].endswith(": allow (user config)")
-    assert result.lines[-1] == ("running runs apply this rule at their next routing decision; "
-                                "`office config --run <id> --apply-routing --quote \"<words>\"` "
-                                "re-pins the rest of a run's pinned routing")
+    assert result.lines == [
+        f"executor/{result.data['route']}: allow (user config)",
+        "an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route",
+        ("running runs apply this rule at their next routing decision; "
+         "`office config --run <id> --apply-routing --quote \"<words>\"` "
+         "re-pins the rest of a run's pinned routing"),
+    ]
 
 
 def test_a_route_change_that_writes_nothing_says_nothing_about_running_runs(isolated):
