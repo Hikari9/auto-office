@@ -465,7 +465,8 @@ def diff(prev: dict | None, cur: dict, prev_version: int) -> list[str]:
         if x.get("profile") != y.get("profile"):
             out.append(f"{tid} profile: {x.get('profile') or 'unknown'} -> {y.get('profile') or 'unknown'}")
         if x.get("review") != y.get("review"):
-            out.append(f"{tid} review: {x.get('review') or 'none'} -> {y.get('review') or 'none'}")
+            out.append(f"{tid} review: {x.get('review') or 'none'} -> {y.get('review') or 'none'}"
+                       + (f" ({y['review_why']})" if y.get("review_why") else ""))
     out += [f"{tid} removed" for tid in a if tid not in b]
     if not out:
         return [f"diagram unchanged from p{prev_version}"]
