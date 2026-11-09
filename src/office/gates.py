@@ -1060,6 +1060,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         with db.transaction(con):
             con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
             con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
+    if cooled_pin:  # first, so the summary truncation below never cuts the recovery (#958)
+        failures.insert(0, cooled_pin_recovery(con, gate["id"], *cooled_pin))
     if convergence:
         return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": None,
                 "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
@@ -1315,16 +1317,35 @@ def _note_headless_reviewer(con, run: dict, d: dict, profile_kind: str) -> None:
                    payload={"launcher": d["launcher"], "profile": profile_kind})
 
 
+def _gate_review_target(con, gate_id: str | None) -> str | None:
+    """The `office review` target that re-runs the review gate `gate_id` names: a task id, or `<scope>:visual|convergence`."""
+    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (gate_id,)).fetchone() if gate_id else None
+    if g and g["scope"]:
+        return f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
+    if g and g["kind"] == "code_review" and g["task_id"]:
+        return g["task_id"]
+    return None
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
-    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
-    if g and g["scope"]:
-        target = f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
-    elif g and g["kind"] == "code_review" and g["task_id"]:
-        target = g["task_id"]
-    else:
-        return "office resume"
-    return f"office review {target} --as <harness>/<model>[@effort]"
+    target = _gate_review_target(con, d.get("gate_id"))
+    return f"office review {target} --as <harness>/<model>[@effort]" if target else "office resume"
+def cooled_pin_recovery(con, gate_id: str | None, candidate: str, until: str) -> str:
+    """Why a pinned reviewer did not run, and when and how to re-run it: its route, its cooldown expiry and the
+    exact `office review <target> --as <route>` that runs it once the cooldown has expired (#958)."""
+    m = routing.CANDIDATE_ID_RE.fullmatch(candidate)  # `--as` takes harness/model@effort, not the candidate id
+    route = (f"{m['harness']}/{m['model']}" + ("" if m["effort"] == "None" else f"@{m['effort']}")) if m else candidate
+    target = _gate_review_target(con, gate_id) or "<task|lane>"
+    return (f"the pinned reviewer {route} is in a cooldown until {until[:16]}Z; after that, re-run only its review: "
+            f"office review {target} --as {route}")
+def cooling_pin_recovery(con, run: dict, task: dict | None, gate_id: str) -> str | None:
+    """The `next:` recovery for a blocked review whose pinned reviewer is still cooling, or None (#958)."""
+    pinned = (task or {}).get("review_override")
+    cooled = _cooling_pin(con, run, pinned, "code_reviewer") if pinned else None
+    if not cooled:
+        return None
+    target = _gate_review_target(con, gate_id) or "<task|lane>"
+    return (cooled_pin_recovery(con, gate_id, *cooled) + f"; before then, office review {target} runs another eligible "
+            "route if one qualifies")
 
 
 def _agent_alive(name: str) -> bool:

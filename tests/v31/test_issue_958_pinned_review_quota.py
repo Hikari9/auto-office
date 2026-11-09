@@ -8,9 +8,9 @@ import json
 import pytest
 
 from conftest import approved_run, task_row
-from test_convergence_contract import _q
+from test_convergence_contract import _q, _status
 from test_lane_gate_revoke import _rewind_to_running, _unavailable_lane
-from test_review_reroute import EXECUTOR, PASS, V31, _pin, _reviewer, _triples
+from test_review_reroute import EXECUTOR, PASS, V31, _code_gates, _pin, _reviewer, _triples
 from office import guide, routing, state
 
 FAR = "2999-01-01T00:00:00+00:00"
@@ -88,6 +88,28 @@ def test_a_pinned_reviewer_with_no_cooldown_on_its_route_still_runs_on_it(env):
     assert not any("in a cooldown" in r for r in _fallback_reasons(env)), _fallback_reasons(env)
 
 
+@V31
+def test_a_cooled_pin_with_no_eligible_alternative_names_its_expiry_and_the_exact_recovery(env, monkeypatch):
+    from office import candidates
+    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "", "exit": 1}])
+    env.office("dispatch", "T1", check=0)
+    pinned = _reviewer(env)
+    _pin_route(env, pinned)
+    _cool(env, pinned, expires=FAR)
+    real, launched_before = candidates.route_role, len(_triples(env))
+    def no_other_reviewer(con, config, run, role, **kw):
+        if role == "code_reviewer":  # no route but the cooled pin qualifies
+            return {"status": "no_qualifying_route", "skipped": []}
+        return real(con, config, run, role, **kw)
+    monkeypatch.setattr(candidates, "route_role", no_other_reviewer)
+    env.office("review", "T1")
+    recovery = f"office review T1 --as {pinned}"
+    gate = _code_gates(env)[-1]
+    assert gate["verdict"] == "UNAVAILABLE" and len(_triples(env)) == launched_before, (dict(gate), _triples(env))
+    assert recovery in gate["summary"] and "2999-01-01T00:00Z" in gate["summary"], gate["summary"]
+    assert _pin(env)["as"] == pinned  # the pin stays on the task
+    nxt = _status(env)["next"]
+    assert recovery in nxt and "2999-01-01T00:00Z" in nxt, nxt
 def test_a_revoked_lane_review_job_is_not_reported_as_a_stall(env):
     _unavailable_lane(env)
     _rewind_to_running(env)
