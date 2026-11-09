@@ -690,7 +690,11 @@ def test_a_pi_plan_review_runs_with_the_read_only_allowlist_and_its_verdict_is_i
     assert calls and calls[0]["harness"] == "pi", env.calls()
     argv = calls[0]["argv"]
     assert argv[argv.index("--tools") + 1] == "read,grep,find,ls", argv
-    code, data = env.ojson("status")
+    # The approved snapshot already has an active run, so name the one this test started (#1107): a bare
+    # status resolves it through the caller's session, which Office's detached integration gate does not have.
+    [run_id] = [r[0] for r in env.con().execute("SELECT id FROM runs WHERE goal = 'add numbers'")]
+    code, data = env.ojson("status", "--run", run_id[:8])
+    assert data["data"]["run_id"] == run_id, data
     assert data["data"]["plan_review"]["ended"] is True, data
     assert "review.worktree_changed" not in _event_kinds(env)
 
