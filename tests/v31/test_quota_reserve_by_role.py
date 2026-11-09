@@ -119,3 +119,44 @@ def test_the_pinned_reserve_notice_names_the_role_and_its_value():
     assert "the executor quota reserve is pinned at 20%" in notice, notice
     reviewer_notice = candidates.protected_quota_remedy(run, "plan_reviewer")
     assert "the plan_reviewer quota reserve is pinned at 5%" in reviewer_notice, reviewer_notice
+
+
+def _stored_run(con, policy):
+    """A run row as resume reads it: the pinned policy goes through the runs table's JSON column."""
+    from office import state
+    from office.util import dumps
+    con.execute("INSERT INTO runs(id, playbook, phase, risk_json) VALUES('R2','Change','open','{}')")
+    con.execute("UPDATE runs SET policy_json=? WHERE id='R2'", (dumps(policy),))
+    return state._run(con.execute("SELECT * FROM runs WHERE id='R2'").fetchone())
+
+
+def test_a_run_pinned_with_the_per_role_keys_keeps_them_across_resume(tmp_path):
+    shipped, _warnings = config.resolve(None, files={"user": None, "repo": None})
+    con = db.connect(tmp_path / "runs.db")
+    try:
+        run = _stored_run(con, {"quota": shipped["quota"]})
+    finally:
+        con.close()
+
+    assert config.quota_reserve_percent(run["policy"], "executor") == 20
+    assert config.quota_reserve_percent(run["policy"], "plan_reviewer") == 5
+
+
+def test_a_run_pinned_before_the_key_existed_keeps_the_base_reserve(tmp_path):
+    con = db.connect(tmp_path / "runs.db")
+    try:
+        run = _stored_run(con, {"quota": {"reserve_percent": 5}})
+    finally:
+        con.close()
+
+    assert config.quota_reserve_percent(run["policy"], "executor") == 5
+
+
+def test_an_existing_user_config_without_the_key_keeps_shipped_role_reserves_and_its_own_base():
+    files = {"user": "quota:\n  reserve_percent: 7\n", "repo": None}
+    resolved, warnings = config.resolve(None, files=files)
+
+    assert warnings == []
+    assert config.quota_reserve_percent(resolved, "executor") == 20
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
+    assert config.quota_reserve_percent(resolved, "visual_reviewer") == 7
