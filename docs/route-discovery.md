@@ -127,10 +127,10 @@ An accepted trial revision teaches effectiveness through the existing attributio
 
 A route is skipped for a role when its projected quota would fall below that role's protected reserve. The reserve is read from `quota.reserve_percent_by_role`, keyed by role family:
 
-- `executor`: `executor` and `worker` (shipped default 20)
+- `executor`: `executor`, `worker` and `planner` (shipped default 20)
 - `reviewer`: `plan_reviewer` and `code_reviewer` (shipped default 5)
 
-A role not listed, or a missing key, uses `quota.reserve_percent` (shipped default 5). A blank value (`executor:` with no number) keeps that family's shipped reserve. A user who sets only `quota.reserve_percent` does not change the executor or reviewer reserve, because the per-role keys ship with values. Set the key itself to change one family. Discovery trials use the executor reserve.
+A role not listed, or a missing key, uses `quota.reserve_percent` (shipped default 5). A blank value (`executor:` with no number), or a blank `reserve_percent_by_role:` block, keeps that family's shipped reserve. A user who sets only `quota.reserve_percent` does not change the executor or reviewer reserve, because the per-role keys ship with values. Set the key itself to change one family. Discovery trials use the executor reserve.
 
 Each run pins the `quota` block at start, so a run's reserves are the values in effect then. The protected-reserve notice names the role and its pinned value. A live run picks up an edit through `--apply-routing`.
 

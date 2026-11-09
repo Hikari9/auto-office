@@ -425,22 +425,22 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
 
 
 # quota.reserve_percent_by_role key that protects each routed role. Roles not listed fall back to quota.reserve_percent.
-RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor",
+RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor", "planner": "executor",
                        "plan_reviewer": "reviewer", "code_reviewer": "reviewer"}
 
 
 def quota_reserve_percent(config: dict | None, role: str | None = None) -> float:
     """The protected quota reserve for `role`, read from a config or a pinned run policy:
-    quota.reserve_percent_by_role under the role's key, else quota.reserve_percent."""
+    quota.reserve_percent_by_role under the role's key, else quota.reserve_percent.
+    A blank value, or a blank block, keeps the shipped reserve for the role's family."""
     quota = (config or {}).get("quota") or {}
-    by_role = quota.get("reserve_percent_by_role")
-    if not isinstance(by_role, dict):
-        by_role = {}
     key = RESERVE_KEY_BY_ROLE.get(role or "")
-    if key is not None and key in by_role:
-        if by_role[key] is None:  # a blank value keeps the shipped reserve for its family, not the base
+    if key is not None:
+        by_role = quota.get("reserve_percent_by_role", {})
+        if by_role is None or (isinstance(by_role, dict) and key in by_role and by_role[key] is None):
             return shipped_quota_reserve_percent(role)
-        return float(by_role[key])
+        if isinstance(by_role, dict) and key in by_role:
+            return float(by_role[key])
     return float(quota.get("reserve_percent", 5))
 
 

@@ -3,7 +3,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from office import candidates, config, db, routing, scheduler
+from conftest import PLAN_ONE
+
+from test_adaptive_dispatch import EXTERNAL, _approve
+from office import candidates, config, db, routing, scheduler, state
 
 
 def _candidate(harness, model, *, remaining, caps=("review",)):
@@ -204,3 +207,40 @@ def test_a_user_quoted_executor_route_at_13_percent_is_refused_at_the_executor_r
 
     with pytest.raises(state.Refused, match="protected reserve"):
         dispatch.qualify_recorded_route(None, {"id": "R1", "repo_root": None}, {"id": "T1"}, route)
+
+
+def test_a_blank_role_block_keeps_the_shipped_family_reserves_not_the_base():
+    """`reserve_percent_by_role:` with no children is a blank value for the whole block: the family keeps 20/5."""
+    files = {"user": "quota:\n  reserve_percent_by_role:\n", "repo": None}
+    resolved, _warnings = config.resolve(None, files=files)
+
+    assert config.quota_reserve_percent(resolved, "executor") == 20
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
+
+
+def test_a_planner_route_is_held_at_the_executor_reserve_it_is_routed_as():
+    """planner is worker-kind and runs in the executor policy, so it draws on the executor reserve."""
+    route = _candidate("codex", "gpt-6", remaining=13)
+
+    assert config.quota_reserve_percent(_shipped(), "planner") == 20
+    assert _route("planner", route)["status"] == "protected_quota_would_be_consumed"
+
+
+def test_the_probe_refusal_reads_the_reserve_of_the_role_it_probes_for():
+    from office import route_probe
+    quota = {"quota": {"status": "ok", "tightest_remaining_percent": 13, "projected_burn_percent": 0}}
+
+    assert route_probe._quota_refusal(quota, _shipped(), "executor") is not None
+    assert route_probe._quota_refusal(quota, _shipped(), "plan_reviewer") is None
+    assert route_probe._quota_refusal(quota, _shipped(), None) is None
+
+
+def test_a_started_run_pins_the_per_role_reserves_and_a_config_edit_does_not_move_them(env):
+    _approve(env, plan=PLAN_ONE)
+    run = state.get_run(env.con(), env.con().execute("SELECT id FROM runs").fetchone()[0])
+    assert run["policy"]["quota"]["reserve_percent_by_role"] == {"executor": 20, "reviewer": 5}
+
+    code, out = env.office("config", "quota.reserve_percent_by_role.executor", "10", env=EXTERNAL)
+    assert code == 0, out
+    run = state.get_run(env.con(), run["id"])
+    assert config.quota_reserve_percent(run["policy"], "executor") == 20
