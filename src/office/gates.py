@@ -1250,10 +1250,16 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
             return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): {exc}; Office did not re-prompt it. Inspect the pane, "
                                   f"then re-run only the review on another reviewer route: {_review_only_hint(con, d)}")
         if got == "held":
-            sample = None if output.is_file() else dispatch_mod._herdr_agent_sample(name)
-            working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
-            if output.is_file() or working:
+            if output.is_file():
                 got = "landed"
+            else:
+                sample = dispatch_mod._herdr_agent_sample(name)
+                working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
+                if working:
+                    got = "landed"
+                # A reply written while the agent was being sampled counts as landed.
+                elif output.is_file():
+                    got = "landed"
         sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
