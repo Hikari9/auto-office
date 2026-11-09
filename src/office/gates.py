@@ -830,7 +830,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     last_failed: tuple[str, str] | None = ((started_away[-1], "an earlier attempt on that route did not settle this review")
                                            if started_away and not pinned else None)
     if cooled_pin:
-        last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a quota cooldown until {cooled_pin[1][:16]}Z")
+        last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
     retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
     retried: set[str] = set()
     for attempt in range(limit + 1):
