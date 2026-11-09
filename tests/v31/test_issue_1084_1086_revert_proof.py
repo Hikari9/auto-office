@@ -127,3 +127,49 @@ def test_module_names_cover_every_import_path_of_a_new_source_file():
     assert self_review_proof._module_names("calc.py") == {"calc"}
     assert self_review_proof._module_names("src/office/foo.py") == {"foo", "office.foo", "src.office.foo"}
     assert self_review_proof._module_names("pkg/__init__.py") == {"pkg"}
+
+
+def _repo_with_new_package_module(tmp_path: Path, test_text: str) -> tuple[Path, str, str]:
+    """Base has the package `office/__init__.py`; the task adds the submodule `office/new_runtime.py`."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _git(wt, "init", "-q")
+    _git(wt, "config", "user.email", "t@example.test")
+    _git(wt, "config", "user.name", "t")
+    (wt / "office").mkdir()
+    (wt / "office" / "__init__.py").write_text("")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", "base")
+    base = _git(wt, "rev-parse", "HEAD")
+
+    (wt / "office" / "new_runtime.py").write_text("def add(a, b):\n    return a + b\n")
+    (wt / "tests").mkdir()
+    (wt / "tests" / "test_new_runtime.py").write_text(test_text)
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", "work")
+    return wt, base, _git(wt, "rev-parse", "HEAD")
+
+
+def test_from_package_import_of_a_new_module_passes_the_proof(tmp_path):
+    """Review R5 F1: `from office import new_runtime` fails reverted as `cannot import name 'new_runtime' from 'office'`.
+
+    The name is the task's new submodule `office.new_runtime`, so that failure is the proof.
+    """
+    test_text = "from office import new_runtime\n\ndef test_add():\n    assert new_runtime.add(2, 3) == 5\n"
+    wt, base, head = _repo_with_new_package_module(tmp_path, test_text)
+
+    result = self_review_proof.prove(wt, base, head, ["office/new_runtime.py", "tests/test_new_runtime.py"],
+                                     RUNNER, ["tests/test_new_runtime.py"], NEW_RUN)
+    assert result["ok"], result
+    assert "failed reverted and passed restored" in result["reason"]
+
+
+def test_from_package_import_of_an_unrelated_name_fails_the_proof(tmp_path):
+    """A `cannot import name` from the new module's package, for a name the task did not add, is not the proof."""
+    test_text = "from office import unrelated_helper\n\ndef test_add():\n    assert True\n"
+    wt, base, head = _repo_with_new_package_module(tmp_path, test_text)
+
+    result = self_review_proof.prove(wt, base, head, ["office/new_runtime.py", "tests/test_new_runtime.py"],
+                                     RUNNER, ["tests/test_new_runtime.py"], NEW_RUN)
+    assert not result["ok"]
+    assert "not a test failure" in result["reason"]

@@ -33,8 +33,8 @@ _PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"
 _PYTEST_COLLECTION_ERROR = 2  # pytest's exit code for a collection error; 4 is a usage error
 _IMPORT_ERROR = re.compile(r"^E?\s*(ModuleNotFoundError|ImportError): (.*)$", re.MULTILINE)
 _MISSING_MODULE = re.compile(r"^No module named '([^']+)'")
-_NAME_FROM_MODULE = re.compile(r"^cannot import name '[^']+' from '([^']+)'")
-_VERSION = "main-proof-4"
+_NAME_FROM_MODULE = re.compile(r"^cannot import name '([^']+)' from '([^']+)'")
+_VERSION = "main-proof-5"
 
 
 def applicable(run: dict) -> bool:
@@ -131,21 +131,23 @@ def _module_names(path: str) -> set[str]:
 def _fails_on_new_module(output: str, modules: set[str]) -> bool:
     """True when every import error in a collection failure names one of the task's new modules.
 
-    An import of a new module that the revert removed fails at collection with `No module named 'calc'`, or
-    with `cannot import name 'add' from 'calc'` when the module is still importable. Any other import error,
-    or a collection failure with no import error at all, is not the proof.
+    An import of a new module that the revert removed fails at collection with `No module named 'calc'`. A
+    `from office import new_runtime` fails as `cannot import name 'new_runtime' from 'office'`: the name is the
+    submodule `office.new_runtime`. `cannot import name 'add' from 'calc'` is a new module's name when the module
+    is still importable. Any other import error, or a collection failure with no import error at all, is not
+    the proof.
     """
-    errors = [(kind, msg) for kind, msg in _IMPORT_ERROR.findall(output)]
+    errors = _IMPORT_ERROR.findall(output)
     if not errors:
         return False
     for kind, msg in errors:
         if kind == "ModuleNotFoundError":
             found = _MISSING_MODULE.match(msg)
-            named = found.group(1) if found else None
+            targets = [found.group(1)] if found else []
         else:
             found = _NAME_FROM_MODULE.match(msg)
-            named = found.group(1) if found else None
-        if named is None or not any(named == m or named.startswith(m + ".") for m in modules):
+            targets = [f"{found.group(2)}.{found.group(1)}", found.group(2)] if found else []
+        if not any(t == m or t.startswith(m + ".") for t in targets for m in modules):
             return False
     return True
 
