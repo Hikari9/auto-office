@@ -644,9 +644,14 @@ def _merge_all(con, run: dict, res: Result) -> str:
             res.add(f"{t['id']} has no file scope and no PR; skipped")
             continue
         pr = t.get("pr") or {}
+        refusal = prs.push_refusal(t)
+        if refusal:
+            reason = refusal.get("reason") or "remote tip is unrecorded"
+            raise Refused("push-refused", f"{t['id']} PR push was refused: {reason}",
+                          next_step=prs.push_refusal_next(t))
         if not pr.get("number"):
             raise Refused("no-pr", f"{t['id']} has no PR",
-                          next_step=prs.push_refusal_next(t) or "office status (a pr.error notice names why)")
+                          next_step="office status (a pr.error notice names why)")
         if pr.get("merged"):
             continue
         # A user may already have merged this task PR outside Office. Read
