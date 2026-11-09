@@ -594,14 +594,16 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
                                                 run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
         # Historical adapter trust is audit-only under #837. Actual quota and
-        # capability checks still apply to this explicitly selected route.
-        quota = candidates.quota_for_candidate(
-            decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
-        decision["candidate"]["quota"] = quota
-        reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
-        if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
-                and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
-            raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
+        # capability checks still apply to this explicitly selected route. A read-only
+        # observer (status) asks only the policy deny above, so it probes no quota.
+        if not observe:
+            quota = candidates.quota_for_candidate(
+                decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
+            decision["candidate"]["quota"] = quota
+            reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+            if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
+                    and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
+                raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
     else:
         selection = {"override": text} if authority.get("flag") == "--route" else {"exact": triple}
         options = {**selection, "task_id": task["id"], "dispatch_kind": "fix",

@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from office import amend, candidates, route_override, routecmd, state
+from office import amend, candidates, dispatch, route_override, routecmd, routing, state
 from conftest import start_inline
 from test_adaptive_dispatch import EXTERNAL, FB1, FB2, PRIMARY, PLANNED, _approve, _quota
 
@@ -152,6 +152,24 @@ def test_an_amendment_after_auto_relaunches_on_the_plan_slate_route(env):
     assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
 
 
+def test_an_amendment_relaunch_after_auto_records_the_plan_route_and_a_rerun_reuses_it(env):
+    _orchestrator_reroute(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
+    assert code == 0, out
+    relaunched = _triple(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    task = state.get_task(con, run["id"], "T1")
+    # The relaunch replaces the returned_to_automatic marker with the route it dispatched.
+    assert not state.returned_to_automatic(task), task["route_json"]
+    assert routing.candidate_id(state.recorded_route(task)["candidate"]) == relaunched
+    _end_round(env)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) == relaunched, out
+
+
 def test_a_size_scoped_deny_of_the_reused_route_is_seen_by_status_and_the_rerun(env):
     rerouted = _orchestrator_reroute(env, gear="M")
     con = env.con()
@@ -207,3 +225,42 @@ def test_a_contract_amendment_relaunch_drops_a_reroute_a_user_deny_now_rejects(e
     assert change["before"] == rerouted and change["actor"] == "office", change
     assert change["after"].rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], change
     assert "deny" in change["reason"] and change["task_id"] == "T1" and change["stage"] == "executor", change
+
+
+def test_a_denied_quoted_route_reused_by_a_rerun_is_dropped_and_the_rerun_repicks_the_plan(env):
+    _approve(env)
+    code, out = env.office("dispatch", "T1", "--as", FB1, "--quote", "use astra here", env=_quota(env))
+    assert code == 0, out
+    _end_round(env)
+    routecmd.change("deny", role="executor", route=FB1)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) == CLAUDE, out
+    (change,) = _denials(env)
+    assert (change["before"], change["after"]) == ("codex@1/gpt-6-astra@low", CLAUDE), change
+
+
+def test_an_amendment_after_a_declared_route_returns_to_automatic_takes_the_plan_slate(env):
+    _approve(env)
+    code, out = env.office("amend", "route", "T1", "--as", FB1, "--quote", "use astra here")
+    assert code == 0, out
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    _end_round(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
+    assert code == 0, out
+    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], out
+
+
+def test_a_status_deny_check_of_a_quoted_route_probes_no_quota(env, monkeypatch):
+    _approve(env)
+    code, out = env.office("dispatch", "T1", "--as", FB1, "--quote", "use astra here", env=_quota(env))
+    assert code == 0, out
+    _end_round(env)
+    probes = []
+    monkeypatch.setattr(candidates, "probe_quota", lambda adapter: probes.append(adapter) or {"status": "unknown"})
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    task = state.get_task(con, run["id"], "T1")
+    assert not dispatch.user_denies(con, run, task, state.recorded_route(task))
+    assert probes == [], probes
