@@ -70,7 +70,8 @@ _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # directory-relative script name (`release.sh`, `scripts/env.sh`) also counts,
 # optionally quoted. Not anchored with `$`: the fallback scan embeds this pattern.
 _SOURCE_OPERAND = re.compile(
-    r"[\"']?(?:\.{1,2}/|/|~|\$|\x60|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w.+-]))")
+    r"[\"']?(?:\.{1,2}/|/(?=[\w.~-])|~|\$(?=[A-Za-z_{(@*#?!]|\d(?!\d))|\x60"
+    r"|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w+-]|\.[\w+-]))", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
@@ -239,8 +240,12 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             # command signal can justify a fail-closed refusal in plan prose.
             if "$(" in command or "`" in command:
                 return True  # a substitution that cannot be tokenized is not text
-            return bool(re.search(rf"\b(?:git|eval|alias)\b|\bsource\s+{_SOURCE_OPERAND.pattern}",
-                                  command, re.I))
+            if re.search(r"\b(?:git|eval|alias)\b", command, re.I):
+                return True
+            # Same rule as the tokenized path: a sourced script refuses only with a
+            # push word or an expansion, so "source release.sh to build" passes.
+            sourced = re.search(rf"\bsource\s+{_SOURCE_OPERAND.pattern}", command, re.I)
+            return bool(sourced and (re.search(r"push", command, re.I) or "$" in command))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
@@ -271,9 +276,12 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
             if tokens[j] == "push" or unknown:
                 return True
-    sourced = any(t == "source" and _sources_file(tokens, i, prose) for i, t in enumerate(tokens))
+    sourced = any(t.lower() == "source" and _sources_file(tokens, i, prose)
+                  for i, t in enumerate(tokens))
+    # A sourced script may push under any inflection (pushes, Push); otherwise the exact token.
+    pushes = any("push" in t.lower() for t in tokens) if sourced else "push" in tokens
     # Dynamic executable construction must not bypass a detectable push token.
-    if "push" in tokens and (
+    if pushes and (
         re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
         or sourced or any(t in ("eval", "alias", "function") for t in tokens)
