@@ -1258,6 +1258,12 @@ def cli_harness(cli: str | None) -> str | None:
     return None
 
 
+# A delivery whose amendment is not a requirements change. A requirements delta is not in the contract, so only a
+# requirements delivery may carry one: the others leave it queued, and a relaunch never supersedes it (#1085).
+NOT_REQUIREMENTS_DELIVERY = ("NOT EXISTS (SELECT 1 FROM amendments a WHERE a.run_id=deliveries.run_id "
+                             "AND a.class='requirements' AND a.id=substr(deliveries.run_id, 1, 8) || ':' || deliveries.amendment_id)")
+
+
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
                    base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
                    replaces: str | None = None) -> str:
@@ -1331,9 +1337,11 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     # This session starts from the current contract, so an amendment still
     # waiting on an earlier session of the task is already in its brief; left
     # queued, it would hold the new revision at amendment_pending (and its ack
-    # would be refused as the wrong holder).
+    # would be refused as the wrong holder). A requirements delta is not in the
+    # contract, so it is never superseded here: it reaches this brief only as a
+    # delivery, and the transfer below hands it over (#1085).
     con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
-                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                f"AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=? AND {NOT_REQUIREMENTS_DELIVERY}",
                 (run["id"], task_id, dispatch_id, applied))
     # A newer amendment (a requirements change can target a plan version past
     # the task contract) is not in this brief: hand it to this session, or no
@@ -1367,10 +1375,10 @@ def lease_dormant(con, run_id: str, row) -> bool:
 
 
 def revoked_without_live_lease(con, run_id: str, task_id: str) -> bool:
-    """True when the task's newest lease was revoked by `office revoke` (not superseded by a relaunch, not released
-    by an accept) and no session of the task is live. Such a task has no session on purpose: relaunching it takes a
-    fresh lease on its scope and blocks overlapping tasks (#1085)."""
-    row = con.execute("SELECT revoked_at, revoke_reason FROM leases WHERE run_id=? AND task_id=? "
+    """True when the task's newest lease is revoked (any reason: `revoke_reason` is free text and is not read) and no
+    session of the task is live. Such a task has no session on purpose: relaunching it takes a fresh lease on its
+    scope and blocks overlapping tasks (#1085)."""
+    row = con.execute("SELECT revoked_at FROM leases WHERE run_id=? AND task_id=? "
                       "ORDER BY fencing DESC LIMIT 1", (run_id, task_id)).fetchone()
     if row is None or row["revoked_at"] is None:
         return False

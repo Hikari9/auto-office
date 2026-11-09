@@ -813,6 +813,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
     so their prompt says so instead of telling them to apply someone else's amendment. Caller holds tx."""
     from office import dispatch, gates
     targets = []
+    # Folding carries older deliveries into this one, and a relaunch supersedes a delivery whose delta the contract
+    # already holds. A requirements delta is not in the contract, so only a requirements delivery folds one (#1085).
+    own = con.execute("SELECT class FROM amendments WHERE run_id=? AND id=?",
+                      (run["id"], f"{run['id'][:8]}:{amendment_id}")).fetchone()
+    requirements = own is not None and own["class"] == "requirements"
     for tid in task_ids:
         task = state.get_task(con, run["id"], tid)
         if task is None or not task.get("current_dispatch_id") or task["status"] == "cancelled":
@@ -820,7 +825,8 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
         d = state.get_dispatch(con, task["current_dispatch_id"])
         applied = d.get("applied_plan_version") or 0
         older = con.execute("SELECT id, content FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered') "
-                            "ORDER BY target_version", (run["id"], tid)).fetchall()
+                            f"AND (? OR {dispatch.NOT_REQUIREMENTS_DELIVERY}) ORDER BY target_version",
+                            (run["id"], tid, requirements)).fetchall()
         combined = [r["content"] for r in older] + [f"{amendment_id} (p{target_version}): {text}"]
         did = f"{run['id'][:8]}:{amendment_id}:{tid}"
         for r in older:
