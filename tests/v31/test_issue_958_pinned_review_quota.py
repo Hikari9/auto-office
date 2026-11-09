@@ -119,25 +119,16 @@ def test_a_cooled_pin_with_no_eligible_alternative_names_its_expiry_and_the_exac
     assert _pin(env)["as"] == pinned  # the pin stays on the task
     nxt = _status(env)["next"]
     assert recovery in nxt and "2999-01-01T00:00Z" in nxt, nxt
-@V31
-def test_a_pin_that_no_longer_declares_a_route_does_not_break_the_status_line(env, monkeypatch):
-    from office import candidates
+    # The same pin, no longer declarable (a route denied since): the status line still renders, with the generic recovery.
     from office.state import Refused
-    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": "", "exit": 1}])
-    env.office("dispatch", "T1", check=0)
-    pinned = _reviewer(env)
-    _pin_route(env, pinned)
-    _cool(env, pinned, expires=FAR)
-    real = candidates.declared_decision
+    real_declared = candidates.declared_decision
     def denied(route, **kw):
         if kw.get("flag") == "--review-as":
             raise Refused("route-denied", f"{route} is denied")
-        return real(route, **kw)
+        return real_declared(route, **kw)
     monkeypatch.setattr(candidates, "declared_decision", denied)
     nxt = _status(env)["next"]
     assert "office review T1 [--as" in nxt and "in a cooldown" not in nxt, nxt
-
-
 def test_a_lane_review_with_a_cooled_pin_hands_the_review_to_another_route(env):
     _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
     env.office("dispatch", "T1", check=0)
