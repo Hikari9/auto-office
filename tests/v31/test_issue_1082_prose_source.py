@@ -83,8 +83,18 @@ SOURCED_PUSH_PROSE = [
     "source publish to push the tag",
     "Source publish to push the tag",
     "run source publish and push the tag",
-    "source publish then pushes the tag",
     "source publish to push the tag'",
+    "source \"publish to push the tag",
+    "'source publish to push the tag",
+    "\"source publish to push the tag",
+    "Run source publish, then push the tag.",
+    "source publish to push, then build",
+    "first source publish and push the tag",
+    "please source publish to push the tag",
+    "just source publish to push the tag",
+    "execute source publish to push the tag",
+    "then source publish to push the tag",
+    "Done; source publish to push the tag",
 ]
 
 
@@ -125,6 +135,12 @@ def test_amend_guard_refuses_sourced_script_push_prose(prose):
     "source publish to build the tag'",
     "Source revenue $500 covers the retreat.",
     "run source of truth notes for the retreat",
+    # Inflected or negated push words are not the push token after a bare-word run.
+    "Source tree must not be pushed.",
+    "Source files are never pushed to the remote.",
+    "The docs and source code are pushed by CI.",
+    "Keep the docs and source code unpushed.",
+    "First source tree is pushed to origin by CI.",
 ])
 def test_non_script_operands_after_source_stay_allowed(prose):
     assert not shell_safety.unsafe_manual_push(prose, prose=True)
