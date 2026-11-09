@@ -189,3 +189,21 @@ def test_a_reused_route_refused_for_quota_is_not_dropped_by_a_rerun(env):
     assert code != 0 and "route-unavailable" in out and rerouted in out, out
     assert _denials(env) == [], out
     assert len(env.con().execute("SELECT id FROM dispatches WHERE task_id='T1'").fetchall()) == 2
+
+
+def test_a_contract_amendment_relaunch_drops_a_reroute_a_user_deny_now_rejects(env):
+    rerouted = _orchestrator_reroute(env)
+    routecmd.change("deny", role="executor", route=_route(rerouted))
+    env.write_plan(PLANNED.replace("- calc.add(2, 3) == 5", "- calc.add(2, 3) == 5\n- calc.add(1, 1) == 2"))
+    code, out = env.office("amend", "T1", "--contract", "--", "also check add(1, 1)", env=_quota(env))
+    assert code == 0, out
+    # The amendment's plan revision can move the slate effort, so compare harness and model only.
+    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
+    con = env.con()
+    did = con.execute("SELECT id FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0]
+    assert con.execute("SELECT COUNT(*) FROM outbox WHERE kind='launch_agent' AND payload_json LIKE ?",
+                       (f'%"dispatch_id": "{did}"%',)).fetchone()[0] == 1
+    (change,) = _denials(env)
+    assert change["before"] == rerouted and change["actor"] == "office", change
+    assert change["after"].rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], change
+    assert "deny" in change["reason"] and change["task_id"] == "T1" and change["stage"] == "executor", change

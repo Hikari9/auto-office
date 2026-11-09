@@ -753,13 +753,20 @@ def _relaunch_decision(con, run: dict, task: dict) -> dict | None:
     """The route an amendment's relaunch runs: the route recorded on the task.
     `office amend route` records a declared route there, and every dispatch records
     the route it ran, so the relaunch never falls back to the ended session's route (#456).
-    A task `amend route --auto` returned to automatic routing relaunches on the plan slate (#1106)."""
+    A task `amend route --auto` returned to automatic routing relaunches on the plan slate (#1106).
+    A user deny that now rejects the recorded route does the same, and records the deny as a route change.
+    Caller holds the tx."""
     from office import dispatch
     if state.returned_to_automatic(task):
         return dispatch.replan_from_slate(con, run, task)
     rec = state.recorded_route(task)
     if not rec:
         return None
+    if denied := dispatch.route_denial(con, run, task, rec):
+        decision = dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(rec["candidate"]), denied))
+        dispatch._record_routing(con, run, decision)
+        dispatch.note_route(con, run, task, decision)
+        return decision
     return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
 
 

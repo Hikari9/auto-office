@@ -543,14 +543,20 @@ def _user_denied_reason(decision: dict, triple: str) -> str | None:
                  if r.get("candidate") == triple and r.get("category") in USER_DENY_CATEGORIES), None)
 
 
-def user_denies(con, run: dict, task: dict, route: dict) -> bool:
-    """Whether the next rerun would find this reused executor route denied by user policy (#1106).
-    It requalifies the route as the rerun does, so the task size and override receipts count."""
+def route_denial(con, run: dict, task: dict, route: dict) -> str | None:
+    """The user deny reason that now rejects this reused executor route, or None (#1106).
+    It requalifies the route as a relaunch does, so the task size and override receipts count."""
     try:
         qualify_recorded_route(con, run, task, route, observe=True)
     except Refused as exc:
-        return exc.category == "route-denied"
-    return False
+        if exc.category == "route-denied":
+            return (exc.data or {}).get("reason") or exc.message
+    return None
+
+
+def user_denies(con, run: dict, task: dict, route: dict) -> bool:
+    """Whether the next rerun would find this reused executor route denied by user policy (#1106)."""
+    return route_denial(con, run, task, route) is not None
 
 
 def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None) -> dict:
