@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from office import amend, candidates, route_override, routecmd, routing, state
+from office import amend, candidates, dispatch, route_override, routecmd, routing, state
 from conftest import start_inline
 from test_adaptive_dispatch import EXTERNAL, FB1, FB2, PRIMARY, PLANNED, _approve, _quota
 
@@ -237,3 +237,30 @@ def test_a_denied_quoted_route_reused_by_a_rerun_is_dropped_and_the_rerun_repick
     assert code == 0 and _triple(env) == CLAUDE, out
     (change,) = _denials(env)
     assert (change["before"], change["after"]) == ("codex@1/gpt-6-astra@low", CLAUDE), change
+
+
+def test_an_amendment_after_a_declared_route_returns_to_automatic_takes_the_plan_slate(env):
+    _approve(env)
+    code, out = env.office("amend", "route", "T1", "--as", FB1, "--quote", "use astra here")
+    assert code == 0, out
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    _end_round(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
+    assert code == 0, out
+    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], out
+
+
+def test_a_status_deny_check_of_a_quoted_route_probes_no_quota(env, monkeypatch):
+    _approve(env)
+    code, out = env.office("dispatch", "T1", "--as", FB1, "--quote", "use astra here", env=_quota(env))
+    assert code == 0, out
+    _end_round(env)
+    probes = []
+    monkeypatch.setattr(candidates, "probe_quota", lambda adapter: probes.append(adapter) or {"status": "unknown"})
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    task = state.get_task(con, run["id"], "T1")
+    assert not dispatch.user_denies(con, run, task, state.recorded_route(task))
+    assert probes == [], probes

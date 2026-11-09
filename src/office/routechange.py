@@ -212,8 +212,8 @@ def _clear_declared(con, run: dict, target: str | None, as_route: str | None, qu
                 or cur.get("route_json") != task.get("route_json"):
             raise Refused("state-changed", f"{tid} changed while the route was being cleared; re-run", scope=tid,
                           next_step=AUTO_USAGE)
-        # A stale reroute stays on the parent dispatch, so its marker keeps the next rerun off that route (#1106).
-        state.update_task(con, run["id"], tid, route_json=None if declared else dumps({"returned_to_automatic": before}))
+        # The parent dispatch keeps its route, so the marker keeps the next rerun and relaunch off it (#1106).
+        state.update_task(con, run["id"], tid, route_json=dumps({"returned_to_automatic": before}))
         state.record_route_change(con, run, tid, before, after or "automatic", kind="reroute", actor="user",
                                   reason=f"user returned the task to automatic routing: \"{quote.strip()}\"",
                                   extra={"quote": quote, "pending": True, "auto": True})
