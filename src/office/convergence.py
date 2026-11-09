@@ -1935,7 +1935,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
         return Result(lines=[f"{scope['id']} {kind} is {g['status']}"
                              + (f" ({g.get('review_status') or g['verdict']})" if g["status"] == "done" else "")
                              + "; nothing to revoke"], next="office status")
-    why = f"revoked: {reason}"[:200]
+    why = f"revoked by orchestrator: {reason}"[:200]  # the marker guide.stalls keys on (#958)
     with db.transaction(con):
         jobs_ = [j for j in gates.owning_jobs(con, run, g) if j["kind"] in LANE_REVOKE_JOBS]
         for j in jobs_:

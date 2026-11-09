@@ -96,10 +96,12 @@ def test_a_revoked_lane_review_job_is_not_reported_as_a_stall(env):
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
     job = _q(env, "SELECT status, error FROM outbox WHERE id='Jrev'")[0]
-    assert job["status"] == "failed" and job["error"].startswith("revoked:"), dict(job)
+    assert job["status"] == "failed" and job["error"].startswith("revoked by orchestrator:"), dict(job)
     assert guide.stalls(con, run) == [], guide.stalls(con, run)
 
-    # Negative control: a job that failed for any other reason is still a stall.
-    con.execute("UPDATE outbox SET error='harness crashed' WHERE id='Jrev'")
-    con.commit()
-    assert any("job convergence_review failed: harness crashed" in s for s in guide.stalls(con, run)), guide.stalls(con, run)
+    # Negative controls: a job that failed for any other reason is still a stall, including a harness error
+    # that merely starts with "revoked:" (the marker is the orchestrator's, not that word).
+    for error in ("harness crashed", "revoked: refresh token", "Revoked by orchestrator? no: auth"):
+        con.execute("UPDATE outbox SET error=? WHERE id='Jrev'", (error,))
+        con.commit()
+        assert any(f"job convergence_review failed: {error}" in s for s in guide.stalls(con, run)), (error, guide.stalls(con, run))

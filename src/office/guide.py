@@ -608,9 +608,10 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: 
         owner, detail = gates_mod.owner_state(con, run, g)
         if owner in ("none", "dead"):
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but {detail}")
-    # A job the orchestrator revoked failed on purpose (`revoked: <reason>`): it is not a stall (#958).
+    # A job the orchestrator revoked failed on purpose (`revoked by orchestrator: <reason>`): it is not a stall (#958).
+    # The marker is specific so a harness error that starts with "revoked:" is still a stall.
     for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ? "
-                         "AND COALESCE(error, '') NOT GLOB 'revoked:*'", (run["id"], since)).fetchall():
+                         "AND COALESCE(error, '') NOT GLOB 'revoked by orchestrator:*'", (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     out.extend(_amendment_stalls(con, run))
     out.extend(_idle_executors(con, run, acts))
