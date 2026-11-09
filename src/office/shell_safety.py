@@ -73,6 +73,16 @@ _SCRIPT_TAIL = re.compile(r"\.(?:sh|bash|zsh|ksh|env)\Z", re.I)
 _SOURCE_OPERAND = re.compile(
     r"[\"']?(?:\.{1,2}/|/(?=[\w.~-])|~|\$(?=[A-Za-z_{(@*#?!]|\d(?!\d))|\x60"
     r"|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w+-]|\.[\w+-]))", re.I)
+# An extensionless word after `source` ("source publish") is a PATH script. In prose
+# that counts only in command position, so "writes the source file" stays the noun.
+_BARE_WORD = r"[A-Za-z_][\w.+-]*"
+# Words that put a following `source` in command position ("run source publish").
+_COMMAND_LEAD_WORDS = frozenset({"run", "execute", "then", "and", "or", "first", "please", "just"})
+_LEAD_ALTERNATION = "|".join(sorted(_COMMAND_LEAD_WORDS))
+_BARE_SOURCE_PROSE = re.compile(
+    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})\s+)[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
+# The push token after a bare-word script run: the exact word, with trailing punctuation.
+_PUSH_WORD = re.compile(r"push[.,;:!?)]*", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
@@ -87,6 +97,13 @@ def _sources_file(tokens: list[str], i: int, prose: bool) -> bool:
     return i + 1 < len(tokens) and (
         _SOURCE_OPERAND.match(tokens[i + 1]) is not None
         or _SCRIPT_TAIL.search(tokens[i + 1]) is not None)
+
+
+def _bare_source_runs(tokens: list[str], i: int) -> bool:
+    """In prose, `source <bare word>` in command position runs an extensionless script."""
+    if i + 1 >= len(tokens) or re.match(_BARE_WORD, tokens[i + 1]) is None:
+        return False
+    return i in _command_starts(tokens) or (i > 0 and tokens[i - 1].lower() in _COMMAND_LEAD_WORDS)
 
 
 def _is_dynamic(token: str) -> bool:
@@ -247,9 +264,13 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             if re.search(r"\b(?:git|eval|alias)\b", command, re.I):
                 return True
             # Same rule as the tokenized path: a sourced script refuses only with a
-            # push word or an expansion, so "source release.sh to build" passes.
+            # push word or an expansion, so "source release.sh to build" passes. A bare
+            # command-position script ("source publish") refuses with a push word alone.
+            if re.search(r"\bpush\b", command, re.I) and _BARE_SOURCE_PROSE.search(command):
+                return True
+            pushed = re.search(r"push", command, re.I)
             sourced = re.search(rf"\bsource\s+{_SOURCE_OPERAND.pattern}", command, re.I)
-            return bool(sourced and (re.search(r"push", command, re.I) or "$" in command))
+            return bool(sourced and (pushed or "$" in command))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
@@ -282,13 +303,18 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
                 return True
     sourced = any(t.lower() == "source" and _sources_file(tokens, i, prose)
                   for i, t in enumerate(tokens))
-    # A sourced script may push under any inflection (pushes, Push); otherwise the exact token.
-    pushes = any("push" in t.lower() for t in tokens) if sourced else "push" in tokens
+    # In prose, a bare command-position `source <word>` also runs a script (F7).
+    bare_run = prose and any(
+        t.lower() == "source" and _bare_source_runs(tokens, i) for i, t in enumerate(tokens))
+    # A sourced path may push under any inflection (pushes, Push). A bare word run takes only
+    # the push word itself, so "pushed" or "unpushed" in ordinary prose does not refuse.
+    pushes = (any("push" in t.lower() for t in tokens) if sourced
+              else ("push" in tokens or (bare_run and any(_PUSH_WORD.fullmatch(t) for t in tokens))))
     # Dynamic executable construction must not bypass a detectable push token.
     if pushes and (
         re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
-        or sourced or any(t in ("eval", "alias", "function") for t in tokens)
+        or sourced or bare_run or any(t in ("eval", "alias", "function") for t in tokens)
     ):
         return True
     # Dynamically evaluated shell commands cannot be proved safe.
