@@ -559,11 +559,12 @@ def user_denies(con, run: dict, task: dict, route: dict) -> bool:
     return route_denial(con, run, task, route) is not None
 
 
-def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None) -> dict:
+def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None,
+                      observe: bool = False) -> dict:
     """The route from the approved plan slate, ignoring any reused route (#1106). `denied` is the
     reused route and the user's deny reason; the decision carries it so the dispatch records the change."""
     tid = task["id"]
-    decision = planned_route(con, run, {**task, "route_json": None})
+    decision = planned_route(con, run, {**task, "route_json": None}, observe=observe)
     if decision.get("status") != "selected":
         failure = _route_failure(tid, decision).removeprefix(f"{tid}: ")
         why = f"{denied[0]} is denied ({denied[1]}); " if denied else ""
@@ -654,7 +655,8 @@ def _planned_slate(con, run: dict, tid: str) -> dict | None:
 
 
 def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False,
-                  exclude: set[str] | None = None, discovery_input: dict | None = None) -> dict:
+                  exclude: set[str] | None = None, discovery_input: dict | None = None,
+                  observe: bool = False) -> dict:
     """Route an executor dispatch: the planner's primary, else its fallbacks in order.
 
     Live evidence (quota, availability, trust, learned eligibility) is refreshed
@@ -667,7 +669,8 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     `discovery_input` is the preflight's recompute handle (#494): a decision that comes back
     with `intent: "trial"` stands whole, because the trial route is the one route a planned
     slate cannot name. `exclude` keeps routes out of the decision (the trial route, when the
-    known-working fallback is wanted)."""
+    known-working fallback is wanted). `observe` is the read-only selection `office status`
+    shows: no quota probe, no notice, no write, and the same order a launch would take."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     planned = None if (override or reroute) else _effective_slate(con, run, task)
@@ -676,7 +679,8 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind, manual=bool(declared), declared=declared,
-                                  exclude=exclude, discovery_input=discovery_input)
+                                  exclude=exclude, discovery_input=discovery_input,
+                                  probe=not observe, observe=observe)
     fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
         prior = _prior_override_ceiling(task)

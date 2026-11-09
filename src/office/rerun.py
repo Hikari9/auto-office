@@ -526,15 +526,16 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
     return decision
 
 
-def _reused_route(con, run: dict, task: dict, parent: dict, route: dict) -> dict:
+def _reused_route(con, run: dict, task: dict, parent: dict, route: dict, *, observe: bool = False) -> dict:
     """Requalify the route a rerun reuses. A user deny that now rejects it drops the route: the rerun
     re-picks from the approved plan and records the change (#1106). Other refusals stay route-unavailable."""
     try:
-        return dispatch.qualify_recorded_route(con, run, task, route)
+        return dispatch.qualify_recorded_route(con, run, task, route, observe=observe)
     except Refused as exc:
         if exc.category == "route-denied":
             return dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(route["candidate"]),
-                                                                     exc.data.get("reason") or exc.message))
+                                                                     exc.data.get("reason") or exc.message),
+                                              observe=observe)
         fix = f"{_fresh_cmd(task['id'])} --reroute routes from current evidence"
         if dispatch._route_quote(route):
             fix += f'; or {_fresh_cmd(task["id"])} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
@@ -544,6 +545,37 @@ def _reused_route(con, run: dict, task: dict, parent: dict, route: dict) -> dict
         raise Refused("route-unavailable",
                       f"{task['id']}'s original route {original} cannot run now: {exc.message}",
                       scope=task["id"], preserved="the task worktree and its route history", next_step=fix) from exc
+
+
+def observed_route(con, run: dict, task: dict) -> dict | None:
+    """The executor route an unfinished task's next launch takes, for `office status` (#1106 F6).
+
+    Read-only: no quota probe and no write. A task with a dispatch reuses its recorded route as a rerun
+    does (`_reused_route`), and a user deny that rejects it re-picks from the plan. Any other task takes
+    the planned slate in order (`dispatch.planned_route`). Returns {"decision"} for the route that will
+    run; {"route", "planned", "failure"} when the selection fails, naming the route status reports and
+    why it was rejected; None when the task has neither a plan slate nor a recorded route."""
+    tid = task["id"]
+    rec = state.recorded_route(task)
+    slate = dispatch._planned_slate(con, run, tid)
+    if not rec and not slate:
+        return None
+    primary = (slate or {}).get("primary") or routing.candidate_id(rec["candidate"])
+    returned = state.returned_to_automatic(task)
+    try:
+        if rec and task.get("current_dispatch_id") and not returned:
+            decision = _reused_route(con, run, task, {}, rec, observe=True)
+        else:
+            decision = dispatch.planned_route(con, run, {**task, "route_json": None} if returned else task,
+                                              observe=True)
+    except Refused as exc:
+        if exc.category == "route-unavailable":
+            return {"route": routing.candidate_id(rec["candidate"]), "planned": False, "failure": exc.message}
+        return {"route": primary, "planned": bool(slate), "failure": exc.message.removeprefix(f"{tid}: ")}
+    if decision.get("status") != "selected":
+        return {"route": primary, "planned": bool(slate),
+                "failure": dispatch._route_failure(tid, decision).removeprefix(f"{tid}: ")}
+    return {"decision": decision}
 
 
 def _mode_required(tid: str) -> Usage:
