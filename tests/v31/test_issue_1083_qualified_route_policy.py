@@ -1,5 +1,7 @@
 """#1083: qualified route identities must give policy inspection and routing one verdict."""
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -103,3 +105,65 @@ def test_qualified_and_unqualified_allows_match_view_and_dispatch_eligibility(is
                                             config=live, repo_root=str(repo))["status"] == "selected"
     decision = route_decision(policy)
     assert decision["status"] == "selected", decision
+
+
+@pytest.mark.parametrize("route", [
+    "claude@2/claude-sonnet-5-5@high",
+    "claude/claude-sonnet-5-5@high",
+])
+@pytest.mark.parametrize("action", ["allow", "deny"])
+def test_amend_route_and_recorded_rerun_requalification_match_policy_view(env, monkeypatch, route, action):
+    """The real route-change and rerun paths must preserve the view's verdict."""
+    from test_adaptive_dispatch import FB1, _approve, _quota
+
+    from office import adapters, routecmd
+
+    real = adapters.route_version
+    monkeypatch.setattr(adapters, "route_version", lambda harness, adapter, sources=None:
+                        INSTALLED_CLAUDE if harness == "claude" else real(harness, adapter, sources))
+    _approve(env)
+    env.office("route", "allow", FB1, "--role", "executor", check=0)
+    target = Path(os.environ["OFFICE_USER_CONFIG"])
+    write_rule(target, route, action)
+
+    code, out = env.office("dispatch", "T1", "--as", FB1, env=_quota(env))
+    assert code == 0, out
+    con = env.con()
+    con.execute("UPDATE dispatches SET status='ended', ended_at='2026-10-09T00:00:00+00:00' WHERE task_id='T1'")
+    con.execute("UPDATE tasks SET status='changes_required' WHERE id='T1'")
+    con.commit()
+
+    view = next(row for row in routecmd.policy(role="executor", effective=True).data["effective"]
+                if row["route"] == VIEW_ROUTE)
+    assert view["state"] == action, view
+    amend = ("amend", "route", "T1", "--as", "claude/sonnet@high", "--quote", "Use sonnet next round")
+    code, out = env.office(*amend, env=_quota(env))
+    if action == "deny":
+        assert code == 4 and "route-denied" in out, out
+        # A denied route cannot be declared; record it while allowed, then prove
+        # rerun requalification refuses it after a later deny.
+        write_rule(target, route, "allow")
+        env.office(*amend, env=_quota(env), check=0)
+        write_rule(target, route, "deny")
+        view = next(row for row in routecmd.policy(role="executor", effective=True).data["effective"]
+                    if row["route"] == VIEW_ROUTE)
+        assert view["state"] == "deny", view
+        from office import candidates
+
+        catalog_rows = candidates.catalog_rows
+        monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+            {key: value for key, value in row.items() if key != "alias_resolved_to"}
+            if row.get("invocation_harness") == "claude" and row.get("model_id") == "sonnet" else row
+            for row in catalog_rows()
+        ])
+    else:
+        assert code == 0, out
+
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
+    if action == "deny":
+        assert code == 4 and "route-unavailable" in out and "policy deny by user" in out, out
+        assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
+    else:
+        assert code == 0, out
+        assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC") \
+            .fetchone()[0].startswith("claude@")
