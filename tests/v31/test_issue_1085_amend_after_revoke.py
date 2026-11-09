@@ -222,3 +222,43 @@ def test_revoked_lease_with_a_live_session_is_not_held_back_on_the_default_tier(
                 "'2026-01-01', '2026-01-02', 'T1', 1, 'D1', '2026-01-01', '2026-01-01', 'orchestrator revoke')")
     monkeypatch.setattr(gates, "live_task_session", lambda *a, **k: "Dlive")
     assert not dispatch.revoked_without_live_lease(con, "R", "T1"), "a live session of T1 keeps its lease"
+
+
+@pytest.mark.review_contract("v3.1")
+def test_ordinary_amendment_does_not_fold_a_requirements_delta_into_its_row(env):
+    """An ordinary amendment on the revoked task must leave the queued requirements delivery as its own row. Its
+    folded row would be superseded at relaunch, because the contract carries the ordinary delta, and the
+    requirements delta would be lost with it."""
+    from office import paths
+    _t2_submitted_and_ended(env)
+    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    env.office(*AMEND, env=EXTERNAL, check=0)
+    env.office("revoke", "T2", env=EXTERNAL, check=0)
+    env.office("amend", "T1", "--", DELTA, env=EXTERNAL, check=0)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    fresh = task_row(env, "T1")["current_dispatch_id"]
+    rows = {r[0]: (r[1], r[2]) for r in env.con().execute("SELECT amendment_id, status, superseded_by FROM deliveries WHERE task_id='T1'")}
+    assert rows["A1"] == ("queued", None), rows
+    assert rows["A2"] == ("superseded", "relaunch"), rows
+    run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    brief = (paths.run_dir(run_id) / "dispatches" / fresh / "brief.md").read_text()
+    assert "R9: log each call" in brief, brief
+
+
+def test_rerun_carries_the_requirements_delivery_under_convergence(env):
+    """The default convergence contract relaunches a revoked task the same way: the requirements delta reaches its brief."""
+    from office import paths
+    _convergence_both_unaccepted(env)
+    env.office("revoke", "T1", env=EXTERNAL, check=0)
+    code, out = env.office(*AMEND, env=EXTERNAL)
+    assert code == 0 and "T1 waits for office rerun (lease revoked)" in out, out
+    waiting = env.con().execute("SELECT amendment_id FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()[0]
+    env.office("revoke", "T2", env=EXTERNAL, check=0)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    fresh = task_row(env, "T1")["current_dispatch_id"]
+    assert _queued_t1_dispatches(env) == [fresh], "the delivery must be queued on the fresh session"
+    run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    brief = (paths.run_dir(run_id) / "dispatches" / fresh / "brief.md").read_text()
+    assert f"AMENDMENT {waiting} (plan -> p" in brief and "R9: log each call" in brief, brief
