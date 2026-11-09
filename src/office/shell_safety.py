@@ -66,9 +66,19 @@ _ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", 
                              "temp", "bare", "local", "no", "any", "each", "one"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A path or expansion operand: `source` runs the file it names.
+_SOURCE_OPERAND = re.compile(r"(?:\.{1,2}/|/|~|\$|\x60)")
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
+
+
+def _sources_file(tokens: list[str], i: int, prose: bool) -> bool:
+    """`source` runs a file. In prose it is usually the English noun ("the source file"),
+    so only a path or expansion operand counts."""
+    if not prose:
+        return True
+    return i + 1 < len(tokens) and _SOURCE_OPERAND.match(tokens[i + 1]) is not None
 
 
 def _is_dynamic(token: str) -> bool:
@@ -226,7 +236,8 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             # command signal can justify a fail-closed refusal in plan prose.
             if "$(" in command or "`" in command:
                 return True  # a substitution that cannot be tokenized is not text
-            return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
+            return bool(re.search(rf"\b(?:git|eval|alias)\b|\bsource\s+{_SOURCE_OPERAND.pattern}",
+                                  command, re.I))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
@@ -257,15 +268,16 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
             if tokens[j] == "push" or unknown:
                 return True
+    sourced = any(t == "source" and _sources_file(tokens, i, prose) for i, t in enumerate(tokens))
     # Dynamic executable construction must not bypass a detectable push token.
     if "push" in tokens and (
         re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
-        or any(t in tokens for t in ("eval", "source", "alias", "function"))
+        or sourced or any(t in ("eval", "alias", "function") for t in tokens)
     ):
         return True
     # Dynamically evaluated shell commands cannot be proved safe.
-    if any(t in ("eval", "source") for t in tokens) and ("$" in command or "\x60" in command):
+    if (sourced or "eval" in tokens) and ("$" in command or "\x60" in command):
         return True
     if any(t in ("sh", "bash", "dash", "zsh", "ksh") for t in tokens) and (
         any(t in ("-c", "-lc", "-ec") for t in tokens)
