@@ -146,3 +146,12 @@ def test_a_receipt_that_lifts_the_deny_keeps_the_reused_route_in_status_and_the_
     assert f"routes: T1 {rerouted}" in out, out
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
     assert code == 0 and _triple(env) == rerouted and _denials(env) == [], out
+
+
+def test_a_reused_route_refused_for_quota_is_not_dropped_by_a_rerun(env):
+    """Only a user deny drops a reused route. Quota exhaustion keeps the refusal, with no re-pick."""
+    rerouted = _orchestrator_reroute(env)
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env, **{rerouted.split("@")[0]: 0}))
+    assert code != 0 and "route-unavailable" in out and rerouted in out, out
+    assert _denials(env) == [], out
+    assert len(env.con().execute("SELECT id FROM dispatches WHERE task_id='T1'").fetchall()) == 2
