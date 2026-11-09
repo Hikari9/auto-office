@@ -295,7 +295,8 @@ def _rule_matches(cand: dict, spec: str, *, state: str | None = None) -> bool:
         # A deny must not fail open because the installed major cannot be read.
         major_ok = major == match["major"] or (state == "deny" and not major.isdigit())
         return (cand.get("harness") == match["harness"] and major_ok and
-                match["model"] in {cand.get("model_id"), cand.get("alias_resolved_to")} and
+                match["model"] in {cand.get("model_id"), cand.get("invocation_model_id"),
+                                   cand.get("alias_resolved_to")} and
                 cand.get("effort") == match["effort"])
     return _matches(cand, spec)
 
