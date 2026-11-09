@@ -183,7 +183,8 @@ def _land_preview(con, run: dict, snap: dict, deploy: dict) -> Result:
             _deploy(con, run, "preview", deploy, checkout, res, commit=head, tree=head_tree)
         _record_deployed(con, run, "preview", head, head_tree)
     _record(con, run, delivered=f"preview deployed from {commit[:12]}; PRs left open for review")
-    res.next = closeout.DOCS_STEP + "office close (PRs stay open for the user to merge)"
+    res.next = (_push_refusal_next(con, run)
+                or closeout.DOCS_STEP + "office close (PRs stay open for the user to merge)")
     return res
 
 
@@ -546,8 +547,17 @@ def _ask(con, run: dict) -> Result:
             continue
         pr = t.get("pr") or {}
         lines.append(f"  {t['id']} {pr.get('url') or '(no PR: ' + _pr_reason(run) + ')'}")
-    return Result(lines=lines, next='ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
+    return Result(lines=lines, next=_push_refusal_next(con, run) or
+                  'ask the user (native question tool): merge | preview deploy | merge + prod | stop; '
                   'then office land --merge|--preview|--e2e --quote "<words>", or office close --handoff <pr-url>')
+
+
+def _push_refusal_next(con, run: dict) -> str | None:
+    for task in integration.accepted_set(con, run) or []:
+        recovery = prs.push_refusal_next(task)
+        if recovery:
+            return recovery
+    return None
 
 
 def _pr_reason(run: dict) -> str:
@@ -635,7 +645,8 @@ def _merge_all(con, run: dict, res: Result) -> str:
             continue
         pr = t.get("pr") or {}
         if not pr.get("number"):
-            raise Refused("no-pr", f"{t['id']} has no PR", next_step="office status (a pr.error notice names why)")
+            raise Refused("no-pr", f"{t['id']} has no PR",
+                          next_step=prs.push_refusal_next(t) or "office status (a pr.error notice names why)")
         if pr.get("merged"):
             continue
         # A user may already have merged this task PR outside Office. Read

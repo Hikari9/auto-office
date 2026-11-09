@@ -186,6 +186,22 @@ def has_pr(task: dict | None) -> bool:
     return bool(task and (task["scope"] or task.get("pr")))
 
 
+def push_refusal(task: dict) -> dict | None:
+    """Return the current accepted revision's unrecorded-remote push refusal, if any."""
+    refusal = (task.get("pr") or {}).get("push_refused")
+    return refusal if refusal and refusal.get("revision") == task.get("accepted_revision_id") else None
+
+
+def push_refusal_next(task: dict) -> str | None:
+    refusal = push_refusal(task)
+    if not refusal:
+        return None
+    branch, reason = refusal.get("branch") or "the task branch", refusal.get("reason") or "remote tip is unrecorded"
+    return (f"{task['id']} PR push was refused: {reason}. Inspect origin/{branch} and reconcile its unrecorded work "
+            "without force-pushing it; then open/update the task PR and hand it off with "
+            "office close --handoff <pr-url>")
+
+
 def pr_blocker(con, run: dict, task: dict) -> str | None:
     """Why `task` cannot become PR-free, or None. Local and conservative (no gh
     call; the caller holds the tx): any recorded PR, open or closed, or a PR job
@@ -309,8 +325,8 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
                                    f"{(edited.stderr or edited.stdout).strip()}"[:300])
         # If gh pr view is unavailable, link the task to the existing PR as
         # before, but do not edit remote title/body without ownership proof.
-    pr = {**(task.get("pr") or {}), "number": found["number"], "url": found["url"], "base": base,
-          "branch": dispatch["branch"]}
+    pr = {k: v for k, v in (task.get("pr") or {}).items() if k != "push_refused"}
+    pr.update(number=found["number"], url=found["url"], base=base, branch=dispatch["branch"])
     with db.transaction(con):
         state.update_task(con, run["id"], task["id"], pr=pr)
     if pr["number"] != (task.get("pr") or {}).get("number"):
@@ -392,6 +408,11 @@ def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
     if not ok:
         ok, err = _safe_restack_push(con, run, task, dispatch, rev, err)
     if not ok:
+        if "remote tip is not a recorded previous task revision" in err:
+            pr = {**(task.get("pr") or {}), "push_refused": {"revision": rev["id"],
+                  "branch": dispatch["branch"], "reason": err}}
+            with db.transaction(con):
+                state.update_task(con, run["id"], task["id"], pr=pr)
         raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
     return rev, ensure_pr(con, run, task, dispatch)
 

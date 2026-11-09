@@ -222,6 +222,11 @@ def next_action(con, run: dict) -> str:
         nxt = convergence.next_action(con, run, dispositions=True)
         if nxt:
             return nxt
+    from office import prs
+    for task in tasks:
+        recovery = prs.push_refusal_next(task)
+        if recovery:
+            return recovery
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] not in ("accepted",):
