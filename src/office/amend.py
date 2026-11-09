@@ -249,15 +249,31 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     return draft if draft.is_file() else None
 
 
+DEPLOY_LINE = re.compile(r"^\s*deploy_(preview|prod|verify)\s*:\s*(\S.*?)\s*$")
+
+
+def deploy_edits(delta: str) -> dict[str, str]:
+    """The deploy commands a requirements delta sets: one `deploy_<preview|prod|verify>: <command>` per line (#758)."""
+    found = [m.groups() for m in map(DEPLOY_LINE.match, delta.splitlines()) if m]
+    labels = [label for label, _ in found]
+    repeated = sorted({f"deploy_{label}" for label in labels if labels.count(label) > 1})
+    if repeated:
+        raise Usage("ambiguous-deploy-amendment", f"{', '.join(repeated)} set more than once in one amendment",
+                    next_step="state each deploy_<preview|prod|verify> command once")
+    return dict(found)
+
+
 def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str],
                          to: list[str], *, drop_non_goals: list[str] = (), add_non_goals: list[str] = ()) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
+    deploy = deploy_edits(delta)
     with db.transaction(con):
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
-                                               drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
+                                               drop_non_goals=drop_non_goals, add_non_goals=add_non_goals,
+                                               deploy=deploy)
         delivery = _delivery_text(targets, _waiting_on_rerun(con, run, targets))
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
@@ -268,7 +284,8 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
 
 def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = (),
                         to: list[str] = (), with_targets: bool = False,
-                        drop_non_goals: list[str] = (), add_non_goals: list[str] = ()):
+                        drop_non_goals: list[str] = (), add_non_goals: list[str] = (),
+                        deploy: dict[str, str] | None = None):
     """Record requirements r(n+1) from the user's words and deliver it to live
     workers. Caller holds the tx. Returns the new version (with `with_targets`, also the tasks
     it was delivered to). `drop` names frozen done criteria the user removed (each must match
@@ -287,6 +304,9 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
         non_goals.remove(_match_criterion(non_goals, text, kind="non-goal"))
     non_goals += [a.strip() for a in add_non_goals if a.strip() and a.strip() not in non_goals]
     frozen["non_goals"] = non_goals
+    if deploy:
+        frozen["deploy"] = {**(frozen.get("deploy") or {}), **deploy}
+        frozen["user_deploy"] = sorted({*(frozen.get("user_deploy") or []), *deploy})
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
     con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
@@ -294,7 +314,7 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     state.update_run(con, run["id"], requirements_version=version)
     amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
     live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-    if added and not (drop or drop_non_goals or add_non_goals):
+    if added and not (drop or drop_non_goals or add_non_goals or deploy):
         live = [t for t in live if t in to]
     targets = _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
                        run["plan_version"])
@@ -480,7 +500,10 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
     current_plan = state.current_plan(con, run["id"]) or {}
     previous_deploy = (current_plan.get("requirements") or {}).get("deploy") or {}
     proposed_deploy = parsed.requirements.get("deploy") or {}
-    if proposed_deploy != previous_deploy:
+    # A user-quoted deploy amendment (#758) lives in the stored requirements, not the older plan text: a plan whose
+    # deploy lines match what is stored is no change.
+    stored_deploy = {**previous_deploy, **(state.current_requirements(con, run["id"])["frozen"].get("deploy") or {})}
+    if proposed_deploy != stored_deploy:
         raise Refused("requirements-change", "deploy command changed in the Requirements section; a plan contract "
                       "amendment cannot apply it. No task or reviewer route was changed", scope="requirements",
                       preserved="the authorized deploy command and plan are unchanged",
