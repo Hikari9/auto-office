@@ -560,8 +560,8 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
             out[t["id"]] = f"{trial['route']} (trial, fallback {trial['fallback'] or 'none'})"
             continue
         rec = state.recorded_route(t)
-        if rec and not rec.get("declared") and dispatch.user_denies(con, run, t, rec):
-            rec = {}  # a reused route a user deny rejects: the next rerun re-picks from the plan (#1106)
+        if rec and dispatch.user_denies(con, run, t, rec):
+            rec = {}  # a declared or reused route a user deny rejects: the next rerun re-picks from the plan (#1106)
         if rec:
             chosen = routing.candidate_id(rec["candidate"])
             preferred = rec.get("preferred_route")

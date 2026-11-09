@@ -77,6 +77,19 @@ def test_a_denied_declared_pin_is_dropped_by_a_rerun_and_the_rerun_repicks_the_p
     assert (change["before"], change["after"]) == ("codex@1/gpt-6-astra@low", CLAUDE), change
 
 
+def test_status_names_the_planned_route_a_denied_declared_pin_gives_way_to(env):
+    _approve(env)
+    code, out = env.office("amend", "route", "T1", "--as", FB1, "--quote", "use astra here")
+    assert code == 0, out
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    _end_round(env)
+    routecmd.change("deny", role="executor", route=FB1)
+    code, out = env.office("status")
+    assert f"routes: T1 {CLAUDE} (planned)" in out, out
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) == CLAUDE, out
+
+
 def test_auto_clears_a_stale_reroute_on_the_parent_and_the_rerun_routes_from_the_plan(env):
     rerouted = _orchestrator_reroute(env)
     code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
