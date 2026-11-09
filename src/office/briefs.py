@@ -307,7 +307,9 @@ def answer_lines(a: dict) -> list[str]:
     """The brief lines for one recorded answer: up to ANSWER_BRIEF_CHARS in full, then a notice that names
     where the rest is stored."""
     from office import raising
-    ans = (a.get("answer") or "").strip() or "(no answer text recorded)"
+    ans = a.get("answer") or ""
+    if not ans.strip():
+        ans = "(no answer text recorded)"
     cut = len(ans) > ANSWER_BRIEF_CHARS
     body = ans[:ANSWER_BRIEF_CHARS] if cut else ans
     lines = ["", f"ANSWER to your raised {a['kind']} ({raising._shown(a['text'], 160)}): "

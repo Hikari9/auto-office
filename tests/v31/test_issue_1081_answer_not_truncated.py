@@ -136,3 +136,22 @@ def test_unit_multiline_answer_continuation_lines_are_indented():
 
 def test_unit_empty_answer_says_no_text_was_recorded():
     assert "(no answer text recorded)" in _answer_text(None)
+    assert "(no answer text recorded)" in _answer_text(" \n\t ")
+
+
+def test_unit_leading_and_trailing_whitespace_of_a_short_answer_is_carried_as_recorded():
+    ans = "   indented first line   "
+    text = _answer_text(ans)
+    assert f"(Which?): {ans}\n" in text, text
+
+
+def test_unit_indented_multiline_answer_keeps_its_first_line_indent():
+    ans = "    def f():\n        return 1"
+    text = _answer_text(ans)
+    assert "(Which?):     def f():\n            return 1" in text, text
+
+
+def test_unit_answer_of_2000_chars_with_leading_whitespace_is_carried_in_full():
+    ans = "  " + "".join(str(i % 10) for i in range(1998))
+    text = _answer_text(ans)
+    assert ans in text and "[cut at" not in text, text
