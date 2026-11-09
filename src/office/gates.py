@@ -1340,12 +1340,15 @@ def cooled_pin_recovery(con, gate_id: str | None, candidate: str, until: str) ->
 def cooling_pin_recovery(con, run: dict, task: dict | None, gate_id: str) -> str | None:
     """The `next:` recovery for a blocked review whose pinned reviewer is still cooling, or None (#958)."""
     pinned = (task or {}).get("review_override")
-    cooled = _cooling_pin(con, run, pinned, "code_reviewer") if pinned else None
+    try:
+        cooled = _cooling_pin(con, run, pinned, "code_reviewer") if pinned else None
+    except (Refused, Usage):  # a pin that no longer declares a route must not break every status line
+        return None
     if not cooled:
         return None
     target = _gate_review_target(con, gate_id) or "<task|lane>"
-    return (cooled_pin_recovery(con, gate_id, *cooled) + f"; before then, office review {target} runs another eligible "
-            "route if one qualifies")
+    text = cooled_pin_recovery(con, gate_id, *cooled) + f"; before then, office review {target} runs another eligible route if one qualifies"
+    return text[:1].upper() + text[1:]
 
 
 def _agent_alive(name: str) -> bool:
