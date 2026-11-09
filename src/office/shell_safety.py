@@ -77,12 +77,15 @@ _SOURCE_OPERAND = re.compile(
 # that counts only in command position, so "writes the source file" stays the noun.
 _BARE_WORD = r"[A-Za-z_][\w.+-]*"
 # Words that put a following `source` in command position ("run source publish").
+# A lead may carry trailing punctuation ("Run: source publish", "Run, source publish").
 _COMMAND_LEAD_WORDS = frozenset({"run", "execute", "then", "and", "or", "first", "please", "just"})
+_TRAILING_PUNCT = ".,;:!?)"
 _LEAD_ALTERNATION = "|".join(sorted(_COMMAND_LEAD_WORDS))
 _BARE_SOURCE_PROSE = re.compile(
-    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})\s+)[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
+    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})[{re.escape(_TRAILING_PUNCT)}]*\s+)"
+    rf"[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
 # The push token after a bare-word script run: the exact word, with trailing punctuation.
-_PUSH_WORD = re.compile(r"push[.,;:!?)]*", re.I)
+_PUSH_WORD = re.compile(rf"push[{re.escape(_TRAILING_PUNCT)}]*", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
@@ -103,7 +106,8 @@ def _bare_source_runs(tokens: list[str], i: int) -> bool:
     """In prose, `source <bare word>` in command position runs an extensionless script."""
     if i + 1 >= len(tokens) or re.match(_BARE_WORD, tokens[i + 1]) is None:
         return False
-    return i in _command_starts(tokens) or (i > 0 and tokens[i - 1].lower() in _COMMAND_LEAD_WORDS)
+    return i in _command_starts(tokens) or (
+        i > 0 and tokens[i - 1].lower().rstrip(_TRAILING_PUNCT) in _COMMAND_LEAD_WORDS)
 
 
 def _is_dynamic(token: str) -> bool:

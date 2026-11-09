@@ -95,6 +95,11 @@ SOURCED_PUSH_PROSE = [
     "execute source publish to push the tag",
     "then source publish to push the tag",
     "Done; source publish to push the tag",
+    # F10: punctuation after a command lead ("Run:") still puts the next word in command position.
+    "Run: source publish to push the tag",
+    "Run, source publish and push the tag",
+    "first: source publish to push the tag",
+    "Run: source publish to push the tag'",
 ]
 
 
@@ -141,6 +146,8 @@ def test_amend_guard_refuses_sourced_script_push_prose(prose):
     "The docs and source code are pushed by CI.",
     "Keep the docs and source code unpushed.",
     "First source tree is pushed to origin by CI.",
+    # F10 negative: punctuation after a lead does not make a bare operand a push.
+    "Run: source publish to build the tag",
 ])
 def test_non_script_operands_after_source_stay_allowed(prose):
     assert not shell_safety.unsafe_manual_push(prose, prose=True)
