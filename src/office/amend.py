@@ -254,7 +254,12 @@ DEPLOY_LINE = re.compile(r"^\s*deploy_(preview|prod|verify)\s*:\s*(\S.*?)\s*$")
 
 def deploy_edits(delta: str) -> dict[str, str]:
     """The deploy commands a requirements delta sets: one `deploy_<preview|prod|verify>: <command>` per line (#758)."""
-    found = (m.groups() for m in map(DEPLOY_LINE.match, delta.splitlines()) if m)
+    found = [m.groups() for m in map(DEPLOY_LINE.match, delta.splitlines()) if m]
+    labels = [label for label, _ in found]
+    repeated = sorted({f"deploy_{label}" for label in labels if labels.count(label) > 1})
+    if repeated:
+        raise Usage("ambiguous-deploy-amendment", f"{', '.join(repeated)} set more than once in one amendment",
+                    next_step="state each deploy_<preview|prod|verify> command once")
     return dict(found)
 
 
@@ -263,11 +268,12 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
+    deploy = deploy_edits(delta)
     with db.transaction(con):
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
                                                drop_non_goals=drop_non_goals, add_non_goals=add_non_goals,
-                                               deploy=deploy_edits(delta))
+                                               deploy=deploy)
         delivery = _delivery_text(targets, _waiting_on_rerun(con, run, targets))
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")

@@ -52,6 +52,17 @@ def test_quoted_deploy_amendment_changes_the_command_land_uses(env):
 
 
 @pytest.mark.approved
+def test_repeated_deploy_label_is_rejected_and_changes_nothing(env):
+    with pytest.raises(amend.Usage):
+        amend.deploy_edits("deploy_prod: echo safe\ndeploy_prod: echo dangerous")
+    before = _version(env)
+    for delta in ("deploy_prod: echo safe\ndeploy_prod: echo dangerous", "deploy_prod: echo same\ndeploy_prod: echo same"):
+        code, out = env.office("amend", "requirements", "--quote", QUOTE, "--", delta, env=EXTERNAL)
+        assert code != 0 and "ambiguous-deploy-amendment" in out and "deploy_prod" in out, out
+    assert _version(env) == before and _end_state(env)["deploy"] == {}
+
+
+@pytest.mark.approved
 def test_unquoted_deploy_amendment_changes_nothing(env):
     before = _version(env)
     code, out = env.office("amend", "requirements", "--", "deploy_prod: echo sneaky", env=EXTERNAL)
