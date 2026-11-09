@@ -503,8 +503,7 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
     # A user-quoted deploy amendment (#758) lives in the stored requirements, not the older plan text: a plan whose
     # deploy lines match what is stored is no change.
     stored_deploy = {**previous_deploy, **(state.current_requirements(con, run["id"])["frozen"].get("deploy") or {})}
-    if any(proposed_deploy.get(k) != stored_deploy.get(k) for k in proposed_deploy) \
-            or any(k not in proposed_deploy for k in previous_deploy):
+    if proposed_deploy != stored_deploy:
         raise Refused("requirements-change", "deploy command changed in the Requirements section; a plan contract "
                       "amendment cannot apply it. No task or reviewer route was changed", scope="requirements",
                       preserved="the authorized deploy command and plan are unchanged",

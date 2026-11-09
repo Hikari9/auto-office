@@ -90,6 +90,17 @@ def test_plan_matching_the_amended_deploy_no_longer_trips_requirements_change(en
 
 
 @pytest.mark.approved
+def test_plan_omitting_a_newly_authorized_deploy_label_trips_requirements_change(env):
+    """F12: the old plan had no deploy label, so only the stored requirements know `deploy_prod`."""
+    env.office("amend", "requirements", "--quote", QUOTE, "--", "deploy_prod: echo new-deploy", env=EXTERNAL,
+               check=0)
+    env.write_plan(PLAN_ONE.replace("calc.add(2, 3) == 5\nvisual", "calc.add(2, 3) == 5\n- calc.add(0, 0) == 0\nvisual"))
+    code, out = env.office("amend", "T1", "--contract", "--", "add acceptance", env=EXTERNAL)
+    assert code != 0 and "requirements-change" in out, out
+    assert _end_state(env)["deploy"] == {"prod": "echo new-deploy"}
+
+
+@pytest.mark.approved
 def test_a_plan_resubmit_does_not_revert_the_users_deploy_edit(env):
     env.office("amend", "requirements", "--quote", QUOTE, "--", "deploy_prod: echo new-deploy", env=EXTERNAL,
                check=0)
