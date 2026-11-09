@@ -186,3 +186,14 @@ def test_revoked_lease_with_a_live_session_is_not_held_back(env, monkeypatch):
     assert dispatch.revoked_without_live_lease(con, run_id, "T1")
     monkeypatch.setattr(gates, "live_task_session", lambda *a, **k: "Dlive")
     assert not dispatch.revoked_without_live_lease(con, run_id, "T1"), "a live session of T1 keeps its lease"
+
+
+def test_revoked_without_live_lease_runs_on_the_default_tier(tmp_path):
+    """Unit tier (no `env` fixture, so it is collected without --all): the check resolves gates at call time."""
+    from office import db, dispatch
+    con = db.connect(tmp_path / "runs.db")
+    db.migrate(con)
+    con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, "
+                "dispatch_id, renewed_at, revoked_at, revoke_reason) VALUES('L1', 'R', 'executor', '[\"calc.py\"]', 'D1', "
+                "'2026-01-01', '2026-01-02', 'T1', 1, 'D1', '2026-01-01', '2026-01-01', 'orchestrator revoke')")
+    assert dispatch.revoked_without_live_lease(con, "R", "T1") is True
