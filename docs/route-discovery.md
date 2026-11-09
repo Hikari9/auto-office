@@ -123,6 +123,26 @@ Each attempt gets an `attempt_id` before a dispatch exists. Immutable `route_dis
 
 An accepted trial revision teaches effectiveness through the existing attribution, maturity and held-out replay rules. A single accepted trial does not grant learned eligibility. Launch, harness, adapter, environment, quota and brief failures keep their actual cause and are not charged to the model. `trial-accepted` is written by the learner when the run closes. A trial row that ended `abandoned` records no `trial-accepted` event even if someone else later submits and the task is accepted. The learner still reads that dispatch as landed. Discovery never writes `adapter_trust_acts`, grants `proven` or clears quarantine.
 
+## Quota reserve by role
+
+A route is skipped for a role when its projected quota would fall below that role's protected reserve. The reserve is read from `quota.reserve_percent_by_role`, keyed by role family:
+
+- `executor`: `executor`, `worker` and `planner` (shipped default 20)
+- `reviewer`: `plan_reviewer` and `code_reviewer` (shipped default 5)
+
+A role not listed, or a missing key, uses `quota.reserve_percent` (shipped default 5). A blank value (`executor:` with no number), or a blank `reserve_percent_by_role:` block, counts as not set.
+
+Each family's reserve resolves in this order, first match wins:
+
+1. A user-set `quota.reserve_percent_by_role.<family>` (user, repo or `--set` tier).
+2. A user-set `quota.reserve_percent`, 0 included. It sets every family without a user by-role value, including `executor` and `reviewer`.
+3. The shipped `quota.reserve_percent_by_role.<family>` (executor 20, reviewer 5).
+4. The shipped `quota.reserve_percent` (5).
+
+So `quota.reserve_percent: 0` alone gives both families a reserve of 0, and `executor: 30` with `reserve_percent: 0` gives executor 30 and reviewer 0. Setting only `quota.reserve_percent: 7` gives both families 7, because it overrides the shipped by-role defaults. To keep the shipped family values while changing the base, set the by-role key itself. Discovery trials use the executor reserve.
+
+Each run pins the `quota` block at start, so a run's reserves are the values in effect then. The protected-reserve notice names the role and its pinned value. A live run picks up an edit through `--apply-routing`.
+
 ## Rollback and pinned runs
 
 Set `routing.discovery.enabled: false` at the user tier (`office config routing.discovery.enabled false`) or the repo tier (add `--repo`) to disable discovery for future runs. A repo-tier value wins over the user tier, so read back the effective value and its source with `office config routing.discovery.enabled --show-origin`. This leaves stored evidence and trust state intact and needs no code change.

@@ -55,6 +55,7 @@ from pathlib import Path
 import yaml
 
 from office import adapters, db, paths, route_policy
+from office import config as office_config
 from office.util import (ALIVE, DEAD, UNKNOWN, atomic_write_json, now_iso, parse_iso, process_is, process_start,
                          sha256_file)
 
@@ -365,12 +366,12 @@ def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, confi
     return None
 
 
-def _quota_refusal(cand: dict, config: dict) -> str | None:
+def _quota_refusal(cand: dict, config: dict, role: str | None) -> str | None:
     quota = cand.get("quota") or {}
     remaining = quota.get("tightest_remaining_percent")
     if quota.get("status") != "ok" or remaining is None:
         return None
-    reserve = float((config.get("quota") or {}).get("reserve_percent", 5.0))
+    reserve = office_config.quota_reserve_percent(config, role)
     burn = float(quota.get("projected_burn_percent") or 0)
     if float(remaining) - burn < reserve:
         return f"quota {float(remaining):g}% left would cross the {reserve:g}% protected reserve"
@@ -740,7 +741,7 @@ def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dic
                 return refuse("discovery-disabled", "routing.discovery.enabled is false in the pinned config")
             if ctx["origin"] != "manual" and ctx.get("role") not in (None, *settings["roles"]):
                 return refuse("role-not-eligible", f"discovery is limited to {', '.join(settings['roles'])}")
-            quota = _quota_refusal(cand, config)
+            quota = _quota_refusal(cand, config, ctx.get("role"))
             if quota:
                 return refuse("quota-reserve", quota)
             if cached and cached["result"] != "pending":

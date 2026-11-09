@@ -7,6 +7,7 @@ pinned snapshot, never from the live files.
 """
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,7 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
     warnings: list = []
     effective = default
     provenance = {key: "shipped" for key in _policy_leaves(default)}
+    user_reserves: dict[str, float] = {}
     for tier, data in layers:
         if not isinstance(data, dict):
             raise ValueError(f"{tier} config must be a mapping")
@@ -152,6 +154,8 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
         for key in _policy_leaves(kept):
             if not any(key == k or key.startswith(k + ".") for k in ignored):
                 provenance[key] = "run" if tier == "prompt_cli" else tier
+        _record_user_reserves(kept, user_reserves)
+    _resolve_quota_reserves(effective, default, user_reserves)
     effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
     problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
@@ -423,8 +427,65 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
     return gates
 
 
-def quota_reserve_percent(config: dict) -> float:
-    return float(((config.get("quota") or {}).get("reserve_percent", 5)))
+# quota.reserve_percent_by_role key that protects each routed role. Roles not listed fall back to quota.reserve_percent.
+RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor", "planner": "executor",
+                       "plan_reviewer": "reviewer", "code_reviewer": "reviewer"}
+RESERVE_FAMILIES = ("executor", "reviewer")
+
+
+def _record_user_reserves(kept: dict, into: dict) -> None:
+    """Record the reserve numbers a non-shipped layer sets: `reserve_percent` and each `reserve_percent_by_role` family.
+    A blank or non-numeric value is unset, as deep_merge treats it."""
+    quota = kept.get("quota")
+    if not isinstance(quota, dict):
+        return
+    scalar = quota.get("reserve_percent")
+    if _is_percent(scalar):
+        into["reserve_percent"] = float(scalar)
+    by_role = quota.get("reserve_percent_by_role")
+    if isinstance(by_role, dict):
+        for family, value in by_role.items():
+            if _is_percent(value):
+                into[f"reserve_percent_by_role.{family}"] = float(value)
+
+
+def _is_percent(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _resolve_quota_reserves(effective: dict, default: dict, user_set: dict[str, float]) -> None:
+    """Pin each family's reserve as a number. Precedence, highest first: a user by-role value, a user
+    quota.reserve_percent (0 included), the shipped by-role value, the shipped quota.reserve_percent.
+    A run pins what this returns, so a read never consults the installed default."""
+    quota = effective.get("quota")
+    if not isinstance(quota, dict):
+        return
+    shipped = default.get("quota") or {}
+    shipped_by_role = shipped.get("reserve_percent_by_role") or {}
+    by_role = {k: v for k, v in (quota.get("reserve_percent_by_role") or {}).items() if v is not None}
+    for family in RESERVE_FAMILIES:
+        candidates = (user_set.get(f"reserve_percent_by_role.{family}"), user_set.get("reserve_percent"),
+                      shipped_by_role.get(family), shipped.get("reserve_percent", 5))
+        by_role[family] = next(v for v in candidates if v is not None)
+    quota["reserve_percent_by_role"] = by_role
+
+
+def quota_reserve_percent(config: dict | None, role: str | None = None) -> float:
+    """The protected quota reserve for `role`, read from a config or a pinned run policy:
+    quota.reserve_percent_by_role under the role's key, else quota.reserve_percent.
+    resolve() has already pinned both families to numbers; the scalar is read only for roles outside them."""
+    quota = (config or {}).get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role")
+    key = RESERVE_KEY_BY_ROLE.get(role or "")
+    if key is not None and isinstance(by_role, dict) and by_role.get(key) is not None:
+        return float(by_role[key])
+    return float(quota.get("reserve_percent", 5))
+
+
+@functools.lru_cache(maxsize=None)
+def shipped_quota_reserve_percent(role: str | None = None) -> float:
+    """The shipped default reserve for `role`, for callers that hold no pinned policy."""
+    return quota_reserve_percent(load_yaml(default_config_path()) or {}, role)
 
 
 def balanced_money_band_percent(config: dict) -> float:
