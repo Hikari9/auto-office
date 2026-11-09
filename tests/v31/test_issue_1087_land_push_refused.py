@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import subprocess
 
-from conftest import GOOD_ADD, start_inline
+from conftest import Env, GOOD_ADD, _activate, start_inline
 from test_task_prs import github, remote_head
 
 
-def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(env, monkeypatch):
+def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(tmp_path, monkeypatch):
+    env = _activate(Env(tmp_path, monkeypatch), monkeypatch)
     bare = github(env, monkeypatch)
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
