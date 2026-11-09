@@ -534,6 +534,25 @@ def _route_origin(route: dict) -> dict:
     return {}
 
 
+USER_DENY_CATEGORIES = ("denied", "role-deny")  # routing.py: the legacy denied_models list, or a role deny
+
+
+def _user_denied_reason(decision: dict, triple: str) -> str | None:
+    """Why a user deny policy rejected `triple` in this routing decision, or None (#1106)."""
+    return next((r.get("reason") for r in decision.get("rejected") or []
+                 if r.get("candidate") == triple and r.get("category") in USER_DENY_CATEGORIES), None)
+
+
+def user_denies(con, run: dict, task: dict, route: dict) -> bool:
+    """Whether the next rerun would find this reused executor route denied by user policy (#1106).
+    It requalifies the route as the rerun does, so the task size and override receipts count."""
+    try:
+        qualify_recorded_route(con, run, task, route, observe=True)
+    except Refused as exc:
+        return exc.category == "route-denied"
+    return False
+
+
 def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: bool = False) -> dict:
     """Revalidate a reused executor route before its new lease/outbox is written.
 
@@ -569,8 +588,10 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
                    "manual": bool(authority), "declared": triple if quote else None}
         decision = candidates.route_role(con, config, run, "executor", **options, observe=observe)
         if decision.get("status") != "selected":
-            raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
-                          next_step=_route_next(decision, task["id"], run))
+            denied = _user_denied_reason(decision, triple)
+            raise Refused("route-denied" if denied else "route-unavailable", _route_failure(task["id"], decision),
+                          scope=task["id"], next_step=_route_next(decision, task["id"], run),
+                          data={"reason": denied} if denied else None)
     decision.update(origin)
     # The exact-route re-qualification above ranks one route; the dispatch keeps the ranking it was first given.
     for key in ("preferred_route", "fallback_routes"):
@@ -871,7 +892,10 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     planned = decision.get("planned") or {}
     taken = decision.get("fallbacks_taken") or []
     why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
-    if taken:
+    if denied := decision.get("denied_route"):
+        before = denied["route"]
+        change = (before, "denied", denied["reason"], "office")
+    elif taken:
         before = planned.get("primary")
         kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
         change = (before, kind, f"fallback: {why}", "office")

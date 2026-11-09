@@ -749,10 +749,18 @@ def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     return amendment_id
 
 
-def _relaunch_decision(task: dict) -> dict | None:
+def _relaunch_decision(con, run: dict, task: dict) -> dict | None:
     """The route an amendment's relaunch runs: the route recorded on the task.
     `office amend route` records a declared route there, and every dispatch records
-    the route it ran, so the relaunch never falls back to the ended session's route (#456)."""
+    the route it ran, so the relaunch never falls back to the ended session's route (#456).
+    A task `amend route --auto` returned to automatic routing relaunches on the plan slate (#1106)."""
+    from office import dispatch
+    if state.returned_to_automatic(task):
+        decision = dispatch.planned_route(con, run, {**task, "route_json": None})
+        if decision.get("status") != "selected":
+            raise Refused("no-route", dispatch._route_failure(task["id"], decision), scope=task["id"],
+                          next_step=dispatch._route_next(decision, task["id"], run))
+        return decision
     rec = state.recorded_route(task)
     if not rec:
         return None
@@ -823,7 +831,7 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
             # session so its brief carries the delta, and it is delivered once that prompt is confirmed.
             new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                              decision=_relaunch_decision(task))
+                                              decision=_relaunch_decision(con, run, task))
             con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
                         (new_did, did))
         targets.append(tid)

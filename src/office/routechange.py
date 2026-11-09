@@ -176,8 +176,9 @@ def _declare(con, run: dict, task: dict, as_route: str, quote: str, restart: boo
 def _clear_declared(con, run: dict, target: str | None, as_route: str | None, quote: str | None,
                     restart: bool) -> Result:
     """`--auto` (#977): drop the user-declared route on a task with no live agent, so its next dispatch routes
-    automatically again (the approved plan's slate with its quota-aware fallbacks). The change is recorded
-    in the route history like any other deliberate route change."""
+    automatically again (the approved plan's slate with its quota-aware fallbacks). A stale reroute the parent
+    dispatch carried is dropped the same way (#1106). The change is recorded in the route history like any
+    other deliberate route change."""
     if as_route or restart:
         raise Usage("usage", "--auto returns the task to automatic routing; it takes no --as or --restart",
                     next_step=AUTO_USAGE, exit_code=2)
@@ -198,9 +199,11 @@ def _clear_declared(con, run: dict, target: str | None, as_route: str | None, qu
                       next_step=f"office revoke {tid}, then {AUTO_USAGE.replace('<task>', tid)}")
     tid = task["id"]
     rec = state.recorded_route(task)
-    if not (rec.get("declared") and dispatch._route_quote(rec)):
+    declared = bool(rec.get("declared") and dispatch._route_quote(rec))
+    stale = None if declared else _stale_reroute(con, run, tid)
+    if not declared and stale is None:
         raise Refused("route-unchanged", f"{tid} has no declared route; it already routes automatically", scope=tid)
-    before = routing.candidate_id(rec["candidate"])
+    before = routing.candidate_id((rec if declared else stale)["candidate"])
     plan = dispatch._planned_slate(con, run, tid) or {}
     after = plan.get("primary")
     with db.transaction(con):
@@ -209,15 +212,23 @@ def _clear_declared(con, run: dict, target: str | None, as_route: str | None, qu
                 or cur.get("route_json") != task.get("route_json"):
             raise Refused("state-changed", f"{tid} changed while the route was being cleared; re-run", scope=tid,
                           next_step=AUTO_USAGE)
-        state.update_task(con, run["id"], tid, route_json=None)
+        # A stale reroute stays on the parent dispatch, so its marker keeps the next rerun off that route (#1106).
+        state.update_task(con, run["id"], tid, route_json=None if declared else dumps({"returned_to_automatic": before}))
         state.record_route_change(con, run, tid, before, after or "automatic", kind="reroute", actor="user",
                                   reason=f"user returned the task to automatic routing: \"{quote.strip()}\"",
                                   extra={"quote": quote, "pending": True, "auto": True})
     shown = f"automatic ({after} planned)" if after else "automatic"
     ran = bool(task.get("current_dispatch_id"))
-    return Result(lines=[f"{tid} route {before} -> {shown} (declared route cleared)"],
-                  next=(f"office rerun {tid} --fresh --reroute routes it from current evidence" if ran
-                        else f"office dispatch {tid}"))
+    cleared = "declared route cleared" if declared else "stale reroute cleared"
+    return Result(lines=[f"{tid} route {before} -> {shown} ({cleared})"],
+                  next=((f"office rerun {tid} --fresh" if stale else f"office rerun {tid} --fresh --reroute routes it "
+                         "from current evidence") if ran else f"office dispatch {tid}"))
+
+
+def _stale_reroute(con, run: dict, tid: str) -> dict | None:
+    """The parent dispatch's route, when an orchestrator reroute chose it and no declared route replaced it (#1106)."""
+    route = (state.last_ended_executor(con, run, tid) or {}).get("route") or {}
+    return route if route.get("candidate") and route.get("route_source") == "reroute" and not route.get("declared") else None
 
 
 def _live_dispatch(con, run: dict, target: str) -> tuple[dict, dict]:
