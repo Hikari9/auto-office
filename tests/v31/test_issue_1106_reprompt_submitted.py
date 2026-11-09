@@ -73,7 +73,11 @@ def test_pi_reviewer_reprompt_with_reply_file_written_counts_as_submitted(env, m
 
 
 @pytest.mark.approved
-def test_reviewer_reprompt_working_agent_without_file_awaits_reply(env, monkeypatch):
+@pytest.mark.parametrize("sample", [
+    {"status": "working", "busy": False, "content_hash": None},
+    {"status": "idle", "busy": True, "content_hash": None},
+])
+def test_reviewer_reprompt_working_agent_without_file_awaits_reply(env, monkeypatch, sample):
     """An agent reported working with no file yet when submit_prompt returns 'held'
     awaits the file and yields a parsed verdict with no unsubmitted reason (#1106)."""
     output = env.tmp / "reply.txt"
@@ -81,9 +85,8 @@ def test_reviewer_reprompt_working_agent_without_file_awaits_reply(env, monkeypa
     run, d = _setup_reviewer_reprompt(env, monkeypatch, [EMPTY, held], harness="pi")
     from office import dispatch, gates, review_parse
 
-    # herdr reports the agent is working/busy (#583 signal)
-    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
-                        lambda name: {"status": "working", "busy": True, "content_hash": None})
+    # herdr reports the agent is working or busy (#583 signal)
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample", lambda name: sample)
 
     orig_submit = dispatch.submit_prompt
     def check_held(name, prompt, **kw):
@@ -100,6 +103,45 @@ def test_reviewer_reprompt_working_agent_without_file_awaits_reply(env, monkeypa
         out.write_text("VERDICT: APPROVED\nNEXT proceed\n")
         return orig_await(out, wait_s, poll)
     monkeypatch.setattr(gates, "_await_file", fake_await)
+
+    con = env.con()
+    try:
+        text, parsed, reason = gates._reprompt_until_valid(
+            con, run, d, env.tmp, output, review_parse.parse(""),
+            plan_review=False, visual=False,
+        )
+        events = con.execute("SELECT summary FROM events WHERE kind='review.reprompt'").fetchall()
+    finally:
+        con.close()
+
+    assert parsed.valid is True
+    assert parsed.verdict in ("APPROVED", "PASS")
+    assert reason is None
+    assert events and not any("unsubmitted" in e["summary"] for e in events)
+
+
+@pytest.mark.approved
+def test_reprompt_reply_written_during_agent_sample_counts_as_submitted(env, monkeypatch):
+    """If the reply file is written while herdr agent sample is executing and the agent
+    transitions to idle, Office detects the new file and counts it as submitted."""
+    output = env.tmp / "reply.txt"
+    held = "› Office could not read your review (empty reply). Write your complete review again"
+    run, d = _setup_reviewer_reprompt(env, monkeypatch, [EMPTY, held], harness="pi")
+    from office import dispatch, gates, review_parse
+
+    orig_submit = dispatch.submit_prompt
+    def check_held(name, prompt, **kw):
+        res = orig_submit(name, prompt, **kw)
+        assert res == "held", f"expected submit_prompt to return 'held', got {res!r}"
+        assert not output.is_file(), "file should not exist yet"
+        return res
+    monkeypatch.setattr(dispatch, "submit_prompt", check_held)
+
+    # During sample execution, reviewer writes file and transitions to idle
+    def sample_with_side_effect(name):
+        output.write_text("VERDICT: APPROVED\nNEXT proceed\n")
+        return {"status": "idle", "busy": False, "content_hash": None}
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample", sample_with_side_effect)
 
     con = env.con()
     try:
