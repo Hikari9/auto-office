@@ -153,6 +153,7 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
         for key in _policy_leaves(kept):
             if not any(key == k or key.startswith(k + ".") for k in ignored):
                 provenance[key] = "run" if tier == "prompt_cli" else tier
+    _resolve_blank_role_reserves(effective, default)
     effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
     problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
@@ -429,18 +430,30 @@ RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor", "planner": 
                        "plan_reviewer": "reviewer", "code_reviewer": "reviewer"}
 
 
+def _resolve_blank_role_reserves(effective: dict, default: dict) -> None:
+    """Resolve a blank per-role value, or a blank block, to the shipped family reserve at resolve time.
+    A run pins what resolve returns, so its stored reserves are always numbers and a read never consults
+    the installed default."""
+    quota = effective.get("quota")
+    if not isinstance(quota, dict) or "reserve_percent_by_role" not in quota:
+        return
+    shipped = (default.get("quota") or {}).get("reserve_percent_by_role") or {}
+    by_role = quota["reserve_percent_by_role"]
+    if by_role is None:
+        quota["reserve_percent_by_role"] = dict(shipped)
+    elif isinstance(by_role, dict):
+        quota["reserve_percent_by_role"] = {**shipped, **{k: v for k, v in by_role.items() if v is not None}}
+
+
 def quota_reserve_percent(config: dict | None, role: str | None = None) -> float:
     """The protected quota reserve for `role`, read from a config or a pinned run policy:
     quota.reserve_percent_by_role under the role's key, else quota.reserve_percent.
-    A blank value, or a blank block, keeps the shipped reserve for the role's family."""
+    A blank value is absent here; resolve() has already replaced blanks with the shipped family reserve."""
     quota = (config or {}).get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role")
     key = RESERVE_KEY_BY_ROLE.get(role or "")
-    if key is not None:
-        by_role = quota.get("reserve_percent_by_role", {})
-        if by_role is None or (isinstance(by_role, dict) and key in by_role and by_role[key] is None):
-            return shipped_quota_reserve_percent(role)
-        if isinstance(by_role, dict) and key in by_role:
-            return float(by_role[key])
+    if key is not None and isinstance(by_role, dict) and by_role.get(key) is not None:
+        return float(by_role[key])
     return float(quota.get("reserve_percent", 5))
 
 

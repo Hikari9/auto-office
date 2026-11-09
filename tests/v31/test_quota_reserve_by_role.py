@@ -244,3 +244,25 @@ def test_a_started_run_pins_the_per_role_reserves_and_a_config_edit_does_not_mov
     assert code == 0, out
     run = state.get_run(env.con(), run["id"])
     assert config.quota_reserve_percent(run["policy"], "executor") == 20
+
+
+def test_a_blank_executor_pins_the_shipped_number_and_survives_a_changed_shipped_default(tmp_path, monkeypatch):
+    import copy
+
+    import yaml
+
+    files = {"user": "quota:\n  reserve_percent_by_role:\n    executor:\n", "repo": None}
+    resolved, _warnings = config.resolve(None, files=files)
+    assert resolved["quota"]["reserve_percent_by_role"]["executor"] == 20, resolved["quota"]
+
+    moved = copy.deepcopy(_shipped())
+    moved["quota"]["reserve_percent_by_role"]["executor"] = 25
+    moved_path = tmp_path / "config.default.yaml"
+    moved_path.write_text(yaml.safe_dump(moved))
+    monkeypatch.setattr(config, "default_config_path", lambda: moved_path)
+    config.shipped_quota_reserve_percent.cache_clear()
+    try:
+        assert config.shipped_quota_reserve_percent("executor") == 25, "the installed default moved"
+        assert config.quota_reserve_percent(resolved, "executor") == 20
+    finally:
+        config.shipped_quota_reserve_percent.cache_clear()
