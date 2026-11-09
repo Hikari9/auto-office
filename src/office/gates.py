@@ -774,6 +774,14 @@ def reviewer_route_rejections(decision: dict, *, max_items: int = 6) -> str:
     return "; rejected: " + "; ".join(reasons[:max_items])[:420] + suffix
 
 
+def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, expires_at) when the user-pinned reviewer's route is in a quota or runtime cooldown now, else None (#958)."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    until = candidates.route_cooldown_until(con, cand)
+    return (routing.candidate_id(cand), until) if until else None
+
+
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
@@ -805,6 +813,11 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     # Independence is per agent: every reviewer is a fresh dispatch and session,
     # never the producer's, so the producer's model or family is not excluded.
     pinned = review_override or ((task or {}).get("review_override") if role == "code_reviewer" else None)
+    # #958: a pinned route still in a quota or usage-limit cooldown is not launched into the same wall. The review moves
+    # to the next eligible route with a notice. The pin stays on the task, so a later review checks it again.
+    cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
+    if cooled_pin:
+        pinned = None
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
                           else (None, None))
@@ -816,6 +829,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     started_away = [r for r in [*(exclude or []), *(prefer_not or [])] if not r.startswith("harness:")]
     last_failed: tuple[str, str] | None = ((started_away[-1], "an earlier attempt on that route did not settle this review")
                                            if started_away and not pinned else None)
+    if cooled_pin:
+        last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a quota cooldown until {cooled_pin[1][:16]}Z")
     retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
     retried: set[str] = set()
     for attempt in range(limit + 1):

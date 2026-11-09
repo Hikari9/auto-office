@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -893,6 +894,18 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "override": True,
         **({"policy_override": policy_override} if policy_override else {}),
     }
+
+
+def route_cooldown_until(con: sqlite3.Connection, candidate: dict) -> str | None:
+    """Expiry of the latest live quota or runtime cooldown on this candidate's route, or None (#958).
+
+    Checks the keys routing.route checks: the invocation across efforts (a quota wall), and its demotion,
+    harness-wide and shared-pool keys. A user-declared route bypasses routing, so it needs this check of its own."""
+    model = candidate.get("invocation_model_id") or candidate.get("model_id")
+    keys = {routing.cooldown_key(candidate.get("harness"), model), *routing._demotion_keys(candidate)}
+    marks = ",".join("?" for _ in keys)
+    return con.execute(f"SELECT MAX(expires_at) FROM route_cooldowns WHERE expires_at>? AND route IN ({marks})",
+                       (datetime.now(timezone.utc).isoformat(), *keys)).fetchone()[0]
 
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
