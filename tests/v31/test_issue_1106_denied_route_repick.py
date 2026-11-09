@@ -264,3 +264,23 @@ def test_a_status_deny_check_of_a_quoted_route_probes_no_quota(env, monkeypatch)
     task = state.get_task(con, run["id"], "T1")
     assert not dispatch.user_denies(con, run, task, state.recorded_route(task))
     assert probes == [], probes
+
+
+def test_a_size_scoped_deny_of_a_quoted_route_with_no_recorded_change_is_dropped_by_a_rerun(env):
+    """F4 (#1106): a quoted route with no route.change record is re-qualified with the same user-deny
+    check a routed route gets, so a size-scoped deny the declared pin does not see still drops it."""
+    env.trust()
+    start_inline(env, plan=PLANNED, gear="M")
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    size = candidates._effective_task_descriptor(run, state.get_task(con, run["id"], "T1")).get("task_size")
+    assert size, size
+    code, out = env.office("dispatch", "T1", "--as", FB1, "--quote", "use astra here", env=_quota(env))
+    assert code == 0, out
+    _end_round(env)
+    routecmd.change("deny", role="executor", route=FB1, sizes=[size])
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) != FB1, out
+    (change,) = _denials(env)
+    assert (change["before"], change["actor"]) == ("codex@1/gpt-6-astra@low", "office"), change

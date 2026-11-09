@@ -593,6 +593,16 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
                                                 run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
+        # F4 (#1106): the user deny policy reads a quoted route as it reads a routed one: the effective
+        # policy, the task's size, a receipt. Only a deny refuses here; quota, capability and trust keep
+        # the quoted-route contract below.
+        # probe=False: the deny reads policy only, and the quota gate below is the one that probes.
+        verdict = candidates.route_role(con, config, run, "executor", task_id=task["id"], exact=triple,
+                                        dispatch_kind="fix", manual=True, declared=triple, probe=False,
+                                        observe=observe)
+        if denied := _user_denied_reason(verdict, triple):
+            raise Refused("route-denied", f"{triple} is denied ({denied})", scope=task["id"],
+                          next_step=_route_next(verdict, task["id"], run), data={"reason": denied})
         # Historical adapter trust is audit-only under #837. Actual quota and
         # capability checks still apply to this explicitly selected route. A read-only
         # observer (status) asks only the policy deny above, so it probes no quota.
