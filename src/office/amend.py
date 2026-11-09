@@ -756,11 +756,7 @@ def _relaunch_decision(con, run: dict, task: dict) -> dict | None:
     A task `amend route --auto` returned to automatic routing relaunches on the plan slate (#1106)."""
     from office import dispatch
     if state.returned_to_automatic(task):
-        decision = dispatch.planned_route(con, run, {**task, "route_json": None})
-        if decision.get("status") != "selected":
-            raise Refused("no-route", dispatch._route_failure(task["id"], decision), scope=task["id"],
-                          next_step=dispatch._route_next(decision, task["id"], run))
-        return decision
+        return dispatch.replan_from_slate(con, run, task)
     rec = state.recorded_route(task)
     if not rec:
         return None

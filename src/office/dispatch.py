@@ -553,6 +553,20 @@ def user_denies(con, run: dict, task: dict, route: dict) -> bool:
     return False
 
 
+def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None) -> dict:
+    """The route from the approved plan slate, ignoring any reused route (#1106). `denied` is the
+    reused route and the user's deny reason; the decision carries it so the dispatch records the change."""
+    tid = task["id"]
+    decision = planned_route(con, run, {**task, "route_json": None})
+    if decision.get("status") != "selected":
+        failure = _route_failure(tid, decision).removeprefix(f"{tid}: ")
+        why = f"{denied[0]} is denied ({denied[1]}); " if denied else ""
+        raise Refused("no-route", f"{tid}: {why}{failure}", scope=tid, next_step=_route_next(decision, tid, run))
+    if denied:
+        decision["denied_route"] = {"route": denied[0], "reason": denied[1]}
+    return decision
+
+
 def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: bool = False) -> dict:
     """Revalidate a reused executor route before its new lease/outbox is written.
 

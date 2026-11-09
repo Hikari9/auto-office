@@ -514,7 +514,7 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
             raise Refused("resume-impossible", f"{task['id']}'s route was changed since {parent['id']}; a resumed "
                           "session keeps its own", scope=task["id"], next_step=_fresh_cmd(task["id"]))
     if not declared and state.returned_to_automatic(task):  # `amend route --auto` dropped the parent's reroute (#1106)
-        decision = _replan(con, run, task)
+        decision = dispatch.replan_from_slate(con, run, task)
     else:
         decision = _reused_route(con, run, task, parent, rec if declared else parent.get("route") or {})
     cand = decision["candidate"]
@@ -533,8 +533,8 @@ def _reused_route(con, run: dict, task: dict, parent: dict, route: dict) -> dict
         return dispatch.qualify_recorded_route(con, run, task, route)
     except Refused as exc:
         if exc.category == "route-denied":
-            return _replan(con, run, task, denied=(routing.candidate_id(route["candidate"]),
-                                                   exc.data.get("reason") or exc.message))
+            return dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(route["candidate"]),
+                                                                     exc.data.get("reason") or exc.message))
         fix = f"{_fresh_cmd(task['id'])} --reroute routes from current evidence"
         if dispatch._route_quote(route):
             fix += f'; or {_fresh_cmd(task["id"])} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
@@ -544,21 +544,6 @@ def _reused_route(con, run: dict, task: dict, parent: dict, route: dict) -> dict
         raise Refused("route-unavailable",
                       f"{task['id']}'s original route {original} cannot run now: {exc.message}",
                       scope=task["id"], preserved="the task worktree and its route history", next_step=fix) from exc
-
-
-def _replan(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None) -> dict:
-    """The rerun's route from the approved plan slate, not from a reused route (#1106). `denied` is the
-    reused route and the user's deny reason; the decision carries it so the dispatch records the change."""
-    tid = task["id"]
-    # The reused route is dropped: the planner's slate is tried, in its recorded order.
-    decision = dispatch.planned_route(con, run, {**task, "route_json": None})
-    if decision.get("status") != "selected":
-        failure = dispatch._route_failure(tid, decision).removeprefix(f"{tid}: ")
-        why = f"{denied[0]} is denied ({denied[1]}); " if denied else ""
-        raise Refused("no-route", f"{tid}: {why}{failure}", scope=tid, next_step=dispatch._route_next(decision, tid, run))
-    if denied:
-        decision["denied_route"] = {"route": denied[0], "reason": denied[1]}
-    return decision
 
 
 def _mode_required(tid: str) -> Usage:
