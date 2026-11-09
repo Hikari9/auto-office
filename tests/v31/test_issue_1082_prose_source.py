@@ -152,3 +152,19 @@ def test_amend_guard_refuses_sourced_script_push_prose(prose):
 def test_non_script_operands_after_source_stay_allowed(prose):
     assert not shell_safety.unsafe_manual_push(prose, prose=True)
     assert not planfile._unsafe_force_push_instruction(prose)
+
+
+# Self-review: a sourced script's check command may name a word that merely contains push.
+# A push form or push flag still refuses, so only the containing word is allowed.
+@pytest.mark.parametrize("command", [
+    "source ./env.sh && pytest tests/test_pusher.py",
+    "source ./env.sh && pytest tests/test_pushover.py",
+])
+def test_sourced_check_naming_pusher_word_stays_allowed(command):
+    assert not shell_safety.unsafe_manual_push(command)
+    assert not shell_safety.unsafe_manual_push(command, prose=True)
+
+
+def test_sourced_script_with_push_flag_or_form_stays_refused():
+    assert shell_safety.unsafe_manual_push("source ./env.sh && ./release --push")
+    assert shell_safety.unsafe_manual_push("source ./env.sh && ./release.sh pushes")

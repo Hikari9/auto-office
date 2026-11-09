@@ -86,6 +86,9 @@ _BARE_SOURCE_PROSE = re.compile(
     rf"[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
 # The push token after a bare-word script run: the exact word, with trailing punctuation.
 _PUSH_WORD = re.compile(rf"push[{re.escape(_TRAILING_PUNCT)}]*", re.I)
+# A sourced path may push under any inflection, or inside a flag (`--push-tags`). It does not
+# match a word that merely contains push and continues (`test_pusher.py`, `pushover`).
+_PUSH_FORM = re.compile(r"push(?:es|ed|ing)?(?![A-Za-z])", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
@@ -312,7 +315,7 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
         t.lower() == "source" and _bare_source_runs(tokens, i) for i, t in enumerate(tokens))
     # A sourced path may push under any inflection (pushes, Push). A bare word run takes only
     # the push word itself, so "pushed" or "unpushed" in ordinary prose does not refuse.
-    pushes = (any("push" in t.lower() for t in tokens) if sourced
+    pushes = (any(_PUSH_FORM.search(t) for t in tokens) if sourced
               else ("push" in tokens or (bare_run and any(_PUSH_WORD.fullmatch(t) for t in tokens))))
     # Dynamic executable construction must not bypass a detectable push token.
     if pushes and (
