@@ -225,3 +225,15 @@ def test_a_contract_amendment_relaunch_drops_a_reroute_a_user_deny_now_rejects(e
     assert change["before"] == rerouted and change["actor"] == "office", change
     assert change["after"].rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], change
     assert "deny" in change["reason"] and change["task_id"] == "T1" and change["stage"] == "executor", change
+
+
+def test_a_denied_quoted_route_reused_by_a_rerun_is_dropped_and_the_rerun_repicks_the_plan(env):
+    _approve(env)
+    code, out = env.office("dispatch", "T1", "--as", FB1, "--quote", "use astra here", env=_quota(env))
+    assert code == 0, out
+    _end_round(env)
+    routecmd.change("deny", role="executor", route=FB1)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) == CLAUDE, out
+    (change,) = _denials(env)
+    assert (change["before"], change["after"]) == ("codex@1/gpt-6-astra@low", CLAUDE), change
