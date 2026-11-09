@@ -131,6 +131,26 @@ def test_an_amendment_relaunch_after_auto_takes_the_plan_slate_not_the_stale_rer
     assert decision and decision.get("selected") == CLAUDE, decision
 
 
+def test_a_second_auto_on_a_task_already_returned_to_automatic_is_refused(env):
+    _orchestrator_reroute(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back again")
+    assert code != 0 and "already routes automatically" in out, out
+    autos = [c for c in (json.loads(r[0]) for r in env.con().execute(
+        "SELECT payload_json FROM events WHERE kind='route.changed' ORDER BY seq").fetchall()) if c.get("auto")]
+    assert len(autos) == 1, autos
+
+
+def test_an_amendment_after_auto_relaunches_on_the_plan_slate_route(env):
+    rerouted = _orchestrator_reroute(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
+    assert code == 0, out
+    assert _triple(env) == CLAUDE and _triple(env) != rerouted, out
+
+
 def test_a_size_scoped_deny_of_the_reused_route_is_seen_by_status_and_the_rerun(env):
     rerouted = _orchestrator_reroute(env, gear="M")
     con = env.con()

@@ -200,7 +200,7 @@ def _clear_declared(con, run: dict, target: str | None, as_route: str | None, qu
     tid = task["id"]
     rec = state.recorded_route(task)
     declared = bool(rec.get("declared") and dispatch._route_quote(rec))
-    stale = None if declared else _stale_reroute(con, run, tid)
+    stale = None if declared or state.returned_to_automatic(task) else _stale_reroute(con, run, tid)
     if not declared and stale is None:
         raise Refused("route-unchanged", f"{tid} has no declared route; it already routes automatically", scope=tid)
     before = routing.candidate_id((rec if declared else stale)["candidate"])
