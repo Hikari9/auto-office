@@ -505,16 +505,18 @@ def recorded_requests():
     }
 
 
-# decision_hash of each request above, computed by routing.route from the eaf155a tree.
+# decision_hash of each request above, computed by routing.route from the eaf155a tree. The worker and
+# pinned-ceiling hashes are recomputed for the shipped executor reserve of 20% (A25); with it forced back to 5 they
+# return to the eaf155a values. reviewer-legacy is unchanged.
 BASE_EAF155A = {
-    "worker-three-strong": "sha256:04c6dc5d95f977acec17c5cb84e23786c81d7d077e1625d01c5a54769e29c7b8",
-    "worker-local-evidence": "sha256:8d6b7440aa3294fc8e5827784451bbe4cedcd43f96567564422427f5fe635c13",
-    "worker-close-call-draw": "sha256:b3d8b053dbea83c6d4e9ccd664aae979a02636e642b1580e656976111d9f2481",
-    "worker-preference": "sha256:a6b21f01459e0592b8c1263f615c902efd89427901cda3ccdc6621f09124260c",
-    "worker-wave-spread": "sha256:2ad13869914d3d562b63b02854224f30ec853147e4cb6230dfeffbca2c22925f",
-    "worker-exploration": "sha256:30447478e42ac83ab43130b6eb0f985f8f1910a3e07161aed620933a3f9fddec",
-    "pinned-ceiling-25": "sha256:12c934de8c97398e0bd65dc5c25997e4efd23242849bdc4af2338797ba99ba02",
-    "pinned-ceiling-1": "sha256:f1d4aadccae18083c9c93f71f498cde4779d9d00f5d34df4c8747d136ae7923d",
+    "worker-three-strong": "sha256:497c72517c4506f665b003c23e2b5bce59828c7c5eff8107f7ee1c9889d36cc3",
+    "worker-local-evidence": "sha256:efc79a66d95a1cf069ef7d3c3d8eee6a38491b693aff1ea4ff46f69e106b937c",
+    "worker-close-call-draw": "sha256:5608e1cdb18afa5915580cb71da552657664575da74c15b878111aa4a6cc0643",
+    "worker-preference": "sha256:ec56aa161372d9880ab64eef285b40273fa6414b8b27b5d768feff7b342b8107",
+    "worker-wave-spread": "sha256:d3b2cf54ca3d1364a19fad577716b5f6c3682e2f20ac73d2c067d885f44db8df",
+    "worker-exploration": "sha256:765b27345763d563b6d7eb616f3a53482f48688d1cb6e3cc539d0ac1e5390d56",
+    "pinned-ceiling-25": "sha256:6a80f66a82d0a29b9931f4cf239a9e4a37cc477d26f2406e27b1df40207f801a",
+    "pinned-ceiling-1": "sha256:1fc228438ec814c1104f9e07f0d28557bab82bf3141b395f1e4d057bd734f91d",
     "reviewer-legacy": "sha256:ece59075a9739fa6d397c868a32439e59b85e31dbcfd57bae0e4b456f7a8efc9",
 }
 ADAPTIVE = [n for n in BASE_EAF155A if n.startswith(("worker", "pinned"))]
