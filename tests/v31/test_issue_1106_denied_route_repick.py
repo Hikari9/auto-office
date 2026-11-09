@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from office import amend, candidates, route_override, routecmd, state
+from office import amend, candidates, route_override, routecmd, routing, state
 from conftest import start_inline
 from test_adaptive_dispatch import EXTERNAL, FB1, FB2, PRIMARY, PLANNED, _approve, _quota
 
@@ -150,6 +150,24 @@ def test_an_amendment_after_auto_relaunches_on_the_plan_slate_route(env):
     assert code == 0, out
     # The amendment's plan revision can move the slate effort, so compare harness and model only.
     assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
+
+
+def test_an_amendment_relaunch_after_auto_records_the_plan_route_and_a_rerun_reuses_it(env):
+    _orchestrator_reroute(env)
+    code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
+    assert code == 0, out
+    code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
+    assert code == 0, out
+    relaunched = _triple(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    task = state.get_task(con, run["id"], "T1")
+    # The relaunch replaces the returned_to_automatic marker with the route it dispatched.
+    assert not state.returned_to_automatic(task), task["route_json"]
+    assert routing.candidate_id(state.recorded_route(task)["candidate"]) == relaunched
+    _end_round(env)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0 and _triple(env) == relaunched, out
 
 
 def test_a_size_scoped_deny_of_the_reused_route_is_seen_by_status_and_the_rerun(env):

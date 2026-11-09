@@ -758,16 +758,20 @@ def _relaunch_decision(con, run: dict, task: dict) -> dict | None:
     Caller holds the tx."""
     from office import dispatch
     if state.returned_to_automatic(task):
-        return dispatch.replan_from_slate(con, run, task)
-    rec = state.recorded_route(task)
-    if not rec:
-        return None
-    if denied := dispatch.route_denial(con, run, task, rec):
+        decision = dispatch.replan_from_slate(con, run, task)
+    else:
+        rec = state.recorded_route(task)
+        if not rec:
+            return None
+        denied = dispatch.route_denial(con, run, task, rec)
+        if not denied:
+            return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
         decision = dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(rec["candidate"]), denied))
-        dispatch._record_routing(con, run, decision)
-        dispatch.note_route(con, run, task, decision)
-        return decision
-    return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
+    # A _qualified decision skips request_launch's recording, so record it here: the relaunch replaces
+    # the returned_to_automatic marker (or the denied route) with the route it actually dispatches (#1106 H3).
+    dispatch._record_routing(con, run, decision)
+    dispatch.note_route(con, run, task, decision)
+    return decision
 
 
 def _owners_label(owners: list[str]) -> str:
