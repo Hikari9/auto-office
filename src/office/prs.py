@@ -408,7 +408,9 @@ def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
     if not ok:
         ok, err = _safe_restack_push(con, run, task, dispatch, rev, err)
     if not ok:
-        if "remote tip is not a recorded previous task revision" in err:
+        if any(reason in err for reason in (
+                "no earlier task revision proves ownership of remote head",
+                "remote tip is not a recorded previous task revision")):
             pr = {**(task.get("pr") or {}), "push_refused": {"revision": rev["id"],
                   "branch": dispatch["branch"], "reason": err}}
             with db.transaction(con):

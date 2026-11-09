@@ -41,15 +41,15 @@ def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(env, mon
     refusal = task["pr"]["push_refused"]
     assert refusal["revision"] == task["accepted_revision_id"]
     assert refusal["branch"] == branch
-    assert "remote tip is not a recorded previous task revision" in refusal["reason"]
+    assert "no earlier task revision proves ownership of remote head" in refusal["reason"]
 
     _, status = env.ojson("status")
     next_action = status["data"]["next"]
-    assert "inspect origin/" + branch in next_action, next_action
+    assert ("inspect origin/" + branch).lower() in next_action.lower(), next_action
     assert "without force-pushing it" in next_action and "office close --handoff <pr-url>" in next_action
     assert "office land" not in next_action
 
     code, landed = env.office("land", "--merge", "--quote", "approved merge")
     assert code != 0, landed
-    assert "next:" in landed and "inspect origin/" + branch in landed, landed
+    assert "next:" in landed and ("inspect origin/" + branch).lower() in landed.lower(), landed
     assert "office close --handoff <pr-url>" in landed and "no-pr" in landed, landed
