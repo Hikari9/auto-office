@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.15.60
 
-A reused route that a user deny now rejects is dropped and the rerun re-picks from the approved plan (recorded as a route change); `amend route --auto` clears a stale reroute on the parent dispatch, and status names the route the rerun takes (#1106 H3).
+A reused route that a user deny now rejects is dropped and the rerun re-picks from the approved plan (recorded as a route change); `amend route --auto` clears a stale reroute on the parent dispatch; status shows the route the next launch takes from the same selection the rerun uses, and a planned route that will not run is shown with its rejection reason, never as `(planned)` (#1106 H3).
 
 ## 3.15.59
 

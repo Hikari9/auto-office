@@ -10,6 +10,7 @@ from conftest import start_inline
 from test_adaptive_dispatch import EXTERNAL, FB1, FB2, PRIMARY, PLANNED, _approve, _quota
 
 CLAUDE = "claude@1/claude-opus-5-5@medium"
+FALLBACK = "codex@1/gpt-6-astra@low"  # FB1 in the planned slate, after the claude primary
 
 
 def _denials(env):
@@ -90,6 +91,23 @@ def test_status_names_the_planned_route_a_denied_declared_pin_gives_way_to(env):
     assert code == 0 and _triple(env) == CLAUDE, out
 
 
+def test_status_names_the_eligible_fallback_a_denied_slate_primary_gives_way_to(env):
+    """F6 (#1106): the reused route is the approved slate primary, a user deny now rejects it, and a planned
+    fallback stays eligible. Status names the fallback the rerun launches and never the denied primary."""
+    _approve(env)
+    env.office("dispatch", "T1", env=_quota(env), check=0)
+    assert _triple(env) == CLAUDE, _triple(env)
+    _end_round(env)
+    routecmd.change("deny", role="executor", route=PRIMARY)
+    code, out = env.office("status")
+    assert f"routes: T1 {FALLBACK} (planned) [{CLAUDE} skipped:" in out, out
+    assert f"routes: T1 {CLAUDE} (planned" not in out, out
+    code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
+    assert code == 0 and _triple(env) == FALLBACK, out
+    (change,) = _denials(env)
+    assert (change["before"], change["after"]) == (CLAUDE, FALLBACK), change
+
+
 def test_auto_clears_a_stale_reroute_on_the_parent_and_the_rerun_routes_from_the_plan(env):
     rerouted = _orchestrator_reroute(env)
     code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
@@ -113,7 +131,7 @@ def test_status_and_the_refused_rerun_name_the_same_planned_route_when_nothing_r
     for route in (_route(rerouted), PRIMARY, FB1, FB2):
         routecmd.change("deny", role="executor", route=route)
     code, out = env.office("status")
-    assert f"routes: T1 {CLAUDE} (planned)" in out, out
+    assert f"routes: T1 {CLAUDE} (planned; will not run:" in out, out
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
     assert code != 0 and "every planned route is unavailable" in out, out
     assert f"{rerouted} is denied" in out and f"{CLAUDE}:" in out, out
