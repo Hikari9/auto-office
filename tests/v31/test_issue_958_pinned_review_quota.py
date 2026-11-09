@@ -80,6 +80,10 @@ def test_a_harness_wide_cooldown_also_moves_a_pinned_review(env):
         con.commit()
     pinned, launched = _review_with_pin(env, cool=cool_harness)
     assert launched and pinned not in launched, launched
+    assert _pin(env)["as"] == pinned and _pin(env)["by"] == "user"  # the pin is not rewritten
+    assert any("the pinned route" in r and "is in a cooldown until" in r for r in _fallback_reasons(env)), _fallback_reasons(env)
+
+
 @V31
 def test_an_expired_cooldown_does_not_move_the_pinned_review(env):
     pinned, launched = _review_with_pin(env, cool=lambda route: _cool(env, route, expires=PAST))

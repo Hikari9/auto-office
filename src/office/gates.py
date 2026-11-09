@@ -1325,10 +1325,14 @@ def _gate_review_target(con, gate_id: str | None) -> str | None:
     if g and g["kind"] == "code_review" and g["task_id"]:
         return g["task_id"]
     return None
+
+
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
     target = _gate_review_target(con, d.get("gate_id"))
     return f"office review {target} --as <harness>/<model>[@effort]" if target else "office resume"
+
+
 def cooled_pin_recovery(con, gate_id: str | None, candidate: str, until: str) -> str:
     """Why a pinned reviewer did not run, and when and how to re-run it: its route, its cooldown expiry and the
     exact `office review <target> --as <route>` that runs it once the cooldown has expired (#958)."""
@@ -1337,6 +1341,8 @@ def cooled_pin_recovery(con, gate_id: str | None, candidate: str, until: str) ->
     target = _gate_review_target(con, gate_id) or "<task|lane>"
     return (f"the pinned reviewer {route} is in a cooldown until {until[:16]}Z; after that, re-run only its review: "
             f"office review {target} --as {route}")
+
+
 def cooling_pin_recovery(con, run: dict, task: dict | None, gate_id: str) -> str | None:
     """The `next:` recovery for a blocked review whose pinned reviewer is still cooling, or None (#958)."""
     pinned = (task or {}).get("review_override")
