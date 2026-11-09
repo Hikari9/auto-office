@@ -147,9 +147,10 @@ def next_action(con, run: dict) -> str:
             from office import gates as gates_review
             block = gates_review.unavailable_review_block(con, run, t)
             if block:
+                reroute = gates_review.cooling_pin_recovery(con, run, t, block["id"]) or (
+                    f"Re-run only the review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]")
                 return (f"{tid} code review of {block['revision_id']} returned no verdict "
-                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). Re-run only the "
-                        f"review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]; or review it "
+                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). {reroute}; or review it "
                         f"yourself as the orchestrator (recorded degraded, non-independent; refused for the session that "
                         f"produced it): office review {tid} --report <file>; office resume retries the same reviewer chain. "
                         f"A waiver is the user's last resort: office approve waive {tid}:code --quote \"<words>\"")
@@ -608,8 +609,10 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: 
         owner, detail = gates_mod.owner_state(con, run, g)
         if owner in ("none", "dead"):
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but {detail}")
-    for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
-                         (run["id"], since)).fetchall():
+    # A job the orchestrator revoked failed on purpose (`revoked by orchestrator: <reason>`): it is not a stall (#958).
+    # The marker is specific so a harness error that starts with "revoked:" is still a stall.
+    for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ? "
+                         "AND COALESCE(error, '') NOT GLOB 'revoked by orchestrator:*'", (run["id"], since)).fetchall():
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     out.extend(_amendment_stalls(con, run))
     out.extend(_idle_executors(con, run, acts))
