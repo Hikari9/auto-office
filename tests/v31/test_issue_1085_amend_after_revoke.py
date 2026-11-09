@@ -130,15 +130,22 @@ def test_rerun_resolves_the_requirements_delivery_queued_on_a_revoked_task(env):
     assert code == 0, out
     code, out = env.office(*AMEND, env=EXTERNAL)
     assert code == 0 and "T1 waits for office rerun (lease revoked)" in out, out
-    waiting = env.con().execute("SELECT id FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()[0]
+    from office import paths
+    run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
+    waiting = env.con().execute("SELECT id, amendment_id FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()
     # The requirements change relaunched T2 (launching), and that session holds the overlapping scope until revoked.
     env.office("revoke", "T2", env=EXTERNAL, check=0)
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
     assert code == 0, out
-    row = env.con().execute("SELECT status, superseded_by FROM deliveries WHERE id=?", (waiting,)).fetchone()
-    # request_launch supersedes deliveries at or below the fresh session's applied plan version (every relaunch runs it).
-    assert tuple(row) == ("superseded", "relaunch"), tuple(row)
-    assert _queued_t1_dispatches(env) == [], "no delivery stays queued on the revoked dispatch"
+    fresh = task_row(env, "T1")["current_dispatch_id"]
+    # A requirements change is not in the contract, so the fresh session takes it over rather than superseding it.
+    row = env.con().execute("SELECT status, superseded_by, dispatch_id FROM deliveries WHERE id=?", (waiting["id"],)).fetchone()
+    assert tuple(row) == ("queued", None, fresh), tuple(row)
+    assert _queued_t1_dispatches(env) == [fresh], "the delivery must be queued on the fresh session"
+    # Supersession is not delivery: the fresh executor's brief must carry the delta and ask for its ack.
+    brief = (paths.run_dir(run_id) / "dispatches" / fresh / "brief.md").read_text()
+    assert f"AMENDMENT {waiting['amendment_id']} (plan -> p" in brief, brief
+    assert "R9: log each call" in brief and f"office ack {waiting['amendment_id']}" in brief, brief
 
 
 @pytest.mark.review_contract("v3.1")

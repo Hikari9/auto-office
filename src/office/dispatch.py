@@ -1331,9 +1331,13 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     # This session starts from the current contract, so an amendment still
     # waiting on an earlier session of the task is already in its brief; left
     # queued, it would hold the new revision at amendment_pending (and its ack
-    # would be refused as the wrong holder).
+    # would be refused as the wrong holder). A requirements delta is not in the
+    # contract, so it is never superseded here: it reaches this brief only as a
+    # delivery, and the transfer below hands it over (#1085).
     con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
-                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=? "
+                "AND NOT EXISTS (SELECT 1 FROM amendments a WHERE a.run_id=deliveries.run_id AND a.class='requirements' "
+                "AND a.id=substr(deliveries.run_id, 1, 8) || ':' || deliveries.amendment_id)",
                 (run["id"], task_id, dispatch_id, applied))
     # A newer amendment (a requirements change can target a plan version past
     # the task contract) is not in this brief: hand it to this session, or no
