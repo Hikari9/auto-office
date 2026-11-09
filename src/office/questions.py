@@ -443,7 +443,7 @@ def _answer_ended(con, run: dict, d: dict, who: str, text: str) -> Result | None
     with db.transaction(con):
         state.emit(con, run, ANSWERED, f"{who} {d['id']}: question answered (recorded for the rerun)", audience="runtime",
                    task_id=tid, dispatch_id=d["id"],
-                   payload={"fingerprint": q.get("fingerprint"), "question": q.get("question"), "answer": text[:500],
+                   payload={"fingerprint": q.get("fingerprint"), "question": q.get("question"), "answer": text,
                             "taken": True, "delivery": "pending-rerun"})
         state.update_task(con, run["id"], tid, pause_reason=f"question answered but {d['id']} ended: "
                           f"office rerun {tid} --resume|--fresh")
@@ -512,7 +512,7 @@ def answer(con, run: dict, target: str | None, text: str, *, keys: str | None = 
     with db.transaction(con):
         state.emit(con, run, ANSWERED, f"{who} {d['id']}: question answered ({how})", audience="runtime",
                    task_id=d.get("task_id"), dispatch_id=d["id"],
-                   payload={"fingerprint": q["fingerprint"], "answer": text[:500], "taken": took})
+                   payload={"fingerprint": q["fingerprint"], "answer": text, "taken": took})
     if not took:
         return Result(lines=[f"{who} {d['id']}: {how}; the same question is still showing in pane {pane}"],
                       next=f"herdr pane read {pane}, then office status")
