@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.60
+
+`office route policy --effective` names each route's per-size states when they differ from the unsized verdict (#1099). A user role rule written after a run pinned its policy reaches that run's next routing decision, and `office route allow|neutral|deny|clear` says so (#1100).
+
 ## 3.15.59
 
 A lane visual review now needs one OBSERVATION line per screenshot (no bare APPROVED), and the reviewer infers which UI sections must be shown from the acceptance and plan, reporting uncovered ones as findings (#1078).
