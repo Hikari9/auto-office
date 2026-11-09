@@ -1,5 +1,5 @@
 """The protected quota reserve is read per role: executor family 20, reviewer family 5, else quota.reserve_percent."""
-from office import candidates, config, routing
+from office import candidates, config, db, routing
 
 
 def _candidate(harness, model, *, remaining, caps=("review",)):
@@ -73,11 +73,42 @@ def test_the_shipped_default_resolves_and_is_pinned_with_the_quota_block():
 
 
 def test_a_user_tier_role_key_overrides_only_its_family():
-    files = {"user": "quota:\n  reserve_percent_by_role:\n    executor: 10\n", "repo": None}
+    files = {"user": "quota:\n  reserve_percent: 7\n  reserve_percent_by_role:\n    executor: 10\n", "repo": None}
     resolved, _warnings = config.resolve(None, files=files)
 
     assert config.quota_reserve_percent(resolved, "executor") == 10
     assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
+    assert config.quota_reserve_percent(resolved, "code_reviewer") == 5
+
+
+def test_a_non_mapping_role_block_falls_back_to_quota_reserve_percent():
+    assert config.quota_reserve_percent({"quota": {"reserve_percent": 7, "reserve_percent_by_role": 20}}, "executor") == 7
+    assert config.quota_reserve_percent({"quota": {"reserve_percent": 7, "reserve_percent_by_role": ["executor"]}},
+                                        "executor") == 7
+
+
+def test_route_role_hands_each_role_its_own_reserve_to_the_router(tmp_path, monkeypatch):
+    """Production wiring: candidates.route_role builds the router's policy from the config's per-role reserve."""
+    con = db.connect(tmp_path / "runs.db")
+    con.execute("INSERT INTO runs(id, playbook, phase, risk_json) VALUES('R1','Change','open','{}')")
+    shipped, _warnings = config.resolve(None, files={"user": None, "repo": None})
+    seen = {}
+    monkeypatch.setattr(candidates, "build_candidates", lambda *a, **kw: ([], []))
+    monkeypatch.setattr("office.benchmarks.apply", lambda run, cands: {})
+
+    def capture(request):
+        seen[request["role"]] = request
+        return {"status": "no_candidate"}
+
+    monkeypatch.setattr("office.routing.route", capture)
+    try:
+        for role in ("executor", "plan_reviewer"):
+            candidates.route_role(con, shipped, {"id": "R1"}, role, probe=False)
+    finally:
+        con.close()
+
+    assert seen["executor"]["policy"]["quota_reserve_percent"] == 20
+    assert seen["plan_reviewer"]["policy"]["quota_reserve_percent"] == 5
 
 
 def test_the_pinned_reserve_notice_names_the_role_and_its_value():
