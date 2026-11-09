@@ -73,6 +73,7 @@ SOURCED_PUSH_PROSE = [
     "source \"release.sh to push the tag",
     "source 'scripts/release.sh' and push the tag",
     "run source \"release.sh\" to push the tag",
+    "source \"my dir/release.sh\" and push the tag",
     "Source release.sh to push the tag",
     "Run source release.sh. Then push the tag",
     "source release.sh and pushes the tag",
@@ -111,6 +112,7 @@ def test_amend_guard_refuses_sourced_script_push_prose(prose):
     "run source release.sh to build the tag",
     "run source release.sh to build the tag\"",
     "source \"release.sh to build the tag",
+    "writes the source \"release notes.md\" file and pushes nothing",
 ])
 def test_non_script_operands_after_source_stay_allowed(prose):
     assert not shell_safety.unsafe_manual_push(prose, prose=True)

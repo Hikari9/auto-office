@@ -69,6 +69,7 @@ _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # A path or expansion operand: `source` runs the file it names. A bare or
 # directory-relative script name (`release.sh`, `scripts/env.sh`) also counts,
 # optionally quoted. Not anchored with `$`: the fallback scan embeds this pattern.
+_SCRIPT_TAIL = re.compile(r"\.(?:sh|bash|zsh|ksh|env)\Z", re.I)
 _SOURCE_OPERAND = re.compile(
     r"[\"']?(?:\.{1,2}/|/(?=[\w.~-])|~|\$(?=[A-Za-z_{(@*#?!]|\d(?!\d))|\x60"
     r"|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w+-]|\.[\w+-]))", re.I)
@@ -82,7 +83,10 @@ def _sources_file(tokens: list[str], i: int, prose: bool) -> bool:
     so only a path or expansion operand counts."""
     if not prose:
         return True
-    return i + 1 < len(tokens) and _SOURCE_OPERAND.match(tokens[i + 1]) is not None
+    # A quoted operand may hold a space ("my dir/release.sh"); its script tail still counts.
+    return i + 1 < len(tokens) and (
+        _SOURCE_OPERAND.match(tokens[i + 1]) is not None
+        or _SCRIPT_TAIL.search(tokens[i + 1]) is not None)
 
 
 def _is_dynamic(token: str) -> bool:
