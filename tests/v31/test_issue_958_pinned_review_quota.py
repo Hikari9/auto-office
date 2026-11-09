@@ -72,6 +72,15 @@ def test_a_pinned_reviewer_in_a_cooldown_is_not_launched_and_the_review_moves_to
 
 
 @V31
+def test_a_harness_wide_cooldown_also_moves_a_pinned_review(env):
+    def cool_harness(route):
+        con = env.con()
+        con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
+                    (routing.harness_demotion_key(_split(route)[0]), FAR, NOW))
+        con.commit()
+    pinned, launched = _review_with_pin(env, cool=cool_harness)
+    assert launched and pinned not in launched, launched
+@V31
 def test_an_expired_cooldown_does_not_move_the_pinned_review(env):
     pinned, launched = _review_with_pin(env, cool=lambda route: _cool(env, route, expires=PAST))
     assert launched == [pinned], launched
