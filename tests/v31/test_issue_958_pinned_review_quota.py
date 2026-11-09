@@ -188,3 +188,21 @@ def test_a_launch_failed_with_revoked_text_and_no_revoke_is_still_a_stall(env, m
                 "WHERE dedup_key=?", (f"launch:{did}",))
     con.commit()
     assert any("job launch_agent failed: revoked: refresh token" in s for s in guide.stalls(con, run)), guide.stalls(con, run)
+
+
+def test_a_fenced_integrate_job_is_a_stall_unless_its_integration_revoke_is_on_record(env):
+    # A31: `revoke_integration` fences the integrate job with `revoked: <reason>` and emits the matching event.
+    from office import db
+    approved_run(env, executor=EXECUTOR, code_reviewer=[{"reply": PASS}])
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, max_attempts, "
+                "created_at, finished_at, error) VALUES('Jint', ?, 'integrate', 'integrate:Jint', '{}', ?, 'failed', 0, 1, "
+                "'2026-11-10T00:00:00+00:00', '2026-11-10T00:00:00+00:00', 'revoked: test reason')",
+                (run["id"], run["office_version"]))
+    con.commit()
+    # Negative control: the job text alone, with no integration revoke recorded, is still a stall.
+    assert any("job integrate failed: revoked: test reason" in s for s in guide.stalls(con, run)), guide.stalls(con, run)
+    with db.transaction(con):
+        state.emit(con, run, "integration.revoked", "integration reviews revoked: test reason")
+    assert not any("job integrate failed" in s for s in guide.stalls(con, run)), guide.stalls(con, run)
