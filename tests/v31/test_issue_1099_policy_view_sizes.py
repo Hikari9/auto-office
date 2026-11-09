@@ -1,7 +1,7 @@
 """#1099: the unsized `office route policy --effective` view names the states that differ by task size.
 
 Unit tier. An isolated user config and a temp repository, the real catalog and candidate code, and a pinned
-installed Claude major. No model is called.
+pinned installed claude and codex versions, so no host binary runs. No model is called.
 """
 import subprocess
 
@@ -11,6 +11,7 @@ import yaml
 from office import adapters, routecmd
 
 INSTALLED_CLAUDE = "2.1.311"
+INSTALLED_CODEX = "0.130.0"
 SONNET = "claude/claude-sonnet-5-5@high"
 PLAIN = "codex/gpt-6-luna@low"  # no shipped executor rule, so no size scope
 SHIPPED_SONNET_BY_SIZE = "deny XS,S,M (shipped), allow L (shipped), neutral XL (default)"
@@ -25,9 +26,10 @@ def isolated(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     monkeypatch.chdir(repo)
     real = adapters.route_version
+    versions = {"claude": INSTALLED_CLAUDE, "codex": INSTALLED_CODEX}
 
     def route_version(harness, adapter, sources=None):
-        return INSTALLED_CLAUDE if harness == "claude" else real(harness, adapter, sources)
+        return versions.get(harness) or real(harness, adapter, sources)
 
     monkeypatch.setattr(adapters, "route_version", route_version)
     return target
@@ -105,15 +107,21 @@ def test_a_sized_view_shows_no_by_size_breakdown(isolated):
     assert row_for(result, SONNET)["state"] == "deny"
 
 
-def test_a_route_change_says_running_runs_apply_the_rule_after_the_existing_lines(isolated):
-    result = routecmd.change("allow", role="executor", route=PLAIN)
-    assert result.lines == [
-        f"executor/{result.data['route']}: allow (user config)",
-        "an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route",
-        ("running runs apply this rule at their next routing decision; "
-         "`office config --run <id> --apply-routing --quote \"<words>\"` "
-         "re-pins the rest of a run's pinned routing"),
-    ]
+@pytest.mark.parametrize("action, running", [
+    ("allow", "apply this rule"), ("deny", "apply this rule"), ("neutral", "apply this rule"), ("clear", "drop this rule"),
+])
+def test_a_route_change_says_running_runs_apply_the_rule_after_the_existing_lines(isolated, action, running):
+    if action == "clear":
+        routecmd.change("allow", role="executor", route=PLAIN)
+    result = routecmd.change(action, role="executor", route=PLAIN)
+    verb = "cleared user rule" if action == "clear" else action
+    expected = [f"executor/{result.data['route']}: {verb} (user config)"]
+    if action == "allow":
+        expected.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
+    expected.append(f"running runs {running} at their next routing decision; "
+                    "`office config --run <id> --apply-routing --quote \"<words>\"` "
+                    "re-pins the rest of a run's pinned routing")
+    assert result.lines == expected
 
 
 def test_a_route_change_that_writes_nothing_says_nothing_about_running_runs(isolated):

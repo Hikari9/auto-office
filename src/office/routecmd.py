@@ -215,7 +215,8 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
         lines.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
-    lines.append("running runs apply this rule at their next routing decision; `office config --run <id> --apply-routing "
+    running = "drop this rule" if action == "clear" else "apply this rule"
+    lines.append(f"running runs {running} at their next routing decision; `office config --run <id> --apply-routing "
                  "--quote \"<words>\"` re-pins the rest of a run's pinned routing")
     return Result(lines=lines, next="office route policy --effective --role " + (role if role != "*" else "code_reviewer"),
                   data={"changed": True, "role": role, "route": routes[0], "routes": routes, "action": action,
