@@ -79,6 +79,12 @@ SOURCED_PUSH_PROSE = [
     "source release.sh and pushes the tag",
     "source release.sh to Push the tag",
     "source release.sh to push the tag\"",
+    # F7: an extensionless command-position operand is a PATH script too.
+    "source publish to push the tag",
+    "Source publish to push the tag",
+    "run source publish and push the tag",
+    "source publish then pushes the tag",
+    "source publish to push the tag'",
 ]
 
 
@@ -113,6 +119,12 @@ def test_amend_guard_refuses_sourced_script_push_prose(prose):
     "run source release.sh to build the tag\"",
     "source \"release.sh to build the tag",
     "writes the source \"release notes.md\" file and pushes nothing",
+    # F7 negatives: a bare operand is a script only in command position and only with a push.
+    "writes the source publish file and pushes nothing",
+    "source publish to build the tag",
+    "source publish to build the tag'",
+    "Source revenue $500 covers the retreat.",
+    "run source of truth notes for the retreat",
 ])
 def test_non_script_operands_after_source_stay_allowed(prose):
     assert not shell_safety.unsafe_manual_push(prose, prose=True)
