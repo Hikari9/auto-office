@@ -62,13 +62,20 @@ def named_tests(ledger_text: str | None) -> list[str]:
 _PACKAGE_OPTIONS = ("--with", "-w", "--with-editable", "--from")  # uv/uvx options whose value is a package
 
 
+def _words(check: str) -> list[str]:
+    """Shell words of a check. Operators are their own tokens even when glued to a word: `pytest -q;echo`."""
+    lex = shlex.shlex(check, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+
+
 def _runner(task: dict) -> list[str] | None:
     """The pytest invocation the task's own checks use, minus test selection, or None."""
     for check in task.get("checks") or []:
         if not isinstance(check, str) or "validate.sh" in check or not _PYTEST.search(check):
             continue
         try:
-            words = shlex.split(check)
+            words = _words(check)
         except ValueError:
             continue
         # The pytest *command* word, not the value of an option that names a package to install:
@@ -83,17 +90,14 @@ def _runner(task: dict) -> list[str] | None:
         for word in words[start + 1:]:
             if word in _SHELL_OPERATORS:
                 break
-            has_semi = word.endswith(";")
-            clean = word.rstrip(";") if has_semi else word
-            if clean:
-                if skip:
-                    skip = False
-                elif clean in _DROP_WITH_VALUE:
-                    skip = True
-                elif clean.startswith("-") and not clean.startswith(_DROP_WITH_VALUE):
-                    kept.append(clean)
-            if has_semi:
-                break
+            if not word:
+                continue
+            if skip:
+                skip = False
+            elif word in _DROP_WITH_VALUE:
+                skip = True
+            elif word.startswith("-") and not word.startswith(_DROP_WITH_VALUE):
+                kept.append(word)
         return kept
     return None
 

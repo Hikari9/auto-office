@@ -38,6 +38,16 @@ def test_runner_stops_at_shell_operator_chained_checks():
     assert self_review_proof._runner({"checks": ["pytest tests/ -q; dotnet run --project X"]}) == ["pytest", "-q"]
 
 
+def test_runner_splits_operators_glued_to_words():
+    """#1084: an operator with no surrounding space must still end the pytest command, not join a flag or fail open."""
+    assert self_review_proof._runner({"checks": ["pytest -q;echo hi"]}) == ["pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["pytest -q|tee log"]}) == ["pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["pytest -q&&echo hi"]}) == ["pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["echo ok;pytest -q"]}) == ["pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["setup.sh&&pytest -q tests/"]}) == ["pytest", "-q"]
+    assert self_review_proof._runner({"checks": ["pytest -k 'a and b' -q && echo done"]}) == ["pytest", "-q"]
+
+
 # ------------------------------------------------------------------ #1086: new source files in revert proof
 
 def _repo_with_new_source(tmp_path: Path, test_text: str, source: str) -> tuple[Path, str, str]:
