@@ -131,6 +131,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
             dispatching += dispatches
             role_lines.append(f"  {result['route']}: {state['state']} ({state['source']}) -> "
                               + ("dispatches" if dispatches else "does not dispatch") + f" ({why})"
+                              + (" at an unknown size" if by_size else "")
                               + (f"; by size: {_by_size_text(by_size)}" if by_size else ""))
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
         if show_rows:

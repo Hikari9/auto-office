@@ -54,7 +54,14 @@ def row_for(result, route):
 def test_the_unsized_line_names_each_task_sizes_state_and_source(isolated):
     line = line_for(view(), SONNET)
     assert line.startswith(f"  {SONNET}: neutral (default) -> ")
-    assert line.endswith(f"; by size: {SHIPPED_SONNET_BY_SIZE}")
+    assert line.endswith(f" at an unknown size; by size: {SHIPPED_SONNET_BY_SIZE}")
+
+
+def test_a_route_denied_at_every_size_says_its_headline_verdict_is_for_an_unknown_size(isolated):
+    write_rules(isolated, {"role": "executor", "route": PLAIN, "state": "deny", "sizes": ["XS", "S", "M", "L", "XL"]})
+    line = line_for(view(), PLAIN)
+    assert line.startswith(f"  {PLAIN}: neutral (default) -> ")
+    assert line.endswith(" at an unknown size; by size: deny XS,S,M,L,XL (user)")
 
 
 def test_the_unsized_row_carries_by_size_as_a_map(isolated):
