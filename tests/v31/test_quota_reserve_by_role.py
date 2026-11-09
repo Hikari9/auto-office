@@ -1,6 +1,8 @@
 """The protected quota reserve is read per role: executor family 20, reviewer family 5, else quota.reserve_percent."""
 from datetime import datetime, timezone
 
+import pytest
+
 from office import candidates, config, db, routing, scheduler
 
 
@@ -177,3 +179,28 @@ def test_queue_admission_holds_executor_work_at_13_percent_left_under_the_execut
     assert shipped_entry["decision"] == "hold" and shipped_entry["quota"] == "exhausted", shipped_entry
     assert "20% reserve" in shipped_entry["reason"], shipped_entry
     assert base_entry["decision"] == "admit" and base_entry["quota"] == "ok", base_entry
+
+
+def test_a_blank_role_value_in_the_user_tier_keeps_the_shipped_reserve_for_its_family():
+    files = {"user": "quota:\n  reserve_percent_by_role:\n    executor:\n", "repo": None}
+    resolved, _warnings = config.resolve(None, files=files)
+
+    assert config.quota_reserve_percent(resolved, "executor") == 20
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
+
+
+def test_a_user_quoted_executor_route_at_13_percent_is_refused_at_the_executor_reserve(monkeypatch):
+    """qualify_recorded_route reads the executor reserve: 13% left is under the shipped 20%, so the reuse is refused."""
+    from office import adapters, dispatch, state
+    shipped = _shipped()
+    cand = _candidate("codex", "gpt-6", remaining=13)
+    monkeypatch.setattr(state, "pinned_config", lambda run: shipped)
+    monkeypatch.setattr(candidates, "declared_decision", lambda *a, **kw: {"candidate": dict(cand)})
+    monkeypatch.setattr(adapters, "load_all", lambda: {"codex": {}})
+    monkeypatch.setattr(candidates, "probe_quota", lambda adapter: {})
+    monkeypatch.setattr(candidates, "quota_for_candidate", lambda c, probe: {
+        "status": "ok", "tightest_remaining_percent": 13, "projected_burn_percent": 0})
+    route = {"candidate": dict(cand), "route_authority": {"quote": "use codex for this fix"}}
+
+    with pytest.raises(state.Refused, match="protected reserve"):
+        dispatch.qualify_recorded_route(None, {"id": "R1", "repo_root": None}, {"id": "T1"}, route)

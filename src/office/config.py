@@ -437,7 +437,9 @@ def quota_reserve_percent(config: dict | None, role: str | None = None) -> float
     if not isinstance(by_role, dict):
         by_role = {}
     key = RESERVE_KEY_BY_ROLE.get(role or "")
-    if key is not None and by_role.get(key) is not None:
+    if key is not None and key in by_role:
+        if by_role[key] is None:  # a blank value keeps the shipped reserve for its family, not the base
+            return shipped_quota_reserve_percent(role)
         return float(by_role[key])
     return float(quota.get("reserve_percent", 5))
 
