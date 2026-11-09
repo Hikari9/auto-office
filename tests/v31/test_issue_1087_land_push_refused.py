@@ -3,17 +3,23 @@ from __future__ import annotations
 
 import subprocess
 
-from conftest import Env, GOOD_ADD, _activate, start_inline
+import pytest
+
+from conftest import Env, GOOD_ADD, PLAN_TWO, _activate, start_inline
 from test_task_prs import github, remote_head
 
 
-def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_ready_task", [False, True])
+def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(tmp_path, monkeypatch, with_ready_task):
     env = _activate(Env(tmp_path, monkeypatch), monkeypatch)
     bare = github(env, monkeypatch)
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    start_inline(env)
+    if with_ready_task:
+        start_inline(env, plan=PLAN_TWO)
+    else:
+        start_inline(env)
     env.office("approve", "plan", "--quote", "go", check=0)
     _, status = env.ojson("status")
     run_id = status["data"]["run_id"]
@@ -49,6 +55,9 @@ def test_unrecorded_remote_tip_refusal_survives_through_status_and_land(tmp_path
     assert ("inspect origin/" + branch).lower() in next_action.lower(), next_action
     assert "without force-pushing it" in next_action and "office close --handoff <pr-url>" in next_action
     assert "office land" not in next_action
+    if with_ready_task:
+        assert "office dispatch T2" in next_action, next_action
+        return
 
     code, landed = env.office("land", "--merge", "--quote", "approved merge")
     assert code != 0, landed

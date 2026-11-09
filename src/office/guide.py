@@ -467,6 +467,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.next = f"{NO_WAKE_WAIT}: {res.next}"
     if oversize_next and not episodes and not stuck_reply:
         res.next = f"{res.next}; {oversize_next}"
+    from office import prs
+    push_recovery = None
+    for task in tasks:
+        push_recovery = prs.push_refusal_next(task)
+        if push_recovery:
+            break
+    if push_recovery and push_recovery not in res.next:
+        res.next = f"{res.next}; pending task PR push recovery: {push_recovery}"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
