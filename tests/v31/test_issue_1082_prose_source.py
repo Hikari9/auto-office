@@ -61,3 +61,46 @@ def test_real_manual_push_and_dynamic_commands_remain_denied():
     assert shell_safety.unsafe_manual_push("run source ./scripts/release.sh and push the tag", prose=True)
     assert shell_safety.unsafe_manual_push("source $FOO", prose=True)
     assert shell_safety.unsafe_manual_push("source ./publish.sh 'push the tag", prose=True)
+    assert shell_safety.unsafe_manual_push("source ./publish.sh 'push the tag", prose=True)
+
+
+# F4: a sourced script named by a bare, relative or quoted path runs the file in
+# prose too. Each must be refused by the plan and amend guards.
+SOURCED_PUSH_PROSE = [
+    "source release.sh to push the tag",
+    "run source scripts/release.sh and push the tag",
+    "source env.sh then push",
+    "source \"release.sh to push the tag",
+    "source 'scripts/release.sh' and push the tag",
+    "run source \"release.sh\" to push the tag",
+]
+
+
+@pytest.mark.parametrize("prose", SOURCED_PUSH_PROSE)
+def test_sourced_script_push_prose_is_refused(prose):
+    assert shell_safety.unsafe_manual_push(prose, prose=True)
+
+
+@pytest.mark.parametrize("prose", SOURCED_PUSH_PROSE)
+def test_plan_guard_refuses_sourced_script_push_prose(prose):
+    plan = PLAN_ONE.replace("- calc.add(2, 3) == 5", f"- {prose}")
+    parsed = planfile.parse(plan)
+    assert any("unsafe manual git push" in e for e in parsed.errors)
+
+
+@pytest.mark.parametrize("prose", SOURCED_PUSH_PROSE)
+def test_amend_guard_refuses_sourced_script_push_prose(prose):
+    edited = planfile.edit_task(PLAN_ONE, "T1", add_accept=[prose])
+    parsed = planfile.parse(edited)
+    assert any("unsafe manual git push" in e for e in parsed.errors)
+
+
+@pytest.mark.parametrize("prose", [
+    "the source and/or target push result",
+    "writes the source file and pushes nothing",
+    "writes the source docs/plan.md for review",
+    "writes the source \"release notes\" file",
+])
+def test_non_script_operands_after_source_stay_allowed(prose):
+    assert not shell_safety.unsafe_manual_push(prose, prose=True)
+    assert not planfile._unsafe_force_push_instruction(prose)

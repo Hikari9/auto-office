@@ -66,8 +66,11 @@ _ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", 
                              "temp", "bare", "local", "no", "any", "each", "one"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# A path or expansion operand: `source` runs the file it names.
-_SOURCE_OPERAND = re.compile(r"(?:\.{1,2}/|/|~|\$|\x60)")
+# A path or expansion operand: `source` runs the file it names. A bare or
+# directory-relative script name (`release.sh`, `scripts/env.sh`) also counts,
+# optionally quoted. Not anchored with `$`: the fallback scan embeds this pattern.
+_SOURCE_OPERAND = re.compile(
+    r"[\"']?(?:\.{1,2}/|/|~|\$|\x60|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w.+-]))")
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
