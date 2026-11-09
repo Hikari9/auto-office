@@ -1366,6 +1366,18 @@ def lease_dormant(con, run_id: str, row) -> bool:
     return gates.live_task_session(con, run_id, row["task_id"]) is None
 
 
+def revoked_without_live_lease(con, run_id: str, task_id: str) -> bool:
+    """True when the task's newest lease was revoked by `office revoke` (not superseded by a relaunch, not released
+    by an accept) and no session of the task is live. Such a task has no session on purpose: relaunching it takes a
+    fresh lease on its scope and blocks overlapping tasks (#1085)."""
+    row = con.execute("SELECT revoked_at, revoke_reason FROM leases WHERE run_id=? AND task_id=? "
+                      "ORDER BY fencing DESC LIMIT 1", (run_id, task_id)).fetchone()
+    if row is None or row["revoked_at"] is None:
+        return False
+    from office import gates
+    return gates.live_task_session(con, run_id, task_id) is None
+
+
 def scope_holder(con, run: dict, task: dict) -> str | None:
     """The task whose live session holds a scope overlapping `task`'s, or None. Read-only."""
     for row in con.execute("SELECT * FROM leases WHERE run_id=? AND released_at IS NULL AND revoked_at IS NULL "
