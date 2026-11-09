@@ -258,8 +258,7 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
                                                drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
-        from office import dispatch
-        held = [t for t in targets if dispatch.revoked_without_live_lease(con, run["id"], t)]
+        held = _waiting_on_rerun(con, run, targets)
         delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
         if held:
             delivery += f"; {', '.join(held)} waits for office rerun (lease revoked)"
@@ -408,8 +407,12 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         parts.append(f"affected {','.join(affected)}")
     if rechecked:
         parts.append(f"checks rerun on {','.join(rechecked)}")
-    if delivered:
-        parts.append(f"delivering to {','.join(delivered)}")
+    waiting = _waiting_on_rerun(con, run, delivered)
+    ready = [t for t in delivered if t not in waiting]
+    if ready:
+        parts.append(f"delivering to {','.join(ready)}")
+    if waiting:
+        parts.append(f"{','.join(waiting)} waits for office rerun (lease revoked)")
     res.add(" | ".join(parts))
     for line in recaptured:
         res.add(line)
@@ -771,6 +774,12 @@ def _ripple_note(owners: list[str]) -> str:
     return f"({_owners_label(owners)} changed its contract, not yours: adjust only work that relies on what changed)"
 
 
+def _waiting_on_rerun(con, run: dict, task_ids: list[str]) -> list[str]:
+    """The tasks `office revoke` ended: their queued delivery waits for `office rerun`, which takes it over (#1085)."""
+    from office import dispatch
+    return [t for t in task_ids if dispatch.revoked_without_live_lease(con, run["id"], t)]
+
+
 def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
              hold: list[str] = (), owners: list[str] | None = None) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
@@ -826,7 +835,8 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # `office revoke` ended this task on purpose. Its delivery stays queued on the ended dispatch until the
             # next launch takes it over (dispatch.request_launch). A relaunch here would take a fresh lease on the
             # task's scope and block overlapping tasks in this same amendment (#1085).
-            pass
+            state.emit(con, run, "delivery.waiting", f"{amendment_id} waits for office rerun: {tid} lease revoked",
+                       task_id=tid, dispatch_id=d["id"])
         else:
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new

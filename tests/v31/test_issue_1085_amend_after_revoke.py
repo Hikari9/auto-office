@@ -93,14 +93,51 @@ def test_amend_requirements_is_not_scope_held_by_a_revoked_lease(env):
     assert queued == 1, "the requirements change must stay queued for T1's next launch"
 
 
+def _queued_t1_dispatches(env) -> list[str]:
+    return [r[0] for r in env.con().execute("SELECT dispatch_id FROM deliveries WHERE task_id='T1' AND status='queued'")]
+
+
 @pytest.mark.review_contract("v3.1")
 def test_ordinary_amendment_does_not_relaunch_a_revoked_task(env):
     _t2_submitted_and_ended(env)
+    revoked = task_row(env)["current_dispatch_id"]
     code, out = env.office("revoke", "T1", env=EXTERNAL)
     assert code == 0, out
     code, out = env.office("amend", "T1", "--", DELTA, env=EXTERNAL)
-    assert "scope-held" not in out, out
+    assert code == 0 and "T1 waits for office rerun (lease revoked)" in out and "delivering to" not in out, out
     assert _live_t1_leases(env) == 0, "an ordinary amendment relaunched the revoked T1"
+    assert _queued_t1_dispatches(env) == [revoked], "the delivery must stay queued on the revoked dispatch"
+
+
+@pytest.mark.review_contract("v3.1")
+def test_contract_amendment_does_not_relaunch_a_revoked_task(env):
+    _t2_submitted_and_ended(env)
+    revoked = task_row(env)["current_dispatch_id"]
+    code, out = env.office("revoke", "T1", env=EXTERNAL)
+    assert code == 0, out
+    env.write_plan(PLAN_OVERLAP.replace("accept:\n- calc.add(2, 3) == 5", "accept:\n- calc.add(2, 3) == 5\n- calc.add(0, 0) == 0"))
+    code, out = env.office("amend", "T1", "--contract", "--", "T1 also accepts add(0, 0)", env=EXTERNAL)
+    assert code == 0, out
+    assert _live_t1_leases(env) == 0, "a contract amendment relaunched the revoked T1"
+    assert _queued_t1_dispatches(env) == [revoked], "the contract delivery must stay queued on the revoked dispatch"
+
+
+@pytest.mark.review_contract("v3.1")
+def test_rerun_resolves_the_requirements_delivery_queued_on_a_revoked_task(env):
+    _t2_submitted_and_ended(env)
+    code, out = env.office("revoke", "T1", env=EXTERNAL)
+    assert code == 0, out
+    code, out = env.office(*AMEND, env=EXTERNAL)
+    assert code == 0 and "T1 waits for office rerun (lease revoked)" in out, out
+    waiting = env.con().execute("SELECT id FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()[0]
+    # The requirements change relaunched T2 (launching), and that session holds the overlapping scope until revoked.
+    env.office("revoke", "T2", env=EXTERNAL, check=0)
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    row = env.con().execute("SELECT status, superseded_by FROM deliveries WHERE id=?", (waiting,)).fetchone()
+    # request_launch supersedes deliveries at or below the fresh session's applied plan version (every relaunch runs it).
+    assert tuple(row) == ("superseded", "relaunch"), tuple(row)
+    assert _queued_t1_dispatches(env) == [], "no delivery stays queued on the revoked dispatch"
 
 
 @pytest.mark.review_contract("v3.1")
