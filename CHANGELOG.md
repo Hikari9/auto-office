@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.63
+
+Fixes from this run: #1087, #1086, #1084, #1083, #1085, #1068, #958, #1081, #1082, #567, #758, a per-role quota reserve default, and SKILL.md back under its size budget.
+
 ## 3.15.59
 
 A lane visual review now needs one OBSERVATION line per screenshot (no bare APPROVED), and the reviewer infers which UI sections must be shown from the acceptance and plan, reporting uncovered ones as findings (#1078).
