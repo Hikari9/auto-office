@@ -262,3 +262,27 @@ def test_rerun_carries_the_requirements_delivery_under_convergence(env):
     run_id = env.con().execute("SELECT id FROM runs").fetchone()[0]
     brief = (paths.run_dir(run_id) / "dispatches" / fresh / "brief.md").read_text()
     assert f"AMENDMENT {waiting} (plan -> p" in brief and "R9: log each call" in brief, brief
+
+
+@pytest.mark.review_contract("v3.1")
+def test_rerun_carries_a_requirements_delivery_its_worker_never_acked(env):
+    """A worker that was live when the requirements change landed ends before it acks it. That dispatch is not revoked,
+    and the rerun brief must still carry the delta."""
+    from office import paths
+    _t2_submitted_and_ended(env)
+    d1 = task_row(env, "T1")["current_dispatch_id"]
+    con = env.con()
+    con.execute("UPDATE dispatches SET ended_at=NULL, status='running' WHERE id=?", (d1,))
+    con.execute("UPDATE tasks SET status='cancelled' WHERE id='T2'")  # T2 holds no session and is not amended
+    con.commit()
+    code, out = env.office(*AMEND, env=EXTERNAL)
+    assert code == 0, out
+    _end(env, d1)
+    waiting = con.execute("SELECT amendment_id FROM deliveries WHERE task_id='T1' AND status='queued'").fetchone()[0]
+    code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
+    assert code == 0, out
+    fresh = task_row(env, "T1")["current_dispatch_id"]
+    assert _queued_t1_dispatches(env) == [fresh], "the unacked delivery must move to the fresh session"
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    brief = (paths.run_dir(run_id) / "dispatches" / fresh / "brief.md").read_text()
+    assert f"AMENDMENT {waiting} (plan -> p" in brief and "R9: log each call" in brief, brief
