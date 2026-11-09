@@ -49,6 +49,19 @@ def test_pre_existing_failure_beside_a_passing_run_level_check_stays_ready(env):
     assert _rows(env, "SELECT * FROM events WHERE kind='integration.accepted'"), "no READY event"
 
 
+def test_pre_existing_failure_before_a_passing_run_level_check_stays_ready(env):
+    # Any passing run-level check counts, not only the first one.
+    approved_run(env, plan=_run_level(OLD, CHECK),
+                 executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+    landing = json.loads(_rows(env, "SELECT landing_json FROM runs")[0]["landing_json"])
+    assert landing["integration"]["status"] == "accepted", landing
+    checks = _rows(env, "SELECT * FROM gates WHERE subject='integration' AND kind='checks'")
+    assert len(checks) == 1 and checks[0]["verdict"] == "PASS", checks
+    assert _rows(env, "SELECT * FROM events WHERE kind='integration.accepted'"), "no READY event"
+
+
 def test_zero_passing_checks_with_one_introduced_failure_stays_blocked_as_introduced(env):
     changed = ('python3 -c "from pathlib import Path; p=Path(\'calc.py\').read_text(); '
                'raise SystemExit(1 if \'return a + b\' in p else 0)"')
