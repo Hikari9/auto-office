@@ -18,6 +18,7 @@ PROTECTED_BOOST = 1000.0
 DEFAULTS = {"auto_mode": True, "aging_per_hour": 1.0, "cpu_pressure": 0.9, "ram_pressure": 0.9,
             "max_active_runs": None}
 ACTIVE_STATES = ("running",)  # idle and paused agents hold no capacity
+SCHEDULED_ROLE = "executor"  # queued runs and tasks are executor work, so admission holds at the executor reserve
 
 
 def settings(config: dict | None) -> dict:
@@ -83,7 +84,7 @@ def plan_admission(items: list[dict], active: list[dict], host: dict | None, quo
     quota: {provider: {remaining_percent}}; a provider absent here is unknown.
     """
     conf = settings(config)
-    reserve = office_config.quota_reserve_percent(config)
+    reserve = office_config.quota_reserve_percent(config, SCHEDULED_ROLE)
     cpu = _pressure((host or {}).get("cpu"), float(conf["cpu_pressure"]), "cpu")
     ram = _pressure((host or {}).get("ram"), float(conf["ram_pressure"]), "ram")
     running = sum(1 for a in active if a.get("state") in ACTIVE_STATES)

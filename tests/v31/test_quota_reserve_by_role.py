@@ -1,5 +1,7 @@
 """The protected quota reserve is read per role: executor family 20, reviewer family 5, else quota.reserve_percent."""
-from office import candidates, config, db, routing
+from datetime import datetime, timezone
+
+from office import candidates, config, db, routing, scheduler
 
 
 def _candidate(harness, model, *, remaining, caps=("review",)):
@@ -160,3 +162,18 @@ def test_an_existing_user_config_without_the_key_keeps_shipped_role_reserves_and
     assert config.quota_reserve_percent(resolved, "executor") == 20
     assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
     assert config.quota_reserve_percent(resolved, "visual_reviewer") == 7
+
+
+def test_queue_admission_holds_executor_work_at_13_percent_left_under_the_executor_reserve():
+    """Scheduler admission reads the executor reserve: 13% left is under the shipped 20% and over the 5% base."""
+    now = datetime.now(timezone.utc)
+    queued = [{"id": "run-a", "priority": "normal", "enqueued_at": now.isoformat(), "provider": "codex"}]
+    quota = {"codex": {"remaining_percent": 13}}
+    unmeasured = {"cpu": {"status": "unavailable", "value": None}, "ram": {"status": "unavailable", "value": None}}
+
+    shipped_entry = scheduler.plan_admission(queued, [], unmeasured, quota, _shipped(), now)["entries"][0]
+    base_entry = scheduler.plan_admission(queued, [], unmeasured, quota, {"quota": {"reserve_percent": 5}}, now)["entries"][0]
+
+    assert shipped_entry["decision"] == "hold" and shipped_entry["quota"] == "exhausted", shipped_entry
+    assert "20% reserve" in shipped_entry["reason"], shipped_entry
+    assert base_entry["decision"] == "admit" and base_entry["quota"] == "ok", base_entry
