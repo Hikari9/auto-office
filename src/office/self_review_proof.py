@@ -8,6 +8,7 @@ is left to prove, so nothing is blocked. The executor's worktree and index are n
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -26,10 +27,11 @@ _SOURCE_SUFFIXES = frozenset((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
                               ".astro", ".dart", ".graphql", ".proto"))
 _PYTEST = re.compile(r"\bpytest\b")
 _DROP_WITH_VALUE = ("-k", "-m", "-n")  # selectors and workers: the named test runs alone
+_SHELL_OPERATORS = frozenset(("&&", "||", ";", "|"))
 _MAX_SECONDS = 120
 _MAX_TESTS = 5
 _PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"; 2 is a collection error
-_VERSION = "main-proof-2"
+_VERSION = "main-proof-3"
 
 
 def applicable(run: dict) -> bool:
@@ -76,17 +78,24 @@ def _runner(task: dict) -> list[str] | None:
         if not commands:
             continue
         start = commands[0]
-        kept, skip = words[:start + 1], False
+        cmd_start = max([i + 1 for i, w in enumerate(words[:start]) if w in _SHELL_OPERATORS], default=0)
+        kept, skip = words[cmd_start:start + 1], False
         for word in words[start + 1:]:
-            if skip:
-                skip = False
-            elif word in _DROP_WITH_VALUE:
-                skip = True
-            elif word.startswith("-") and not word.startswith(("-k", "-m", "-n")):
-                kept.append(word)
-            elif word.startswith("-"):
-                continue  # -k<expr>, -m<expr> or -n<count> attached to its flag
-            # a bare word after pytest is a path or node id: the ledger's test replaces it
+            if word in _SHELL_OPERATORS:
+                break
+            has_semi = word.endswith(";")
+            clean = word.rstrip(";") if has_semi else word
+            if clean:
+                if skip:
+                    skip = False
+                elif clean in _DROP_WITH_VALUE:
+                    skip = True
+                elif clean.startswith("-") and not clean.startswith(("-k", "-m", "-n")):
+                    kept.append(clean)
+                elif clean.startswith("-"):
+                    pass
+            if has_semi:
+                break
         return kept
     return None
 
@@ -104,6 +113,30 @@ def _safe_test(checkout: Path, test: str) -> bool:
 
 def _run(wt: Path, command: str, run: dict) -> int:
     return gates._run_check(command, wt, _MAX_SECONDS, gates._check_env(run))[0]
+
+
+def _stub_python_source(text: str) -> str:
+    """A minimal syntactically valid stub of a Python module whose functions/methods return None."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return ""
+
+    class _Stub(ast.NodeTransformer):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+            node.body = [ast.Pass()]
+            return node
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
+            node.body = [ast.Pass()]
+            return node
+
+    tree = _Stub().visit(tree)
+    ast.fix_missing_locations(tree)
+    try:
+        return ast.unparse(tree)
+    except Exception:
+        return ""
 
 
 def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str], tests: list[str],
@@ -129,6 +162,21 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
         if undone.returncode:
             return {"ok": False, "status": "blocked",
                     "reason": "source-only revert failed: " + undone.stderr.decode(errors="replace")[-300:]}
+        # #1086: A source file new in the task is deleted by git apply --reverse. Recreate it in a stubbed state
+        # so test collection succeeds and assertions fail, rather than erroring on missing module imports.
+        for s in sources:
+            red_file = red_checkout / s
+            green_file = green_checkout / s
+            if not red_file.exists() and green_file.exists():
+                red_file.parent.mkdir(parents=True, exist_ok=True)
+                if s.endswith(".py"):
+                    try:
+                        red_file.write_text(_stub_python_source(green_file.read_text(encoding="utf-8")),
+                                            encoding="utf-8")
+                    except Exception:
+                        red_file.write_text("", encoding="utf-8")
+                else:
+                    red_file.write_text("", encoding="utf-8")
         for test in tests:
             if not _safe_test(green_checkout, test):
                 return {"ok": False, "status": "blocked",
