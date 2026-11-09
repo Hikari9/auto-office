@@ -259,7 +259,7 @@ def answer(con, run: dict, d: dict, text: str) -> Result | None:
             return Result(lines=[f"{tid} {d['id']}: the raise is no longer open"], next="office status")
         for r in still:
             state.emit(con, run, ANSWERED, f"{tid} {r['kind']} answered ({how}): {_shown(text, 160)}", audience="runtime",
-                       task_id=tid, dispatch_id=d["id"], payload={"raise": r["seq"], "answer": text[:MAX_TEXT], "delivery": how})
+                       task_id=tid, dispatch_id=d["id"], payload={"raise": r["seq"], "answer": text, "delivery": how})
         if how == "pending-rerun":
             if submit.self_blocked(task):
                 state.update_task(con, run["id"], tid, status="blocked",

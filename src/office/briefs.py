@@ -24,6 +24,7 @@ LEDGER_DISPOSITIONS = ("fixed", "out-of-scope", "dismissed", "contract-conflict"
 MAX_REVIEW_ROUNDS = 3
 FOCUSED_REVIEW_ROUNDS = 1  # new (convergence-v1) runs: one round, never a fix-diff re-review
 AMENDMENT_BRIEF_CHARS = 6000
+ANSWER_BRIEF_CHARS = 2000
 
 
 def self_review_path(run: dict, dispatch_id: str, revision_id: str) -> Path:
@@ -302,6 +303,22 @@ def harness_subagents(con, packet: dict) -> bool:
     return adapter.get("subagents") is not False
 
 
+def answer_lines(a: dict) -> list[str]:
+    """The brief lines for one recorded answer: up to ANSWER_BRIEF_CHARS in full, then a notice that names
+    where the rest is stored."""
+    from office import raising
+    ans = (a.get("answer") or "").strip() or "(no answer text recorded)"
+    cut = len(ans) > ANSWER_BRIEF_CHARS
+    body = ans[:ANSWER_BRIEF_CHARS] if cut else ans
+    lines = ["", f"ANSWER to your raised {a['kind']} ({raising._shown(a['text'], 160)}): "
+             + "\n    ".join(body.splitlines())]
+    if cut:
+        lines.append(f"    [cut at {ANSWER_BRIEF_CHARS} characters: the full answer is stored as {a['kind']} seq {a['seq']}; "
+                     "ask the orchestrator for it]")
+    lines.append("    It does not change your contract or scope; only an AMENDMENT does.")
+    return lines
+
+
 def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carried: list | None = None) -> str:
     out = [
         "ROLE executor",
@@ -405,8 +422,7 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
     from office import raising
     for a in raising.answered_for_brief(con, run["id"], packet["task_id"], packet["dispatch_id"]) \
             if con is not None and packet.get("dispatch_id") else []:
-        out += ["", f"ANSWER to your raised {a['kind']} ({raising._shown(a['text'], 160)}): {raising._shown(a['answer'], 600)}",
-                "    It does not change your contract or scope; only an AMENDMENT does."]
+        out += answer_lines(a)
     pr = packet.get("pr")
     if pr:
         out += ["", f"GIT commit and push your work to this branch as you go: {pr['push']}",
