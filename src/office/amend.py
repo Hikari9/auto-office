@@ -258,7 +258,11 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
                                                drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
+        from office import dispatch
+        held = [t for t in targets if dispatch.revoked_without_live_lease(con, run["id"], t)]
         delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
+        if held:
+            delivery += f"; {', '.join(held)} waits for office rerun (lease revoked)"
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
     jobs.kick(con, run["id"])
@@ -818,6 +822,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             else:
                 state.update_task(con, run["id"], tid, pause_reason=f"amended by {amendment_id}; rerun after its "
                                   "dependency is accepted again")
+        elif dispatch.revoked_without_live_lease(con, run["id"], tid):
+            # `office revoke` ended this task on purpose. Its delivery stays queued on the ended dispatch until the
+            # next launch takes it over (dispatch.request_launch). A relaunch here would take a fresh lease on the
+            # task's scope and block overlapping tasks in this same amendment (#1085).
+            pass
         else:
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
