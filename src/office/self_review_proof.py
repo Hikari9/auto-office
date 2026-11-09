@@ -90,10 +90,8 @@ def _runner(task: dict) -> list[str] | None:
                     skip = False
                 elif clean in _DROP_WITH_VALUE:
                     skip = True
-                elif clean.startswith("-") and not clean.startswith(("-k", "-m", "-n")):
+                elif clean.startswith("-") and not clean.startswith(_DROP_WITH_VALUE):
                     kept.append(clean)
-                elif clean.startswith("-"):
-                    pass
             if has_semi:
                 break
         return kept
