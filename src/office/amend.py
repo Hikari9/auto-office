@@ -749,13 +749,24 @@ def _record(con, run, klass, scope_ids, delta, from_v, to_v) -> str:
     return amendment_id
 
 
-def _relaunch_decision(task: dict) -> dict | None:
+def _relaunch_decision(con, run: dict, task: dict) -> dict | None:
     """The route an amendment's relaunch runs: the route recorded on the task.
     `office amend route` records a declared route there, and every dispatch records
-    the route it ran, so the relaunch never falls back to the ended session's route (#456)."""
+    the route it ran, so the relaunch never falls back to the ended session's route (#456).
+    A task `amend route --auto` returned to automatic routing relaunches on the plan slate (#1106).
+    A user deny that now rejects the recorded route does the same, and records the deny as a route change.
+    Caller holds the tx."""
+    from office import dispatch
+    if state.returned_to_automatic(task):
+        return dispatch.replan_from_slate(con, run, task)
     rec = state.recorded_route(task)
     if not rec:
         return None
+    if denied := dispatch.route_denial(con, run, task, rec):
+        decision = dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(rec["candidate"]), denied))
+        dispatch._record_routing(con, run, decision)
+        dispatch.note_route(con, run, task, decision)
+        return decision
     return {**rec, "status": "selected", "selected": routing.candidate_id(rec["candidate"])}
 
 
@@ -823,7 +834,7 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
             # session so its brief carries the delta, and it is delivered once that prompt is confirmed.
             new_did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
-                                              decision=_relaunch_decision(task))
+                                              decision=_relaunch_decision(con, run, task))
             con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
                         (new_did, did))
         targets.append(tid)

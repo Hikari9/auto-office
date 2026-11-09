@@ -549,7 +549,7 @@ def _preexisting_accept_lines(con, run: dict, tasks: list[dict]) -> list[str]:
 def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
     """Each unfinished task's effective route (#426): the one recorded on the
     task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
-    from office import plan_view, routing
+    from office import dispatch, plan_view, routing
     pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
     out = {}
     for t in tasks:
@@ -560,6 +560,8 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
             out[t["id"]] = f"{trial['route']} (trial, fallback {trial['fallback'] or 'none'})"
             continue
         rec = state.recorded_route(t)
+        if rec and dispatch.user_denies(con, run, t, rec):
+            rec = {}  # a declared or reused route a user deny rejects: the next rerun re-picks from the plan (#1106)
         if rec:
             chosen = routing.candidate_id(rec["candidate"])
             preferred = rec.get("preferred_route")
