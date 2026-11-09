@@ -148,7 +148,8 @@ def test_an_amendment_after_auto_relaunches_on_the_plan_slate_route(env):
     assert code == 0, out
     code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
     assert code == 0, out
-    assert _triple(env) == CLAUDE and _triple(env) != rerouted, out
+    # The amendment's plan revision can move the slate effort, so compare harness and model only.
+    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
 
 
 def test_a_size_scoped_deny_of_the_reused_route_is_seen_by_status_and_the_rerun(env):
