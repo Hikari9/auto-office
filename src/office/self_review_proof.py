@@ -2,13 +2,12 @@
 
 Each medium or high fix in the ledger names one test. Office runs that test alone on two disposable
 checkouts of the task's commit: with the task's non-test source reverted it must fail (a test
-failure, not a collection error, a timeout or a missing command), and unreverted it must pass.
+failure, or a collection error that is an import of a source file the task added), and unreverted it must pass.
 A task with no named test or no pytest command to run it with records an exemption: nothing
 is left to prove, so nothing is blocked. The executor's worktree and index are never touched.
 """
 from __future__ import annotations
 
-import ast
 import os
 import re
 import shlex
@@ -30,8 +29,12 @@ _DROP_WITH_VALUE = ("-k", "-m", "-n")  # selectors and workers: the named test r
 _SHELL_OPERATORS = frozenset(("&&", "||", ";", "|"))
 _MAX_SECONDS = 120
 _MAX_TESTS = 5
-_PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"; 2 is a collection error
-_VERSION = "main-proof-3"
+_PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"
+_PYTEST_COLLECTION_ERROR = 2  # pytest's exit code for a collection error; 4 is a usage error
+_IMPORT_ERROR = re.compile(r"^E?\s*(ModuleNotFoundError|ImportError): (.*)$", re.MULTILINE)
+_MISSING_MODULE = re.compile(r"^No module named '([^']+)'")
+_NAME_FROM_MODULE = re.compile(r"^cannot import name '[^']+' from '([^']+)'")
+_VERSION = "main-proof-4"
 
 
 def applicable(run: dict) -> bool:
@@ -113,32 +116,38 @@ def _safe_test(checkout: Path, test: str) -> bool:
     return (checkout / file).is_file()
 
 
-def _run(wt: Path, command: str, run: dict) -> int:
-    return gates._run_check(command, wt, _MAX_SECONDS, gates._check_env(run))[0]
+def _run(wt: Path, command: str, run: dict) -> tuple[int, str]:
+    return gates._run_check(command, wt, _MAX_SECONDS, gates._check_env(run))
 
 
-def _stub_python_source(text: str) -> str:
-    """A minimal syntactically valid stub of a Python module whose functions/methods return None."""
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return ""
+def _module_names(path: str) -> set[str]:
+    """The names an import can use for a source file: `src/office/foo.py` is `foo`, `office.foo`, `src.office.foo`."""
+    parts = list(Path(path).with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return {".".join(parts[i:]) for i in range(len(parts))}
 
-    class _Stub(ast.NodeTransformer):
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-            node.body = [ast.Pass()]
-            return node
 
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
-            node.body = [ast.Pass()]
-            return node
+def _fails_on_new_module(output: str, modules: set[str]) -> bool:
+    """True when every import error in a collection failure names one of the task's new modules.
 
-    tree = _Stub().visit(tree)
-    ast.fix_missing_locations(tree)
-    try:
-        return ast.unparse(tree)
-    except Exception:
-        return ""
+    An import of a new module that the revert removed fails at collection with `No module named 'calc'`, or
+    with `cannot import name 'add' from 'calc'` when the module is still importable. Any other import error,
+    or a collection failure with no import error at all, is not the proof.
+    """
+    errors = [(kind, msg) for kind, msg in _IMPORT_ERROR.findall(output)]
+    if not errors:
+        return False
+    for kind, msg in errors:
+        if kind == "ModuleNotFoundError":
+            found = _MISSING_MODULE.match(msg)
+            named = found.group(1) if found else None
+        else:
+            found = _NAME_FROM_MODULE.match(msg)
+            named = found.group(1) if found else None
+        if named is None or not any(named == m or named.startswith(m + ".") for m in modules):
+            return False
+    return True
 
 
 def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str], tests: list[str],
@@ -164,30 +173,23 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
         if undone.returncode:
             return {"ok": False, "status": "blocked",
                     "reason": "source-only revert failed: " + undone.stderr.decode(errors="replace")[-300:]}
-        # #1086: A source file new in the task is deleted by git apply --reverse. Recreate it in a stubbed state
-        # so test collection succeeds and assertions fail, rather than erroring on missing module imports.
-        for s in sources:
-            red_file = red_checkout / s
-            green_file = green_checkout / s
-            if not red_file.exists() and green_file.exists():
-                red_file.parent.mkdir(parents=True, exist_ok=True)
-                if s.endswith(".py"):
-                    try:
-                        red_file.write_text(_stub_python_source(green_file.read_text(encoding="utf-8")),
-                                            encoding="utf-8")
-                    except Exception:
-                        red_file.write_text("", encoding="utf-8")
-                else:
-                    red_file.write_text("", encoding="utf-8")
+        # A source file new in the task is deleted by the reverse apply. Its absence is the red state: the
+        # named test must then fail at collection on that module's import (see _fails_on_new_module).
+        new_modules = {m for s in sources if not (red_checkout / s).exists() and (green_checkout / s).exists()
+                       for m in _module_names(s)}
         for test in tests:
             if not _safe_test(green_checkout, test):
                 return {"ok": False, "status": "blocked",
                         "reason": f"named test {test} is not a file of the submitted commit"}
             command = " ".join(shlex.quote(w) for w in [*runner, test])
-            red, green = _run(red_checkout, command, run), _run(green_checkout, command, run)
-            if red != _PYTEST_TEST_FAILED:
+            red, red_out = _run(red_checkout, command, run)
+            green = _run(green_checkout, command, run)[0]
+            red_fails = red == _PYTEST_TEST_FAILED or (
+                red == _PYTEST_COLLECTION_ERROR and _fails_on_new_module(red_out, new_modules))
+            if not red_fails:
                 why = ("passes without the fix" if red == 0 else
-                       f"exited {red}, which is not a test failure (collection error, timeout or missing command)")
+                       f"exited {red}, which is not a test failure (a collection error other than a new module's "
+                       f"import, a usage error, timeout or missing command)")
                 return {"ok": False, "status": "blocked",
                         "reason": f"revert-and-fail proof: {test} with the source reverted {why}"}
             if green != 0:

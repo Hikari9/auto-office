@@ -71,11 +71,10 @@ def _repo_with_new_source(tmp_path: Path, test_text: str, source: str) -> tuple[
     return wt, base, _git(wt, "rev-parse", "HEAD")
 
 
-def test_revert_proof_handles_new_source_file_and_fails_on_assertion(tmp_path):
-    """#1086: Reversing a diff for a new source file would delete it and exit with an import/collection error.
+def test_new_module_import_failure_passes_the_proof(tmp_path):
+    """#1086: with the task's new module removed, the named test fails at collection on its import of that module.
 
-    The proof's reverse step leaves the new source file in a stubbed state so test collection succeeds
-    and the test fails on assertion, proving the fix.
+    That failure proves the test depends on the change, so the proof passes.
     """
     fixed_source = "def add(a, b):\n    return a + b\n"
     good_test = "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
@@ -86,6 +85,30 @@ def test_revert_proof_handles_new_source_file_and_fails_on_assertion(tmp_path):
     assert result["ok"], result
     assert "failed reverted and passed restored" in result["reason"]
     assert _git(wt, "status", "--porcelain") == "" and _git(wt, "worktree", "list").count("\n") == 0
+
+
+def test_unrelated_import_error_fails_the_proof(tmp_path):
+    """An import error that names a module the task did not add is not the proof."""
+    source = "def add(a, b):\n    return a + b\n"
+    unrelated_import = "import no_such_dependency_1086\n\ndef test_add():\n    assert True\n"
+    wt, base, head = _repo_with_new_source(tmp_path, unrelated_import, source)
+
+    result = self_review_proof.prove(wt, base, head, ["calc.py", "tests/test_calc.py"], RUNNER,
+                                     ["tests/test_calc.py"], NEW_RUN)
+    assert not result["ok"]
+    assert "not a test failure" in result["reason"]
+
+
+def test_bad_pytest_arg_fails_the_proof(tmp_path):
+    """A usage error (pytest exit 4) is not a collection error on a new module and must not pass the proof."""
+    source = "def add(a, b):\n    return a + b\n"
+    good_test = "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+    wt, base, head = _repo_with_new_source(tmp_path, good_test, source)
+
+    result = self_review_proof.prove(wt, base, head, ["calc.py", "tests/test_calc.py"],
+                                     [*RUNNER, "--no-such-option-1086"], ["tests/test_calc.py"], NEW_RUN)
+    assert not result["ok"]
+    assert "exited 4" in result["reason"]
 
 
 def test_revert_proof_blocks_when_test_against_new_source_does_not_exercise_change(tmp_path):
@@ -100,25 +123,7 @@ def test_revert_proof_blocks_when_test_against_new_source_does_not_exercise_chan
     assert "passes without the fix" in result["reason"]
 
 
-def test_stub_python_source_handles_classes_and_functions():
-    code = """
-import os
-
-TIMEOUT = 10
-
-class Calc:
-    def __init__(self, mode="normal"):
-        self.mode = mode
-
-    def compute(self, x: int) -> int:
-        return x * 2
-
-async def fetch_data(url: str):
-    return url
-"""
-    stubbed = self_review_proof._stub_python_source(code)
-    assert "class Calc:" in stubbed
-    assert "def __init__(self, mode='normal'):" in stubbed
-    assert "def compute(self, x: int) -> int:" in stubbed
-    assert "async def fetch_data(url: str):" in stubbed
-    assert "return x * 2" not in stubbed
+def test_module_names_cover_every_import_path_of_a_new_source_file():
+    assert self_review_proof._module_names("calc.py") == {"calc"}
+    assert self_review_proof._module_names("src/office/foo.py") == {"foo", "office.foo", "src.office.foo"}
+    assert self_review_proof._module_names("pkg/__init__.py") == {"pkg"}
