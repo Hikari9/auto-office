@@ -111,3 +111,19 @@ def test_a_route_change_that_writes_nothing_says_nothing_about_running_runs(isol
     result = routecmd.change("allow", role="executor", route=PLAIN)
     assert result.data["changed"] is False
     assert len(result.lines) == 1
+
+
+def test_a_preferred_seed_allow_is_named_by_size_and_a_user_size_deny_outranks_it(isolated):
+    isolated.write_text(yaml.safe_dump({
+        "roles": {"executor": {"preferred_seed": [{"harness": "codex", "model_id": "gpt-6-luna", "effort": "low"}]}},
+        "routing": {"user_policy": {"role_rules": [{"role": "executor", "route": PLAIN, "state": "deny", "sizes": ["S"]}]}}}))
+    result = view()
+    assert line_for(result, PLAIN).endswith("; by size: allow XS,M,L,XL (preferred_seed), deny S (user)")
+    assert row_for(result, PLAIN)["by_size"]["S"] == {"state": "deny", "source": "user"}
+
+
+def test_an_empty_size_is_unknown_like_no_size_so_the_unsized_view_is_shown(isolated):
+    unsized, empty = view(), view(size="")
+    assert empty.lines == unsized.lines
+    assert line_for(empty, SONNET).endswith(f"; by size: {SHIPPED_SONNET_BY_SIZE}")
+    assert row_for(empty, SONNET)["by_size"] == row_for(unsized, SONNET)["by_size"]

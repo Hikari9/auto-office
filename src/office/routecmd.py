@@ -123,7 +123,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
                       "dispatches": dispatches, "dispatch_reason": why}
-            by_size = _by_size(c, r, [seed, p], state) if size is None else None
+            by_size = None if size else _by_size(c, r, [seed, p], state)
             if by_size:
                 result["by_size"] = by_size
             output.append(result)
