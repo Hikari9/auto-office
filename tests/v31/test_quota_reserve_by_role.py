@@ -84,8 +84,39 @@ def test_a_user_tier_role_key_overrides_only_its_family():
     resolved, _warnings = config.resolve(None, files=files)
 
     assert config.quota_reserve_percent(resolved, "executor") == 10
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 7
+    assert config.quota_reserve_percent(resolved, "code_reviewer") == 7
+
+
+def test_a_user_scalar_of_zero_gives_the_executor_and_reviewer_families_zero():
+    resolved, _warnings = config.resolve(None, files={"user": "quota:\n  reserve_percent: 0\n", "repo": None})
+
+    assert config.quota_reserve_percent(resolved, "executor") == 0
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 0
+    assert config.quota_reserve_percent(resolved, "visual_reviewer") == 0
+
+
+def test_a_user_by_role_value_beats_a_user_scalar_of_zero():
+    files = {"user": "quota:\n  reserve_percent: 0\n  reserve_percent_by_role:\n    executor: 30\n", "repo": None}
+    resolved, _warnings = config.resolve(None, files=files)
+
+    assert config.quota_reserve_percent(resolved, "executor") == 30
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 0
+
+
+def test_no_user_reserve_keys_resolve_to_the_shipped_family_reserves():
+    resolved, _warnings = config.resolve(None, files={"user": "routing: {}\n", "repo": None})
+
+    assert config.quota_reserve_percent(resolved, "executor") == 20
     assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
-    assert config.quota_reserve_percent(resolved, "code_reviewer") == 5
+    assert resolved["quota"]["reserve_percent_by_role"] == {"executor": 20, "reviewer": 5}
+
+
+def test_a_prompt_set_scalar_zero_beats_the_shipped_family_reserves():
+    resolved, _warnings = config.resolve(None, sets=["quota.reserve_percent=0"], files={"user": None, "repo": None})
+
+    assert config.quota_reserve_percent(resolved, "executor") == 0
+    assert config.quota_reserve_percent(resolved, "code_reviewer") == 0
 
 
 def test_a_non_mapping_role_block_falls_back_to_quota_reserve_percent():
@@ -159,13 +190,13 @@ def test_a_run_pinned_before_the_key_existed_keeps_the_base_reserve(tmp_path):
     assert config.quota_reserve_percent(run["policy"], "executor") == 5
 
 
-def test_an_existing_user_config_without_the_key_keeps_shipped_role_reserves_and_its_own_base():
+def test_a_user_scalar_without_the_by_role_key_sets_the_families_it_does_not_name():
     files = {"user": "quota:\n  reserve_percent: 7\n", "repo": None}
     resolved, warnings = config.resolve(None, files=files)
 
     assert warnings == []
-    assert config.quota_reserve_percent(resolved, "executor") == 20
-    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 5
+    assert config.quota_reserve_percent(resolved, "executor") == 7
+    assert config.quota_reserve_percent(resolved, "plan_reviewer") == 7
     assert config.quota_reserve_percent(resolved, "visual_reviewer") == 7
 
 

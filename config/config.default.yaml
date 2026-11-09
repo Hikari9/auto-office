@@ -33,7 +33,8 @@ quota:
   # Ratified v3.1 charter (12A): protect 5% of provider quota.
   reserve_percent: 5
   # Per-role protected reserve. executor covers executor, worker and planner; reviewer covers plan_reviewer and
-  # code_reviewer. A role not listed here, or a key left out, uses reserve_percent above.
+  # code_reviewer. A role not listed here, or a key left out, uses reserve_percent above. A user-set
+  # reserve_percent (0 included) overrides these shipped family values unless the user sets the family key.
   reserve_percent_by_role:
     executor: 20
     reviewer: 5
