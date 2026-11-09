@@ -258,11 +258,7 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
                                                drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
-        held = _waiting_on_rerun(con, run, targets)
-        ready = [t for t in targets if t not in held]
-        delivery = f"delivered to {', '.join(ready)}" if ready else "not delivered to live tasks"
-        if held:
-            delivery += f"; {', '.join(held)} waits for office rerun (lease revoked)"
+        delivery = _delivery_text(targets, _waiting_on_rerun(con, run, targets))
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
     jobs.kick(con, run["id"])
@@ -773,6 +769,15 @@ def _owners_label(owners: list[str]) -> str:
 
 def _ripple_note(owners: list[str]) -> str:
     return f"({_owners_label(owners)} changed its contract, not yours: adjust only work that relies on what changed)"
+
+
+def _delivery_text(targets: list[str], held: list[str]) -> str:
+    """What `amend requirements` reports as delivery. A task `office revoke` ended is waiting, not delivered (#1085)."""
+    ready = [t for t in targets if t not in held]
+    text = f"delivered to {', '.join(ready)}" if ready else "not delivered to live tasks"
+    if held:
+        text += f"; {', '.join(held)} waits for office rerun (lease revoked)"
+    return text
 
 
 def _waiting_on_rerun(con, run: dict, task_ids: list[str]) -> list[str]:

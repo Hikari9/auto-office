@@ -197,3 +197,21 @@ def test_revoked_without_live_lease_runs_on_the_default_tier(tmp_path):
                 "dispatch_id, renewed_at, revoked_at, revoke_reason) VALUES('L1', 'R', 'executor', '[\"calc.py\"]', 'D1', "
                 "'2026-01-01', '2026-01-02', 'T1', 1, 'D1', '2026-01-01', '2026-01-01', 'orchestrator revoke')")
     assert dispatch.revoked_without_live_lease(con, "R", "T1") is True
+
+
+def test_delivery_text_names_a_revoked_task_as_waiting_on_the_default_tier():
+    from office import amend
+    assert amend._delivery_text(["T1", "T2"], ["T1"]) == "delivered to T2; T1 waits for office rerun (lease revoked)"
+    assert amend._delivery_text(["T1"], ["T1"]) == "not delivered to live tasks; T1 waits for office rerun (lease revoked)"
+    assert amend._delivery_text(["T2"], []) == "delivered to T2"
+
+
+def test_revoked_lease_with_a_live_session_is_not_held_back_on_the_default_tier(tmp_path, monkeypatch):
+    from office import db, dispatch, gates
+    con = db.connect(tmp_path / "runs.db")
+    db.migrate(con)
+    con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, "
+                "dispatch_id, renewed_at, revoked_at, revoke_reason) VALUES('L1', 'R', 'executor', '[\"calc.py\"]', 'D1', "
+                "'2026-01-01', '2026-01-02', 'T1', 1, 'D1', '2026-01-01', '2026-01-01', 'orchestrator revoke')")
+    monkeypatch.setattr(gates, "live_task_session", lambda *a, **k: "Dlive")
+    assert not dispatch.revoked_without_live_lease(con, "R", "T1"), "a live session of T1 keeps its lease"
