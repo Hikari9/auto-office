@@ -21,12 +21,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from office import adaptive, executor_slates, route_learning, route_policy, scoring
+from office import config as office_config
 from office.util import sha256_obj
 
 # Roles whose selection confers mutable or gate authority; they need derived trust.
 MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeout_verifier", "visual_reviewer",
                        "integration_reviewer"}
-DEFAULT_RESERVE_PERCENT = 5.0
 # Legacy planner/reviewer routing only. Executor and worker routing (#300) has no
 # money band; its cost safety valve is routing.adaptive.budget_ceiling_multiple.
 DEFAULT_MONEY_BAND_PERCENT = 20.0
@@ -446,7 +446,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
         required = set(policy["required_capabilities"])
     else:
         required = set(_default_required_capabilities(role))
-    reserve = float(policy.get("quota_reserve_percent", DEFAULT_RESERVE_PERCENT))
+    # The caller's policy carries the reserve resolved for this role; without one, the shipped per-role default.
+    reserve = float(policy.get("quota_reserve_percent", office_config.shipped_quota_reserve_percent(role)))
     band_percent = float(policy.get("balanced_money_band_percent", DEFAULT_MONEY_BAND_PERCENT))
     cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
     allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))

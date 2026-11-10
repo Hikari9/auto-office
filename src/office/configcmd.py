@@ -480,8 +480,8 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     the one opt-in that moves a running run off the values it pinned at start.
     Later dispatches route from the re-pinned policy; the drift notice then has
     nothing left to report for those blocks. `quota` is here because route choice
-    reads the run's pinned `quota.reserve_percent`: without it a lowered reserve
-    could never reach a live run. `quote` is the user's words authorizing it."""
+    reads the run's pinned `quota` reserves (`reserve_percent` and `reserve_percent_by_role`):
+    without it a lowered reserve could never reach a live run. `quote` is the user's words authorizing it."""
     run, repo, files, live = _repin_target(con, run_arg, quote, "--apply-routing")
     policy = dict(run.get("policy") or {})
     blocks = ("roles", "routing", "quota")
