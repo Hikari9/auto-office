@@ -383,16 +383,21 @@ def _integrate(con, run: dict, job: dict) -> dict:
             except Exception:
                 base_failures = []  # no proof -> block, never guess that it is pre-existing
             proven = {entry["code"] for entry in base_failures}
-            failures = {f"C{i}" for i, result in enumerate(outcome.get("results") or [], 1)
-                        if result["exit"] != 0}
+            check_results = outcome.get("results") or []
+            failures = {f"C{i}" for i, result in enumerate(check_results, 1) if result["exit"] != 0}
+            # Pre-existing failures never verify the composed result alone: a run-level check must pass too.
+            passed_run_check = any(result["exit"] == 0 for result in check_results[:len(run_checks)])
             if base_failures:
                 summary = (f"{len(base_failures)} integration check(s) fail identically on pinned base "
-                           f"{base[:12]}: pre-existing, NONBLOCKING (not green)")
+                           f"{base[:12]}: pre-existing" + (", NONBLOCKING (not green)" if passed_run_check else ""))
                 with db.transaction(con):
                     state.emit(con, run, "integration.preexisting", summary,
                                payload={"commit": commit, "base_commit": base, "checks": base_failures})
-                if failures and failures <= proven:
+                if failures and failures <= proven and passed_run_check:
                     outcome = {**outcome, "verdict": "PASS", "summary": summary}
+                elif failures <= proven:
+                    outcome = {**outcome, "summary": f"{outcome['summary']}; {summary}; no run-level check passed, "
+                                                     "so nothing verifies the composed result: BLOCK"}
                 else:
                     outcome = {**outcome, "summary": f"{outcome['summary']}; {summary}; introduced failures BLOCK"}
         check_outcome = outcome
