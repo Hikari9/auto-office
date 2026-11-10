@@ -67,6 +67,22 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     return True, "ready"
 
 
+def _by_size(cand: dict, role: str, policies: list[dict], unsized: dict) -> dict | None:
+    """Each task size's (state, source) when any size differs from the unsized verdict, else None (#1099)."""
+    by_size = {s: route_policy.effective_role_state(cand, role, policies, s) for s in route_policy.SIZES}
+    if all((v["state"], v["source"]) == (unsized["state"], unsized["source"]) for v in by_size.values()):
+        return None
+    return {s: {"state": v["state"], "source": v["source"]} for s, v in by_size.items()}
+
+
+def _by_size_text(by_size: dict) -> str:
+    """`deny XS,S,M (shipped), allow L (shipped)`: sizes that share a state and source are grouped."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for size, verdict in by_size.items():
+        groups.setdefault((verdict["state"], verdict["source"]), []).append(size)
+    return ", ".join(f"{state} {','.join(sizes)} ({source})" for (state, source), sizes in groups.items())
+
+
 def policy(*, role: str | None = None, effective: bool = False, size: str | None = None) -> Result:
     if size and size not in route_policy.SIZES:
         raise configcmd._usage(f"unknown task size {size!r} (known: {', '.join(route_policy.SIZES)})")
@@ -107,11 +123,16 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
                       "dispatches": dispatches, "dispatch_reason": why}
+            by_size = None if size else _by_size(c, r, [seed, p], state)
+            if by_size:
+                result["by_size"] = by_size
             output.append(result)
             count[state["state"]] += 1
             dispatching += dispatches
             role_lines.append(f"  {result['route']}: {state['state']} ({state['source']}) -> "
-                              + ("dispatches" if dispatches else "does not dispatch") + f" ({why})")
+                              + ("dispatches" if dispatches else "does not dispatch") + f" ({why})"
+                              + (" at an unknown size" if by_size else "")
+                              + (f"; by size: {_by_size_text(by_size)}" if by_size else ""))
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
         if show_rows:
             lines += role_lines
@@ -194,6 +215,13 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
         lines.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
+    if action == "clear":
+        # Live runs re-read the user policy each decision; a run started while the rule was set keeps its pinned copy.
+        lines.append("running runs drop the rule at their next routing decision, except a run started while the rule was set, "
+                     "which keeps its pinned copy until `office config --run <id> --apply-routing --quote \"<words>\"`")
+    else:
+        lines.append(f"running runs apply this rule at their next routing decision; `office config --run <id> --apply-routing "
+                     "--quote \"<words>\"` re-pins the rest of a run's pinned routing")
     return Result(lines=lines, next="office route policy --effective --role " + (role if role != "*" else "code_reviewer"),
                   data={"changed": True, "role": role, "route": routes[0], "routes": routes, "action": action,
                         "path": str(path)})
