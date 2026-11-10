@@ -547,10 +547,10 @@ def _preexisting_accept_lines(con, run: dict, tasks: list[dict]) -> list[str]:
 
 
 def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
-    """Each unfinished task's effective route (#426): the one recorded on the
-    task, else the plan's primary it will dispatch on. Shown so a swap is visible."""
-    from office import plan_view, routing
-    pv = plan_view.load(con, run["id"], run["plan_version"]) if run.get("plan_version") else None
+    """Each unfinished task's executor route (#426, #1106 F6), as its next launch takes it. The selection
+    is `rerun.observed_route`, the one dispatch and rerun run, read-only: no quota probe, no write.
+    A selection that fails names the planned route that will not run, with its rejection reason."""
+    from office import rerun
     out = {}
     for t in tasks:
         if t["status"] in ("accepted", "cancelled"):
@@ -559,18 +559,39 @@ def effective_routes(con, run: dict, tasks: list[dict]) -> dict[str, str]:
         if trial:
             out[t["id"]] = f"{trial['route']} (trial, fallback {trial['fallback'] or 'none'})"
             continue
-        rec = state.recorded_route(t)
-        if rec:
-            chosen = routing.candidate_id(rec["candidate"])
-            preferred = rec.get("preferred_route")
-            out[t["id"]] = chosen + (" (declared)" if rec.get("declared") else "") + \
-                (f" (preferred {preferred}: {rec.get('selection_reason') or 'fell back'})"
-                 if preferred and preferred != chosen else "")
-            continue
-        plan = (((pv or {}).get("tasks") or {}).get(t["id"]) or {}).get("route_plan") or {}
-        if plan.get("primary"):
-            out[t["id"]] = f"{plan['primary']} (planned)"
+        observed = rerun.observed_route(con, run, t)
+        if observed:
+            out[t["id"]] = _route_text(observed, state.recorded_route(t))
     return out
+
+
+def _route_text(observed: dict, rec: dict) -> str:
+    """The route text for one observed selection (`rerun.observed_route`)."""
+    from office import routing
+    if "failure" in observed:
+        planned = "planned; " if observed["planned"] else ""
+        return f"{observed['route']} ({planned}will not run: {observed['failure']})"
+    decision = observed["decision"]
+    chosen = routing.candidate_id(decision["candidate"])
+    slate = decision.get("planned")
+    if slate is None:  # a reused route, requalified as a rerun requalifies it
+        preferred = decision.get("preferred_route")
+        return chosen + (" (declared)" if decision.get("declared") else "") + \
+            (f" (preferred {preferred}: {rec.get('selection_reason') or 'fell back'})"
+             if preferred and preferred != chosen else "")
+    chooser = slate.get("chooser")
+    if chooser == "declared":
+        text = f"{chosen} (declared)"
+    elif chooser == "recorded":
+        preferred = rec.get("preferred_route")
+        text = chosen + (f" (preferred {preferred}: {rec.get('selection_reason') or 'fell back'})"
+                         if preferred and preferred != chosen else "")
+    else:
+        text = f"{chosen} (planned)"
+    taken = decision.get("fallbacks_taken") or []
+    if taken:
+        text += " [" + "; ".join(f"{t['route']} skipped: {t['reason']}" for t in taken) + "]"
+    return text
 
 
 def _plan_review_live(con, run: dict) -> str:

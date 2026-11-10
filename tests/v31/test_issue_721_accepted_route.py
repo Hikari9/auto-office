@@ -54,7 +54,7 @@ def test_revoke_of_new_acceptance_work_does_not_restore_stale_acceptance(env):
     assert _dispatch(env, task_row(env, "T1")["current_dispatch_id"])["triple"] == "codex@1/gpt-6-astra@low"
 
 
-@pytest.mark.parametrize("block", ["denied", "quota", "capabilities"])
+@pytest.mark.parametrize("block", ["quota", "capabilities"])
 def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env, monkeypatch, block):
     accepted = _accepted(env)
     producer = _dispatch(env, accepted["current_dispatch_id"])
@@ -64,9 +64,7 @@ def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env,
     counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
     before = task_row(env, "T1")
     extra = EXTERNAL
-    if block == "denied":
-        (env.tmp / "user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{NEW}]\n")
-    elif block == "quota":
+    if block == "quota":
         from test_adaptive_dispatch import _quota
         extra = _quota(env, codex=1)
     else:
@@ -84,3 +82,24 @@ def test_accepted_future_route_rechecks_factual_gates_and_refusal_is_atomic(env,
     assert {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables} == counts
     assert _dispatch(env, producer["id"]) == producer
     assert task_row(env, "T1") == before
+
+
+def test_accepted_future_route_a_user_deny_drops_it_and_the_amendment_relaunches_on_the_plan(env):
+    """#1106 H3: a declared route that a user deny now rejects is dropped; the amendment relaunches on
+    the plan slate and records the deny as a route change."""
+    accepted = _accepted(env)
+    producer = _dispatch(env, accepted["current_dispatch_id"])
+    env.office("amend", "route", "T1", "--as", NEW, "--quote", QUOTE, env=EXTERNAL, check=0)
+    (env.tmp / "user-config.yaml").write_text(f"routing:\n  user_policy:\n    denied_models: [{NEW}]\n")
+    code, out = env.office("amend", "T1", "--add-accept", "reject nonnumeric arguments", "--",
+                           "tighten input handling", env=EXTERNAL)
+    assert code == 0, out
+    con = env.con()
+    worker = _dispatch(env, task_row(env, "T1")["current_dispatch_id"])
+    assert worker["id"] != producer["id"] and worker["triple"] != "codex@1/gpt-6-astra@low", worker
+    assert _dispatch(env, producer["id"]) == producer
+    changes = [json.loads(r[0]) for r in con.execute(
+        "SELECT payload_json FROM events WHERE kind='route.changed' ORDER BY seq").fetchall()]
+    (change,) = [c for c in changes if c.get("kind") == "denied"]
+    assert (change["before"], change["after"], change["actor"]) == ("codex@1/gpt-6-astra@low", worker["triple"], "office"), change
+    assert change["task_id"] == "T1" and "denied by user" in change["reason"], change

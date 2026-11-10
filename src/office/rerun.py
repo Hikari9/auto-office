@@ -29,9 +29,7 @@ def _fresh_cmd(tid: str) -> str:
 
 
 def _last_ended_executor(con, run: dict, tid: str) -> dict | None:
-    row = con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? AND role='executor' AND ended_at IS NOT NULL "
-                      "ORDER BY ended_at DESC, started_at DESC LIMIT 1", (run["id"], tid)).fetchone()
-    return state.get_dispatch(con, row["id"]) if row else None
+    return state.last_ended_executor(con, run, tid)
 
 
 def modes(con, run: dict, tid: str) -> str:
@@ -515,10 +513,29 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
         if resume:
             raise Refused("resume-impossible", f"{task['id']}'s route was changed since {parent['id']}; a resumed "
                           "session keeps its own", scope=task["id"], next_step=_fresh_cmd(task["id"]))
-    route = rec if declared else parent.get("route") or {}
+    if not declared and state.returned_to_automatic(task):  # `amend route --auto` dropped the parent's reroute (#1106)
+        decision = dispatch.replan_from_slate(con, run, task)
+    else:
+        decision = _reused_route(con, run, task, parent, rec if declared else parent.get("route") or {})
+    cand = decision["candidate"]
+    if resume and (cand["harness"], cand.get("invocation_model_id"), cand.get("effort")) != (
+            parent.get("adapter_id") or parent.get("harness"), parent.get("model"), parent.get("effort")):
+        raise Refused("resume-impossible", f"cannot resume {task['id']}: {parent['id']}'s session keeps its "
+                      f"harness, model and effort ({parent.get('harness')}/{parent.get('model')}@{parent.get('effort')})",
+                      scope=task["id"], preserved="the task worktree", next_step=_fresh_cmd(task["id"]))
+    return decision
+
+
+def _reused_route(con, run: dict, task: dict, parent: dict, route: dict, *, observe: bool = False) -> dict:
+    """Requalify the route a rerun reuses. A user deny that now rejects it drops the route: the rerun
+    re-picks from the approved plan and records the change (#1106). Other refusals stay route-unavailable."""
     try:
-        decision = dispatch.qualify_recorded_route(con, run, task, route)
+        return dispatch.qualify_recorded_route(con, run, task, route, observe=observe)
     except Refused as exc:
+        if exc.category == "route-denied":
+            return dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(route["candidate"]),
+                                                                     exc.data.get("reason") or exc.message),
+                                              observe=observe)
         fix = f"{_fresh_cmd(task['id'])} --reroute routes from current evidence"
         if dispatch._route_quote(route):
             fix += f'; or {_fresh_cmd(task["id"])} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
@@ -528,13 +545,37 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
         raise Refused("route-unavailable",
                       f"{task['id']}'s original route {original} cannot run now: {exc.message}",
                       scope=task["id"], preserved="the task worktree and its route history", next_step=fix) from exc
-    cand = decision["candidate"]
-    if resume and (cand["harness"], cand.get("invocation_model_id"), cand.get("effort")) != (
-            parent.get("adapter_id") or parent.get("harness"), parent.get("model"), parent.get("effort")):
-        raise Refused("resume-impossible", f"cannot resume {task['id']}: {parent['id']}'s session keeps its "
-                      f"harness, model and effort ({parent.get('harness')}/{parent.get('model')}@{parent.get('effort')})",
-                      scope=task["id"], preserved="the task worktree", next_step=_fresh_cmd(task["id"]))
-    return decision
+
+
+def observed_route(con, run: dict, task: dict) -> dict | None:
+    """The executor route an unfinished task's next launch takes, for `office status` (#1106 F6).
+
+    Read-only: no quota probe and no write. A task with a dispatch reuses its recorded route as a rerun
+    does (`_reused_route`), and a user deny that rejects it re-picks from the plan. Any other task takes
+    the planned slate in order (`dispatch.planned_route`). Returns {"decision"} for the route that will
+    run; {"route", "planned", "failure"} when the selection fails, naming the route status reports and
+    why it was rejected; None when the task has neither a plan slate nor a recorded route."""
+    tid = task["id"]
+    rec = state.recorded_route(task)
+    slate = dispatch._planned_slate(con, run, tid)
+    if not rec and not slate:
+        return None
+    primary = (slate or {}).get("primary") or routing.candidate_id(rec["candidate"])
+    returned = state.returned_to_automatic(task)
+    try:
+        if rec and task.get("current_dispatch_id") and not returned:
+            decision = _reused_route(con, run, task, {}, rec, observe=True)
+        else:
+            decision = dispatch.planned_route(con, run, {**task, "route_json": None} if returned else task,
+                                              observe=True)
+    except Refused as exc:
+        if exc.category == "route-unavailable":
+            return {"route": routing.candidate_id(rec["candidate"]), "planned": False, "failure": exc.message}
+        return {"route": primary, "planned": bool(slate), "failure": exc.message.removeprefix(f"{tid}: ")}
+    if decision.get("status") != "selected":
+        return {"route": primary, "planned": bool(slate),
+                "failure": dispatch._route_failure(tid, decision).removeprefix(f"{tid}: ")}
+    return {"decision": decision}
 
 
 def _mode_required(tid: str) -> Usage:

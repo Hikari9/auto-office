@@ -204,6 +204,18 @@ def recorded_route(task: dict) -> dict:
     return route if isinstance(route, dict) and route.get("candidate") else {}
 
 
+def returned_to_automatic(task: dict) -> bool:
+    """`amend route --auto` dropped a stale reroute the parent dispatch carried (#1106): the next rerun routes from the plan."""
+    route = loads(task.get("route_json"), {})
+    return isinstance(route, dict) and "returned_to_automatic" in route
+
+
+def last_ended_executor(con: sqlite3.Connection, run: dict, tid: str) -> dict | None:
+    row = con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? AND role='executor' AND ended_at IS NOT NULL "
+                      "ORDER BY ended_at DESC, started_at DESC LIMIT 1", (run["id"], tid)).fetchone()
+    return get_dispatch(con, row["id"]) if row else None
+
+
 SIGNAL_KIND = "worker.signal"
 SIGNAL_REPEAT_S = 600  # the same reason from the same dispatch is news again after this long
 SIGNAL_CONSUMER = "orchestrator-signal"  # its own cursor: a signal is a stall whatever else is unread
