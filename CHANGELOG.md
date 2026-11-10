@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.63
+
+Fixes from this run: #1087, #1086, #1084, #1083, #1085, #1068, #958, #1081, #1082, #567, #758, a per-role quota reserve default, and SKILL.md back under its size budget.
+
 ## 3.15.62
 
 `office route policy --effective` names each route's per-size states when they differ from the unsized verdict (#1099). A user role rule written after a run pinned its policy reaches that run's next routing decision, and `office route allow|neutral|deny` says so (#1100). `office route clear` says a run that pinned the rule keeps applying it until `office config --run <id> --apply-routing` re-pins it. The pi registration test reads status for the run it started, not a bare status (#1107).

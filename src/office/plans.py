@@ -309,7 +309,8 @@ def _apply_requirements(con, run: dict, proposed: dict, submitter: str) -> None:
         if proposed.get(key):
             merged[key] = proposed[key]
     if proposed.get("deploy"):
-        merged["deploy"] = {**(frozen.get("deploy") or {}), **proposed["deploy"]}
+        kept = {k: v for k, v in (frozen.get("deploy") or {}).items() if k in (frozen.get("user_deploy") or [])}
+        merged["deploy"] = {**(frozen.get("deploy") or {}), **proposed["deploy"], **kept}  # a user's deploy edit stands (#758)
     if proposed.get("goal"):
         merged["goal"] = proposed["goal"]
     if merged == frozen:

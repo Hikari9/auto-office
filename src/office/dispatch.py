@@ -33,6 +33,7 @@ except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
 from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, read_scope, review_submit, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import config as office_config
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -611,7 +612,7 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
             quota = candidates.quota_for_candidate(
                 decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
             decision["candidate"]["quota"] = quota
-            reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+            reserve = office_config.quota_reserve_percent(config, "executor")
             if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
                     and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
                 raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
@@ -1082,7 +1083,7 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
         return "trial-cap"
     if alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
         return "rolling-cap"
-    if route_probe._quota_refusal(cand, config):
+    if route_probe._quota_refusal(cand, config, "executor"):
         return "quota-reserve"
     probe = route_probe.status(con, cand)
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
@@ -1318,6 +1319,12 @@ def cli_harness(cli: str | None) -> str | None:
     return None
 
 
+# A delivery whose amendment is not a requirements change. A requirements delta is not in the contract, so only a
+# requirements delivery may carry one: the others leave it queued, and a relaunch never supersedes it (#1085).
+NOT_REQUIREMENTS_DELIVERY = ("NOT EXISTS (SELECT 1 FROM amendments a WHERE a.run_id=deliveries.run_id "
+                             "AND a.class='requirements' AND a.id=substr(deliveries.run_id, 1, 8) || ':' || deliveries.amendment_id)")
+
+
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
                    base: str | None = None, extra: dict | None = None, fix_of: str | None = None,
                    replaces: str | None = None) -> str:
@@ -1391,9 +1398,11 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     # This session starts from the current contract, so an amendment still
     # waiting on an earlier session of the task is already in its brief; left
     # queued, it would hold the new revision at amendment_pending (and its ack
-    # would be refused as the wrong holder).
+    # would be refused as the wrong holder). A requirements delta is not in the
+    # contract, so it is never superseded here: it reaches this brief only as a
+    # delivery, and the transfer below hands it over (#1085).
     con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
-                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                f"AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=? AND {NOT_REQUIREMENTS_DELIVERY}",
                 (run["id"], task_id, dispatch_id, applied))
     # A newer amendment (a requirements change can target a plan version past
     # the task contract) is not in this brief: hand it to this session, or no
@@ -1424,6 +1433,18 @@ def lease_dormant(con, run_id: str, row) -> bool:
         return False
     from office import gates
     return gates.live_task_session(con, run_id, row["task_id"]) is None
+
+
+def revoked_without_live_lease(con, run_id: str, task_id: str) -> bool:
+    """True when the task's newest lease is revoked (any reason: `revoke_reason` is free text and is not read) and no
+    session of the task is live. Such a task has no session on purpose: relaunching it takes a fresh lease on its
+    scope and blocks overlapping tasks (#1085)."""
+    row = con.execute("SELECT revoked_at FROM leases WHERE run_id=? AND task_id=? "
+                      "ORDER BY fencing DESC LIMIT 1", (run_id, task_id)).fetchone()
+    if row is None or row["revoked_at"] is None:
+        return False
+    from office import gates
+    return gates.live_task_session(con, run_id, task_id) is None
 
 
 def scope_holder(con, run: dict, task: dict) -> str | None:
