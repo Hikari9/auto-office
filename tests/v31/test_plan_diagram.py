@@ -173,3 +173,13 @@ def test_dispatch_reports_drift_from_the_preview(env):
         assert authority["actor"] == "user" and authority["quote"] == quote
     finally:
         con.close()
+
+
+def test_567_diff_prints_the_reason_on_a_reviewer_route_change():
+    task = {"title": "x", "depends": [], "wave": 1, "base": None, "needs": [], "route": "codex/gpt-5.5@high",
+            "review": "codex/luna@high"}
+    cur = {"tasks": {"T4": {**task, "review": "claude/opus@low", "review_why": "luna quota exhausted"}}}
+    assert plan_view.diff({"tasks": {"T4": task}}, cur, 1) == [
+        "changes vs p1:", "  T4 review: codex/luna@high -> claude/opus@low (luna quota exhausted)"]
+    bare = {"tasks": {"T4": {**task, "review": "claude/opus@low"}}}
+    assert plan_view.diff({"tasks": {"T4": task}}, bare, 1)[1] == "  T4 review: codex/luna@high -> claude/opus@low"

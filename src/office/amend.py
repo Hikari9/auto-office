@@ -249,16 +249,32 @@ def _orchestrator_plan_path(con, run: dict, cwd: Path | None) -> Path | None:
     return draft if draft.is_file() else None
 
 
+DEPLOY_LINE = re.compile(r"^\s*deploy_(preview|prod|verify)\s*:\s*(\S.*?)\s*$")
+
+
+def deploy_edits(delta: str) -> dict[str, str]:
+    """The deploy commands a requirements delta sets: one `deploy_<preview|prod|verify>: <command>` per line (#758)."""
+    found = [m.groups() for m in map(DEPLOY_LINE.match, delta.splitlines()) if m]
+    labels = [label for label, _ in found]
+    repeated = sorted({f"deploy_{label}" for label in labels if labels.count(label) > 1})
+    if repeated:
+        raise Usage("ambiguous-deploy-amendment", f"{', '.join(repeated)} set more than once in one amendment",
+                    next_step="state each deploy_<preview|prod|verify> command once")
+    return dict(found)
+
+
 def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: list[str], add: list[str],
                          to: list[str], *, drop_non_goals: list[str] = (), add_non_goals: list[str] = ()) -> Result:
     if not quote or not quote.strip():
         raise Refused("user-quote-required", "only the user can change requirements; record their words",
                       next_step='office amend requirements --quote "<user\'s exact words>" -- "<change>"')
+    deploy = deploy_edits(delta)
     with db.transaction(con):
         version, targets = record_requirements(con, state.get_run(con, run["id"]), delta, quote, drop=drop, add=add,
                                                to=to, with_targets=True,
-                                               drop_non_goals=drop_non_goals, add_non_goals=add_non_goals)
-        delivery = f"delivered to {', '.join(targets)}" if targets else "not delivered to live tasks"
+                                               drop_non_goals=drop_non_goals, add_non_goals=add_non_goals,
+                                               deploy=deploy)
+        delivery = _delivery_text(targets, _waiting_on_rerun(con, run, targets))
         state.emit(con, run, "requirements.changed",
                    f"REQUIREMENTS r{version}: {delta.strip()[:100]}; {delivery}; authorization required")
     jobs.kick(con, run["id"])
@@ -268,7 +284,8 @@ def _requirements_change(con, run: dict, delta: str, quote: str | None, drop: li
 
 def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[str] = (), add: list[str] = (),
                         to: list[str] = (), with_targets: bool = False,
-                        drop_non_goals: list[str] = (), add_non_goals: list[str] = ()):
+                        drop_non_goals: list[str] = (), add_non_goals: list[str] = (),
+                        deploy: dict[str, str] | None = None):
     """Record requirements r(n+1) from the user's words and deliver it to live
     workers. Caller holds the tx. Returns the new version (with `with_targets`, also the tasks
     it was delivered to). `drop` names frozen done criteria the user removed (each must match
@@ -287,6 +304,9 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
         non_goals.remove(_match_criterion(non_goals, text, kind="non-goal"))
     non_goals += [a.strip() for a in add_non_goals if a.strip() and a.strip() not in non_goals]
     frozen["non_goals"] = non_goals
+    if deploy:
+        frozen["deploy"] = {**(frozen.get("deploy") or {}), **deploy}
+        frozen["user_deploy"] = sorted({*(frozen.get("user_deploy") or []), *deploy})
     frozen.setdefault("user_changes", []).append(delta.strip())
     version = cur["version"] + 1
     con.execute("INSERT INTO requirements(run_id, version, frozen_json, source, quote, created_at) VALUES(?,?,?,?,?,?)",
@@ -294,7 +314,7 @@ def record_requirements(con, run: dict, delta: str, quote: str, *, drop: list[st
     state.update_run(con, run["id"], requirements_version=version)
     amendment_id = _record(con, run, "requirements", [], delta, run["plan_version"], run["plan_version"])
     live = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] not in ("accepted", "cancelled", "planned")]
-    if added and not (drop or drop_non_goals or add_non_goals):
+    if added and not (drop or drop_non_goals or add_non_goals or deploy):
         live = [t for t in live if t in to]
     targets = _deliver(con, state.get_run(con, run["id"]), amendment_id, live, f"requirements r{version}: {delta.strip()}",
                        run["plan_version"])
@@ -404,8 +424,12 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         parts.append(f"affected {','.join(affected)}")
     if rechecked:
         parts.append(f"checks rerun on {','.join(rechecked)}")
-    if delivered:
-        parts.append(f"delivering to {','.join(delivered)}")
+    waiting = _waiting_on_rerun(con, run, delivered)
+    ready = [t for t in delivered if t not in waiting]
+    if ready:
+        parts.append(f"delivering to {','.join(ready)}")
+    if waiting:
+        parts.append(f"{','.join(waiting)} waits for office rerun (lease revoked)")
     res.add(" | ".join(parts))
     for line in recaptured:
         res.add(line)
@@ -476,7 +500,10 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
     current_plan = state.current_plan(con, run["id"]) or {}
     previous_deploy = (current_plan.get("requirements") or {}).get("deploy") or {}
     proposed_deploy = parsed.requirements.get("deploy") or {}
-    if proposed_deploy != previous_deploy:
+    # A user-quoted deploy amendment (#758) lives in the stored requirements, not the older plan text: a plan whose
+    # deploy lines match what is stored is no change.
+    stored_deploy = {**previous_deploy, **(state.current_requirements(con, run["id"])["frozen"].get("deploy") or {})}
+    if proposed_deploy != stored_deploy:
         raise Refused("requirements-change", "deploy command changed in the Requirements section; a plan contract "
                       "amendment cannot apply it. No task or reviewer route was changed", scope="requirements",
                       preserved="the authorized deploy command and plan are unchanged",
@@ -767,6 +794,21 @@ def _ripple_note(owners: list[str]) -> str:
     return f"({_owners_label(owners)} changed its contract, not yours: adjust only work that relies on what changed)"
 
 
+def _delivery_text(targets: list[str], held: list[str]) -> str:
+    """What `amend requirements` reports as delivery. A task `office revoke` ended is waiting, not delivered (#1085)."""
+    ready = [t for t in targets if t not in held]
+    text = f"delivered to {', '.join(ready)}" if ready else "not delivered to live tasks"
+    if held:
+        text += f"; {', '.join(held)} waits for office rerun (lease revoked)"
+    return text
+
+
+def _waiting_on_rerun(con, run: dict, task_ids: list[str]) -> list[str]:
+    """The tasks `office revoke` ended: their queued delivery waits for `office rerun`, which takes it over (#1085)."""
+    from office import dispatch
+    return [t for t in task_ids if dispatch.revoked_without_live_lease(con, run["id"], t)]
+
+
 def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, target_version: int,
              hold: list[str] = (), owners: list[str] | None = None) -> list[str]:
     """Queue one combined delta per affected dispatched task and supersede older
@@ -776,6 +818,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
     so their prompt says so instead of telling them to apply someone else's amendment. Caller holds tx."""
     from office import dispatch, gates
     targets = []
+    # Folding carries older deliveries into this one, and a relaunch supersedes a delivery whose delta the contract
+    # already holds. A requirements delta is not in the contract, so only a requirements delivery folds one (#1085).
+    own = con.execute("SELECT class FROM amendments WHERE run_id=? AND id=?",
+                      (run["id"], f"{run['id'][:8]}:{amendment_id}")).fetchone()
+    requirements = own is not None and own["class"] == "requirements"
     for tid in task_ids:
         task = state.get_task(con, run["id"], tid)
         if task is None or not task.get("current_dispatch_id") or task["status"] == "cancelled":
@@ -783,7 +830,8 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
         d = state.get_dispatch(con, task["current_dispatch_id"])
         applied = d.get("applied_plan_version") or 0
         older = con.execute("SELECT id, content FROM deliveries WHERE run_id=? AND task_id=? AND status IN ('queued','delivered') "
-                            "ORDER BY target_version", (run["id"], tid)).fetchall()
+                            f"AND (? OR {dispatch.NOT_REQUIREMENTS_DELIVERY}) ORDER BY target_version",
+                            (run["id"], tid, requirements)).fetchall()
         combined = [r["content"] for r in older] + [f"{amendment_id} (p{target_version}): {text}"]
         did = f"{run['id'][:8]}:{amendment_id}:{tid}"
         for r in older:
@@ -818,6 +866,12 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             else:
                 state.update_task(con, run["id"], tid, pause_reason=f"amended by {amendment_id}; rerun after its "
                                   "dependency is accepted again")
+        elif dispatch.revoked_without_live_lease(con, run["id"], tid):
+            # `office revoke` ended this task on purpose. Its delivery stays queued on the ended dispatch until the
+            # next launch takes it over (dispatch.request_launch). A relaunch here would take a fresh lease on the
+            # task's scope and block overlapping tasks in this same amendment (#1085).
+            state.emit(con, run, "delivery.waiting", f"{amendment_id} waits for office rerun: {tid} lease revoked",
+                       task_id=tid, dispatch_id=d["id"])
         else:
             # The worker is gone. The relaunched session starts from the current contract, but an ordinary
             # delta is not in the contract and a reopened task has no findings: hand the delivery to the new
