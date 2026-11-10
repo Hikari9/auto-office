@@ -230,6 +230,7 @@ def test_a_user_quoted_executor_route_at_13_percent_is_refused_at_the_executor_r
     cand = _candidate("codex", "gpt-6", remaining=13)
     monkeypatch.setattr(state, "pinned_config", lambda run: shipped)
     monkeypatch.setattr(candidates, "declared_decision", lambda *a, **kw: {"candidate": dict(cand)})
+    monkeypatch.setattr(candidates, "route_role", lambda *a, **kw: {"status": "selected", "rejected": []})
     monkeypatch.setattr(adapters, "load_all", lambda: {"codex": {}})
     monkeypatch.setattr(candidates, "probe_quota", lambda adapter: {})
     monkeypatch.setattr(candidates, "quota_for_candidate", lambda c, probe: {
