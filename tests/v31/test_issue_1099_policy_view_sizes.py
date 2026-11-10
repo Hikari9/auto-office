@@ -110,9 +110,9 @@ def test_a_sized_view_shows_no_by_size_breakdown(isolated):
 APPLY_LINE = ("running runs apply this rule at their next routing decision; "
               "`office config --run <id> --apply-routing --quote \"<words>\"` "
               "re-pins the rest of a run's pinned routing")
-# A run started while the rule was set keeps its pinned copy, so clear cannot promise the rule is dropped live.
-CLEAR_LINE = ("running runs that pinned this rule keep applying it until "
-              "`office config --run <id> --apply-routing --quote \"<words>\"` re-pins their routing")
+# A run started while the rule was set keeps its pinned copy; every other running run drops it live.
+CLEAR_LINE = ("running runs drop the rule at their next routing decision, except a run started while the rule was set, "
+              "which keeps its pinned copy until `office config --run <id> --apply-routing --quote \"<words>\"`")
 
 
 @pytest.mark.parametrize("action, running", [

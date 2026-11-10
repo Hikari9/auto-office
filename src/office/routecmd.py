@@ -216,9 +216,9 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     if backup:
         lines.append(f"commented source backed up at {backup}")
     if action == "clear":
-        # A run pinned the rule at start and keeps its pinned copy; only a re-pin drops it.
-        lines.append("running runs that pinned this rule keep applying it until `office config --run <id> --apply-routing "
-                     "--quote \"<words>\"` re-pins their routing")
+        # Live runs re-read the user policy each decision; a run started while the rule was set keeps its pinned copy.
+        lines.append("running runs drop the rule at their next routing decision, except a run started while the rule was set, "
+                     "which keeps its pinned copy until `office config --run <id> --apply-routing --quote \"<words>\"`")
     else:
         lines.append(f"running runs apply this rule at their next routing decision; `office config --run <id> --apply-routing "
                      "--quote \"<words>\"` re-pins the rest of a run's pinned routing")
