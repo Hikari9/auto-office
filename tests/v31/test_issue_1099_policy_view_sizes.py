@@ -107,10 +107,18 @@ def test_a_sized_view_shows_no_by_size_breakdown(isolated):
     assert row_for(result, SONNET)["state"] == "deny"
 
 
+APPLY_LINE = ("running runs apply this rule at their next routing decision; "
+              "`office config --run <id> --apply-routing --quote \"<words>\"` "
+              "re-pins the rest of a run's pinned routing")
+# A run started while the rule was set keeps its pinned copy, so clear cannot promise the rule is dropped live.
+CLEAR_LINE = ("running runs that pinned this rule keep applying it until "
+              "`office config --run <id> --apply-routing --quote \"<words>\"` re-pins their routing")
+
+
 @pytest.mark.parametrize("action, running", [
-    ("allow", "apply this rule"), ("deny", "apply this rule"), ("neutral", "apply this rule"), ("clear", "drop this rule"),
+    ("allow", APPLY_LINE), ("deny", APPLY_LINE), ("neutral", APPLY_LINE), ("clear", CLEAR_LINE),
 ])
-def test_a_route_change_says_running_runs_apply_the_rule_after_the_existing_lines(isolated, action, running):
+def test_a_route_change_says_how_running_runs_pick_up_the_rule_after_the_existing_lines(isolated, action, running):
     if action == "clear":
         routecmd.change("allow", role="executor", route=PLAIN)
     result = routecmd.change(action, role="executor", route=PLAIN)
@@ -118,9 +126,7 @@ def test_a_route_change_says_running_runs_apply_the_rule_after_the_existing_line
     expected = [f"executor/{result.data['route']}: {verb} (user config)"]
     if action == "allow":
         expected.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
-    expected.append(f"running runs {running} at their next routing decision; "
-                    "`office config --run <id> --apply-routing --quote \"<words>\"` "
-                    "re-pins the rest of a run's pinned routing")
+    expected.append(running)
     assert result.lines == expected
 
 
