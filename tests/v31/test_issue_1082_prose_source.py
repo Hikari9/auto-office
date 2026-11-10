@@ -2,7 +2,8 @@
 import pytest
 
 from conftest import PLAN_ONE
-from office import planfile, shell_safety
+from office import planfile
+from office import shell_safety
 
 # Verbatim accept text from the issue. It passes the guard on HEAD too; it is a
 # regression guard for the same plan path, not a reproducer.
