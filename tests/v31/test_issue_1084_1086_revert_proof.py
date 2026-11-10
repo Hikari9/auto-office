@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from office import contract, self_review_proof
+from office import contract
+from office import self_review_proof
 
 NEW_RUN = {"id": "r", "gear": "M", "risk_json": None, "gates": {"review_contract": contract.CONVERGENCE}}
 RUNNER = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
