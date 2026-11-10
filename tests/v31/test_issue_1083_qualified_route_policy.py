@@ -161,8 +161,12 @@ def test_amend_route_and_recorded_rerun_requalification_match_policy_view(env, m
 
     code, out = env.office("rerun", "T1", "--fresh", env=_quota(env))
     if action == "deny":
-        assert code == 4 and "route-unavailable" in out and "policy deny by user" in out, out
-        assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
+        # #1106 H3: the rerun drops the denied reused route, names the deny, and re-picks;
+        # the denied route never launches.
+        assert code == 0 and "policy deny by user" in out, out
+        triple = env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC") \
+            .fetchone()[0]
+        assert "sonnet" not in triple, triple
     else:
         assert code == 0, out
         assert env.con().execute("SELECT triple FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC") \
