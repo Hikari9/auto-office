@@ -244,7 +244,7 @@ def test_auto_clears_a_declared_route_and_dispatch_routes_automatically_again(en
     env.office("amend", "route", "T1", "--as", "codex/gpt-6-astra@low", "--quote", "use astra here", check=0)
     code, out = env.office("amend", "route", "T1", "--auto", "--quote", "back to automatic")
     assert code == 0 and f"T1 route {CODEX} -> automatic (claude@1/claude-opus-5-5@medium planned)" in out, out
-    assert env.con().execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()[0] is None
+    assert "returned_to_automatic" in env.con().execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()[0]
     first, second = _events(env)
     assert (second["before"], second["after"]) == (CODEX, "claude@1/claude-opus-5-5@medium")
     assert second["actor"] == "user" and "back to automatic" in second["reason"] and second["auto"] is True

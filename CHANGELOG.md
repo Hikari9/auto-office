@@ -2,6 +2,14 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.15.61
+
+Reviewer re-prompt counts a written reply file or an agent reported working as submitted rather than stopping on held scrollback (#1106 H4).
+
+## 3.15.60
+
+A reused route that a user deny now rejects is dropped and the rerun re-picks from the approved plan (recorded as a route change); `amend route --auto` clears a stale reroute on the parent dispatch; status shows the route the next launch takes from the same selection the rerun uses, and a planned route that will not run is shown with its rejection reason, never as `(planned)` (#1106 H3).
+
 ## 3.15.59
 
 A lane visual review now needs one OBSERVATION line per screenshot (no bare APPROVED), and the reviewer infers which UI sections must be shown from the acceptance and plan, reporting uncovered ones as findings (#1078).
