@@ -66,9 +66,53 @@ _ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", 
                              "temp", "bare", "local", "no", "any", "each", "one"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A path or expansion operand: `source` runs the file it names. A bare or
+# directory-relative script name (`release.sh`, `scripts/env.sh`) also counts,
+# optionally quoted. Not anchored with `$`: the fallback scan embeds this pattern.
+_SCRIPT_TAIL = re.compile(r"\.(?:sh|bash|zsh|ksh|env)\Z", re.I)
+_SOURCE_OPERAND = re.compile(
+    r"[\"']?(?:\.{1,2}/|/(?=[\w.~-])|~|\$(?=[A-Za-z_{(@*#?!]|\d(?!\d))|\x60"
+    r"|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w+-]|\.[\w+-]))", re.I)
+# An extensionless word after `source` ("source publish") is a PATH script. In prose
+# that counts only in command position, so "writes the source file" stays the noun.
+_BARE_WORD = r"[A-Za-z_][\w.+-]*"
+# Words that put a following `source` in command position ("run source publish").
+# A lead may carry trailing punctuation ("Run: source publish", "Run, source publish").
+_COMMAND_LEAD_WORDS = frozenset({"run", "execute", "then", "and", "or", "first", "please", "just"})
+_EDGE_PUNCT = ".,;:!?)*_"  # trailing punctuation and emphasis marks around a lead word
+_LEAD_ALTERNATION = "|".join(sorted(_COMMAND_LEAD_WORDS))
+_BARE_SOURCE_PROSE = re.compile(
+    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})[{re.escape(_EDGE_PUNCT)}]*\s+)"
+    rf"[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
+# The push token after a bare-word script run: the exact word, with trailing punctuation.
+_PUSH_WORD = re.compile(rf"push[{re.escape(_EDGE_PUNCT)}]*", re.I)
+# A sourced path may push under any inflection, or inside a flag (`--push-tags`). It does not
+# match a word that merely contains push and continues (`test_pusher.py`, `pushover`).
+# A quoted script operand may hold a space ("my dir/release.sh"); the unbalanced-quote fallback needs it too.
+_QUOTED_SCRIPT = r"[\"'][^\"'\n]*?\.(?:sh|bash|zsh|ksh|env)(?![\w+-])"
+_PUSH_FORM = re.compile(r"push(?:es|ed|ing)?(?![A-Za-z])", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
+
+
+def _sources_file(tokens: list[str], i: int, prose: bool) -> bool:
+    """`source` runs a file. In prose it is usually the English noun ("the source file"),
+    so only a path or expansion operand counts."""
+    if not prose:
+        return True
+    # A quoted operand may hold a space ("my dir/release.sh"); its script tail still counts.
+    return i + 1 < len(tokens) and (
+        _SOURCE_OPERAND.match(tokens[i + 1]) is not None
+        or _SCRIPT_TAIL.search(tokens[i + 1]) is not None)
+
+
+def _bare_source_runs(tokens: list[str], i: int) -> bool:
+    """In prose, `source <bare word>` in command position runs an extensionless script."""
+    if i + 1 >= len(tokens) or re.match(_BARE_WORD, tokens[i + 1]) is None:
+        return False
+    return i in _command_starts(tokens) or (
+        i > 0 and tokens[i - 1].lower().strip(_EDGE_PUNCT) in _COMMAND_LEAD_WORDS)
 
 
 def _is_dynamic(token: str) -> bool:
@@ -226,7 +270,16 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             # command signal can justify a fail-closed refusal in plan prose.
             if "$(" in command or "`" in command:
                 return True  # a substitution that cannot be tokenized is not text
-            return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
+            if re.search(r"\b(?:git|eval|alias)\b", command, re.I):
+                return True
+            # Same rule as the tokenized path: a sourced script refuses only with a
+            # push word or an expansion, so "source release.sh to build" passes. A bare
+            # command-position script ("source publish") refuses with a push word alone.
+            if re.search(r"\bpush\b", command, re.I) and _BARE_SOURCE_PROSE.search(command):
+                return True
+            pushed = re.search(r"push", command, re.I)
+            sourced = re.search(rf"\bsource\s+(?:{_SOURCE_OPERAND.pattern}|{_QUOTED_SCRIPT})", command, re.I)
+            return bool(sourced and (pushed or "$" in command))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
@@ -257,15 +310,24 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
             if tokens[j] == "push" or unknown:
                 return True
+    sourced = any(t.lower() == "source" and _sources_file(tokens, i, prose)
+                  for i, t in enumerate(tokens))
+    # In prose, a bare command-position `source <word>` also runs a script (F7).
+    bare_run = prose and any(
+        t.lower() == "source" and _bare_source_runs(tokens, i) for i, t in enumerate(tokens))
+    # A sourced path may push under any inflection (pushes, Push). A bare word run takes only
+    # the push word itself, so "pushed" or "unpushed" in ordinary prose does not refuse.
+    pushes = (any(_PUSH_FORM.search(t) for t in tokens) if sourced
+              else ("push" in tokens or (bare_run and any(_PUSH_WORD.fullmatch(t) for t in tokens))))
     # Dynamic executable construction must not bypass a detectable push token.
-    if "push" in tokens and (
+    if pushes and (
         re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
-        or any(t in tokens for t in ("eval", "source", "alias", "function"))
+        or sourced or bare_run or any(t in ("eval", "alias", "function") for t in tokens)
     ):
         return True
     # Dynamically evaluated shell commands cannot be proved safe.
-    if any(t in ("eval", "source") for t in tokens) and ("$" in command or "\x60" in command):
+    if (sourced or "eval" in tokens) and ("$" in command or "\x60" in command):
         return True
     if any(t in ("sh", "bash", "dash", "zsh", "ksh") for t in tokens) and (
         any(t in ("-c", "-lc", "-ec") for t in tokens)

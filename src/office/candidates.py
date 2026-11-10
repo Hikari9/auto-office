@@ -14,11 +14,13 @@ import sqlite3
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from office import adapters, executor_slates, greenfield, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import config as office_config
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -895,6 +897,18 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     }
 
 
+def route_cooldown_until(con: sqlite3.Connection, candidate: dict) -> str | None:
+    """Expiry of the latest live quota or runtime cooldown on this candidate's route, or None (#958).
+
+    Checks the keys routing.route checks: the invocation across efforts (a quota wall), and its demotion,
+    harness-wide and shared-pool keys. A user-declared route bypasses routing, so it needs this check of its own."""
+    model = candidate.get("invocation_model_id") or candidate.get("model_id")
+    keys = {routing.cooldown_key(candidate.get("harness"), model), *routing._demotion_keys(candidate)}
+    marks = ",".join("?" for _ in keys)
+    return con.execute(f"SELECT MAX(expires_at) FROM route_cooldowns WHERE expires_at>? AND route IN ({marks})",
+                       (datetime.now(timezone.utc).isoformat(), *keys)).fetchone()[0]
+
+
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
                       config: dict | None = None, repo_root=None, run_id: str | None = None,
                       scope: str | None = None, claim: bool = False) -> dict:
@@ -968,8 +982,8 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     (dispatch --as), task code review (dispatch --review-as), and a task's
     visual review (approve visual). Plan and integration review have none.
     The reserve is pinned at `office start`, so a config edit does not apply."""
-    reserve = float(((run.get("policy") or {}).get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
-    pinned = (f"quota.reserve_percent is pinned at {reserve:g}% for this run (set at office start), "
+    reserve = office_config.quota_reserve_percent(run.get("policy") or {}, role)
+    pinned = (f"the {role} quota reserve is pinned at {reserve:g}% for this run (set at office start), "
               "config edits do not apply to it")
     route = "<harness>/<model>[@effort]"
     if role == "executor" and task_id:
@@ -1168,7 +1182,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     policy = {
         "required_capabilities": list(policy_cfg.get("required_capabilities") or []),
         "floor": policy_cfg.get("floor"),
-        "quota_reserve_percent": float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT)),
+        "quota_reserve_percent": office_config.quota_reserve_percent(config, role),
         "daily_dispatch_budget": dict((config.get("quota") or {}).get("daily_dispatch_budget") or {}),
         "balanced_money_band_percent": float((config.get("cost_policy") or {}).get(
             "balanced_money_band_percent", routing.DEFAULT_MONEY_BAND_PERCENT)),

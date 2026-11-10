@@ -113,11 +113,13 @@ def test_discovery_off_ignores_pool_candidates_and_hashes_exactly_as_before():
 # decision_hash and a digest of the whole result, computed by routing.route at 341b48b (before #494)
 # for requests that carry no discovery input. The decision hashes are unchanged (replay parity); the whole-result
 # digests were regenerated for #837, which replaced the per-route `trust` eligibility record with `policy`.
+# A27: the shipped executor reserve is 20% (r3). These four entries were re-baselined for it; with
+# quota.reserve_percent_by_role.executor forced back to 5 they return to the values above the A27 update.
 GOLDEN_BEFORE_494 = {
-    "two": ("sha256:ff3c41ae5690c965d11f4599ccca6a22714035e6751374c4a90a4ee9398acf2a", "9494701bd45cf5cb"),
-    "three": ("sha256:811e29d6fbaf68a6337c594860b7db95093e57d126214cdb8dcb03ad9bdca5a9", "25e556810cbc1660"),
-    "worker": ("sha256:40ab10639a2b4e71fa048b2d5a8ff496a24e9d1c78fc8c8573484c51e31ad894", "850d746eb8f21fc1"),
-    "explore": ("sha256:ea98364617d5102b827b2a025a28bd56120372c536c6202dd9f82367bdf7b700", "cb2ee4bc183b05f6"),
+    "two": ("sha256:6a7a4dd4e1f0fe0df9f4a237a6a45787d4ee49f9fa6f93ca294768c4e67d03dc", "32c446b37e909059"),
+    "three": ("sha256:31ff0a5682d0c443fe1c42ccfbf6687aea29afb3daca200c012bbe57d4d2a473", "bc49b356c0c46222"),
+    "worker": ("sha256:551782dddfa651c5cbacb0b824b97543211102d21968ec3589b9414cf999c8fd", "198dec069e0eccc8"),
+    "explore": ("sha256:d2d62a7f2d2d4598661ae048413a7cf223a00ed4e3ae562b19178fa97c007e76", "bcd54d78ae368442"),
 }
 
 

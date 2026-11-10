@@ -147,9 +147,10 @@ def next_action(con, run: dict) -> str:
             from office import gates as gates_review
             block = gates_review.unavailable_review_block(con, run, t)
             if block:
+                reroute = gates_review.cooling_pin_recovery(con, run, t, block["id"]) or (
+                    f"Re-run only the review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]")
                 return (f"{tid} code review of {block['revision_id']} returned no verdict "
-                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). Re-run only the "
-                        f"review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]; or review it "
+                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). {reroute}; or review it "
                         f"yourself as the orchestrator (recorded degraded, non-independent; refused for the session that "
                         f"produced it): office review {tid} --report <file>; office resume retries the same reviewer chain. "
                         f"A waiver is the user's last resort: office approve waive {tid}:code --quote \"<words>\"")
@@ -222,6 +223,11 @@ def next_action(con, run: dict) -> str:
         nxt = convergence.next_action(con, run, dispositions=True)
         if nxt:
             return nxt
+    from office import prs
+    for task in tasks:
+        recovery = prs.push_refusal_next(task)
+        if recovery:
+            return recovery
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] not in ("accepted",):
@@ -462,6 +468,14 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
         res.next = f"{NO_WAKE_WAIT}: {res.next}"
     if oversize_next and not episodes and not stuck_reply:
         res.next = f"{res.next}; {oversize_next}"
+    from office import prs
+    push_recovery = None
+    for task in tasks:
+        push_recovery = prs.push_refusal_next(task)
+        if push_recovery:
+            break
+    if push_recovery and push_recovery not in res.next:
+        res.next = f"{res.next}; pending task PR push recovery: {push_recovery}"
     res.data = {"run_id": run["id"], "phase": run["phase"], "office_version": run["office_version"],
                 "requirements_version": run["requirements_version"], "plan_version": run["plan_version"],
                 "tasks": {t["id"]: t["status"] for t in tasks}, "routes": routes, "plan_review": {k: v for k, v in rs.items() if k != "open_defects"},
@@ -610,6 +624,22 @@ def _snapshot(con, run: dict) -> tuple:
     return run["phase"], run["requirements_version"], run["plan_version"], tasks
 
 
+def _revoke_recorded(con, run: dict, job) -> bool:
+    """True when a failed job carries a task revoke's `revoked: <reason>` and that revoke is on record:
+    its launch's dispatch was revoked, or the integration revoke wrote its reason to the events."""
+    error = job["error"] or ""
+    if not error.startswith("revoked: "):
+        return False
+    if job["kind"] == "launch_agent" and job["dedup_key"].startswith("launch:"):
+        from office import dispatch
+        d = state.get_dispatch(con, job["dedup_key"][len("launch:"):])
+        return d is not None and dispatch.was_revoked(con, d)
+    if job["kind"] == "integrate":
+        return con.execute("SELECT 1 FROM events WHERE run_id=? AND kind='integration.revoked' AND instr(summary, ?) = 1 "
+                           "LIMIT 1", (run["id"], f"integration reviews {error}")).fetchone() is not None
+    return False
+
+
 def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: list[dict] | None = None) -> list[str]:
     """Work Office believes is in progress with nothing left to advance it. `acts` is the pane
     activity `questions.scan` already read, by dispatch id, so no pane is read twice. `episodes` is
@@ -624,8 +654,14 @@ def stalls(con, run: dict, since: str = "", acts: dict | None = None, episodes: 
         owner, detail = gates_mod.owner_state(con, run, g)
         if owner in ("none", "dead"):
             out.append(f"{g['task_id'] or 'plan'} {g['kind']} gate {g['id']} is {g['status']} but {detail}")
-    for j in con.execute("SELECT kind, error FROM outbox WHERE run_id=? AND status='failed' AND finished_at > ?",
+    # A job the orchestrator revoked failed on purpose, so it is not a stall (#958, A31). A lane review writes
+    # `revoked by orchestrator: <reason>`; a task revoke writes `revoked: <reason>` on a queued launch or a fenced
+    # integrate job. A harness error can also start with "revoked:", so that text counts only with its revoke on record.
+    for j in con.execute("SELECT kind, dedup_key, error FROM outbox WHERE run_id=? AND status='failed' "
+                         "AND finished_at > ? AND COALESCE(error, '') NOT GLOB 'revoked by orchestrator:*'",
                          (run["id"], since)).fetchall():
+        if _revoke_recorded(con, run, j):
+            continue
         out.append(f"job {j['kind']} failed: {(j['error'] or '')[:120]}")
     out.extend(_amendment_stalls(con, run))
     out.extend(_idle_executors(con, run, acts))
