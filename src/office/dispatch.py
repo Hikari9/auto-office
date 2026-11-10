@@ -534,6 +534,46 @@ def _route_origin(route: dict) -> dict:
     return {}
 
 
+USER_DENY_CATEGORIES = ("denied", "role-deny")  # routing.py: the legacy denied_models list, or a role deny
+
+
+def _user_denied_reason(decision: dict, triple: str) -> str | None:
+    """Why a user deny policy rejected `triple` in this routing decision, or None (#1106)."""
+    return next((r.get("reason") for r in decision.get("rejected") or []
+                 if r.get("candidate") == triple and r.get("category") in USER_DENY_CATEGORIES), None)
+
+
+def route_denial(con, run: dict, task: dict, route: dict) -> str | None:
+    """The user deny reason that now rejects this reused executor route, or None (#1106).
+    It requalifies the route as a relaunch does, so the task size and override receipts count."""
+    try:
+        qualify_recorded_route(con, run, task, route, observe=True)
+    except Refused as exc:
+        if exc.category == "route-denied":
+            return (exc.data or {}).get("reason") or exc.message
+    return None
+
+
+def user_denies(con, run: dict, task: dict, route: dict) -> bool:
+    """Whether the next rerun would find this reused executor route denied by user policy (#1106)."""
+    return route_denial(con, run, task, route) is not None
+
+
+def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None,
+                      observe: bool = False) -> dict:
+    """The route from the approved plan slate, ignoring any reused route (#1106). `denied` is the
+    reused route and the user's deny reason; the decision carries it so the dispatch records the change."""
+    tid = task["id"]
+    decision = planned_route(con, run, {**task, "route_json": None}, observe=observe)
+    if decision.get("status") != "selected":
+        failure = _route_failure(tid, decision).removeprefix(f"{tid}: ")
+        why = f"{denied[0]} is denied ({denied[1]}); " if denied else ""
+        raise Refused("no-route", f"{tid}: {why}{failure}", scope=tid, next_step=_route_next(decision, tid, run))
+    if denied:
+        decision["denied_route"] = {"route": denied[0], "reason": denied[1]}
+    return decision
+
+
 def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: bool = False) -> dict:
     """Revalidate a reused executor route before its new lease/outbox is written.
 
@@ -554,23 +594,37 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
                                                 run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
+        # F4 (#1106): the user deny policy reads a quoted route as it reads a routed one: the effective
+        # policy, the task's size, a receipt. Only a deny refuses here; quota, capability and trust keep
+        # the quoted-route contract below.
+        # probe=False: the deny reads policy only, and the quota gate below is the one that probes.
+        verdict = candidates.route_role(con, config, run, "executor", task_id=task["id"], exact=triple,
+                                        dispatch_kind="fix", manual=True, declared=triple, probe=False,
+                                        observe=observe)
+        if denied := _user_denied_reason(verdict, triple):
+            raise Refused("route-denied", f"{triple} is denied ({denied})", scope=task["id"],
+                          next_step=_route_next(verdict, task["id"], run), data={"reason": denied})
         # Historical adapter trust is audit-only under #837. Actual quota and
-        # capability checks still apply to this explicitly selected route.
-        quota = candidates.quota_for_candidate(
-            decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
-        decision["candidate"]["quota"] = quota
-        reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
-        if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
-                and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
-            raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
+        # capability checks still apply to this explicitly selected route. A read-only
+        # observer (status) asks only the policy deny above, so it probes no quota.
+        if not observe:
+            quota = candidates.quota_for_candidate(
+                decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
+            decision["candidate"]["quota"] = quota
+            reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
+            if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
+                    and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
+                raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
     else:
         selection = {"override": text} if authority.get("flag") == "--route" else {"exact": triple}
         options = {**selection, "task_id": task["id"], "dispatch_kind": "fix",
                    "manual": bool(authority), "declared": triple if quote else None}
         decision = candidates.route_role(con, config, run, "executor", **options, observe=observe)
         if decision.get("status") != "selected":
-            raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
-                          next_step=_route_next(decision, task["id"], run))
+            denied = _user_denied_reason(decision, triple)
+            raise Refused("route-denied" if denied else "route-unavailable", _route_failure(task["id"], decision),
+                          scope=task["id"], next_step=_route_next(decision, task["id"], run),
+                          data={"reason": denied} if denied else None)
     decision.update(origin)
     # The exact-route re-qualification above ranks one route; the dispatch keeps the ranking it was first given.
     for key in ("preferred_route", "fallback_routes"):
@@ -601,7 +655,8 @@ def _planned_slate(con, run: dict, tid: str) -> dict | None:
 
 
 def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False,
-                  exclude: set[str] | None = None, discovery_input: dict | None = None) -> dict:
+                  exclude: set[str] | None = None, discovery_input: dict | None = None,
+                  observe: bool = False) -> dict:
     """Route an executor dispatch: the planner's primary, else its fallbacks in order.
 
     Live evidence (quota, availability, trust, learned eligibility) is refreshed
@@ -614,7 +669,8 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     `discovery_input` is the preflight's recompute handle (#494): a decision that comes back
     with `intent: "trial"` stands whole, because the trial route is the one route a planned
     slate cannot name. `exclude` keeps routes out of the decision (the trial route, when the
-    known-working fallback is wanted)."""
+    known-working fallback is wanted). `observe` is the read-only selection `office status`
+    shows: no quota probe, no notice, no write, and the same order a launch would take."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     planned = None if (override or reroute) else _effective_slate(con, run, task)
@@ -623,7 +679,8 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind, manual=bool(declared), declared=declared,
-                                  exclude=exclude, discovery_input=discovery_input)
+                                  exclude=exclude, discovery_input=discovery_input,
+                                  probe=not observe, observe=observe)
     fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
         prior = _prior_override_ceiling(task)
@@ -871,7 +928,10 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     planned = decision.get("planned") or {}
     taken = decision.get("fallbacks_taken") or []
     why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
-    if taken:
+    if denied := decision.get("denied_route"):
+        before = denied["route"]
+        change = (before, "denied", denied["reason"], "office")
+    elif taken:
         before = planned.get("primary")
         kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
         change = (before, kind, f"fallback: {why}", "office")
