@@ -106,6 +106,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_argon_catalog_809.py` | retire |
 | `tests/v31/test_batch_landing.py` | keep |
 | `tests/v31/test_benchmark_refresh.py` | keep |
+| `tests/v31/test_board_card.py` | keep |
 | `tests/v31/test_bug_hint.py` | keep |
 | `tests/v31/test_cap_diff.py` | keep |
 | `tests/v31/test_cli_override_harness.py` | keep |
