@@ -58,8 +58,10 @@ LOCK_WAIT_SECONDS = 2.0
 
 
 def _handlers():
-    from office import convergence, dispatch, executor_context, gates, plans, prs, visual, integration, land, landing_recovery
+    from office import (board_card, convergence, dispatch, executor_context, gates, plans, prs, visual, integration,
+                        land, landing_recovery)
     return {
+        "card_publish": board_card.job_publish,
         "converge": convergence.job_converge,
         "convergence_review": convergence.job_convergence_review,
         "lane_visual": convergence.job_lane_visual,
@@ -596,6 +598,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
                 kick(con, run["id"])  # a failure may have queued its own recovery
         return 1
     state.write_projection(con, run["id"])
+    from office import board_card
+    with db.unfenced():
+        board_card.sweep(con, state.get_run(con, run["id"]))  # the run's board card, if it has one
     if mode() != "inline":
         with db.unfenced():
             kick(con, run["id"])

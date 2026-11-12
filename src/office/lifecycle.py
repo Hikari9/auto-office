@@ -84,7 +84,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           base: str | None = None, planner: str | None = None, issue: str | None = None,
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
           benchmark_refresh: bool = False, from_run: str | None = None,
-          plan_review_rounds: int | None = None, review_rounds: int | None = None) -> Result:
+          plan_review_rounds: int | None = None, review_rounds: int | None = None,
+          card: str | None = None, no_card: bool = False) -> Result:
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -242,6 +243,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        # The run on its display-only board card (docs/board-card.md); None without one.
+        from office import board_card
+        card_line = board_card.attach_at_start(con, run_id, card=card, no_card=no_card,
+                                               setting=(config.get("board") or {}).get("card", "auto"))
         # Inline planners must be able to write the plan path advertised by next.
         # Keep PLAN.md absent until the orchestrator actually authors it.
         if planner_mode == "inline":
@@ -255,6 +260,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res = Result()
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
         res.add(f"run gear why: {gates['run_gear_rationale']}")
+        if card_line:
+            res.add(card_line)
         if gear in cfg.LEGACY_GEARS:
             res.add(f"compatibility notice: {gear} is a historical preset, not an XS-XL run gear; "
                     "use --gear XS|S|M|L|XL for new work; original review/risk gates remain pinned")
@@ -483,6 +490,8 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+    from office import board_card
+    board_card.publish_terminal(con, run["id"])
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
     if by_hand:
@@ -694,6 +703,8 @@ def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> 
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+    from office import board_card
+    board_card.publish_terminal(con, run["id"])
     return stopped_jobs
 
 
