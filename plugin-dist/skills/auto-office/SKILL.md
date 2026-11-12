@@ -206,6 +206,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 Inside Herdr, each dispatch is a real interactive agent in a pane beside yours, closed once accepted (`office dismiss` closes kept panes). Message a
 live worker only with `office prompt <T2|dispatch> -- "<message>"`, never `herdr pane run` or `pane send-text`. A `launch` notice in `office status`
 means the agent never started or the prompt never landed; a worker with no pane runs headless and queues prompts. Detail: `docs/orchestrator-reference.md`.
+Each run shows on a display-only herdr-projects board card (key from rico-mode, else Office adds its own when the board is installed); Office updates it by itself and answers still come through rico-mode, not the board: `docs/orchestrator-reference.md` (Board card).
 
 ## Land and close
 

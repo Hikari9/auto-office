@@ -178,6 +178,17 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
   `herdr pane run`, `herdr agent start` and `herdr agent prompt` commands. A prompt has landed when the agent reports `working`
   or its pane shows a running turn. agy reads `idle` mid-turn: judge an agy pane by its footer and `git status`.
 
+## Board card
+
+A run shows on one display-only herdr-projects board card: the card rico-mode made (`OFFICE_BOARD_CARD`, or
+`office start --card <id>`), else, with the board installed, a card Office adds itself (`--no-card` or
+`office config board.card off` to skip it). Office updates it by itself after each command, job and wake tick: the
+state line (intake, plan review, blocked with `answer in rico-mode`, executing with progress, merge-ready, done) and
+a description with the plan, every route and fallback with its reason, and every review round with its findings.
+Nothing about the work changes: answers to a blocked card still reach you through rico-mode, and you record them as
+always (`office approve plan --quote`, `office amend ...`). `office card status` shows the link and the last error;
+`office card sync` resends; `office card link <id>|--create` attaches one to a running run. Detail: `docs/board-card.md`.
+
 ## Review recovery, checks and stale dependents
 
 - A review that returned no verdict (UNAVAILABLE, ATTENTION, INVALID_RESULT) blocks its gate with a runtime status, not a verdict. Re-run only
