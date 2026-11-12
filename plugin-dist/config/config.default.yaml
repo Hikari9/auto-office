@@ -433,6 +433,13 @@ web:
 # Disable with `office config economics.collect false`.
 economics:
   collect: false
+# The run on a display-only herdr-projects board card (docs/board-card.md). A
+# card key from rico-mode (OFFICE_BOARD_CARD, or office start --card) is always
+# used. Without one, `auto` lets Office add its own card when it runs inside
+# herdr with the board installed; `off` never adds one. Outside herdr nothing
+# changes. Disable with `office config board.card off`.
+board:
+  card: auto
 orchestrator_context:
   enabled: true
   # Set to 0 to disable context-high notices.

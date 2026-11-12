@@ -38,6 +38,7 @@ Where the earlier [CLI architecture](office-cli-architecture.md) disagrees, the 
 | Image-capability conformance | `conformance.py` |
 | User authority (`approve`) | `authority.py` |
 | Durable jobs without a daemon | `jobs.py` |
+| The run on its display-only herdr-projects board card | `board_card.py` |
 | Status and the `next:` line | `guide.py` |
 | `inspect` | `inspect_cmd.py` |
 | `prune` | `prune.py` |

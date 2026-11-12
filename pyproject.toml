@@ -49,6 +49,7 @@ packages = ["src/office"]
 "docs/review-convergence.md" = "office/_resources/docs/review-convergence.md"
 "docs/greenfield-lean-gear.md" = "office/_resources/docs/greenfield-lean-gear.md"
 "docs/onboarding.md" = "office/_resources/docs/onboarding.md"
+"docs/board-card.md" = "office/_resources/docs/board-card.md"
 "scripts/codex-usage.py" = "office/_resources/scripts/codex-usage.py"
 "scripts/claude-usage.py" = "office/_resources/scripts/claude-usage.py"
 "scripts/agy-usage.py" = "office/_resources/scripts/agy-usage.py"
