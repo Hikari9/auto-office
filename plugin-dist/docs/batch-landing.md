@@ -13,7 +13,7 @@ Save a JSON manifest (outside the repository or as an untracked file):
 {
   "id": "release-nov-1",
   "base": "main",
-  "version": "3.16.0",
+  "version": "9.1.0",
   "version_file": "src/office/_version.py",
   "changelog_file": "CHANGELOG.md",
   "merge_method": "merge",
