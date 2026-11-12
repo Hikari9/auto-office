@@ -11,8 +11,8 @@ it. Code: `src/office/board_card.py`. Tests: `tests/v31/test_board_card.py`.
 |---|---|
 | rico-mode created a card and started the pane with `OFFICE_BOARD_CARD=<id>` | that card |
 | `office start --card <id>` | that card (wins over the variable) |
-| no key, inside herdr (`HERDR_ENV=1`) with the board's CLI found | Office adds its own card: `herdr-projects add "Office <run>: <goal>" --repo <repo>`, never `--delegate` |
-| no key, outside herdr or no board CLI | no card; Office works exactly as before, and never calls the board |
+| no key, the board's CLI found (in herdr or any other shell, also a run started by hand) | Office adds its own card: `herdr-projects add "Office <run>: <goal>" --repo <repo>`, never `--delegate` |
+| no key and no board CLI | no card; Office works exactly as before, and never calls the board |
 | `--no-card`, `OFFICE_BOARD_CARD=off`, or config `board.card: off` | no card of Office's own (a given key is still used, except with `--no-card` or `off`) |
 
 The key is read once, at `office start`, and kept in the run (`runs.landing_json.card`). Later
@@ -26,7 +26,9 @@ titled `Office <run>:` (`list --all --query`). A card found there is adopted, ne
 again. That also covers a crash between the board's `add` and Office recording it.
 
 The CLI is `HERDR_PROJECTS_BIN`, else `$HERDR_PROJECTS_DATA_DIR/bin/herdr-projects`, else
-`~/.herdr-projects/data/bin/herdr-projects`, else `herdr-projects` on `PATH`.
+`~/.herdr-projects/data/bin/herdr-projects`, else `herdr-projects` on `PATH`. Under pytest only
+`HERDR_PROJECTS_BIN` counts: the suite does not move HOME, and a test must never add a card to the
+developer's real board.
 
 ## What the card shows
 

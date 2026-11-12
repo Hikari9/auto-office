@@ -5,8 +5,8 @@ it has no board worktree, plan, review or merge. Office keeps its whole pipeline
 module links a run to its card and keeps the card up to date:
 
 - the key comes from rico-mode (`OFFICE_BOARD_CARD`, or `office start --card`). Without one,
-  and with the board present (inside herdr, its CLI found), Office creates its own card.
-  There is never more than one card for a run.
+  and with the board present (its CLI found, in herdr or not), Office creates its own card,
+  so every run shows on the board. There is never more than one card for a run.
 - `card_state` maps the run to the card's state line (working / blocked / done / error, a
   one-line message and a progress percent). Waiting on the human is `blocked` with
   "answer in rico-mode": answers keep flowing through rico-mode, never through the board.
@@ -51,11 +51,18 @@ class CardError(Exception):
 
 def find_cli() -> str | None:
     """The herdr-projects command: HERDR_PROJECTS_BIN, the board's data folder, its default
-    home, then PATH. None when there is no board CLI here."""
+    home, then PATH. None when there is no board CLI here.
+
+    Under pytest only HERDR_PROJECTS_BIN counts. The suite does not move HOME, so the default
+    home would be the developer's real board, and a test's `office start` must never add a
+    card there. Pytest sets PYTEST_CURRENT_TEST in the test process, and the job processes it
+    spawns inherit it."""
     env = os.environ
     explicit = env.get("HERDR_PROJECTS_BIN")
     if explicit:
         return explicit if _executable(Path(explicit)) else None
+    if env.get("PYTEST_CURRENT_TEST"):
+        return None
     candidates = []
     if env.get("HERDR_PROJECTS_DATA_DIR"):
         candidates.append(Path(env["HERDR_PROJECTS_DATA_DIR"]) / "bin" / "herdr-projects")
@@ -71,10 +78,8 @@ def _executable(p: Path) -> bool:
 
 
 def board_present() -> str | None:
-    """The board CLI, when Office runs inside herdr. The `HERDR_ENV` gate keeps every shell
-    outside herdr, and every test (the root conftest strips HERDR_*), exactly as before."""
-    if os.environ.get("HERDR_ENV") != "1":
-        return None
+    """The board CLI when the board is installed here, inside herdr or in any other shell, so a
+    run started by hand gets its card as one rico-mode starts does. None: no board."""
     return find_cli()
 
 
@@ -618,7 +623,7 @@ def command(con, run: dict, action: str, target: str | None, *, create_card: boo
             present = board_present()
             return Result(lines=[f"{rid}: no board card" + (
                 f" (board present: office card link --create --run {rid} adds one)" if present else
-                " (no board here: inside herdr, with herdr-projects installed, Office adds its own)")],
+                " (no board here: with herdr-projects installed, Office adds its own)")],
                 data={"card": None})
         lines = [f"{rid}: board card {card['id']} ({card.get('created_by')}), cli {card.get('cli') or 'not found'}"]
         if card.get("last"):

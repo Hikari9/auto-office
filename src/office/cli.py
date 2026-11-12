@@ -268,7 +268,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
     card_opt = s.add_mutually_exclusive_group()
     card_opt.add_argument("--card", metavar="ID", help="show this run on that herdr-projects board card "
-                          "(default: $OFFICE_BOARD_CARD; inside herdr with the board, Office adds its own)")
+                          "(default: $OFFICE_BOARD_CARD; with the board installed, Office adds its own)")
     card_opt.add_argument("--no-card", action="store_true", help="no board card for this run")
     s.add_argument("--benchmark-refresh", action="store_true",
                    help="the user's intake opt-in: refresh missing benchmark scores in the background")

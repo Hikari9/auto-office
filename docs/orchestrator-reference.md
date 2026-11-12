@@ -181,7 +181,7 @@ landed. A pane closes itself once its result is accepted, after saving `pane-fin
 ## Board card
 
 A run shows on one display-only herdr-projects board card: the card rico-mode made (`OFFICE_BOARD_CARD`, or
-`office start --card <id>`), else, inside herdr with the board installed, a card Office adds itself (`--no-card` or
+`office start --card <id>`), else, with the board installed, a card Office adds itself (`--no-card` or
 `office config board.card off` to skip it). Office updates it by itself after each command, job and wake tick: the
 state line (intake, plan review, blocked with `answer in rico-mode`, executing with progress, merge-ready, done) and
 a description with the plan, every route and fallback with its reason, and every review round with its findings.

@@ -97,10 +97,13 @@ def _run(env):
         con.close()
 
 
-def test_no_key_and_no_herdr_never_calls_the_board(env, board):
+def test_no_key_and_no_board_cli_never_calls_the_board(env, board, monkeypatch):
+    monkeypatch.setenv("HERDR_PROJECTS_BIN", str(env.tmp / "no-such-herdr-projects"))
     start_inline(env)
     env.office("approve", "plan", "--quote", "approved", check=0)
     env.office("status", check=0)
+    code, out = env.office("card", "status")
+    assert code == 0 and "no board here" in out
     env.office("close", "--abandon", "test over", check=0)
     assert board.calls() == []
     assert "card" not in _run(env)["landing"]
@@ -169,8 +172,11 @@ def test_rico_mode_text_and_card_edits_are_kept(env, board, monkeypatch):
     assert "Brief from rico-mode: fix the login page" in desc
 
 
-def test_own_card_inside_herdr_is_created_once(env, board, monkeypatch):
-    monkeypatch.setenv("HERDR_ENV", "1")
+@pytest.mark.parametrize("herdr", [False, True], ids=["started-by-hand", "inside-herdr"])
+def test_own_card_whenever_the_board_is_installed_is_created_once(env, board, monkeypatch, herdr):
+    """Every run shows on the board: a run started by hand outside herdr gets its card too."""
+    if herdr:
+        monkeypatch.setenv("HERDR_ENV", "1")
     start_inline(env)
     adds = board.calls("add")
     assert len(adds) == 1 and "--delegate" not in adds[0]
@@ -182,7 +188,6 @@ def test_own_card_inside_herdr_is_created_once(env, board, monkeypatch):
 
 
 def test_lost_link_adopts_the_existing_card(env, board, monkeypatch):
-    monkeypatch.setenv("HERDR_ENV", "1")
     start_inline(env)
     run = _run(env)
     # The DB lost the link (as after a crash between add and the write): link --create adopts the card.
@@ -202,7 +207,7 @@ def test_lost_link_adopts_the_existing_card(env, board, monkeypatch):
 
 
 def test_concurrent_creates_add_one_card(env, board, monkeypatch):
-    start_inline(env)
+    start_inline(env, extra=("--no-card",))
     run = _run(env)
     from office import board_card
     cli = os.environ["HERDR_PROJECTS_BIN"]
@@ -225,7 +230,6 @@ def test_concurrent_creates_add_one_card(env, board, monkeypatch):
 
 @pytest.mark.parametrize("how", ["flag", "env", "config"])
 def test_opt_outs_add_no_card(env, board, monkeypatch, how):
-    monkeypatch.setenv("HERDR_ENV", "1")
     extra = ()
     if how == "flag":
         extra = ("--no-card",)
@@ -240,7 +244,6 @@ def test_opt_outs_add_no_card(env, board, monkeypatch, how):
 
 def test_given_key_wins_over_creation(env, board, monkeypatch):
     board.seed("repo/9")
-    monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("OFFICE_BOARD_CARD", "repo/9")
     start_inline(env)
     assert board.calls("add") == []
@@ -346,7 +349,7 @@ def test_long_findings_are_trimmed_oldest_first(env, board, monkeypatch):
 
 
 def test_card_status_without_a_card(env, board):
-    start_inline(env)
+    start_inline(env, extra=("--no-card",))
     code, out = env.office("card", "status")
     assert code == 0 and "no board card" in out
     code, out = env.office("card", "sync")
@@ -396,3 +399,43 @@ def test_fallback_triples_drop_the_adapter_version():
     assert board_card._fmt_triple("claude@2/claude-opus-5-5@low") == "claude/claude-opus-5-5@low"
     assert board_card._fmt_triple("codex@0/luna@high") == "codex/luna@high"
     assert board_card._fmt_triple(None) == "unrecorded"
+
+
+def _exe(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_cli_lookup_order_outside_pytest(tmp_path, monkeypatch):
+    from office import board_card
+    for k in ("HERDR_PROJECTS_BIN", "HERDR_PROJECTS_DATA_DIR", "PYTEST_CURRENT_TEST"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", str(tmp_path / "pathbin"))
+    assert board_card.find_cli() is None
+    on_path = _exe(tmp_path / "pathbin" / "herdr-projects")
+    assert board_card.find_cli() == on_path
+    home = _exe(tmp_path / "home" / ".herdr-projects" / "data" / "bin" / "herdr-projects")
+    assert board_card.find_cli() == home
+    monkeypatch.setenv("HERDR_PROJECTS_DATA_DIR", str(tmp_path / "data"))
+    data = _exe(tmp_path / "data" / "bin" / "herdr-projects")
+    assert board_card.find_cli() == data
+    monkeypatch.setenv("HERDR_PROJECTS_BIN", _exe(tmp_path / "explicit"))
+    assert board_card.find_cli() == str(tmp_path / "explicit")
+    assert board_card.board_present() == str(tmp_path / "explicit")  # no HERDR_ENV needed
+
+
+def test_under_pytest_only_an_explicit_cli_counts(tmp_path, monkeypatch):
+    """The suite keeps the real HOME: its default board must never be found from a test."""
+    from office import board_card
+    monkeypatch.delenv("HERDR_PROJECTS_BIN", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _exe(tmp_path / "home" / ".herdr-projects" / "data" / "bin" / "herdr-projects")
+    monkeypatch.setenv("PATH", str(tmp_path / "pathbin"))
+    _exe(tmp_path / "pathbin" / "herdr-projects")
+    assert board_card.find_cli() is None
+    monkeypatch.setenv("HERDR_PROJECTS_BIN", _exe(tmp_path / "explicit"))
+    assert board_card.find_cli() == str(tmp_path / "explicit")
