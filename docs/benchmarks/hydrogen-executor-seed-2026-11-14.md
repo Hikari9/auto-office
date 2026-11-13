@@ -4,14 +4,14 @@
 
 ## Registered routes — documentation, not authenticated local proof
 
-| Office route | Candidate \`agy --model\` ID | Antigravity proof |
+| Office route | Candidate `agy --model` ID | Antigravity proof |
 | --- | --- | --- |
-| \`agy/gemini-4-hydrogen@low\` | \`gemini-4-hydrogen-low\` | Pending exact model/effort readback |
-| \`agy/gemini-4-hydrogen@medium\` | \`gemini-4-hydrogen-medium\` | Pending exact model/effort readback |
-| \`agy/gemini-4-hydrogen@high\` | \`gemini-4-hydrogen-high\` | Pending exact model/effort readback |
-| \`agy/gemini-4-hydrogen@xhigh\` | \`gemini-4-hydrogen-xhigh\` | Pending exact model/effort readback |
+| `agy/gemini-4-hydrogen@low` | `gemini-4-hydrogen-low` | Pending exact model/effort readback |
+| `agy/gemini-4-hydrogen@medium` | `gemini-4-hydrogen-medium` | Pending exact model/effort readback |
+| `agy/gemini-4-hydrogen@high` | `gemini-4-hydrogen-high` | Pending exact model/effort readback |
+| `agy/gemini-4-hydrogen@xhigh` | `gemini-4-hydrogen-xhigh` | Pending exact model/effort readback |
 
-The IDs are **external/third-party evidence** and must not be labeled locally proven. All rows remain \`dispatchable: false\`, \`discovery: eligible\`; no shipped role allow, missing-score floor waiver, global trust change or policy exception enables them. The agy adapter encodes thinking effort in the combined model ID, not a separate \`--effort\` argument. Confirm installed \`agy models\`, selected identity, effort, builder tool execution, workspace write isolation, subprocess cleanup, permissions, quota and fallback on the authenticated account before claiming qualification. \`office doctor --probe-route agy/gemini-4-hydrogen@<effort>\` can record exact conformance receipts when the platform's required OS-enforced sandbox and model identity readback are available.
+The IDs are **external/third-party evidence** and must not be labeled locally proven. All rows remain `dispatchable: false`, `discovery: eligible`; no shipped role allow, missing-score floor waiver, global trust change or policy exception enables them. The agy adapter encodes thinking effort in the combined model ID, not a separate `--effort` argument. Confirm installed `agy models`, selected identity, effort, builder tool execution, workspace write isolation, subprocess cleanup, permissions, quota and fallback on the authenticated account before claiming qualification. `office doctor --probe-route agy/gemini-4-hydrogen@<effort>` can record exact conformance receipts when the platform's required OS-enforced sandbox and model identity readback are available.
 
 **Benchmark isolation:** the shipped routing index is **Artificial Analysis Intelligence Index v4.3.2**, and every Hydrogen row's score for that index remains **null**. Published **v5.0.1** headline index values (Low 27, Medium 41, High 51, Xhigh 54) are *reference-only evidence*: they are not an Office coding composite, cannot be compared to v4.3.2 floors and cannot create a v4 score. Google's published API list prices of **$1.50 input / $7.50 output per million tokens** (November 12, 2026) are not actual Antigravity subscription or Office quota consumption.
 
@@ -19,7 +19,7 @@ Sources: [Google release](https://blog.google/innovation-and-ai/models-and-resea
 
 ## Final owner-approved XS–XL advisory preferences
 
-The arrow means soft escalation and \`|\` means qualified same-rung peers, selected by task-fit, cost, quota, reliability and seed bias. The **staged YAML is flat** and does not implement equal-rung semantics; #1143 owns that runtime change.
+The arrow means soft escalation and `|` means qualified same-rung peers, selected by task-fit, cost, quota, reliability and seed bias. The **staged YAML is flat** and does not implement equal-rung semantics; #1143 owns that runtime change.
 
 | Size | Preferred and subsequent peers | Hydrogen authorization after exact conformance |
 | --- | --- | --- |
