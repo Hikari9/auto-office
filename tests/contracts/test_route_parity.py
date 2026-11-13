@@ -1,4 +1,4 @@
-"""Pin shipped effective route preferences to the behavior on main (#871/#861)."""
+"""Pin owner-approved #1143 executor preferences and preserve main planner policy."""
 from __future__ import annotations
 
 import pytest
@@ -6,36 +6,23 @@ import pytest
 from office import candidates, executor_slates as slates, routing
 
 
-# This is the route matrix from main's #809/#850 policy plus #861's M executor
-# amendment. Keep it literal: reading it from the shipped policy would make this
-# comparison tautological.
+# Literal independent expected owner-approved executor preferences (#1143),
+# not derived from policy YAML. Planner rows remain unchanged from main.
 MAIN_ROUTE_MATRIX = {
-    ("executor", "XS"): [
-        ("claude", "claude-haiku-5-5", "medium"),
-        (None, "gemini-3.8-flash", "low"),
-        ("codex", "gpt-6.1-terra", "low"),
-    ],
-    ("executor", "S"): [
-        (None, "gemini-3.8-flash", "medium"),
-        ("claude", "claude-haiku-5-5", "high"),
-        ("codex", "gpt-6.1-terra", "medium"),
-    ],
-    ("executor", "M"): [
-        ("claude", "claude-haiku-5-5", "high"),
-        ("opencode", "glm-5.3-flash", "max"),
-        ("codex", "gpt-6.1-terra", "medium"),
-    ],
-    ("executor", "L"): [
-        ("claude", "claude-sonnet-5-5", "high"),
-        ("agy", "claude-sonnet-5-5", "high"),
-        ("codex", "gpt-6.1-terra", "high"),
-        (None, "gemini-4-argon", "medium"),
-    ],
-    ("executor", "XL"): [
-        ("claude", "claude-opus-5-5", "medium"),
-        ("codex", "gpt-6.1-sol", "medium"),
-        (None, "gemini-4-argon", "high"),
-    ],
+    ("executor", "XS"): [("claude", "claude-haiku-5-5", "medium"),
+                         ("codex", "gpt-6.1-terra", "low"),
+                         ("agy", "gemini-4-hydrogen", "low")],
+    ("executor", "S"): [("codex", "gpt-6.1-terra", "medium"),
+                        ("agy", "gemini-4-hydrogen", "medium"),
+                        ("claude", "claude-sonnet-5-5", "medium")],
+    ("executor", "M"): [("claude", "claude-sonnet-5-5", "medium"),
+                        ("agy", "gemini-4-hydrogen", "high"),
+                        ("codex", "gpt-6.1-terra", "high")],
+    ("executor", "L"): [("claude", "claude-sonnet-5-5", "high"),
+                        ("agy", "gemini-4-hydrogen", "high")],
+    ("executor", "XL"): [("claude", "claude-opus-5-5", "medium"),
+                         ("codex", "gpt-6.1-sol", "medium"),
+                         ("agy", "gemini-4-argon", "high")],
     ("planner", "XS"): [(None, "opus", "medium"), (None, "astra", "low")],
     ("planner", "S"): [(None, "opus", "medium"), (None, "astra", "low")],
     ("planner", "M"): [
@@ -77,8 +64,8 @@ def _candidate(model, effort, harness, score=55):
 
 
 @pytest.mark.parametrize("key, expected", MAIN_ROUTE_MATRIX.items())
-def test_effective_shipped_routes_match_main(key, expected):
-    """The policy refactor preserves main's effective route matrix, including conditionals."""
+def test_effective_shipped_routes_match_owner_executor_and_main_planner(key, expected):
+    """Test finalized executor seed preferences while retaining planner parity."""
     role, size = key
     run = {"gear": size}
     # Main's planner flat preference is still the fallback below M; the size
@@ -132,14 +119,16 @@ def test_m_executor_haiku_high_keeps_its_floor_exception():
     assert selected_waiver["observed_score"] == 38
 
 
-def test_conditional_m_routes_match_main_even_when_absent_from_catalog():
+def test_conditional_hydrogen_m_and_planner_routes_remain_unqualified():
     executor = slates.ideal_seed("M", slates.POLICY)
     planner = slates.planner_seed("M", slates.POLICY)
-    assert executor[1] == {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"}
+    assert executor[1] == {"model_id": "gemini-4-hydrogen", "effort": "high", "harness": "agy", "rung": 1}
     assert planner[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
-    assert slates.POLICY["executor_preferred"]["M"][1]["_resolved_routes"] == []
+    assert slates.POLICY["executor_preferred"]["M"][1]["_resolved_routes"]
+    assert slates.POLICY["executor_preferred"]["M"][1]["_dispatchable_routes"] == []
     assert slates.POLICY["planner_preferred"]["M"][-1]["_resolved_routes"] == []
     executor_audit = slates.route_summary(executor, [], [], [])
     planner_audit = slates.route_summary(planner, [], [], [])
+    # No runtime candidates were passed, distinct from static catalog resolution.
     assert executor_audit[1]["status"] == "not-in-catalog"
     assert planner_audit[-1]["status"] == "not-in-catalog"

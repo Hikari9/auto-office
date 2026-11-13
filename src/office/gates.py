@@ -2068,7 +2068,7 @@ def _no_progress(con, run, task, gate, repeats: int) -> bool:
     for h in history:
         prior = {r["fingerprint"] for r in con.execute("SELECT fingerprint FROM findings WHERE origin_gate_id=? OR gate_id=?",
                                                        (h["id"], h["id"])).fetchall()}
-        if not fps_now & prior:
+        if fps_now != prior:  # two substantive RECHECKs must be identical, not merely overlapping
             return False
     return True
 

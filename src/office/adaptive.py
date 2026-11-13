@@ -261,7 +261,9 @@ def score(candidates: list[dict], request: dict, s: dict) -> list[dict]:
             "time_to_success_seconds": round(wall * rework * attempts, 1) if wall is not None else None,
             "quota": {"score": round(quota_score, 4), "state": quota_note},
             **({"concurrency": dict(c["concurrency"])} if c.get("concurrency") else {}),
-            "preference": {"score": round(pref_score, 4), "seed_rank": pref_rank},
+            "preference": {"score": round(pref_score, 4), "seed_rank": pref_rank,
+                           **({"rung": pref_rank + 1 if pref_rank is not None else None}
+                              if any("rung" in row for row in request.get("preferred_seed") or []) else {})},
         })
     return rows
 
