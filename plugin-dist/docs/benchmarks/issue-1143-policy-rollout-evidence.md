@@ -30,6 +30,24 @@ All concurrent Office processes **must use the same state `runs.db`**. No automa
 
 Executor reserves remain 20%, independent Luna reviewer reserves 5%; Codex reviewer quota is not reallocated to executor. A provider/account/shared-pool cooldown is recorded **only** when an actual quota probe explicitly supplies verified `provider`, `account_id` and `pool_id` metadata. Missing account identity is not proof of cross-account sharing. Quota exhaustion is distinguished from unsupported model/effort and transient transport errors; hard auth/authorization failures stop for operator action. The existing convergence loop stays at three rounds, and repeats escalate only when two substantive RECHECK finding sets are **identical**, not merely overlapping.
 
+## Conformance blocker confirmed from current #1142 code
+
+`src/office/route_probe.py` currently permits authoritative identity readback only
+for **Claude and Codex** (`_IDENTITY_READBACK`). `agy` is explicitly refused with
+`no-identity-readback` before a probe can run; a model's self-reported identity is
+not evidence. Agy's *actual harness-reported* selected model **and** effort need a
+new exact parser, coupled to negative/mismatched-effort tests and live proof, in
+registration PR **#1142** before any `pass` receipt may qualify Hydrogen here.
+
+The current `write_boundary_reason()` also requires functioning **macOS
+`/usr/bin/sandbox-exec`**; Linux remote sandboxes correctly refuse conformance,
+rather than bypassing the write boundary. Run real qualification on an authorized
+macOS host with a verified Antigravity installation using
+`office doctor --probe-route agy@1/gemini-4-hydrogen@medium` and the corresponding
+High route. Inspect real model/effort identity readback, tool file write, outside
+worktree denial, process-group cleanup, quota/authorization and fallback receipts.
+Never synthesize positive conformance rows or relax the sandbox to satisfy this gate.
+
 ## Release gates / rollback
 
 1. #1142 fully qualified and merged: exact Agy route IDs and effort, selected identity readback, auth, sandbox, writable boundary, child cleanup, quota and usable fallback, verified with live receipts for S Medium and M High (and XS/L before manual use). Do not infer sibling efforts.

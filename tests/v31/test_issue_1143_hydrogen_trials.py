@@ -100,6 +100,15 @@ def test_unknown_size_is_not_l_implicitly():
     assert "classify" in out["action"]
 
 
+def test_new_executor_without_gear_or_size_must_explicitly_classify():
+    decision = routing.route({"role": "executor", "context": {}, "candidates": [],
+                              "require_classified_executor_size": True})
+    assert decision["status"] == "size_unclassified"
+    legacy = routing.route({"role": "executor", "context": {}, "candidates": [],
+                            "require_classified_executor_size": False})
+    assert legacy["status"] != "size_unclassified"
+
+
 def test_hydrogen_never_qualifies_from_generic_allow_or_unverified_effort():
     c = {"model_id": h.MODEL, "harness": "agy", "effort": "medium"}
     assert h.route_refusal(c, role="executor", size="S", manual=False)

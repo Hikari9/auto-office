@@ -478,8 +478,10 @@ def route(request: dict, discovery_input: dict | None = None, *,
     # inherit a convenient L route (or the historical unsized role floor).
     ctx = request.get("context") or {}
     declared_size = request.get("size_class") or ctx.get("size_class")
-    if (role == "executor" and request.get("require_classified_executor_size", True)
-            and ctx.get("gear") in executor_slates.SIZES and declared_size not in executor_slates.SIZES):
+    # A newly configured executor must classify even if the gear field itself
+    # is absent/unknown. Legacy unsized route requests retain their old path.
+    needs_classification = request.get("require_classified_executor_size", ctx.get("gear") in executor_slates.SIZES)
+    if role == "executor" and needs_classification and declared_size not in executor_slates.SIZES:
         return {"status": "size_unclassified", "selected": None, "rejected": [],
                 "reason": "executor task size is unknown: classify XS/S/M/L/XL before routing",
                 "action": "classify the task and re-run routing; no L inference"}
