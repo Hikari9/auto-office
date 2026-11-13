@@ -91,12 +91,33 @@ def population(tasks, scoreboard_path):
     out = {"frozen_tasks": len(tasks), "frozen_attempts": sum(len(t["atts"]) for t in tasks)}
     if scoreboard_path:
         sb = {(r["run"], r["task"]): r for r in map(json.loads, scoreboard_path.read_text().splitlines())}
-        changed = sum(1 for t in tasks if (t["run"], t["task"]) not in sb
-                      or len(sb[(t["run"], t["task"])]["attempts"]) != len(t["atts"])
-                      or sb[(t["run"], t["task"])]["outcome"] != t["outcome"])
+        changed, spellings = 0, defaultdict(set)
+        for t in tasks:
+            cur = sb.get((t["run"], t["task"]))
+            if not task_unchanged(t, cur):
+                changed += 1
+                continue
+            for a, b in zip(sorted(t["atts"], key=lambda a: a["pos"]), cur["attempts"]):
+                spellings[a["route"]].add(b["route"])
         out.update(scoreboard_tasks=len(sb), scoreboard_attempts=sum(len(r["attempts"]) for r in sb.values()),
-                   frozen_tasks_missing_or_changed=changed)
+                   frozen_tasks_missing_or_changed=changed,
+                   # The frozen file spells routes as aliases (claude/sonnet@high), the scoreboard as
+                   # the invoked exact model. Unchanged = each alias maps to exactly one invocation.
+                   frozen_route_spellings=len(spellings),
+                   frozen_route_spellings_with_multiple_invocations=sum(len(v) > 1 for v in spellings.values()))
     return out
+
+
+def task_unchanged(frozen, cur):
+    """Same size, outcome and attempt count, and per attempt (in order) the same outcome,
+    rejection count and dispatch count. Route spelling is compared separately."""
+    if cur is None or cur["size"] != frozen["size"] or cur["outcome"] != frozen["outcome"]:
+        return False
+    atts = sorted(frozen["atts"], key=lambda a: a["pos"])
+    if len(atts) != len(cur["attempts"]):
+        return False
+    return all(a["outcome"] == b["outcome"] and a["rej"] == b["rejections"]
+               and a["nDisp"] == len(b["dispatches"]) for a, b in zip(atts, cur["attempts"]))
 
 
 def _ts(s):

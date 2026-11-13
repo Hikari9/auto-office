@@ -2902,6 +2902,8 @@
   "population": {
    "frozen_attempts": 1362,
    "frozen_tasks": 1019,
+   "frozen_route_spellings": 32,
+   "frozen_route_spellings_with_multiple_invocations": 4,
    "frozen_tasks_missing_or_changed": 0,
    "scoreboard_attempts": 1374,
    "scoreboard_tasks": 1027
