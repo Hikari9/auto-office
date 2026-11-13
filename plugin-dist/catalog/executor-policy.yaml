@@ -6,10 +6,10 @@ floors: {XS: 31, S: 38, M: 40, L: 44, XL: 47}
 executor_preferred:
   XS:
     - {model_id: claude-haiku-5-5, effort: medium, harness: claude}
-    - {model_id: gemini-3.8-flash, effort: low}
+    - {model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
     - {model_id: gpt-6.1-terra, effort: low, harness: codex}
   S:
-    - {model_id: gemini-3.8-flash, effort: medium}
+    - {model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
     - {model_id: claude-haiku-5-5, effort: high, harness: claude}
     - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
   M:

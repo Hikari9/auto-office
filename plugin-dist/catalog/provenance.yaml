@@ -591,6 +591,66 @@ rows:
       fetched_at: '2026-10-28T01:19:00Z'
       page_title: Gemini 4 Argon (high)
     supersession_metadata: null
+  agy/gemini-4-hydrogen@low:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-low
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (low)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@medium:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-medium
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (medium)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@high:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-high
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (high)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@xhigh:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (xhigh)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
   pi/gpt-5-codex@high:
     price_fields:
       input_per_mtok: 1.25
