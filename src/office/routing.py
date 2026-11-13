@@ -506,7 +506,10 @@ def route(request: dict, discovery_input: dict | None = None, *,
         for c in request.get("candidates", []):
             cid = candidate_id(c)
             role_rule = route_policy.effective_role_state(c, role, policies, new_policy_size)
-            if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
+            # Ordinary signed policy overrides must never waive this model's
+            # hard planner-only qualification boundary.
+            if (not route_policy.fable_role_block(c, role) and role_rule["state"] == "deny"
+                    and (receipt_id := (request.get("policy_overrides") or {}).get(cid))):
                 role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
             if (scope := c.get("user_allow_sizes")) is not None and new_policy_size not in scope:

@@ -327,7 +327,21 @@ def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | Non
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return "policy-unreadable", f"the live user or repo policy cannot be read ({exc}), so a denial cannot be ruled out"
     # A probe serves the executor role (#837): a role allow supersedes a legacy global deny, a role deny holds.
-    verdict = route_policy.effective_role_state(cand, "executor", [route_policy.user_policy(config), *live])
+    policies = [route_policy.user_policy(config), *live]
+    if route_policy.is_fable(cand):
+        # --probe-route observes an unqualified *planner* route. The Office
+        # doctor is historically executor-scoped; its normal role verdict would
+        # prohibit gathering the very evidence required for Fable qualification.
+        # Preserve explicit user denials while permitting manual readback only.
+        for policy in policies:
+            if reason := route_policy.is_denied(cand, policy):
+                return "route-denied", reason
+            if any(rule.get("state") == "deny" and rule.get("role") in ("planner", "*")
+                   and route_policy._rule_matches(cand, rule.get("route"), state="deny")
+                   for rule in policy.get("role_rules", ())):
+                return "route-denied", "planner route explicitly denied by user policy"
+        return None
+    verdict = route_policy.effective_role_state(cand, "executor", policies)
     if verdict["state"] == "deny":
         return "route-denied", verdict.get("reason") or f"executor is denied by {verdict['source']}: {verdict.get('rule')}"
     return None
