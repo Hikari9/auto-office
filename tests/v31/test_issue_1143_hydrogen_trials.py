@@ -8,7 +8,8 @@ import sqlite3
 import pytest
 import yaml
 
-from office import adaptive, candidates, db, executor_slates, hydrogen_trials as h, routing
+from office import adaptive, candidates, db, executor_slates, routing
+from office import hydrogen_trials as h
 
 
 @pytest.fixture
