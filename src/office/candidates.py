@@ -644,6 +644,10 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
         state = route_policy.row_status(row)
+        # A generic user allow or discovery cannot promote a planner-only model.
+        if block := route_policy.fable_role_block(row, role):
+            skipped.append({"candidate": label, "category": "role-deny", "reason": block})
+            continue
         is_free_model = route_policy.is_free_model(row)
         if is_free_model and not free_models_allowed:
             skipped.append({"candidate": label, "category": "free-model-opt-in",
@@ -878,6 +882,11 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
+    # Do not let direct --as, --review-as or a signed ordinary deny override
+    # bypass a planner-only technical qualification boundary.
+    if block := route_policy.fable_role_block(named, role):
+        raise Refused("route-denied", block, scope=role,
+                      next_step="complete exact Claude Code planner-role qualification before Fable activation")
     active_policy = route_policy.effective_role_state(named, role, required_user_policies(repo_root))
     policy_override = None
     if active_policy["state"] == "deny":

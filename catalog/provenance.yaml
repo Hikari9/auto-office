@@ -1229,3 +1229,88 @@ rows:
       command_date: '2026-10-14'
       notes: Free Kilo Gateway model launch; exit 0 is not model conformance because model identity is not read back
     supersession_metadata: null
+  claude/claude-fable-5-2@low:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@medium:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@high:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@xhigh:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@max:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
