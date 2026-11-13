@@ -1,8 +1,16 @@
-"""Hydrogen XS/S seed registration stays disabled and does not use AA v5 scores as v4."""
+"""Owner-approved advisory XS-XL candidate seeds remain gated pending exact Hydrogen qualification."""
 from pathlib import Path
 from office import shipped_catalog, executor_slates
 
-def test_hydrogen_medium_replaces_flash_in_xs_s_preferred_seeds():
+EXPECTED = {
+    "XS": [("claude-haiku-5-5", "medium", "claude"), ("gpt-6.1-terra", "low", "codex"), ("gemini-4-hydrogen", "low", "agy")],
+    "S": [("gpt-6.1-terra", "medium", "codex"), ("gemini-4-hydrogen", "medium", "agy"), ("claude-sonnet-5-5", "medium", "claude")],
+    "M": [("claude-sonnet-5-5", "medium", "claude"), ("gemini-4-hydrogen", "high", "agy"), ("gpt-6.1-terra", "high", "codex")],
+    "L": [("claude-sonnet-5-5", "high", "claude"), ("gemini-4-hydrogen", "high", "agy")],
+    "XL": [("claude-opus-5-5", "medium", "claude"), ("gpt-6.1-sol", "medium", "codex"), ("gemini-4-argon", "high", "agy")],
+}
+
+def test_owner_preference_intent_and_non_dispatchable_hydrogen():
     catalog = shipped_catalog.load()
     routes = {shipped_catalog.key(row): row for row in catalog["models"]}
     index = catalog["benchmark_index_version"]
@@ -13,11 +21,13 @@ def test_hydrogen_medium_replaces_flash_in_xs_s_preferred_seeds():
         assert row["discovery"] == "eligible"
         assert (row.get("benchmark_indexes") or {}).get(index) is None
     policy = executor_slates.load_policy()
-    for size in ("XS", "S"):
-        seeds = policy["executor_preferred"][size]
-        assert any(x["model_id"] == "gemini-4-hydrogen" and x["effort"] == "medium" and x.get("harness") == "agy" for x in seeds)
-        assert not any(x["model_id"] == "gemini-3.8-flash" for x in seeds)
-    assert routes["agy/gemini-3.8-flash@medium"]["dispatchable"] is True
+    assert policy["benchmark_index"] == index
+    for size, expected in EXPECTED.items():
+        actual = [(r["model_id"], r["effort"], r.get("harness")) for r in policy["executor_preferred"][size]]
+        assert actual == expected
+        assert not any(item["model_id"] == "gemini-3.8-flash" for item in policy["executor_preferred"][size])
+    assert policy["model_restrictions"][0]["allowed_sizes"] == ["XL"]
+    assert routes["agy/gemini-3.8-flash@medium"]["dispatchable"] is True  # historical and visual review untouched
 
 def test_packaged_hydrogen_catalog_parity():
     root = Path(__file__).resolve().parents[2]
