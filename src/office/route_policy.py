@@ -306,6 +306,29 @@ def _in_scope(rule: dict, size: str | None) -> bool:
     return "sizes" not in rule or size in rule["sizes"]
 
 
+# Qualification must be set in a separately reviewed, effort-specific planner
+# activation change, after real Claude Code identity/tool/quota receipts. A role
+# allow cannot promote this still-unqualified catalog registration (#1133).
+FABLE_PLANNER_QUALIFIED_EFFORTS: frozenset[str] = frozenset()
+
+
+def is_fable(cand: dict) -> bool:
+    return "claude-fable-5-2" in {
+        cand.get("model_id"), cand.get("invocation_model_id"),
+        cand.get("alias_resolved_to"),
+    } or cand.get("lineage_key") == "anthropic/claude-fable"
+
+
+def fable_role_block(cand: dict, role: str) -> str | None:
+    if not is_fable(cand):
+        return None
+    if role != "planner":
+        return "Claude Fable 5.2 is planner-only; executor, worker and reviewer roles are prohibited"
+    if cand.get("effort") not in FABLE_PLANNER_QUALIFIED_EFFORTS:
+        return "Claude Fable 5.2 planner effort is not locally qualified or authorized"
+    return None
+
+
 def effective_role_state(cand: dict, role: str, policies: list[dict], size: str | None = None) -> dict:
     """Effective role policy; newest user rules > legacy denies > shipped rules > neutral.
 
@@ -313,6 +336,8 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
     Policy evaluation is independent of technical availability, quotas and review safety.
     A list entry is exact unless its author deliberately set `wildcard: true`.
     """
+    if block := fable_role_block(cand, role):
+        return {"state": "deny", "source": "hard-model-role-boundary", "reason": block}
     # A preferred_seed allow never lifts a deny, the same refusal dispatch gives (#899).
     seed_outranked = any(is_denied(cand, policy) for policy in policies)
     for policy in reversed(policies):
