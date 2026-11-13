@@ -1,4 +1,5 @@
 """#809 actual offline route() decisions, not only sizing helper assertions."""
+import copy
 import json
 import sqlite3
 
@@ -43,6 +44,22 @@ def decide(size, models, *, gear="XL", preference=None, user_policies=None, disc
     })
 
 
+def _issue861_policy():
+    """The #861 executor policy (Haiku High leads M), as a run pinned before #1143 keeps it."""
+    policy = copy.deepcopy(executor_slates.POLICY)
+    policy["executor_preferred"]["M"] = [
+        {"model_id": "claude-haiku-5-5", "effort": "high", "harness": "claude"},
+        {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode", "conditional": True},
+        {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"}]
+    return policy
+
+
+def decide_861(models, **kwargs):
+    policy = _issue861_policy()
+    with routing._using_executor_policy(policy):
+        return decide("M", models, preference=executor_slates.ideal_seed("M", policy), **kwargs)
+
+
 @pytest.mark.parametrize("size,effort", [("L", "high")])
 def test_real_sonnet_harness_self_fallback_and_unavailable_first_route(size, effort):
     score = 41 if size == "M" else 47
@@ -82,11 +99,11 @@ def test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback():
     haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude", available=False)
     terra = candidate("gpt-6.1-terra", "medium", 41)
     sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
-    first = decide("M", [haiku, terra, sonnet])
+    first = decide_861([haiku, terra, sonnet])
     assert first["candidate"]["model_id"] == "gpt-6.1-terra", first
     assert any("haiku" in x["candidate"] and x.get("category") == "untried"
                for x in first["rejected"]), first
-    second = decide("M", [haiku, sonnet])
+    second = decide_861([haiku, sonnet])
     assert second["candidate"]["model_id"] == "claude-sonnet-5-5", second
     assert "Temporary Sonnet Medium M fallback" in second["selection_disclosure"]["operational_fallback"]
 
@@ -113,7 +130,7 @@ def test_issue861_persisted_route_audit_retains_exact_haiku_receipt_and_fallback
         assert receipt["selected_route"] == choice["selected"]
         return receipt
 
-    first = decide("M", [haiku, terra, sonnet])
+    first = decide_861([haiku, terra, sonnet])
     audit = persisted(first)
     waiver = audit["floor_exceptions"]
     assert len(waiver) == 1 and waiver[0]["candidate"] == first["selected"]
@@ -122,7 +139,7 @@ def test_issue861_persisted_route_audit_retains_exact_haiku_receipt_and_fallback
     assert audit["preferred_route"] == first["selected"]
     assert "gpt-6.1-terra@medium" in audit["fallback_routes"][0]
 
-    fallback = decide("M", [dict(haiku, route_status="untried"), sonnet])
+    fallback = decide_861([dict(haiku, route_status="untried"), sonnet])
     stored = persisted(fallback)
     assert "floor_exceptions" not in stored
     assert stored["selected_route"] == fallback["selected"]
@@ -229,7 +246,7 @@ def test_issue861_authenticated_user_override_receipt_beats_role_deny_and_persis
     rid = routing.candidate_id(haiku)
     # The caller-facing candidates.route_role validates and claims this receipt;
     # raw routing.route intentionally only consumes the already validated handle.
-    decision = decide("M", [haiku, terra], user_policies=[deny],
+    decision = decide_861([haiku, terra], user_policies=[deny],
                       policy_overrides={rid: "validated-user-receipt-861"})
     assert decision["selected"] == rid, decision
     eligibility = next(row["eligibility"] for row in decision["routing"]["candidates"]
@@ -237,3 +254,14 @@ def test_issue861_authenticated_user_override_receipt_beats_role_deny_and_persis
     assert eligibility["policy"] == "allow"
     assert "validated-user-receipt-861" in eligibility["source"]
     assert decision["routing"]["floor_exceptions"][0]["candidate"] == rid
+
+
+def test_issue1143_m_sonnet_lead_is_not_disclosed_as_the_861_temporary_fallback():
+    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
+    terra = candidate("gpt-6.1-terra", "high", 44)
+    current = decide("M", [sonnet, terra], gear="M")
+    assert current["candidate"]["model_id"] == "claude-sonnet-5-5", current
+    assert "operational_fallback" not in current["selection_disclosure"], current["selection_disclosure"]
+    pinned = decide_861([dict(candidate("claude-haiku-5-5", "high", 38, harness="claude"),
+                              route_status="untried"), sonnet])
+    assert "Temporary Sonnet Medium M fallback" in pinned["selection_disclosure"]["operational_fallback"]

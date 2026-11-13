@@ -1144,7 +1144,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
     if (executor_slates.new_gear_size(request, executor_policy) == "M" and not request.get("manual_route")
             and (chosen.get("alias_resolved_to") or chosen.get("model_id")) == "claude-sonnet-5-5"
-            and chosen.get("effort") == "medium"):
+            and chosen.get("effort") == "medium"
+            # Only the #861 policy led M with Haiku High; under #1143 Sonnet Medium
+            # is the M lead itself, so the "temporary fallback" text would be false.
+            and (executor_slates.ideal_seed("M", executor_policy)[:1] or [{}])[0].get("model_id")
+            == "claude-haiku-5-5"):
         disclosure["operational_fallback"] = (
             "Temporary Sonnet Medium M fallback (#861); Haiku High is preferred only "
             "after exact harness/model/effort conformance and availability qualify")
