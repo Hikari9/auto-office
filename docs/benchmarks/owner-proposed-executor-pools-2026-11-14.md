@@ -1,0 +1,48 @@
+# Executive routing preferences: pooled seeds, quota-aware fallbacks, Hydrogen trial (2026-11-14)
+
+**Status: owner-proposed preference specification, pending one executive decision about Hydrogen auto-trial scope. NOT an activated dispatch policy.** Based on the owner’s 2026-11-14 Exec Grilling message and empirical `report-executor-routing-token-economy-2026-11-14.md` (uploaded in ChatGPT; source file intentionally not published to this repository). This note supersedes the **older two XS/S Hydrogen soft-seed positions** in PR #1142 as the desired proposal; it does NOT silently change runtime `catalog/executor-policy.yaml`.
+
+## Owner's exact proposal (do not flatten the pipes)
+
+`→` denotes ordered escalation to the next **rung**. `|` denotes alternate models **within the same rung**; select among qualified choices with observable quota/headroom, task-fit, local landed-work economics and an explicit bounded canary allocation for unproven models. Neither punctuation currently exists as a native field in the shipped `executor-policy.yaml`; its `executor_preferred` is a flat list and `preferred_rank()` returns a distinct integer per item. **An ordered YAML list alone cannot guarantee the proposed peer grouping or strict arrow escalation.** Implement/validate an explicit grouping representation and ranked routing semantics before activating.
+
+| Size | Rung 1 / preferred pool | Rung 2 / fallback pool | Qualification notes |
+| --- | --- | --- | --- |
+| **XS** | **Claude Haiku 5.5 Medium** | **Codex GPT-6.1 Terra Low | Agy Gemini 4 Hydrogen Low** | Preserve Claude quota advantage; Hydra Low requires a qualified bounded XS probe; current discovery sizes exclude XS |
+| **S** | **Codex GPT-6.1 Terra Medium | Agy Gemini 4 Hydrogen Medium** | **Claude Sonnet 5.5 Medium** | Terra has 13 reported attempts / 5 fully costed; Hydrogen unmeasured; Sonnet Medium S n=3 |
+| **M** | **Claude Sonnet 5.5 Medium | Agy Gemini 4 Hydrogen High** | **Codex GPT-6.1 Terra High** | Sonnet Medium strongest measured M economics; Terra High M currently denied |
+| **L** | **Claude Sonnet 5.5 High** | **Agy Gemini 4 Hydrogen High | Claude Opus 5.5 Low** | Opus Low L currently forbidden by XL-only restriction and score floor; additional owner decision needed to allow automatically |
+| **XL** | **Claude Opus 5.5 Medium** | **Codex GPT-6.1 Sol Medium | Agy Gemini 4 Argon High** | Argon still needs model/effort qualification; keep Opus primary |
+| **unknown size** | **Do not coerce to L** | **Request classification, apply risk safeguards, or preserve existing pinned semantics** | `new_gear_size()` currently returns None without a recognized run gear AND task size; no implicit L floor/allow |
+
+**Visual review:** owner proposed **Gemini 3.8 Flash OR Gemini 4 Hydrogen**, plus “agree to drop Gemini Flash.” Interpret safely as **drop Flash from executor slates** while preserving the existing Flash visual-review path until an image-sensitive Hydrogen vision probe is proven, at which point review whether Flash can be retired entirely. Hydrogen for visual review needs its own exact harness+effort vision capability and independent verdict test; builder conformance does not certify vision. Continue existing safety fallbacks until verified, not an untested replacement.
+
+**Planning/review boundaries:** Fable 5.2 remains planner-only. Keep independent code/plan review; do not quietly switch to Hydrogen code review or erode reviewer gating to save money. Avoid consuming critical Codex reviewer quota on optional Terra executor work when the remaining budget is constrained.
+
+## Why trial Hydrogen, and why not grant it immediate equal automatic traffic?
+
+- Google announced Hydrogen for rapid agentic execution 2026-11-12; Artificial Analysis Intelligence Index v5.0.1 scores Low 27 / Medium 41 / High 51 / Xhigh 54. These are **external index scores, not local Office success rates**, and they are **incompatible with shipped AA v4.3.2 floors**. Source: https://artificialanalysis.ai/changelog and https://deepmind.google/models/model-cards/gemini-4-hydrogen/
+- The empirical report contains **zero Hydrogen task attempts**, so no local success, context, cost, quota efficiency, time-to-land or RECHECK claim can be made. Proposed experiment domain: bounded, reversible, low-blast-radius XS/S and selective M tasks; L only explicit user-approved assignment until independent outcomes exist.
+- XS Haiku Medium was not itself observed as first at XS, but the report indicates Haiku prompts more often remain below 100k on XS than S/M; user reports high effective Codex quota cost and materially cheaper Claude allowance (owner-local observation, not a provider pricing claim). For S, Terra Medium had 13 attempts / 77% landed with five costed. For M, Sonnet Medium as first landed 18/18 on first route at $1.89 modeled full-chain mean versus Haiku High first $5.05 over 65 tasks. Selection bias and missing usage data remain.
+- No claimed 25–33% total savings can be assigned to this new owner-proposed pool: that estimate was made for the **report’s different routing policy** without Hydrogen and with list-price cost proxies.
+- Trial measurement: accepted-first-pass, eventual landing, RECHECK count and shared-gate attribution, total tokens incl. cache & 100K prompt-tier, quota headroom per **provider/harness pool** (Claude vs Codex vs Agy), time-to-land, operational vs capability failures, risk and task class, cost per independently accepted task; stop an experiment on regressions or multiple operator rescues.
+
+## Existing runtime/policy constraints (2026-11-14)
+
+1. `catalog/executor-policy.yaml` uses **AA v4.3.2 floors XS31/S38/M40/L44/XL47** and flat ordered preferences. Any new grouped slates require design, route/audit tests, a policy version bump, shipped `plugin-dist` parity and pinned-run compatibility.
+2. `catalog/role-policy.yaml` **denies Terra High at M**. Sonnet Medium at M is allowed. L Opus Low is blocked by `model_restrictions` (`allowed_sizes: [XL]`) and, independently, the pinned v4 L floor (Opus Low v4 score 42 < L floor 44). Any L Opus Low automatic path requires a *deliberate* narrowly scoped owner authorization; do NOT silently waive floors or open Opus to every size.
+3. Hydrogen four efforts in draft #1142 are `dispatchable:false`, `discovery:eligible`, have **no v4 score**, and lack proven local `agy` selected-model + effort readback. Adding a preference or role `allow` alone must never bypass that state. Test protected canary path with exact conformance and signed run-scoped authority.
+4. Built-in discovery already permits **S/M** with max two probes per run, one trial per run, a 15% rolling-20 trial cap, local/repo blast radius and known-working fallback. It currently excludes XS and L. Preserve these defaults unless owner confirms the initial trial scope; an XS manual opt-in is safer than silently broadening global discovery. Keep privileged/high-risk tasks out of discovery.
+5. Quota routing currently tracks per-harness/model cool-downs and a shared pool only for OpenCode free-tier models. It does **not** universally know that Terra executors and Luna reviewers can share Codex allowance, or Sonnet efforts the same Claude allowance. Strengthen source-backed provider-pool accounting before claiming true quota-aware peer selection.
+6. `routing.adaptive` utility incorporates cost, quota, reliability, speed and preference weights; `preferred_seed` is advisory, not a strict order. A valid equal-rung spec must not imply the runtime currently enforces it. `review.max_rounds:3` is existing convergence contract; the empirical report’s “escalate after 2 RECHECKs” is exploratory. Keep hard failures immediate, but stage a distinct, auditable, reversible escalation policy for review-loop failure instead of globally shortening review approval.
+7. Visual reviewer shipped primary is Gemini 3.8 Flash Low, then Terra Low, DeepSeek Max, and Agy Sonnet Medium. Hydrogen must pass image-sensitive probe before replacing that path. The “drop Flash” instruction can safely remove it from executor seeds now, but removing it from all visual paths before a proven replacement needs a separate explicit confirmation.
+8. Do not treat unknown-size subtasks as automatically L or let the absence of a size gate become implicit permission for Hydrogen/Opus. Classify or explicitly pin an assessed conservative policy, with risk/authority gates.
+9. Preserve historical v4 run snapshots and user role authority/overrides, and keep the AA v5 evidence migration in #862 separate from route activation.
+
+## Executive question / proposed rollout default
+
+**Should Hydrogen receive a capped, automatic safe-task canary rather than immediately becoming an unrestricted peer for every `|` pool?**
+
+Recommended: **yes**. Start with the repository’s existing **up-to-15% S/M trials** after exact Agy builder conformance, trust, quota and an established same-size fallback; XS Hydrogen Low only explicit opt-in initially; L Hydrogen High only explicit owner choice on low-blast-radius tasks; XL excludes Hydrogen. Measure 15–30 independently accepted attempts per relevant effort/size (or record insufficient evidence) before considering equal-rung automatic treatment, and define stop conditions. A yes/no answer unlocks detailed policy/grouping design and a separate draft implementation PR. This document is a proposal, not an authorization to dispatch.
+
+Related: [#862 AA v5 migration and local outcomes](https://github.com/Hikari9/auto-office/issues/862), [#1142 Hydrogen catalog PR](https://github.com/Hikari9/auto-office/pull/1142), [#1133 Fable planner PR](https://github.com/Hikari9/auto-office/pull/1133).
