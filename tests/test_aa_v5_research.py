@@ -334,9 +334,24 @@ def test_committed_local_replay_is_sanitized_and_names_no_winner():
     rec=data["extractor_reconciliation"]
     assert rec["frozen_report_attempts"]==rec["attempts_matching_dispatches_outcome_and_recheck"]==1362
     assert data["report_reproduction"]["population"]=={"frozen_attempts":1362,"frozen_tasks":1019,
+        "frozen_route_spellings":32,"frozen_route_spellings_with_multiple_invocations":4,
         "frozen_tasks_missing_or_changed":0,"scoreboard_attempts":1374,"scoreboard_tasks":1027}
     cal=data["calibration"]
     assert cal["production_index"]=="unchanged-v4.3.2"
     for cmp in cal["comparisons"].values():
         if "held_out" in cmp:
             assert cmp["empirical_ranking"]=="undetermined" or cmp["empirical_ranking"]["winner"] is None
+
+
+def test_report_replay_population_detects_changed_attempt_contents(tmp_path):
+    from eval import aa_v5_report_replay as replay
+    att=lambda o,r,n: {"pos":0,"route":"claude/sonnet@high","outcome":o,"rej":r,"nDisp":n}
+    frozen=[{"run":"r","task":"T1","size":"M","outcome":"accepted","atts":[att("accepted",0,2)]}]
+    def board(o="accepted",rej=0,disp=("a","b"),size="M"):
+        p=tmp_path/f"sb-{o}-{rej}-{len(disp)}-{size}.jsonl"
+        p.write_text(json.dumps({"run":"r","task":"T1","size":size,"outcome":"accepted","attempts":[
+            {"route":"claude/claude-sonnet-5-5@high","outcome":o,"rejections":rej,"dispatches":list(disp)}]})+"\n")
+        return p
+    assert replay.population(frozen,board())["frozen_tasks_missing_or_changed"]==0
+    for changed in (board(o="rejected"),board(rej=1),board(disp=("a",)),board(size="L")):
+        assert replay.population(frozen,changed)["frozen_tasks_missing_or_changed"]==1
