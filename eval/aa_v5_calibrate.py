@@ -70,7 +70,7 @@ def fit_link(train):
     best = (float("inf"), 0., 0.)
     for a in (-2., -1.5, -1., -.5, 0., .5, 1., 1.5, 2.):
         for b in (0., .25, .5, 1., 1.5, 2., 3.):
-            loss = _loss([(_prob(o["coding"], a, b), o["first_pass_accepted"], o["learn_weight"]) for o in train])
+            loss = _loss([(_prob(o["coding"], a, b), o["y"], o["learn_weight"]) for o in train])
             loss += .005 * (a*a + b*b)
             if loss < best[0]:
                 best = (loss, a, b)
@@ -90,13 +90,13 @@ def fit_domain(train, valid, link):
         weights = {}
         for domain in domains:
             sample = [o for o in train if o["domain"] == domain]
-            if len(sample) < 8 or len({o["first_pass_accepted"] for o in sample}) < 2:
+            if len(sample) < 8 or len({o["y"] for o in sample}) < 2:
                 weights[domain] = .6
                 continue
             weights[domain] = min(DOMAIN_WEIGHTS,
-                key=lambda weight: _loss([(_score_pred(o,link,weight), o["first_pass_accepted"], o["learn_weight"]) for o in sample])
+                key=lambda weight: _loss([(_score_pred(o,link,weight), o["y"], o["learn_weight"]) for o in sample])
                    + lam*(weight-.6)**2)
-        predictions = [(_score_pred(o,link,weights.get(o["domain"],.6)),o["first_pass_accepted"],o["learn_weight"]) for o in valid]
+        predictions = [(_score_pred(o,link,weights.get(o["domain"],.6)),o["y"],o["learn_weight"]) for o in valid]
         candidates.append((_loss(predictions),lam,weights))
     val_loss, lam, weights = min(candidates,key=lambda x:(x[0],x[1]))
     return {"regularization": lam, "domain_weights": weights, "validation_logloss": round(val_loss,6)}
@@ -120,7 +120,7 @@ def posterior(o, past, link, k):
         days = max(0.,(_parse_date(o["ended_at"])-_parse_date(e["ended_at"])).total_seconds()/86400)
         weight *= .5**(days/120.)
         n += weight
-        succ += weight * e["first_pass_accepted"]
+        succ += weight * e["y"]
     return (k*p0 + succ)/(k+n),n
 
 def prequential(block, earlier, link, k):
@@ -136,11 +136,23 @@ def choose_strength(train,valid,link):
     scores = []
     for k in PRIOR_STRENGTHS:
         preds = prequential(valid,train,link,k)
-        scores.append((_loss([(x["p"],x["o"]["first_pass_accepted"],x["o"]["learn_weight"]) for x in preds]),k))
+        scores.append((_loss([(x["p"],x["o"]["y"],x["o"]["learn_weight"]) for x in preds]),k))
     value,k = min(scores,key=lambda x:(x[0],x[1]))
     return {"pseudo_outcomes":k,"validation_logloss":round(value,6)}
 
-def observed_dataset(outcomes_path, evidence):
+TARGETS = ("first_pass_accepted", "eventual_accepted")
+
+
+def _when(r):
+    return r.get("label_at") or r.get("ended_at")
+
+
+def observed_dataset(outcomes_path, evidence, *, include_unknown_size=False):
+    """Executed attempts with exact same-route, same-effort v5 components.
+
+    An attempt joins only the evidence row for its own resolved catalog route.
+    Unresolved aliases, sibling efforts and unexecuted routes never join.
+    """
     obs = []
     reasons = Counter()
     all_rows = []
@@ -151,10 +163,13 @@ def observed_dataset(outcomes_path, evidence):
             r = json.loads(line)
         except ValueError as exc:
             raise ValueError(f"outcome line {line_number}: {exc}") from exc
-        need = ("run_id","task_id","dispatch_ids","route","ended_at","size_class","domain","role",
+        need = ("run_id","task_id","dispatch_ids","route","size_class","domain","role",
                 "first_pass_accepted","eventual_accepted","attribution","learn_weight")
         if any(k not in r for k in need):
             raise ValueError(f"outcome line {line_number} lacks fields (use aa_v5_outcomes.py)")
+        if not _when(r):
+            reasons["no_label_time"] += 1
+            continue
         if type(r["first_pass_accepted"]) is not bool or type(r["eventual_accepted"]) is not bool:
             raise ValueError("acceptance fields must be actual boolean observations")
         if r["first_pass_accepted"] and not r["eventual_accepted"]:
@@ -166,11 +181,12 @@ def observed_dataset(outcomes_path, evidence):
             continue
         if not isinstance(r["learn_weight"],(float,int)) or not 0 <= r["learn_weight"] <= 1:
             raise ValueError("invalid attribution weight")
-        if not r["ended_at"]:
-            raise ValueError("missing chronological timestamp")
-        _parse_date(r["ended_at"])
+        _parse_date(_when(r))
         all_rows.append(r)
-        ev = evidence.get(r["route"])
+        ev = evidence.get(r["route"]) if r["route"] else None
+        if r["route"] is None:
+            reasons["route_unresolved_to_exact_catalog_identity"] += 1
+            continue
         if ev is None:
             reasons["route_not_in_evidence"] += 1
             continue
@@ -179,83 +195,70 @@ def observed_dataset(outcomes_path, evidence):
             reasons["missing_same_effort_components"] += 1
             continue
         if r["learn_weight"] <= 0:
-            reasons["operational_not_model_attributable"] += 1
+            reasons["operational_or_plan_not_model_attributable"] += 1
             continue
-        if r["size_class"] not in OWNER_RUNGS:
+        if r["size_class"] not in OWNER_RUNGS and not include_unknown_size:
             reasons["unknown_size"] += 1
             continue
-        d = {**r, "fc":fc,"tb":tb,"coding":.6*fc+.4*tb}
-        obs.append(d)
-    obs.sort(key=lambda o:(o["ended_at"],o["run_id"],o["task_id"],o["route"]))
-    # Each dispatch counted once, no fabricated comparison labels for other routes.
-    triples = [((o["run_id"],o["task_id"],o["route"])) for o in obs]
-    if len(triples) != len(set(triples)):
-        raise ValueError("duplicate task-route episode; cannot assume independent evidence")
+        obs.append({**r, "ended_at": _when(r), "fc":fc,"tb":tb,"coding":.6*fc+.4*tb})
+    obs.sort(key=lambda o:(o["ended_at"],o["run_id"],o["task_id"],o.get("segment_index",0)))
+    keys = [(o["run_id"],o["task_id"],o.get("segment_index",o["route"])) for o in obs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate task attempt; cannot assume independent evidence")
     return obs,all_rows,dict(reasons)
 
-def chrono_split(observations):
-    """Non-overlapping chronological holdouts: no run straddles a boundary.
 
-    Runs with overlapping episode windows form indivisible time clusters, so
-    even a slow train-run finishing after a validation-run began cannot leak.
+def chrono_split(observations, fractions=(.70, .85)):
+    """Purged chronological train/validation/test split.
+
+    Cut times sit at the label-time quantiles. A run whose labels fall on both
+    sides of a cut is purged from the analysis rather than assigned, so no run
+    contributes to two windows and every training label precedes every
+    validation label, which precedes every test label.
     """
-    byrun=defaultdict(list)
+    if len({o["run_id"] for o in observations})<MIN_VALID_RUNS or len(observations)<MIN_VALID_EPISODES:
+        raise InsufficientData("need >=6 attributed runs and >=30 exact-score attempts for train/val/test")
+    times=sorted(o["ended_at"] for o in observations)
+    cuts=[times[min(len(times)-1,int(f*len(times)))] for f in fractions]
+    def window(t):
+        return 0 if t<cuts[0] else 1 if t<cuts[1] else 2
+    byrun=defaultdict(set)
     for o in observations:
-        byrun[o["run_id"]].append(o)
-    intervals=sorted(((min(x["ended_at"] for x in rows),
-                       max(x["ended_at"] for x in rows),run)
-                      for run,rows in byrun.items()), key=lambda r:(r[0],r[1],r[2]))
-    if len(intervals)<MIN_VALID_RUNS or len(observations)<MIN_VALID_EPISODES:
-        raise InsufficientData("need >=6 attributed runs and >=30 exact-score episodes for train/val/test")
-    clusters=[]
-    for start,end,run in intervals:
-        if clusters and start <= clusters[-1]["end"]:
-            clusters[-1]["runs"].add(run)
-            clusters[-1]["end"]=max(end,clusters[-1]["end"])
-        else:
-            clusters.append({"start":start,"end":end,"runs":{run}})
-    if len(clusters)<3:
-        raise InsufficientData("runs overlap into fewer than three non-leaking chronological windows")
-    # Target chronological sample fractions with intact run/time clusters.
-    total=sum(len(byrun[r]) for r in byrun)
-    cumulative=[]
-    n=0
-    for cl in clusters:
-        n+=sum(len(byrun[r]) for r in cl["runs"])
-        cumulative.append(n)
-    cut1=min(range(1,len(clusters)-1),key=lambda i:abs(cumulative[i-1]/total-.70))
-    cut2=min(range(cut1+1,len(clusters)),key=lambda i:abs(cumulative[i-1]/total-.85))
-    groups=[clusters[:cut1],clusters[cut1:cut2],clusters[cut2:]]
-    sets=[set().union(*(c["runs"] for c in group)) for group in groups]
-    pieces=[[o for o in observations if o["run_id"] in keys] for keys in sets]
+        byrun[o["run_id"]].add(window(o["ended_at"]))
+    purged={r for r,w in byrun.items() if len(w)>1}
+    pieces=[[o for o in observations if o["run_id"] not in purged and window(o["ended_at"])==i] for i in range(3)]
     if not all(pieces):
-        raise InsufficientData("chronological train/val/test holdout is empty")
+        raise InsufficientData("purged chronological train/val/test holdout is empty")
     if not (pieces[0][-1]["ended_at"] < pieces[1][0]["ended_at"] and
             pieces[1][-1]["ended_at"] < pieces[2][0]["ended_at"]):
         raise ValueError("chronological time leakage")
-    return pieces,{"train_runs":len(sets[0]),"validation_runs":len(sets[1]),"test_runs":len(sets[2]),
+    runs=[{o["run_id"] for o in p} for p in pieces]
+    return pieces,{"train_runs":len(runs[0]),"validation_runs":len(runs[1]),"test_runs":len(runs[2]),
                    "train_n":len(pieces[0]),"validation_n":len(pieces[1]),"test_n":len(pieces[2]),
+                   "purged_runs":len(purged),"purged_attempts":sum(o["run_id"] in purged for o in observations),
                    "time_bounds":[[p[0]["ended_at"],p[-1]["ended_at"]] for p in pieces],
-                   "time_overlap_purged_by_run_cluster":True}
+                   "cuts":cuts,"straddling_runs_purged":True}
+
 
 def metrics(pairs):
     if not pairs:
         return {"n":0}
-    b=[brier(p,o["first_pass_accepted"]) for o,p in pairs]
-    l=[logloss(p,o["first_pass_accepted"]) for o,p in pairs]
-    mean=sum(o["first_pass_accepted"] for o,p in pairs)/len(pairs)
+    b=[brier(p,o["y"]) for o,p in pairs]
+    l=[logloss(p,o["y"]) for o,p in pairs]
+    mean=sum(o["y"] for o,p in pairs)/len(pairs)
     # ECE is a descriptive, fixed 5-bin measure; nonparametric CI by run.
     ece=0.
     for binid in range(5):
         g=[(o,p) for o,p in pairs if min(4,int(p*5))==binid]
         if g:
-            ece += len(g)/len(pairs)*abs(sum(p for o,p in g)/len(g)-sum(o["first_pass_accepted"] for o,p in g)/len(g))
-    return {"n":len(pairs),"first_pass_rate":round(mean,4),
+            ece += len(g)/len(pairs)*abs(sum(p for o,p in g)/len(g)-sum(o["y"] for o,p in g)/len(g))
+    return {"n":len(pairs),"observed_rate":round(mean,4),
             "brier":round(statistics.mean(b),6),"logloss":round(statistics.mean(l),6),
             "ece_5bin":round(ece,6),"mean_predicted":round(statistics.mean(p for _,p in pairs),4)}
 
+
 def cluster_uncertainty(pred, draws=1000):
-    """Bootstrap whole runs (not dependent attempts) on the same held-out IDs."""
+    """Bootstrap whole test runs (not dependent attempts); paired Brier deltas."""
     grouped=defaultdict(list)
     for key,pairs in pred.items():
         for o,p in pairs:
@@ -266,19 +269,62 @@ def cluster_uncertainty(pred, draws=1000):
     rng=random.Random(862)
     results=defaultdict(list)
     for _ in range(draws):
-        grouped_sample=defaultdict(list)
+        sample=defaultdict(list)
         for run in (rng.choice(runs) for __ in runs):
             for key,o,p in grouped[run]:
-                grouped_sample[key].append((o,p))
-        for key,items in grouped_sample.items():
-            results[key].append(sum(brier(p,o["first_pass_accepted"]) for o,p in items)/len(items))
-        if "A" in grouped_sample and "C" in grouped_sample:
-            results["delta_C_minus_A"].append(results["C"][-1]-results["A"][-1])
+                sample[key].append((o,p))
+        means={k:sum(brier(p,o["y"]) for o,p in v)/len(v) for k,v in sample.items()}
+        for k,v in means.items():
+            results[k].append(v)
+        for a,b in (("B","A"),("C","A"),("A","N"),("B","N"),("C","N")):
+            if a in means and b in means:
+                results[f"delta_{a}_minus_{b}"].append(means[a]-means[b])
     def ci(values):
         ordered=sorted(values)
         return [round(ordered[int(.025*(len(ordered)-1))],6),
                 round(ordered[int(.975*(len(ordered)-1))],6)]
-    return {"method":"run-cluster-bootstrap-1000","brier_95_ci":{k:ci(v) for k,v in results.items()}}
+    return {"method":"run-cluster-bootstrap-1000-seed-862","test_runs":len(runs),
+            "brier_95_ci":{k:ci(v) for k,v in sorted(results.items())}}
+
+
+def _rate(rows, key):
+    return round(sum(bool(r[key]) for r in rows)/len(rows),4) if rows else None
+
+
+def _mean(values, digits=4):
+    values=[v for v in values if isinstance(v,(int,float))]
+    return round(statistics.mean(values),digits) if values else None
+
+
+def aggregate(rows):
+    """Sanitized factual outcome aggregate for a set of executed attempts."""
+    n=len(rows)
+    if not n:
+        return {"n":0}
+    accepted=[r for r in rows if r["eventual_accepted"]]
+    costed=[r for r in rows if isinstance(r.get("estimated_cost_usd"),(int,float))]
+    costed_ok=[r for r in accepted if isinstance(r.get("estimated_cost_usd"),(int,float))]
+    known_ind=[r for r in accepted if r.get("independent_review_passed") is not None]
+    usage=[r for r in rows if r.get("usage_limit_hit") is not None]
+    return {
+        "n":n,"first_pass_rate":_rate(rows,"first_pass_accepted"),"eventual_rate":_rate(rows,"eventual_accepted"),
+        "recheck_mean":_mean([r.get("recheck_count") for r in rows],3),
+        "recheck_any_rate":round(sum((r.get("recheck_count") or 0)>0 for r in rows)/n,4),
+        "operational_failures_n":sum(bool(r.get("operational_failure")) for r in rows),
+        "model_quality_failures_n":sum(bool(r.get("model_quality_failure")) for r in rows),
+        "usage_limit_hits_n":sum(bool(r.get("usage_limit_hit")) for r in usage) if usage else None,
+        "usage_limit_coverage":len(usage),
+        "exec_minutes_mean":_mean([r["time_seconds"]/60 for r in rows if isinstance(r.get("time_seconds"),(int,float))],1),
+        "estimated_cost_per_attempt_usd":_mean([r["estimated_cost_usd"] for r in costed],2),
+        "estimated_cost_per_accepted_attempt_usd":_mean([r["estimated_cost_usd"] for r in costed_ok],2),
+        "estimated_cost_coverage":len(costed),
+        "money_actual_coverage":sum(isinstance(r.get("money_actual"),(int,float)) for r in rows),
+        "quota_delta_coverage":sum(isinstance(r.get("quota_burn"),(int,float)) for r in rows),
+        "independent_review_rate_of_accepted":_rate(known_ind,"independent_review_passed"),
+        "independent_review_known_n":len(known_ind),
+        "regression_rate":None,
+    }
+
 
 def operational_stats(all_rows):
     bysize=defaultdict(list)
@@ -286,34 +332,87 @@ def operational_stats(all_rows):
     for o in all_rows:
         bysize[o["size_class"]].append(o)
         bydomain[o["domain"]].append(o)
-    def aggregate(rows):
-        n=len(rows)
-        if not n:
-            return {"n":0}
-        accepted=[r for r in rows if r["eventual_accepted"]]
-        money=[r["money_actual"] for r in rows if isinstance(r.get("money_actual"),(float,int))]
-        costed_accepted=[r for r in accepted if isinstance(r.get("money_actual"),(float,int))]
-        time=[r["time_seconds"] for r in accepted if isinstance(r.get("time_seconds"),(float,int))]
-        quotas=[r["quota_burn"] for r in rows if isinstance(r.get("quota_burn"),(float,int))]
-        return {
-            "n":n,"first_pass_n":sum(r["first_pass_accepted"] for r in rows),
-            "eventually_accepted_n":len(accepted),
-            "recheck_episodes_n":sum((r.get("recheck_count") or 0)>0 for r in rows),
-            "review_rounds_total":sum((r.get("recheck_count") or 0) for r in rows),
-            "operational_failures_n":sum(bool(r.get("operational_failure")) for r in rows),
-            "model_quality_failures_n":sum(bool(r.get("model_quality_failure")) for r in rows),
-            "time_to_accept_seconds_mean":round(statistics.mean(time),1) if time else None,
-            "accepted_time_coverage":len(time),
-            "observed_cost_per_accepted_usd":round(sum(r["money_actual"] for r in costed_accepted)/len(costed_accepted),4) if costed_accepted else None,
-            "accepted_cost_coverage":len(costed_accepted),
-            "cost_coverage_all":len(money),
-            "quota_delta_total":sum(quotas) if quotas else None,
-            "quota_delta_coverage":len(quotas),
-            "regression_verified_n":sum(r.get("regression_observed") is not None for r in rows),
-            "independent_review_verified_n":sum(r.get("independent_review_passed") is not None for r in rows),
-        }
     return {"all":aggregate(all_rows),"by_size":{s:aggregate(bysize[s]) for s in ("XS","S","M","L","XL","unknown")},
             "by_domain":{d:aggregate(rows) for d,rows in sorted(bydomain.items())}}
+
+
+def route_table(all_rows, evidence, min_n=3):
+    """Per size x exact executed route; first-route and all-position views."""
+    out=[]
+    groups=defaultdict(list)
+    for r in all_rows:
+        if r.get("route"):
+            groups[(r["size_class"],r["route"])].append(r)
+    for (size,route),rows in sorted(groups.items()):
+        if len(rows)<min_n:
+            continue
+        ev=evidence.get(route)
+        out.append({"size":size,"route":route,"office_60_40_score":round(coding_score(ev),2) if ev and coding_score(ev) is not None else None,
+                    "all_positions":aggregate(rows),
+                    "first_route":aggregate([r for r in rows if r.get("first_route")])})
+    return out
+
+
+def _spearman(xs, ys):
+    def ranks(v):
+        order=sorted(range(len(v)),key=lambda i:v[i])
+        r=[0.]*len(v)
+        i=0
+        while i<len(v):
+            j=i
+            while j+1<len(v) and v[order[j+1]]==v[order[i]]:
+                j+=1
+            for k in range(i,j+1):
+                r[order[k]]=(i+j)/2
+            i=j+1
+        return r
+    rx,ry=ranks(xs),ranks(ys)
+    mx,my=statistics.mean(rx),statistics.mean(ry)
+    num=sum((a-mx)*(b-my) for a,b in zip(rx,ry))
+    den=math.sqrt(sum((a-mx)**2 for a in rx)*sum((b-my)**2 for b in ry))
+    return round(num/den,3) if den else None
+
+
+def benchmark_rank_agreement(table, min_n=5):
+    """Does the 60/40 benchmark order exact routes the way observed outcomes do?"""
+    out={}
+    for size in ("XS","S","M","L","XL","unknown"):
+        rows=[r for r in table if r["size"]==size and r["office_60_40_score"] is not None
+              and r["all_positions"]["n"]>=min_n]
+        if len(rows)<3:
+            out[size]={"routes":len(rows),"spearman_first_pass":None,"spearman_eventual":None,
+                       "reason":"fewer than three exact-score routes with >=5 attempts"}
+            continue
+        sc=[r["office_60_40_score"] for r in rows]
+        out[size]={"routes":len(rows),
+                   "spearman_first_pass":_spearman(sc,[r["all_positions"]["first_pass_rate"] for r in rows]),
+                   "spearman_eventual":_spearman(sc,[r["all_positions"]["eventual_rate"] for r in rows])}
+    return out
+
+
+def owner_replay(all_rows):
+    """#1143 soft preference rungs against FACTUAL attempts only.
+
+    For each approved route: what actually happened when it ran at that size.
+    A route that never ran at that size is 'unobserved', never a success.
+    Also: how often the factual first route already was an approved rung-1 route.
+    """
+    out={}
+    for size,rungs in OWNER_RUNGS.items():
+        sized=[r for r in all_rows if r["size_class"]==size]
+        firsts=[r for r in sized if r.get("first_route")]
+        entries=[]
+        for i,group in enumerate(rungs):
+            for route in group:
+                rows=[r for r in sized if r.get("route")==route]
+                entries.append({"rung":i+1,"route":route,
+                                "factual":aggregate(rows) if rows else "unobserved",
+                                "factual_first_route":aggregate([r for r in rows if r.get("first_route")]) if rows else "unobserved"})
+        out[size]={"rungs":entries,"tasks_with_first_route":len(firsts),
+                   "first_route_was_approved_rung1":sum(r.get("route") in rungs[0] for r in firsts),
+                   "counterfactual_outcomes":"unobserved; tasks that ran another route are not relabeled"}
+    return out
+
 
 def policy_coverage(evidence):
     out={}
@@ -338,54 +437,85 @@ def policy_coverage(evidence):
                    "blocked_by_old_floor":[x["route"] for x in entries if x["old_shadow_floor_pass"] is False]}
     return out
 
+
+def compare(obs, target):
+    """A/B/C plus a no-benchmark base-rate yardstick N on identical held-out attempts."""
+    data=[{**o,"y":bool(o[target])} for o in obs]
+    (train,val,test),split=chrono_split(data)
+    link=fit_link(train)
+    B=fit_domain(train,val,link)
+    C=choose_strength(train,val,link)
+    base=sum(o["y"] for o in train+val)/len(train+val)
+    cpreds=prequential(test,train+val,link,C["pseudo_outcomes"])
+    pred={
+        "N":[(o,max(.01,min(.99,base))) for o in test],
+        "A":[(o,_score_pred(o,link)) for o in test],
+        "B":[(o,_score_pred(o,link,B["domain_weights"].get(o["domain"],.6))) for o in test],
+        "C":[(z["o"],z["p"]) for z in cpreds],
+    }
+    keys={k:[(o["run_id"],o["task_id"],o.get("segment_index",o["route"])) for o,p in v] for k,v in pred.items()}
+    if not keys["N"]==keys["A"]==keys["B"]==keys["C"]:
+        raise ValueError("evaluation identity mismatch")
+    summary={k:metrics(v) for k,v in pred.items()}
+    unc=cluster_uncertainty(pred)
+    domains={o["domain"] for o in train}
+    def coverage(rows):
+        return {"size":dict(Counter(o["size_class"] for o in rows)),"route":dict(Counter(o["route"] for o in rows))}
+    ranking="undetermined"
+    if len(test)>=30 and split["test_runs"]>=3 and "brier_95_ci" in unc:
+        best=min(("A","B","C"),key=lambda k:(summary[k]["brier"],k))
+        ci=unc["brier_95_ci"]
+        ranking={"lowest_brier_overall":min(("N","A","B","C"),key=lambda k:(summary[k]["brier"],k)),
+                 "lowest_brier_benchmark_formula":best,
+                 "benchmark_formula_beats_baseline_at_95":ci.get(f"delta_{best}_minus_N",[0,0])[1]<0,
+                 "winner":best if ci.get(f"delta_{best}_minus_N",[0,0])[1]<0 else None,
+                 "note":"a lower point Brier without a run-cluster CI excluding zero is not a winner"}
+    return {"split":split,"formula_parameters":{"N":{"train_val_base_rate":round(base,4)},"A":link,"B":{**B,
+                "degenerate":len(domains)<2,"degenerate_reason":"one domain recorded; B equals A" if len(domains)<2 else None},"C":C},
+            "held_out":summary,"uncertainty":unc,"empirical_ranking":ranking,
+            "coverage":{"train":coverage(train),"validation":coverage(val),"test":coverage(test)},
+            "feature_note":"A and B use one benchmark score per exact route, so within a route every attempt gets the same prediction; they can only rank routes."}
+
+
 def run(outcome_path,folder=aa_v5_evidence.FOLDER):
     verification=aa_v5_evidence.validate(folder)
     ev={r["route_key"]:r for r in aa_v5_evidence.rows(folder)}
     report={"analysis":"research-only-aa-v5.0.1-shadow","production_index":"unchanged-v4.3.2",
             "owner_policy":"#1143-unchanged","data_reconciliation":verification,
             "policy_floor_shadow":policy_coverage(ev),"formulae": {
+                "N":"no-benchmark yardstick: train+validation base rate",
                 "A":"60% FrontierCode 2.0 + 40% Terminal-Bench 4.0; TRAIN-calibrated link",
                 "B":"domain-regularized FrontierCode/Terminal blend; fit TRAIN, hyperparameter VALIDATION",
-                "C":"A as weak logistic benchmark prior; route+effort+size+domain Beta evidence, chronological; tune k on VALIDATION",
+                "C":"A as weak logistic benchmark prior; same exact route Beta evidence (size/domain discounted), prequential; tune k on VALIDATION",
             }}
     if outcome_path is None or not outcome_path.exists():
-        report.update(status="blocked_no_raw_outcomes",reason="Nov 14 empirical routing report is SECONDARY only. Current local runs.db and rico-mode/state/executor-scoreboard.jsonl are inaccessible from this environment. No attributed local labels; no formula winner can be established.",
-                      next_command="python eval/aa_v5_outcomes.py --db /path/to/consistent/runs-copy.db --out /private/aa-v5-episodes.jsonl; python eval/aa_v5_calibrate.py --outcomes /private/aa-v5-episodes.jsonl --report /private/aa-v5-analysis.json")
+        report.update(status="blocked_no_raw_outcomes",reason="No private attempt file supplied. Run the local extraction first; no formula winner can be established without executed outcomes.",
+                      next_command="python eval/aa_v5_outcomes.py --db /path/to/consistent/runs-copy.db --out /private/aa-v5-attempts.jsonl; python eval/aa_v5_calibrate.py --outcomes /private/aa-v5-attempts.jsonl --report /private/aa-v5-analysis.json")
         return report
     obs,all_rows,reasons=observed_dataset(outcome_path,ev)
-    report["data_coverage"]={"observed_episodes":len(all_rows),"exact_score_attributable_episodes":len(obs),
-                             "excluded_reasons":reasons}
+    obs_all,_,reasons_all=observed_dataset(outcome_path,ev,include_unknown_size=True)
+    report["data_coverage"]={"observed_attempts":len(all_rows),"exact_score_attributable_sized":len(obs),
+                             "exact_score_attributable_any_size":len(obs_all),"excluded_reasons":reasons}
     report["operational_outcomes"]=operational_stats(all_rows)
+    table=route_table(all_rows,ev)
+    report["route_outcomes"]=table
+    report["benchmark_rank_agreement"]=benchmark_rank_agreement(table)
+    report["owner_replay_1143"]=owner_replay(all_rows)
     report["shadow_routing"]={"status":"factual-only","counterfactual_model_success":"unobserved",
-        "preferred_factual_episodes":sum(o["route"] in sum(OWNER_RUNGS.get(o["size_class"],[]),[]) for o in obs),
-        "observed_candidate_episodes":len(obs),
         "no_changes_to_dispatch_or_policy":True}
-    try:
-        (train,val,test),split=chrono_split(obs)
-    except InsufficientData as exc:
-        report.update(status="insufficient_chronological_holdout",reason=str(exc))
-        return report
-    link=fit_link(train)
-    B=fit_domain(train,val,link)
-    C=choose_strength(train,val,link)
-    cpreds=prequential(test,train+val,link,C["pseudo_outcomes"])
-    pred={
-        "A":[(o,_score_pred(o,link)) for o in test],
-        "B":[(o,_score_pred(o,link,B["domain_weights"].get(o["domain"],.6))) for o in test],
-        "C":[(z["o"],z["p"]) for z in cpreds],
-    }
-    # Same exact executed test episodes for all three. No invented alternative-route labels.
-    testkeys={k: [(o["run_id"],o["task_id"],o["route"]) for o,p in v] for k,v in pred.items()}
-    if not testkeys["A"]==testkeys["B"]==testkeys["C"]:
-        raise ValueError("evaluation identity mismatch")
-    summary={k:metrics(v) for k,v in pred.items()}
-    report.update(status="calibrated_shadow_only", split=split, formula_parameters={"A":link,"B":B,"C":C},
-                  held_out_first_pass=summary, uncertainty=cluster_uncertainty(pred),
-                  empirical_ranking="undetermined" if len(test)<30 or split["test_runs"]<3 else
-                    min(summary,key=lambda k:summary[k]["brier"]))
+    comparisons={}
+    for scope,data in (("sized_XS_XL",obs),("any_size_sensitivity",obs_all)):
+        for target in TARGETS:
+            try:
+                comparisons[f"{scope}:{target}"]=compare(data,target)
+            except InsufficientData as exc:
+                comparisons[f"{scope}:{target}"]={"status":"insufficient_chronological_holdout","reason":str(exc)}
+    report["comparisons"]=comparisons
+    report["status"]="calibrated_shadow_only" if any("held_out" in v for v in comparisons.values()) else "insufficient_chronological_holdout"
     # Winning a score is not a production cutover authorization.
     report["approval_required"]="owner signoff on formula/index/floors/reviewer isolation plus representative real outcomes"
     return report
+
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -399,6 +529,7 @@ def main():
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(serialized+"\n")
     print(serialized)
+
 
 if __name__=="__main__":
     main()

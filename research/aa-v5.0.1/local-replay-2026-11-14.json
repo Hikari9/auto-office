@@ -1,0 +1,3106 @@
+{
+ "calibration": {
+  "analysis": "research-only-aa-v5.0.1-shadow",
+  "approval_required": "owner signoff on formula/index/floors/reviewer isolation plus representative real outcomes",
+  "benchmark_rank_agreement": {
+   "L": {
+    "reason": "fewer than three exact-score routes with >=5 attempts",
+    "routes": 1,
+    "spearman_eventual": null,
+    "spearman_first_pass": null
+   },
+   "M": {
+    "routes": 8,
+    "spearman_eventual": 0.335,
+    "spearman_first_pass": 0.681
+   },
+   "S": {
+    "routes": 4,
+    "spearman_eventual": 0.0,
+    "spearman_first_pass": 0.4
+   },
+   "XL": {
+    "reason": "fewer than three exact-score routes with >=5 attempts",
+    "routes": 0,
+    "spearman_eventual": null,
+    "spearman_first_pass": null
+   },
+   "XS": {
+    "routes": 3,
+    "spearman_eventual": 1.0,
+    "spearman_first_pass": 1.0
+   },
+   "unknown": {
+    "routes": 6,
+    "spearman_eventual": 0.543,
+    "spearman_first_pass": 0.6
+   }
+  },
+  "comparisons": {
+   "any_size_sensitivity:eventual_accepted": {
+    "coverage": {
+     "test": {
+      "route": {
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 23,
+       "claude/claude-haiku-5-5@high": 70,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 25,
+       "claude/claude-sonnet-5-5@medium": 26,
+       "codex/gpt-6.1-terra@high": 1,
+       "codex/gpt-6.1-terra@medium": 10
+      },
+      "size": {
+       "L": 28,
+       "M": 69,
+       "S": 58,
+       "XL": 2,
+       "XS": 1
+      }
+     },
+     "train": {
+      "route": {
+       "agy/claude-sonnet-5-5@medium": 4,
+       "agy/gemini-3.8-flash@low": 2,
+       "agy/gemini-3.8-flash@medium": 57,
+       "claude/claude-haiku-5-5@high": 34,
+       "claude/claude-haiku-5-5@medium": 3,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 438,
+       "claude/claude-sonnet-5-5@medium": 24,
+       "codex/gpt-6-luna@high": 179,
+       "codex/gpt-6.1-sol@medium": 15,
+       "codex/gpt-6.1-terra@high": 6
+      },
+      "size": {
+       "L": 6,
+       "M": 39,
+       "S": 31,
+       "XL": 1,
+       "XS": 4,
+       "unknown": 683
+      }
+     },
+     "validation": {
+      "route": {
+       "agy/claude-sonnet-5-5@high": 3,
+       "agy/claude-sonnet-5-5@medium": 1,
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 32,
+       "claude/claude-haiku-5-5@high": 42,
+       "claude/claude-opus-5-5@medium": 1,
+       "claude/claude-sonnet-5-5@high": 33,
+       "claude/claude-sonnet-5-5@medium": 11,
+       "codex/gpt-6-luna@high": 1,
+       "codex/gpt-6.1-terra@low": 3,
+       "codex/gpt-6.1-terra@medium": 20
+      },
+      "size": {
+       "L": 13,
+       "M": 82,
+       "S": 46,
+       "XS": 5,
+       "unknown": 2
+      }
+     }
+    },
+    "empirical_ranking": {
+     "benchmark_formula_beats_baseline_at_95": false,
+     "lowest_brier_benchmark_formula": "C",
+     "lowest_brier_overall": "C",
+     "note": "a lower point Brier without a run-cluster CI excluding zero is not a winner",
+     "winner": null
+    },
+    "feature_note": "A and B use one benchmark score per exact route, so within a route every attempt gets the same prediction; they can only rank routes.",
+    "formula_parameters": {
+     "A": {
+      "intercept": 2.0,
+      "slope": 0.25,
+      "training_objective": 0.316105
+     },
+     "B": {
+      "degenerate": true,
+      "degenerate_reason": "one domain recorded; B equals A",
+      "domain_weights": {
+       "unknown": 0.6
+      },
+      "regularization": 0.1,
+      "validation_logloss": 0.510798
+     },
+     "C": {
+      "pseudo_outcomes": 4,
+      "validation_logloss": 0.500197
+     },
+     "N": {
+      "train_val_base_rate": 0.8958
+     }
+    },
+    "held_out": {
+     "A": {
+      "brier": 0.132712,
+      "ece_5bin": 0.027361,
+      "logloss": 0.434539,
+      "mean_predicted": 0.8691,
+      "n": 158,
+      "observed_rate": 0.8418
+     },
+     "B": {
+      "brier": 0.132712,
+      "ece_5bin": 0.027361,
+      "logloss": 0.434539,
+      "mean_predicted": 0.8691,
+      "n": 158,
+      "observed_rate": 0.8418
+     },
+     "C": {
+      "brier": 0.123904,
+      "ece_5bin": 0.024428,
+      "logloss": 0.40364,
+      "mean_predicted": 0.8597,
+      "n": 158,
+      "observed_rate": 0.8418
+     },
+     "N": {
+      "brier": 0.136114,
+      "ece_5bin": 0.054061,
+      "logloss": 0.45047,
+      "mean_predicted": 0.8958,
+      "n": 158,
+      "observed_rate": 0.8418
+     }
+    },
+    "split": {
+     "cuts": [
+      "2026-10-31T06:33:30.721716+00:00",
+      "2026-11-10T03:29:48.900479+00:00"
+     ],
+     "purged_attempts": 32,
+     "purged_runs": 5,
+     "straddling_runs_purged": true,
+     "test_n": 158,
+     "test_runs": 46,
+     "time_bounds": [
+      [
+       "2026-10-06T16:41:00.499340+00:00",
+       "2026-10-31T05:31:26.050926+00:00"
+      ],
+      [
+       "2026-10-31T07:41:38.022488+00:00",
+       "2026-11-10T03:04:37.943708+00:00"
+      ],
+      [
+       "2026-11-10T03:44:23.436178+00:00",
+       "2026-11-13T18:54:14.002162+00:00"
+      ]
+     ],
+     "train_n": 764,
+     "train_runs": 282,
+     "validation_n": 148,
+     "validation_runs": 48
+    },
+    "uncertainty": {
+     "brier_95_ci": {
+      "A": [
+       0.076072,
+       0.191573
+      ],
+      "B": [
+       0.076072,
+       0.191573
+      ],
+      "C": [
+       0.075599,
+       0.172191
+      ],
+      "N": [
+       0.075174,
+       0.199343
+      ],
+      "delta_A_minus_N": [
+       -0.008269,
+       0.001318
+      ],
+      "delta_B_minus_A": [
+       0.0,
+       0.0
+      ],
+      "delta_B_minus_N": [
+       -0.008269,
+       0.001318
+      ],
+      "delta_C_minus_A": [
+       -0.031286,
+       0.011115
+      ],
+      "delta_C_minus_N": [
+       -0.037434,
+       0.011133
+      ]
+     },
+     "method": "run-cluster-bootstrap-1000-seed-862",
+     "test_runs": 46
+    }
+   },
+   "any_size_sensitivity:first_pass_accepted": {
+    "coverage": {
+     "test": {
+      "route": {
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 23,
+       "claude/claude-haiku-5-5@high": 70,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 25,
+       "claude/claude-sonnet-5-5@medium": 26,
+       "codex/gpt-6.1-terra@high": 1,
+       "codex/gpt-6.1-terra@medium": 10
+      },
+      "size": {
+       "L": 28,
+       "M": 69,
+       "S": 58,
+       "XL": 2,
+       "XS": 1
+      }
+     },
+     "train": {
+      "route": {
+       "agy/claude-sonnet-5-5@medium": 4,
+       "agy/gemini-3.8-flash@low": 2,
+       "agy/gemini-3.8-flash@medium": 57,
+       "claude/claude-haiku-5-5@high": 34,
+       "claude/claude-haiku-5-5@medium": 3,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 438,
+       "claude/claude-sonnet-5-5@medium": 24,
+       "codex/gpt-6-luna@high": 179,
+       "codex/gpt-6.1-sol@medium": 15,
+       "codex/gpt-6.1-terra@high": 6
+      },
+      "size": {
+       "L": 6,
+       "M": 39,
+       "S": 31,
+       "XL": 1,
+       "XS": 4,
+       "unknown": 683
+      }
+     },
+     "validation": {
+      "route": {
+       "agy/claude-sonnet-5-5@high": 3,
+       "agy/claude-sonnet-5-5@medium": 1,
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 32,
+       "claude/claude-haiku-5-5@high": 42,
+       "claude/claude-opus-5-5@medium": 1,
+       "claude/claude-sonnet-5-5@high": 33,
+       "claude/claude-sonnet-5-5@medium": 11,
+       "codex/gpt-6-luna@high": 1,
+       "codex/gpt-6.1-terra@low": 3,
+       "codex/gpt-6.1-terra@medium": 20
+      },
+      "size": {
+       "L": 13,
+       "M": 82,
+       "S": 46,
+       "XS": 5,
+       "unknown": 2
+      }
+     }
+    },
+    "empirical_ranking": {
+     "benchmark_formula_beats_baseline_at_95": false,
+     "lowest_brier_benchmark_formula": "A",
+     "lowest_brier_overall": "A",
+     "note": "a lower point Brier without a run-cluster CI excluding zero is not a winner",
+     "winner": null
+    },
+    "feature_note": "A and B use one benchmark score per exact route, so within a route every attempt gets the same prediction; they can only rank routes.",
+    "formula_parameters": {
+     "A": {
+      "intercept": -0.5,
+      "slope": 0.5,
+      "training_objective": 0.662637
+     },
+     "B": {
+      "degenerate": true,
+      "degenerate_reason": "one domain recorded; B equals A",
+      "domain_weights": {
+       "unknown": 0.6
+      },
+      "regularization": 0.1,
+      "validation_logloss": 0.700557
+     },
+     "C": {
+      "pseudo_outcomes": 12,
+      "validation_logloss": 0.710666
+     },
+     "N": {
+      "train_val_base_rate": 0.3991
+     }
+    },
+    "held_out": {
+     "A": {
+      "brier": 0.218323,
+      "ece_5bin": 0.022322,
+      "logloss": 0.628302,
+      "mean_predicted": 0.3319,
+      "n": 158,
+      "observed_rate": 0.3228
+     },
+     "B": {
+      "brier": 0.218323,
+      "ece_5bin": 0.022322,
+      "logloss": 0.628302,
+      "mean_predicted": 0.3319,
+      "n": 158,
+      "observed_rate": 0.3228
+     },
+     "C": {
+      "brier": 0.230015,
+      "ece_5bin": 0.075562,
+      "logloss": 0.654897,
+      "mean_predicted": 0.3488,
+      "n": 158,
+      "observed_rate": 0.3228
+     },
+     "N": {
+      "brier": 0.224422,
+      "ece_5bin": 0.076338,
+      "logloss": 0.641423,
+      "mean_predicted": 0.3991,
+      "n": 158,
+      "observed_rate": 0.3228
+     }
+    },
+    "split": {
+     "cuts": [
+      "2026-10-31T06:33:30.721716+00:00",
+      "2026-11-10T03:29:48.900479+00:00"
+     ],
+     "purged_attempts": 32,
+     "purged_runs": 5,
+     "straddling_runs_purged": true,
+     "test_n": 158,
+     "test_runs": 46,
+     "time_bounds": [
+      [
+       "2026-10-06T16:41:00.499340+00:00",
+       "2026-10-31T05:31:26.050926+00:00"
+      ],
+      [
+       "2026-10-31T07:41:38.022488+00:00",
+       "2026-11-10T03:04:37.943708+00:00"
+      ],
+      [
+       "2026-11-10T03:44:23.436178+00:00",
+       "2026-11-13T18:54:14.002162+00:00"
+      ]
+     ],
+     "train_n": 764,
+     "train_runs": 282,
+     "validation_n": 148,
+     "validation_runs": 48
+    },
+    "uncertainty": {
+     "brier_95_ci": {
+      "A": [
+       0.172346,
+       0.272933
+      ],
+      "B": [
+       0.172346,
+       0.272933
+      ],
+      "C": [
+       0.183068,
+       0.286715
+      ],
+      "N": [
+       0.195849,
+       0.260759
+      ],
+      "delta_A_minus_N": [
+       -0.023597,
+       0.013072
+      ],
+      "delta_B_minus_A": [
+       0.0,
+       0.0
+      ],
+      "delta_B_minus_N": [
+       -0.023597,
+       0.013072
+      ],
+      "delta_C_minus_A": [
+       -0.000359,
+       0.021608
+      ],
+      "delta_C_minus_N": [
+       -0.015522,
+       0.027508
+      ]
+     },
+     "method": "run-cluster-bootstrap-1000-seed-862",
+     "test_runs": 46
+    }
+   },
+   "sized_XS_XL:eventual_accepted": {
+    "coverage": {
+     "test": {
+      "route": {
+       "agy/gemini-3.8-flash@medium": 2,
+       "claude/claude-haiku-5-5@high": 19,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 6,
+       "claude/claude-sonnet-5-5@medium": 14
+      },
+      "size": {
+       "L": 7,
+       "M": 18,
+       "S": 16,
+       "XL": 2
+      }
+     },
+     "train": {
+      "route": {
+       "agy/claude-sonnet-5-5@high": 3,
+       "agy/claude-sonnet-5-5@medium": 4,
+       "agy/gemini-3.8-flash@low": 4,
+       "agy/gemini-3.8-flash@medium": 60,
+       "claude/claude-haiku-5-5@high": 102,
+       "claude/claude-opus-5-5@medium": 1,
+       "claude/claude-sonnet-5-5@high": 40,
+       "claude/claude-sonnet-5-5@medium": 13,
+       "codex/gpt-6-luna@high": 14,
+       "codex/gpt-6.1-terra@high": 5,
+       "codex/gpt-6.1-terra@low": 4,
+       "codex/gpt-6.1-terra@medium": 20
+      },
+      "size": {
+       "L": 20,
+       "M": 136,
+       "S": 99,
+       "XL": 1,
+       "XS": 14
+      }
+     },
+     "validation": {
+      "route": {
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 7,
+       "claude/claude-haiku-5-5@high": 13,
+       "claude/claude-sonnet-5-5@high": 7,
+       "claude/claude-sonnet-5-5@medium": 6,
+       "codex/gpt-6.1-terra@medium": 5
+      },
+      "size": {
+       "L": 8,
+       "M": 14,
+       "S": 16,
+       "XS": 1
+      }
+     }
+    },
+    "empirical_ranking": {
+     "benchmark_formula_beats_baseline_at_95": false,
+     "lowest_brier_benchmark_formula": "C",
+     "lowest_brier_overall": "C",
+     "note": "a lower point Brier without a run-cluster CI excluding zero is not a winner",
+     "winner": null
+    },
+    "feature_note": "A and B use one benchmark score per exact route, so within a route every attempt gets the same prediction; they can only rank routes.",
+    "formula_parameters": {
+     "A": {
+      "intercept": 1.5,
+      "slope": 0.25,
+      "training_objective": 0.480586
+     },
+     "B": {
+      "degenerate": true,
+      "degenerate_reason": "one domain recorded; B equals A",
+      "domain_weights": {
+       "unknown": 0.6
+      },
+      "regularization": 0.1,
+      "validation_logloss": 0.22127
+     },
+     "C": {
+      "pseudo_outcomes": 12,
+      "validation_logloss": 0.181656
+     },
+     "N": {
+      "train_val_base_rate": 0.8414
+     }
+    },
+    "held_out": {
+     "A": {
+      "brier": 0.095872,
+      "ece_5bin": 0.107012,
+      "logloss": 0.352009,
+      "mean_predicted": 0.8,
+      "n": 43,
+      "observed_rate": 0.907
+     },
+     "B": {
+      "brier": 0.095872,
+      "ece_5bin": 0.107012,
+      "logloss": 0.352009,
+      "mean_predicted": 0.8,
+      "n": 43,
+      "observed_rate": 0.907
+     },
+     "C": {
+      "brier": 0.081794,
+      "ece_5bin": 0.04133,
+      "logloss": 0.300771,
+      "mean_predicted": 0.8913,
+      "n": 43,
+      "observed_rate": 0.907
+     },
+     "N": {
+      "brier": 0.088667,
+      "ece_5bin": 0.065553,
+      "logloss": 0.327903,
+      "mean_predicted": 0.8414,
+      "n": 43,
+      "observed_rate": 0.907
+     }
+    },
+    "split": {
+     "cuts": [
+      "2026-11-10T09:55:01.099608+00:00",
+      "2026-11-12T06:35:51.072744+00:00"
+     ],
+     "purged_attempts": 65,
+     "purged_runs": 8,
+     "straddling_runs_purged": true,
+     "test_n": 43,
+     "test_runs": 17,
+     "time_bounds": [
+      [
+       "2026-10-27T13:03:01.141643+00:00",
+       "2026-11-10T09:24:13.133477+00:00"
+      ],
+      [
+       "2026-11-10T09:55:01.099608+00:00",
+       "2026-11-11T10:24:43.283764+00:00"
+      ],
+      [
+       "2026-11-12T09:33:50.141108+00:00",
+       "2026-11-13T18:54:14.002162+00:00"
+      ]
+     ],
+     "train_n": 270,
+     "train_runs": 89,
+     "validation_n": 39,
+     "validation_runs": 13
+    },
+    "uncertainty": {
+     "brier_95_ci": {
+      "A": [
+       0.038516,
+       0.169031
+      ],
+      "B": [
+       0.038516,
+       0.169031
+      ],
+      "C": [
+       0.0107,
+       0.169287
+      ],
+      "N": [
+       0.025146,
+       0.170433
+      ],
+      "delta_A_minus_N": [
+       -0.001933,
+       0.015999
+      ],
+      "delta_B_minus_A": [
+       0.0,
+       0.0
+      ],
+      "delta_B_minus_N": [
+       -0.001933,
+       0.015999
+      ],
+      "delta_C_minus_A": [
+       -0.029563,
+       0.002627
+      ],
+      "delta_C_minus_N": [
+       -0.014447,
+       0.00303
+      ]
+     },
+     "method": "run-cluster-bootstrap-1000-seed-862",
+     "test_runs": 17
+    }
+   },
+   "sized_XS_XL:first_pass_accepted": {
+    "coverage": {
+     "test": {
+      "route": {
+       "agy/gemini-3.8-flash@medium": 2,
+       "claude/claude-haiku-5-5@high": 19,
+       "claude/claude-opus-5-5@medium": 2,
+       "claude/claude-sonnet-5-5@high": 6,
+       "claude/claude-sonnet-5-5@medium": 14
+      },
+      "size": {
+       "L": 7,
+       "M": 18,
+       "S": 16,
+       "XL": 2
+      }
+     },
+     "train": {
+      "route": {
+       "agy/claude-sonnet-5-5@high": 3,
+       "agy/claude-sonnet-5-5@medium": 4,
+       "agy/gemini-3.8-flash@low": 4,
+       "agy/gemini-3.8-flash@medium": 60,
+       "claude/claude-haiku-5-5@high": 102,
+       "claude/claude-opus-5-5@medium": 1,
+       "claude/claude-sonnet-5-5@high": 40,
+       "claude/claude-sonnet-5-5@medium": 13,
+       "codex/gpt-6-luna@high": 14,
+       "codex/gpt-6.1-terra@high": 5,
+       "codex/gpt-6.1-terra@low": 4,
+       "codex/gpt-6.1-terra@medium": 20
+      },
+      "size": {
+       "L": 20,
+       "M": 136,
+       "S": 99,
+       "XL": 1,
+       "XS": 14
+      }
+     },
+     "validation": {
+      "route": {
+       "agy/gemini-3.8-flash@low": 1,
+       "agy/gemini-3.8-flash@medium": 7,
+       "claude/claude-haiku-5-5@high": 13,
+       "claude/claude-sonnet-5-5@high": 7,
+       "claude/claude-sonnet-5-5@medium": 6,
+       "codex/gpt-6.1-terra@medium": 5
+      },
+      "size": {
+       "L": 8,
+       "M": 14,
+       "S": 16,
+       "XS": 1
+      }
+     }
+    },
+    "empirical_ranking": {
+     "benchmark_formula_beats_baseline_at_95": false,
+     "lowest_brier_benchmark_formula": "C",
+     "lowest_brier_overall": "N",
+     "note": "a lower point Brier without a run-cluster CI excluding zero is not a winner",
+     "winner": null
+    },
+    "feature_note": "A and B use one benchmark score per exact route, so within a route every attempt gets the same prediction; they can only rank routes.",
+    "formula_parameters": {
+     "A": {
+      "intercept": -0.5,
+      "slope": 1.0,
+      "training_objective": 0.603567
+     },
+     "B": {
+      "degenerate": true,
+      "degenerate_reason": "one domain recorded; B equals A",
+      "domain_weights": {
+       "unknown": 0.6
+      },
+      "regularization": 0.1,
+      "validation_logloss": 0.754528
+     },
+     "C": {
+      "pseudo_outcomes": 12,
+      "validation_logloss": 0.786343
+     },
+     "N": {
+      "train_val_base_rate": 0.3398
+     }
+    },
+    "held_out": {
+     "A": {
+      "brier": 0.292259,
+      "ece_5bin": 0.202232,
+      "logloss": 0.794392,
+      "mean_predicted": 0.2861,
+      "n": 43,
+      "observed_rate": 0.4884
+     },
+     "B": {
+      "brier": 0.292259,
+      "ece_5bin": 0.202232,
+      "logloss": 0.794392,
+      "mean_predicted": 0.2861,
+      "n": 43,
+      "observed_rate": 0.4884
+     },
+     "C": {
+      "brier": 0.277598,
+      "ece_5bin": 0.11983,
+      "logloss": 0.755103,
+      "mean_predicted": 0.3685,
+      "n": 43,
+      "observed_rate": 0.4884
+     },
+     "N": {
+      "brier": 0.271937,
+      "ece_5bin": 0.148566,
+      "logloss": 0.739578,
+      "mean_predicted": 0.3398,
+      "n": 43,
+      "observed_rate": 0.4884
+     }
+    },
+    "split": {
+     "cuts": [
+      "2026-11-10T09:55:01.099608+00:00",
+      "2026-11-12T06:35:51.072744+00:00"
+     ],
+     "purged_attempts": 65,
+     "purged_runs": 8,
+     "straddling_runs_purged": true,
+     "test_n": 43,
+     "test_runs": 17,
+     "time_bounds": [
+      [
+       "2026-10-27T13:03:01.141643+00:00",
+       "2026-11-10T09:24:13.133477+00:00"
+      ],
+      [
+       "2026-11-10T09:55:01.099608+00:00",
+       "2026-11-11T10:24:43.283764+00:00"
+      ],
+      [
+       "2026-11-12T09:33:50.141108+00:00",
+       "2026-11-13T18:54:14.002162+00:00"
+      ]
+     ],
+     "train_n": 270,
+     "train_runs": 89,
+     "validation_n": 39,
+     "validation_runs": 13
+    },
+    "uncertainty": {
+     "brier_95_ci": {
+      "A": [
+       0.206108,
+       0.439794
+      ],
+      "B": [
+       0.206108,
+       0.439794
+      ],
+      "C": [
+       0.218419,
+       0.375438
+      ],
+      "N": [
+       0.2097,
+       0.369109
+      ],
+      "delta_A_minus_N": [
+       -0.019859,
+       0.080336
+      ],
+      "delta_B_minus_A": [
+       0.0,
+       0.0
+      ],
+      "delta_B_minus_N": [
+       -0.019859,
+       0.080336
+      ],
+      "delta_C_minus_A": [
+       -0.06374,
+       0.017159
+      ],
+      "delta_C_minus_N": [
+       -0.028293,
+       0.035114
+      ]
+     },
+     "method": "run-cluster-bootstrap-1000-seed-862",
+     "test_runs": 17
+    }
+   }
+  },
+  "data_coverage": {
+   "exact_score_attributable_any_size": 1102,
+   "exact_score_attributable_sized": 417,
+   "excluded_reasons": {
+    "no_label_time": 6,
+    "operational_or_plan_not_model_attributable": 187,
+    "route_not_in_evidence": 14,
+    "route_unresolved_to_exact_catalog_identity": 148,
+    "unknown_size": 685
+   },
+   "observed_attempts": 1451
+  },
+  "data_reconciliation": {
+   "edition": "Artificial Analysis Intelligence Index v5.0.1",
+   "missing_coding": 1,
+   "rows": 26,
+   "verified_model_effort": 25
+  },
+  "formulae": {
+   "A": "60% FrontierCode 2.0 + 40% Terminal-Bench 4.0; TRAIN-calibrated link",
+   "B": "domain-regularized FrontierCode/Terminal blend; fit TRAIN, hyperparameter VALIDATION",
+   "C": "A as weak logistic benchmark prior; same exact route Beta evidence (size/domain discounted), prequential; tune k on VALIDATION",
+   "N": "no-benchmark yardstick: train+validation base rate"
+  },
+  "operational_outcomes": {
+   "all": {
+    "estimated_cost_coverage": 789,
+    "estimated_cost_per_accepted_attempt_usd": 3.54,
+    "estimated_cost_per_attempt_usd": 3.18,
+    "eventual_rate": 0.7209,
+    "exec_minutes_mean": 60.9,
+    "first_pass_rate": 0.3129,
+    "independent_review_known_n": 772,
+    "independent_review_rate_of_accepted": 0.7772,
+    "model_quality_failures_n": 143,
+    "money_actual_coverage": 0,
+    "n": 1451,
+    "operational_failures_n": 255,
+    "quota_delta_coverage": 0,
+    "recheck_any_rate": 0.5079,
+    "recheck_mean": 1.146,
+    "regression_rate": null,
+    "usage_limit_coverage": 1357,
+    "usage_limit_hits_n": 60
+   },
+   "by_domain": {
+    "unknown": {
+     "estimated_cost_coverage": 789,
+     "estimated_cost_per_accepted_attempt_usd": 3.54,
+     "estimated_cost_per_attempt_usd": 3.18,
+     "eventual_rate": 0.7209,
+     "exec_minutes_mean": 60.9,
+     "first_pass_rate": 0.3129,
+     "independent_review_known_n": 772,
+     "independent_review_rate_of_accepted": 0.7772,
+     "model_quality_failures_n": 143,
+     "money_actual_coverage": 0,
+     "n": 1451,
+     "operational_failures_n": 255,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5079,
+     "recheck_mean": 1.146,
+     "regression_rate": null,
+     "usage_limit_coverage": 1357,
+     "usage_limit_hits_n": 60
+    }
+   },
+   "by_size": {
+    "L": {
+     "estimated_cost_coverage": 52,
+     "estimated_cost_per_accepted_attempt_usd": 9.98,
+     "estimated_cost_per_attempt_usd": 8.45,
+     "eventual_rate": 0.7344,
+     "exec_minutes_mean": 57.6,
+     "first_pass_rate": 0.2656,
+     "independent_review_known_n": 46,
+     "independent_review_rate_of_accepted": 0.9783,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 64,
+     "operational_failures_n": 14,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5156,
+     "recheck_mean": 1.438,
+     "regression_rate": null,
+     "usage_limit_coverage": 56,
+     "usage_limit_hits_n": 4
+    },
+    "M": {
+     "estimated_cost_coverage": 210,
+     "estimated_cost_per_accepted_attempt_usd": 3.24,
+     "estimated_cost_per_attempt_usd": 2.61,
+     "eventual_rate": 0.5791,
+     "exec_minutes_mean": 58.5,
+     "first_pass_rate": 0.1886,
+     "independent_review_known_n": 151,
+     "independent_review_rate_of_accepted": 0.9007,
+     "model_quality_failures_n": 52,
+     "money_actual_coverage": 0,
+     "n": 297,
+     "operational_failures_n": 70,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5724,
+     "recheck_mean": 1.414,
+     "regression_rate": null,
+     "usage_limit_coverage": 251,
+     "usage_limit_hits_n": 31
+    },
+    "S": {
+     "estimated_cost_coverage": 138,
+     "estimated_cost_per_accepted_attempt_usd": 2.36,
+     "estimated_cost_per_attempt_usd": 2.19,
+     "eventual_rate": 0.7268,
+     "exec_minutes_mean": 73.3,
+     "first_pass_rate": 0.3005,
+     "independent_review_known_n": 117,
+     "independent_review_rate_of_accepted": 0.9658,
+     "model_quality_failures_n": 22,
+     "money_actual_coverage": 0,
+     "n": 183,
+     "operational_failures_n": 27,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5464,
+     "recheck_mean": 1.262,
+     "regression_rate": null,
+     "usage_limit_coverage": 155,
+     "usage_limit_hits_n": 0
+    },
+    "XL": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": 24.13,
+     "estimated_cost_per_attempt_usd": 24.13,
+     "eventual_rate": 1.0,
+     "exec_minutes_mean": 63.1,
+     "first_pass_rate": 0.6667,
+     "independent_review_known_n": 3,
+     "independent_review_rate_of_accepted": 0.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.3333,
+     "recheck_mean": 0.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 3,
+     "usage_limit_hits_n": 0
+    },
+    "XS": {
+     "estimated_cost_coverage": 12,
+     "estimated_cost_per_accepted_attempt_usd": 0.58,
+     "estimated_cost_per_attempt_usd": 0.69,
+     "eventual_rate": 0.5455,
+     "exec_minutes_mean": 28.6,
+     "first_pass_rate": 0.3636,
+     "independent_review_known_n": 8,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 5,
+     "money_actual_coverage": 0,
+     "n": 22,
+     "operational_failures_n": 5,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4091,
+     "recheck_mean": 0.636,
+     "regression_rate": null,
+     "usage_limit_coverage": 22,
+     "usage_limit_hits_n": 1
+    },
+    "unknown": {
+     "estimated_cost_coverage": 375,
+     "estimated_cost_per_accepted_attempt_usd": 3.12,
+     "estimated_cost_per_attempt_usd": 3.09,
+     "eventual_rate": 0.7698,
+     "exec_minutes_mean": 60.0,
+     "first_pass_rate": 0.3583,
+     "independent_review_known_n": 447,
+     "independent_review_rate_of_accepted": 0.6667,
+     "model_quality_failures_n": 61,
+     "money_actual_coverage": 0,
+     "n": 882,
+     "operational_failures_n": 139,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4807,
+     "recheck_mean": 1.025,
+     "regression_rate": null,
+     "usage_limit_coverage": 870,
+     "usage_limit_hits_n": 24
+    }
+   }
+  },
+  "owner_policy": "#1143-unchanged",
+  "owner_replay_1143": {
+   "L": {
+    "counterfactual_outcomes": "unobserved; tasks that ran another route are not relabeled",
+    "first_route_was_approved_rung1": 39,
+    "rungs": [
+     {
+      "factual": {
+       "estimated_cost_coverage": 42,
+       "estimated_cost_per_accepted_attempt_usd": 10.73,
+       "estimated_cost_per_attempt_usd": 10.17,
+       "eventual_rate": 0.9111,
+       "exec_minutes_mean": 62.3,
+       "first_pass_rate": 0.3556,
+       "independent_review_known_n": 40,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 45,
+       "operational_failures_n": 3,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.5778,
+       "recheck_mean": 1.8,
+       "regression_rate": null,
+       "usage_limit_coverage": 42,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 38,
+       "estimated_cost_per_accepted_attempt_usd": 10.69,
+       "estimated_cost_per_attempt_usd": 10.08,
+       "eventual_rate": 0.8974,
+       "exec_minutes_mean": 64.5,
+       "first_pass_rate": 0.359,
+       "independent_review_known_n": 35,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 39,
+       "operational_failures_n": 3,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.5641,
+       "recheck_mean": 1.59,
+       "regression_rate": null,
+       "usage_limit_coverage": 38,
+       "usage_limit_hits_n": 0
+      },
+      "route": "claude/claude-sonnet-5-5@high",
+      "rung": 1
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "agy/gemini-4-hydrogen@high",
+      "rung": 2
+     }
+    ],
+    "tasks_with_first_route": 47
+   },
+   "M": {
+    "counterfactual_outcomes": "unobserved; tasks that ran another route are not relabeled",
+    "first_route_was_approved_rung1": 26,
+    "rungs": [
+     {
+      "factual": {
+       "estimated_cost_coverage": 22,
+       "estimated_cost_per_accepted_attempt_usd": 2.68,
+       "estimated_cost_per_attempt_usd": 2.61,
+       "eventual_rate": 0.8611,
+       "exec_minutes_mean": 43.9,
+       "first_pass_rate": 0.3056,
+       "independent_review_known_n": 25,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 4,
+       "money_actual_coverage": 0,
+       "n": 36,
+       "operational_failures_n": 1,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.6667,
+       "recheck_mean": 2.194,
+       "regression_rate": null,
+       "usage_limit_coverage": 24,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 15,
+       "estimated_cost_per_accepted_attempt_usd": 1.95,
+       "estimated_cost_per_attempt_usd": 1.95,
+       "eventual_rate": 0.9231,
+       "exec_minutes_mean": 48.4,
+       "first_pass_rate": 0.4231,
+       "independent_review_known_n": 19,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 26,
+       "operational_failures_n": 1,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.5385,
+       "recheck_mean": 1.192,
+       "regression_rate": null,
+       "usage_limit_coverage": 16,
+       "usage_limit_hits_n": 0
+      },
+      "route": "claude/claude-sonnet-5-5@medium",
+      "rung": 1
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "agy/gemini-4-hydrogen@high",
+      "rung": 1
+     },
+     {
+      "factual": {
+       "estimated_cost_coverage": 0,
+       "estimated_cost_per_accepted_attempt_usd": null,
+       "estimated_cost_per_attempt_usd": null,
+       "eventual_rate": 1.0,
+       "exec_minutes_mean": 125.0,
+       "first_pass_rate": 0.4,
+       "independent_review_known_n": 5,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 0,
+       "money_actual_coverage": 0,
+       "n": 5,
+       "operational_failures_n": 0,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.6,
+       "recheck_mean": 1,
+       "regression_rate": null,
+       "usage_limit_coverage": 5,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "n": 0
+      },
+      "route": "codex/gpt-6.1-terra@high",
+      "rung": 2
+     }
+    ],
+    "tasks_with_first_route": 172
+   },
+   "S": {
+    "counterfactual_outcomes": "unobserved; tasks that ran another route are not relabeled",
+    "first_route_was_approved_rung1": 10,
+    "rungs": [
+     {
+      "factual": {
+       "estimated_cost_coverage": 5,
+       "estimated_cost_per_accepted_attempt_usd": 1.27,
+       "estimated_cost_per_attempt_usd": 1.37,
+       "eventual_rate": 0.6667,
+       "exec_minutes_mean": 5.5,
+       "first_pass_rate": 0.5333,
+       "independent_review_known_n": 8,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 2,
+       "money_actual_coverage": 0,
+       "n": 15,
+       "operational_failures_n": 3,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.2667,
+       "recheck_mean": 0.533,
+       "regression_rate": null,
+       "usage_limit_coverage": 13,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 1,
+       "estimated_cost_per_accepted_attempt_usd": 0.31,
+       "estimated_cost_per_attempt_usd": 0.31,
+       "eventual_rate": 0.7,
+       "exec_minutes_mean": 5.0,
+       "first_pass_rate": 0.6,
+       "independent_review_known_n": 5,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 10,
+       "operational_failures_n": 2,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.2,
+       "recheck_mean": 0.3,
+       "regression_rate": null,
+       "usage_limit_coverage": 9,
+       "usage_limit_hits_n": 0
+      },
+      "route": "codex/gpt-6.1-terra@medium",
+      "rung": 1
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "agy/gemini-4-hydrogen@medium",
+      "rung": 1
+     },
+     {
+      "factual": {
+       "estimated_cost_coverage": 2,
+       "estimated_cost_per_accepted_attempt_usd": 3.31,
+       "estimated_cost_per_attempt_usd": 3.31,
+       "eventual_rate": 0.5,
+       "exec_minutes_mean": 19.5,
+       "first_pass_rate": 0.25,
+       "independent_review_known_n": 2,
+       "independent_review_rate_of_accepted": 1.0,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 4,
+       "operational_failures_n": 1,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.5,
+       "recheck_mean": 1.75,
+       "regression_rate": null,
+       "usage_limit_coverage": 2,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 0,
+       "estimated_cost_per_accepted_attempt_usd": null,
+       "estimated_cost_per_attempt_usd": null,
+       "eventual_rate": 0.0,
+       "exec_minutes_mean": 29.6,
+       "first_pass_rate": 0.0,
+       "independent_review_known_n": 0,
+       "independent_review_rate_of_accepted": null,
+       "model_quality_failures_n": 1,
+       "money_actual_coverage": 0,
+       "n": 2,
+       "operational_failures_n": 1,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.5,
+       "recheck_mean": 0.5,
+       "regression_rate": null,
+       "usage_limit_coverage": 0,
+       "usage_limit_hits_n": null
+      },
+      "route": "claude/claude-sonnet-5-5@medium",
+      "rung": 2
+     }
+    ],
+    "tasks_with_first_route": 135
+   },
+   "XL": {
+    "counterfactual_outcomes": "unobserved; tasks that ran another route are not relabeled",
+    "first_route_was_approved_rung1": 2,
+    "rungs": [
+     {
+      "factual": {
+       "estimated_cost_coverage": 2,
+       "estimated_cost_per_accepted_attempt_usd": 24.13,
+       "estimated_cost_per_attempt_usd": 24.13,
+       "eventual_rate": 1.0,
+       "exec_minutes_mean": 66.7,
+       "first_pass_rate": 1.0,
+       "independent_review_known_n": 2,
+       "independent_review_rate_of_accepted": 0.0,
+       "model_quality_failures_n": 0,
+       "money_actual_coverage": 0,
+       "n": 2,
+       "operational_failures_n": 0,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.0,
+       "recheck_mean": 0,
+       "regression_rate": null,
+       "usage_limit_coverage": 2,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 2,
+       "estimated_cost_per_accepted_attempt_usd": 24.13,
+       "estimated_cost_per_attempt_usd": 24.13,
+       "eventual_rate": 1.0,
+       "exec_minutes_mean": 66.7,
+       "first_pass_rate": 1.0,
+       "independent_review_known_n": 2,
+       "independent_review_rate_of_accepted": 0.0,
+       "model_quality_failures_n": 0,
+       "money_actual_coverage": 0,
+       "n": 2,
+       "operational_failures_n": 0,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.0,
+       "recheck_mean": 0,
+       "regression_rate": null,
+       "usage_limit_coverage": 2,
+       "usage_limit_hits_n": 0
+      },
+      "route": "claude/claude-opus-5-5@medium",
+      "rung": 1
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "codex/gpt-6.1-sol@medium",
+      "rung": 2
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "agy/gemini-4-argon@high",
+      "rung": 2
+     }
+    ],
+    "tasks_with_first_route": 3
+   },
+   "XS": {
+    "counterfactual_outcomes": "unobserved; tasks that ran another route are not relabeled",
+    "first_route_was_approved_rung1": 0,
+    "rungs": [
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "claude/claude-haiku-5-5@medium",
+      "rung": 1
+     },
+     {
+      "factual": {
+       "estimated_cost_coverage": 1,
+       "estimated_cost_per_accepted_attempt_usd": null,
+       "estimated_cost_per_attempt_usd": 0.2,
+       "eventual_rate": 0.5,
+       "exec_minutes_mean": 2.7,
+       "first_pass_rate": 0.5,
+       "independent_review_known_n": 0,
+       "independent_review_rate_of_accepted": null,
+       "model_quality_failures_n": 0,
+       "money_actual_coverage": 0,
+       "n": 8,
+       "operational_failures_n": 4,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.0,
+       "recheck_mean": 0,
+       "regression_rate": null,
+       "usage_limit_coverage": 8,
+       "usage_limit_hits_n": 0
+      },
+      "factual_first_route": {
+       "estimated_cost_coverage": 1,
+       "estimated_cost_per_accepted_attempt_usd": null,
+       "estimated_cost_per_attempt_usd": 0.2,
+       "eventual_rate": 0.5,
+       "exec_minutes_mean": 2.7,
+       "first_pass_rate": 0.5,
+       "independent_review_known_n": 0,
+       "independent_review_rate_of_accepted": null,
+       "model_quality_failures_n": 0,
+       "money_actual_coverage": 0,
+       "n": 8,
+       "operational_failures_n": 4,
+       "quota_delta_coverage": 0,
+       "recheck_any_rate": 0.0,
+       "recheck_mean": 0,
+       "regression_rate": null,
+       "usage_limit_coverage": 8,
+       "usage_limit_hits_n": 0
+      },
+      "route": "codex/gpt-6.1-terra@low",
+      "rung": 2
+     },
+     {
+      "factual": "unobserved",
+      "factual_first_route": "unobserved",
+      "route": "agy/gemini-4-hydrogen@low",
+      "rung": 2
+     }
+    ],
+    "tasks_with_first_route": 13
+   }
+  },
+  "policy_floor_shadow": {
+   "L": {
+    "approved_soft_rungs": [
+     {
+      "measured_source": true,
+      "office_60_40_score": 33.02,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "claude/claude-sonnet-5-5@high",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 43.41,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "agy/gemini-4-hydrogen@high",
+      "rung": 2
+     }
+    ],
+    "blocked_by_old_floor": [],
+    "coverage_only_floor_ceiling": 33,
+    "old_shadow_floor": 33,
+    "old_soft_ceiling": 44
+   },
+   "M": {
+    "approved_soft_rungs": [
+     {
+      "measured_source": true,
+      "office_60_40_score": 18.5,
+      "old_shadow_floor_pass": false,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "claude/claude-sonnet-5-5@medium",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 43.41,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "agy/gemini-4-hydrogen@high",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 39.24,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "codex/gpt-6.1-terra@high",
+      "rung": 2
+     }
+    ],
+    "blocked_by_old_floor": [
+     "claude/claude-sonnet-5-5@medium"
+    ],
+    "coverage_only_floor_ceiling": 18,
+    "old_shadow_floor": 22,
+    "old_soft_ceiling": 36
+   },
+   "S": {
+    "approved_soft_rungs": [
+     {
+      "measured_source": true,
+      "office_60_40_score": 33.65,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "codex/gpt-6.1-terra@medium",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 30.63,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "agy/gemini-4-hydrogen@medium",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 18.5,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "claude/claude-sonnet-5-5@medium",
+      "rung": 2
+     }
+    ],
+    "blocked_by_old_floor": [],
+    "coverage_only_floor_ceiling": 18,
+    "old_shadow_floor": 17,
+    "old_soft_ceiling": 28
+   },
+   "XL": {
+    "approved_soft_rungs": [
+     {
+      "measured_source": true,
+      "office_60_40_score": 40.86,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "claude/claude-opus-5-5@medium",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 39.22,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "codex/gpt-6.1-sol@medium",
+      "rung": 2
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 38.25,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "agy/gemini-4-argon@high",
+      "rung": 2
+     }
+    ],
+    "blocked_by_old_floor": [],
+    "coverage_only_floor_ceiling": 38,
+    "old_shadow_floor": 38,
+    "old_soft_ceiling": null
+   },
+   "XS": {
+    "approved_soft_rungs": [
+     {
+      "measured_source": true,
+      "office_60_40_score": 15.72,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "claude/claude-haiku-5-5@medium",
+      "rung": 1
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 20.75,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "codex/gpt-6.1-terra@low",
+      "rung": 2
+     },
+     {
+      "measured_source": true,
+      "office_60_40_score": 8.2,
+      "old_shadow_floor_pass": true,
+      "production_eligibility": "not evaluated; apply trust, conformance, v4 and #1143 gates",
+      "route": "agy/gemini-4-hydrogen@low",
+      "rung": 2
+     }
+    ],
+    "blocked_by_old_floor": [],
+    "coverage_only_floor_ceiling": 8,
+    "old_shadow_floor": 8,
+    "old_soft_ceiling": 20
+   }
+  },
+  "production_index": "unchanged-v4.3.2",
+  "route_outcomes": [
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 1.42,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 23.0,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 1.42,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 23.0,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.02,
+    "route": "agy/claude-sonnet-5-5@high",
+    "size": "L"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 42,
+     "estimated_cost_per_accepted_attempt_usd": 10.73,
+     "estimated_cost_per_attempt_usd": 10.17,
+     "eventual_rate": 0.9111,
+     "exec_minutes_mean": 62.3,
+     "first_pass_rate": 0.3556,
+     "independent_review_known_n": 40,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 45,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5778,
+     "recheck_mean": 1.8,
+     "regression_rate": null,
+     "usage_limit_coverage": 42,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 38,
+     "estimated_cost_per_accepted_attempt_usd": 10.69,
+     "estimated_cost_per_attempt_usd": 10.08,
+     "eventual_rate": 0.8974,
+     "exec_minutes_mean": 64.5,
+     "first_pass_rate": 0.359,
+     "independent_review_known_n": 35,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 39,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5641,
+     "recheck_mean": 1.59,
+     "regression_rate": null,
+     "usage_limit_coverage": 38,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.02,
+    "route": "claude/claude-sonnet-5-5@high",
+    "size": "L"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": 2.69,
+     "estimated_cost_per_attempt_usd": 2.69,
+     "eventual_rate": 0.3333,
+     "exec_minutes_mean": 7.8,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 1,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 2,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.3333,
+     "recheck_mean": 0.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 1
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 1.6,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 2,
+     "operational_failures_n": 2,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 1,
+     "usage_limit_hits_n": 1
+    },
+    "office_60_40_score": 39.24,
+    "route": "codex/gpt-6.1-terra@high",
+    "size": "L"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 5,
+     "estimated_cost_per_accepted_attempt_usd": 0.43,
+     "estimated_cost_per_attempt_usd": 0.76,
+     "eventual_rate": 0.1667,
+     "exec_minutes_mean": 28.4,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 1,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 6,
+     "operational_failures_n": 2,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6667,
+     "recheck_mean": 0.833,
+     "regression_rate": null,
+     "usage_limit_coverage": 6,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 106.2,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 1,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 1,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 18.5,
+    "route": "agy/claude-sonnet-5-5@medium",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 32,
+     "estimated_cost_per_accepted_attempt_usd": 3.11,
+     "estimated_cost_per_attempt_usd": 2.32,
+     "eventual_rate": 0.4103,
+     "exec_minutes_mean": 36.6,
+     "first_pass_rate": 0.1026,
+     "independent_review_known_n": 16,
+     "independent_review_rate_of_accepted": 0.9375,
+     "model_quality_failures_n": 15,
+     "money_actual_coverage": 0,
+     "n": 39,
+     "operational_failures_n": 8,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6923,
+     "recheck_mean": 1.769,
+     "regression_rate": null,
+     "usage_limit_coverage": 38,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 4.05,
+     "estimated_cost_per_attempt_usd": 3.1,
+     "eventual_rate": 0.3846,
+     "exec_minutes_mean": 54.9,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 0.8,
+     "model_quality_failures_n": 5,
+     "money_actual_coverage": 0,
+     "n": 13,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.7692,
+     "recheck_mean": 2.308,
+     "regression_rate": null,
+     "usage_limit_coverage": 13,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 17.76,
+    "route": "agy/gemini-3.8-flash@medium",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 73,
+     "estimated_cost_per_accepted_attempt_usd": 4.39,
+     "estimated_cost_per_attempt_usd": 3.96,
+     "eventual_rate": 0.6939,
+     "exec_minutes_mean": 92.4,
+     "first_pass_rate": 0.2143,
+     "independent_review_known_n": 53,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 12,
+     "money_actual_coverage": 0,
+     "n": 98,
+     "operational_failures_n": 17,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6122,
+     "recheck_mean": 1.684,
+     "regression_rate": null,
+     "usage_limit_coverage": 75,
+     "usage_limit_hits_n": 1
+    },
+    "first_route": {
+     "estimated_cost_coverage": 63,
+     "estimated_cost_per_accepted_attempt_usd": 4.64,
+     "estimated_cost_per_attempt_usd": 4.19,
+     "eventual_rate": 0.7089,
+     "exec_minutes_mean": 73.6,
+     "first_pass_rate": 0.2278,
+     "independent_review_known_n": 45,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 9,
+     "money_actual_coverage": 0,
+     "n": 79,
+     "operational_failures_n": 14,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5949,
+     "recheck_mean": 1.544,
+     "regression_rate": null,
+     "usage_limit_coverage": 65,
+     "usage_limit_hits_n": 1
+    },
+    "office_60_40_score": 22.61,
+    "route": "claude/claude-haiku-5-5@high",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 18,
+     "estimated_cost_per_accepted_attempt_usd": 3.92,
+     "estimated_cost_per_attempt_usd": 3.81,
+     "eventual_rate": 0.6522,
+     "exec_minutes_mean": 60.0,
+     "first_pass_rate": 0.3043,
+     "independent_review_known_n": 15,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 23,
+     "operational_failures_n": 5,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4783,
+     "recheck_mean": 0.957,
+     "regression_rate": null,
+     "usage_limit_coverage": 18,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 4.51,
+     "estimated_cost_per_attempt_usd": 4.12,
+     "eventual_rate": 0.8889,
+     "exec_minutes_mean": 85.9,
+     "first_pass_rate": 0.4444,
+     "independent_review_known_n": 8,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 9,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5556,
+     "recheck_mean": 0.556,
+     "regression_rate": null,
+     "usage_limit_coverage": 9,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.02,
+    "route": "claude/claude-sonnet-5-5@high",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 22,
+     "estimated_cost_per_accepted_attempt_usd": 2.68,
+     "estimated_cost_per_attempt_usd": 2.61,
+     "eventual_rate": 0.8611,
+     "exec_minutes_mean": 43.9,
+     "first_pass_rate": 0.3056,
+     "independent_review_known_n": 25,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 4,
+     "money_actual_coverage": 0,
+     "n": 36,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6667,
+     "recheck_mean": 2.194,
+     "regression_rate": null,
+     "usage_limit_coverage": 24,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 15,
+     "estimated_cost_per_accepted_attempt_usd": 1.95,
+     "estimated_cost_per_attempt_usd": 1.95,
+     "eventual_rate": 0.9231,
+     "exec_minutes_mean": 48.4,
+     "first_pass_rate": 0.4231,
+     "independent_review_known_n": 19,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 26,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5385,
+     "recheck_mean": 1.192,
+     "regression_rate": null,
+     "usage_limit_coverage": 16,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 18.5,
+    "route": "claude/claude-sonnet-5-5@medium",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 0.11,
+     "eventual_rate": 0.4545,
+     "exec_minutes_mean": 57.3,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 0.0,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 11,
+     "operational_failures_n": 4,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6364,
+     "recheck_mean": 1.727,
+     "regression_rate": null,
+     "usage_limit_coverage": 11,
+     "usage_limit_hits_n": 3
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.6,
+     "exec_minutes_mean": 80.5,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 3,
+     "independent_review_rate_of_accepted": 0.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 5,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.8,
+     "recheck_mean": 2.4,
+     "regression_rate": null,
+     "usage_limit_coverage": 5,
+     "usage_limit_hits_n": 1
+    },
+    "office_60_40_score": 12.98,
+    "route": "codex/gpt-6-luna@high",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 1.0,
+     "exec_minutes_mean": 125.0,
+     "first_pass_rate": 0.4,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 5,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6,
+     "recheck_mean": 1,
+     "regression_rate": null,
+     "usage_limit_coverage": 5,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "n": 0
+    },
+    "office_60_40_score": 39.24,
+    "route": "codex/gpt-6.1-terra@high",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 18,
+     "estimated_cost_per_accepted_attempt_usd": 1.16,
+     "estimated_cost_per_attempt_usd": 1.26,
+     "eventual_rate": 0.2857,
+     "exec_minutes_mean": 19.9,
+     "first_pass_rate": 0.1143,
+     "independent_review_known_n": 10,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 9,
+     "money_actual_coverage": 0,
+     "n": 35,
+     "operational_failures_n": 15,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4571,
+     "recheck_mean": 0.714,
+     "regression_rate": null,
+     "usage_limit_coverage": 34,
+     "usage_limit_hits_n": 9
+    },
+    "first_route": {
+     "estimated_cost_coverage": 12,
+     "estimated_cost_per_accepted_attempt_usd": 0.9,
+     "estimated_cost_per_attempt_usd": 1.34,
+     "eventual_rate": 0.2069,
+     "exec_minutes_mean": 23.1,
+     "first_pass_rate": 0.0345,
+     "independent_review_known_n": 6,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 9,
+     "money_actual_coverage": 0,
+     "n": 29,
+     "operational_failures_n": 13,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5172,
+     "recheck_mean": 0.759,
+     "regression_rate": null,
+     "usage_limit_coverage": 28,
+     "usage_limit_hits_n": 8
+    },
+    "office_60_40_score": 33.65,
+    "route": "codex/gpt-6.1-terra@medium",
+    "size": "M"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 49,
+     "estimated_cost_per_accepted_attempt_usd": 2.98,
+     "estimated_cost_per_attempt_usd": 2.7,
+     "eventual_rate": 0.6129,
+     "exec_minutes_mean": 56.9,
+     "first_pass_rate": 0.2258,
+     "independent_review_known_n": 32,
+     "independent_review_rate_of_accepted": 0.9688,
+     "model_quality_failures_n": 10,
+     "money_actual_coverage": 0,
+     "n": 62,
+     "operational_failures_n": 14,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5484,
+     "recheck_mean": 1.161,
+     "regression_rate": null,
+     "usage_limit_coverage": 54,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 45,
+     "estimated_cost_per_accepted_attempt_usd": 3.03,
+     "estimated_cost_per_attempt_usd": 2.71,
+     "eventual_rate": 0.6182,
+     "exec_minutes_mean": 60.7,
+     "first_pass_rate": 0.2364,
+     "independent_review_known_n": 29,
+     "independent_review_rate_of_accepted": 0.9655,
+     "model_quality_failures_n": 7,
+     "money_actual_coverage": 0,
+     "n": 55,
+     "operational_failures_n": 14,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5091,
+     "recheck_mean": 1.055,
+     "regression_rate": null,
+     "usage_limit_coverage": 50,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 17.76,
+    "route": "agy/gemini-3.8-flash@medium",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 65,
+     "estimated_cost_per_accepted_attempt_usd": 2.11,
+     "estimated_cost_per_attempt_usd": 1.97,
+     "eventual_rate": 0.8765,
+     "exec_minutes_mean": 115.1,
+     "first_pass_rate": 0.3333,
+     "independent_review_known_n": 63,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 81,
+     "operational_failures_n": 6,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5802,
+     "recheck_mean": 1.37,
+     "regression_rate": null,
+     "usage_limit_coverage": 66,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 47,
+     "estimated_cost_per_accepted_attempt_usd": 2.36,
+     "estimated_cost_per_attempt_usd": 2.2,
+     "eventual_rate": 0.8889,
+     "exec_minutes_mean": 138.2,
+     "first_pass_rate": 0.2963,
+     "independent_review_known_n": 41,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 54,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6296,
+     "recheck_mean": 1.185,
+     "regression_rate": null,
+     "usage_limit_coverage": 48,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 22.61,
+    "route": "claude/claude-haiku-5-5@high",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 3.07,
+     "estimated_cost_per_attempt_usd": 2.67,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 18.5,
+     "first_pass_rate": 0.2,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 10,
+     "operational_failures_n": 2,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6,
+     "recheck_mean": 1.5,
+     "regression_rate": null,
+     "usage_limit_coverage": 9,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 3.07,
+     "estimated_cost_per_attempt_usd": 2.67,
+     "eventual_rate": 0.5556,
+     "exec_minutes_mean": 20.5,
+     "first_pass_rate": 0.2222,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 9,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.6667,
+     "recheck_mean": 1.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 9,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.02,
+    "route": "claude/claude-sonnet-5-5@high",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": 3.31,
+     "estimated_cost_per_attempt_usd": 3.31,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 19.5,
+     "first_pass_rate": 0.25,
+     "independent_review_known_n": 2,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 4,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5,
+     "recheck_mean": 1.75,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 29.6,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 2,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5,
+     "recheck_mean": 0.5,
+     "regression_rate": null,
+     "usage_limit_coverage": 0,
+     "usage_limit_hits_n": null
+    },
+    "office_60_40_score": 18.5,
+    "route": "claude/claude-sonnet-5-5@medium",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.6667,
+     "exec_minutes_mean": 61.6,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 2,
+     "independent_review_rate_of_accepted": 0.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 1.0,
+     "recheck_mean": 2.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 3,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 59.3,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 1,
+     "independent_review_rate_of_accepted": 0.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 2,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 1.0,
+     "recheck_mean": 2,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 12.98,
+    "route": "codex/gpt-6-luna@high",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 5,
+     "estimated_cost_per_accepted_attempt_usd": 1.27,
+     "estimated_cost_per_attempt_usd": 1.37,
+     "eventual_rate": 0.6667,
+     "exec_minutes_mean": 5.5,
+     "first_pass_rate": 0.5333,
+     "independent_review_known_n": 8,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 15,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.2667,
+     "recheck_mean": 0.533,
+     "regression_rate": null,
+     "usage_limit_coverage": 13,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": 0.31,
+     "estimated_cost_per_attempt_usd": 0.31,
+     "eventual_rate": 0.7,
+     "exec_minutes_mean": 5.0,
+     "first_pass_rate": 0.6,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 1,
+     "money_actual_coverage": 0,
+     "n": 10,
+     "operational_failures_n": 2,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.2,
+     "recheck_mean": 0.3,
+     "regression_rate": null,
+     "usage_limit_coverage": 9,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.65,
+    "route": "codex/gpt-6.1-terra@medium",
+    "size": "S"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 4,
+     "estimated_cost_per_accepted_attempt_usd": 0.54,
+     "estimated_cost_per_attempt_usd": 1.14,
+     "eventual_rate": 0.4,
+     "exec_minutes_mean": 37.6,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 2,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 3,
+     "money_actual_coverage": 0,
+     "n": 5,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 1.0,
+     "recheck_mean": 1.6,
+     "regression_rate": null,
+     "usage_limit_coverage": 5,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 1.71,
+     "eventual_rate": 0.0,
+     "exec_minutes_mean": 42.2,
+     "first_pass_rate": 0.0,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 2,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 1.0,
+     "recheck_mean": 1.5,
+     "regression_rate": null,
+     "usage_limit_coverage": 2,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 8.88,
+    "route": "agy/gemini-3.8-flash@low",
+    "size": "XS"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 5,
+     "estimated_cost_per_accepted_attempt_usd": 0.47,
+     "estimated_cost_per_attempt_usd": 0.47,
+     "eventual_rate": 1.0,
+     "exec_minutes_mean": 48.3,
+     "first_pass_rate": 0.8,
+     "independent_review_known_n": 5,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 5,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.2,
+     "recheck_mean": 0.6,
+     "regression_rate": null,
+     "usage_limit_coverage": 5,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "n": 0
+    },
+    "office_60_40_score": 22.61,
+    "route": "claude/claude-haiku-5-5@high",
+    "size": "XS"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 0.2,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 2.7,
+     "first_pass_rate": 0.5,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 8,
+     "operational_failures_n": 4,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 8,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 1,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": 0.2,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 2.7,
+     "first_pass_rate": 0.5,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 8,
+     "operational_failures_n": 4,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 8,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 20.75,
+    "route": "codex/gpt-6.1-terra@low",
+    "size": "XS"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 15,
+     "estimated_cost_per_accepted_attempt_usd": 1.56,
+     "estimated_cost_per_attempt_usd": 2.61,
+     "eventual_rate": 0.4643,
+     "exec_minutes_mean": 64.8,
+     "first_pass_rate": 0.1071,
+     "independent_review_known_n": 20,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 10,
+     "money_actual_coverage": 0,
+     "n": 56,
+     "operational_failures_n": 20,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5357,
+     "recheck_mean": 1.786,
+     "regression_rate": null,
+     "usage_limit_coverage": 56,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 1.19,
+     "estimated_cost_per_attempt_usd": 3.03,
+     "eventual_rate": 0.4872,
+     "exec_minutes_mean": 73.2,
+     "first_pass_rate": 0.1282,
+     "independent_review_known_n": 15,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 8,
+     "money_actual_coverage": 0,
+     "n": 39,
+     "operational_failures_n": 12,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5641,
+     "recheck_mean": 1.744,
+     "regression_rate": null,
+     "usage_limit_coverage": 39,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 17.76,
+    "route": "agy/gemini-3.8-flash@medium",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": 1.37,
+     "estimated_cost_per_attempt_usd": 1.37,
+     "eventual_rate": 0.8571,
+     "exec_minutes_mean": 28.0,
+     "first_pass_rate": 0.5714,
+     "independent_review_known_n": 2,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 7,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.2857,
+     "recheck_mean": 0.286,
+     "regression_rate": null,
+     "usage_limit_coverage": 7,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 2,
+     "estimated_cost_per_accepted_attempt_usd": 1.37,
+     "estimated_cost_per_attempt_usd": 1.37,
+     "eventual_rate": 0.8333,
+     "exec_minutes_mean": 32.4,
+     "first_pass_rate": 0.5,
+     "independent_review_known_n": 2,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 6,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.3333,
+     "recheck_mean": 0.333,
+     "regression_rate": null,
+     "usage_limit_coverage": 6,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 22.61,
+    "route": "claude/claude-haiku-5-5@high",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 1.0,
+     "exec_minutes_mean": 19.8,
+     "first_pass_rate": 0.6667,
+     "independent_review_known_n": 1,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.3333,
+     "recheck_mean": 0.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 3,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 1.0,
+     "exec_minutes_mean": 19.8,
+     "first_pass_rate": 0.6667,
+     "independent_review_known_n": 1,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 3,
+     "operational_failures_n": 0,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.3333,
+     "recheck_mean": 0.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 3,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 15.72,
+    "route": "claude/claude-haiku-5-5@medium",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 268,
+     "estimated_cost_per_accepted_attempt_usd": 3.46,
+     "estimated_cost_per_attempt_usd": 3.36,
+     "eventual_rate": 0.9067,
+     "exec_minutes_mean": 48.1,
+     "first_pass_rate": 0.4447,
+     "independent_review_known_n": 264,
+     "independent_review_rate_of_accepted": 0.8636,
+     "model_quality_failures_n": 14,
+     "money_actual_coverage": 0,
+     "n": 461,
+     "operational_failures_n": 27,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4924,
+     "recheck_mean": 1.054,
+     "regression_rate": null,
+     "usage_limit_coverage": 449,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 216,
+     "estimated_cost_per_accepted_attempt_usd": 3.79,
+     "estimated_cost_per_attempt_usd": 3.67,
+     "eventual_rate": 0.9081,
+     "exec_minutes_mean": 46.3,
+     "first_pass_rate": 0.4541,
+     "independent_review_known_n": 216,
+     "independent_review_rate_of_accepted": 0.8565,
+     "model_quality_failures_n": 13,
+     "money_actual_coverage": 0,
+     "n": 381,
+     "operational_failures_n": 20,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.4882,
+     "recheck_mean": 1.108,
+     "regression_rate": null,
+     "usage_limit_coverage": 369,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 33.02,
+    "route": "claude/claude-sonnet-5-5@high",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 21,
+     "estimated_cost_per_accepted_attempt_usd": 0.95,
+     "estimated_cost_per_attempt_usd": 1.37,
+     "eventual_rate": 0.875,
+     "exec_minutes_mean": 17.6,
+     "first_pass_rate": 0.25,
+     "independent_review_known_n": 19,
+     "independent_review_rate_of_accepted": 0.4737,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 24,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.7083,
+     "recheck_mean": 1.167,
+     "regression_rate": null,
+     "usage_limit_coverage": 24,
+     "usage_limit_hits_n": 0
+    },
+    "first_route": {
+     "estimated_cost_coverage": 9,
+     "estimated_cost_per_accepted_attempt_usd": 1.2,
+     "estimated_cost_per_attempt_usd": 2.11,
+     "eventual_rate": 0.75,
+     "exec_minutes_mean": 17.7,
+     "first_pass_rate": 0.0833,
+     "independent_review_known_n": 9,
+     "independent_review_rate_of_accepted": 0.5556,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 12,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.8333,
+     "recheck_mean": 1.667,
+     "regression_rate": null,
+     "usage_limit_coverage": 12,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": 18.5,
+    "route": "claude/claude-sonnet-5-5@medium",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.7241,
+     "exec_minutes_mean": 63.5,
+     "first_pass_rate": 0.3054,
+     "independent_review_known_n": 106,
+     "independent_review_rate_of_accepted": 0.0283,
+     "model_quality_failures_n": 19,
+     "money_actual_coverage": 0,
+     "n": 203,
+     "operational_failures_n": 36,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5123,
+     "recheck_mean": 1.064,
+     "regression_rate": null,
+     "usage_limit_coverage": 203,
+     "usage_limit_hits_n": 16
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.7284,
+     "exec_minutes_mean": 68.0,
+     "first_pass_rate": 0.3148,
+     "independent_review_known_n": 85,
+     "independent_review_rate_of_accepted": 0.0353,
+     "model_quality_failures_n": 17,
+     "money_actual_coverage": 0,
+     "n": 162,
+     "operational_failures_n": 26,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5185,
+     "recheck_mean": 1.031,
+     "regression_rate": null,
+     "usage_limit_coverage": 162,
+     "usage_limit_hits_n": 8
+    },
+    "office_60_40_score": 12.98,
+    "route": "codex/gpt-6-luna@high",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.5,
+     "exec_minutes_mean": 248.7,
+     "first_pass_rate": 0.5,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 8,
+     "operational_failures_n": 4,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 8,
+     "usage_limit_hits_n": 1
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.5714,
+     "exec_minutes_mean": 160.4,
+     "first_pass_rate": 0.5714,
+     "independent_review_known_n": 0,
+     "independent_review_rate_of_accepted": null,
+     "model_quality_failures_n": 0,
+     "money_actual_coverage": 0,
+     "n": 7,
+     "operational_failures_n": 3,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.0,
+     "recheck_mean": 0,
+     "regression_rate": null,
+     "usage_limit_coverage": 7,
+     "usage_limit_hits_n": 0
+    },
+    "office_60_40_score": null,
+    "route": "codex/gpt-6-luna@xhigh",
+    "size": "unknown"
+   },
+   {
+    "all_positions": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.8125,
+     "exec_minutes_mean": 57.2,
+     "first_pass_rate": 0.375,
+     "independent_review_known_n": 7,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 16,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5625,
+     "recheck_mean": 0.688,
+     "regression_rate": null,
+     "usage_limit_coverage": 16,
+     "usage_limit_hits_n": 2
+    },
+    "first_route": {
+     "estimated_cost_coverage": 0,
+     "estimated_cost_per_accepted_attempt_usd": null,
+     "estimated_cost_per_attempt_usd": null,
+     "eventual_rate": 0.7857,
+     "exec_minutes_mean": 34.9,
+     "first_pass_rate": 0.4286,
+     "independent_review_known_n": 7,
+     "independent_review_rate_of_accepted": 1.0,
+     "model_quality_failures_n": 2,
+     "money_actual_coverage": 0,
+     "n": 14,
+     "operational_failures_n": 1,
+     "quota_delta_coverage": 0,
+     "recheck_any_rate": 0.5,
+     "recheck_mean": 0.643,
+     "regression_rate": null,
+     "usage_limit_coverage": 14,
+     "usage_limit_hits_n": 2
+    },
+    "office_60_40_score": 39.22,
+    "route": "codex/gpt-6.1-sol@medium",
+    "size": "unknown"
+   }
+  ],
+  "shadow_routing": {
+   "counterfactual_model_success": "unobserved",
+   "no_changes_to_dispatch_or_policy": true,
+   "status": "factual-only"
+  },
+  "status": "calibrated_shadow_only"
+ },
+ "extractor_reconciliation": {
+  "attempts_matching_dispatches_outcome_and_recheck": 1362,
+  "frozen_report_attempts": 1362,
+  "frozen_report_tasks": 1019,
+  "in_flight_attempts_excluded": 6,
+  "m_first_route_cohorts": {
+   "claude/claude-haiku-5-5@high": {
+    "added_since_or_open_runs": {
+     "eventual_rate": 0.5714,
+     "first_pass_rate": 0.1429,
+     "n": 14
+    },
+    "in_report_population": {
+     "eventual_rate": 0.7385,
+     "first_pass_rate": 0.2462,
+     "n": 65
+    }
+   },
+   "claude/claude-sonnet-5-5@medium": {
+    "added_since_or_open_runs": {
+     "eventual_rate": 0.8,
+     "first_pass_rate": 0.2,
+     "n": 10
+    },
+    "in_report_population": {
+     "eventual_rate": 1.0,
+     "first_pass_rate": 0.5625,
+     "n": 16
+    }
+   }
+  },
+  "reason": "settled tasks in runs not yet closed or abandoned; the scoreboard emits terminal runs only",
+  "size_difference_reason": "task carries two declared sizes; extractor says unknown, scoreboard takes the descriptor size",
+  "size_differences": 3,
+  "tasks_in_extractor_not_in_scoreboard": 48
+ },
+ "generated": "2026-11-14",
+ "issue": 862,
+ "privacy": "aggregates only; no run, task, dispatch, session or account identifiers; private inputs stay outside the repository",
+ "report_reproduction": {
+  "claude_cost_audit": {
+   "attempts": 551,
+   "attempts_within_5pct_or_5c": 542,
+   "by_size_route": [
+    {
+     "n": 42,
+     "raw_mean_usd": 8.93,
+     "report_mean_usd": 8.95,
+     "route": "claude/sonnet@high",
+     "size": "L"
+    },
+    {
+     "n": 73,
+     "raw_mean_usd": 3.4,
+     "report_mean_usd": 3.4,
+     "route": "claude/haiku@high",
+     "size": "M"
+    },
+    {
+     "n": 18,
+     "raw_mean_usd": 3.48,
+     "report_mean_usd": 3.49,
+     "route": "claude/sonnet@high",
+     "size": "M"
+    },
+    {
+     "n": 30,
+     "raw_mean_usd": 1.54,
+     "report_mean_usd": 1.56,
+     "route": "claude/sonnet@medium",
+     "size": "M"
+    },
+    {
+     "n": 65,
+     "raw_mean_usd": 1.61,
+     "report_mean_usd": 1.61,
+     "route": "claude/haiku@high",
+     "size": "S"
+    },
+    {
+     "n": 9,
+     "raw_mean_usd": 2.42,
+     "report_mean_usd": 2.45,
+     "route": "claude/sonnet@high",
+     "size": "S"
+    },
+    {
+     "n": 5,
+     "raw_mean_usd": 0.18,
+     "report_mean_usd": 0.19,
+     "route": "claude/haiku@high",
+     "size": "XS"
+    },
+    {
+     "n": 269,
+     "raw_mean_usd": 3.2,
+     "report_mean_usd": 3.22,
+     "route": "claude/sonnet@high",
+     "size": "unknown"
+    },
+    {
+     "n": 22,
+     "raw_mean_usd": 1.33,
+     "report_mean_usd": 1.35,
+     "route": "claude/sonnet@medium",
+     "size": "unknown"
+    }
+   ],
+   "note": "includes subagent transcripts; without them haiku@high M reads $2.88 vs $3.40",
+   "raw_transcript_total_usd": 1930.9,
+   "report_total_usd": 1938.97
+  },
+  "population": {
+   "frozen_attempts": 1362,
+   "frozen_tasks": 1019,
+   "frozen_tasks_missing_or_changed": 0,
+   "scoreboard_attempts": 1374,
+   "scoreboard_tasks": 1027
+  },
+  "table_3_2": [
+   {
+    "attempts_per_task": 1.39,
+    "chain_usd_mean": 3.43,
+    "chain_usd_median": 2.38,
+    "ci90_independent_rng": [
+     2.78,
+     4.13
+    ],
+    "ci90_report_lcg": [
+     2.78,
+     4.09
+    ],
+    "cost_n": 45,
+    "first_route": "agy/gemini-flash@medium",
+    "landed_on_rung1": 0.6667,
+    "one_shot": 0.2549,
+    "size": "S",
+    "tasks": 51
+   },
+   {
+    "attempts_per_task": 1.06,
+    "chain_usd_mean": 2.27,
+    "chain_usd_median": 1.28,
+    "ci90_independent_rng": [
+     1.75,
+     2.85
+    ],
+    "ci90_report_lcg": [
+     1.72,
+     2.85
+    ],
+    "cost_n": 47,
+    "first_route": "claude/haiku@high",
+    "landed_on_rung1": 0.875,
+    "one_shot": 0.2708,
+    "size": "S",
+    "tasks": 48
+   },
+   {
+    "attempts_per_task": 1.44,
+    "chain_usd_mean": 3.15,
+    "chain_usd_median": 2.65,
+    "ci90_independent_rng": [
+     2.35,
+     4.06
+    ],
+    "ci90_report_lcg": [
+     2.32,
+     4.06
+    ],
+    "cost_n": 9,
+    "first_route": "claude/sonnet@high",
+    "landed_on_rung1": 0.5556,
+    "one_shot": 0.2222,
+    "size": "S",
+    "tasks": 9
+   },
+   {
+    "attempts_per_task": 1.44,
+    "chain_usd_mean": 0.31,
+    "chain_usd_median": 0.31,
+    "ci90_independent_rng": null,
+    "ci90_report_lcg": null,
+    "cost_n": 1,
+    "first_route": "codex/terra@medium",
+    "landed_on_rung1": 0.7778,
+    "one_shot": 0.6667,
+    "size": "S",
+    "tasks": 9
+   },
+   {
+    "attempts_per_task": 1.43,
+    "chain_usd_mean": 5.05,
+    "chain_usd_median": 3.59,
+    "ci90_independent_rng": [
+     4.11,
+     6.09
+    ],
+    "ci90_report_lcg": [
+     4.04,
+     6.14
+    ],
+    "cost_n": 62,
+    "first_route": "claude/haiku@high",
+    "landed_on_rung1": 0.7385,
+    "one_shot": 0.2462,
+    "size": "M",
+    "tasks": 65
+   },
+   {
+    "attempts_per_task": 2.93,
+    "chain_usd_mean": 2.67,
+    "chain_usd_median": 1.33,
+    "ci90_independent_rng": [
+     1.28,
+     4.46
+    ],
+    "ci90_report_lcg": [
+     1.27,
+     4.54
+    ],
+    "cost_n": 12,
+    "first_route": "codex/terra@medium",
+    "landed_on_rung1": 0.2069,
+    "one_shot": 0.0345,
+    "size": "M",
+    "tasks": 29
+   },
+   {
+    "attempts_per_task": 1,
+    "chain_usd_mean": 1.89,
+    "chain_usd_median": 1.8,
+    "ci90_independent_rng": [
+     1.53,
+     2.25
+    ],
+    "ci90_report_lcg": [
+     1.54,
+     2.26
+    ],
+    "cost_n": 17,
+    "first_route": "claude/sonnet@medium",
+    "landed_on_rung1": 1.0,
+    "one_shot": 0.6111,
+    "size": "M",
+    "tasks": 18
+   },
+   {
+    "attempts_per_task": 1.71,
+    "chain_usd_mean": 3.7,
+    "chain_usd_median": 3.34,
+    "ci90_independent_rng": [
+     2.79,
+     4.61
+    ],
+    "ci90_report_lcg": [
+     2.77,
+     4.61
+    ],
+    "cost_n": 7,
+    "first_route": "agy/gemini-flash@medium",
+    "landed_on_rung1": 0.4286,
+    "one_shot": 0.0,
+    "size": "M",
+    "tasks": 14
+   },
+   {
+    "attempts_per_task": 1.11,
+    "chain_usd_mean": 4.24,
+    "chain_usd_median": 3.42,
+    "ci90_independent_rng": [
+     3.07,
+     5.45
+    ],
+    "ci90_report_lcg": [
+     3.08,
+     5.47
+    ],
+    "cost_n": 9,
+    "first_route": "claude/sonnet@high",
+    "landed_on_rung1": 0.8889,
+    "one_shot": 0.4444,
+    "size": "M",
+    "tasks": 9
+   },
+   {
+    "attempts_per_task": 1.16,
+    "chain_usd_mean": 11.2,
+    "chain_usd_median": 9.81,
+    "ci90_independent_rng": [
+     9.41,
+     13.12
+    ],
+    "ci90_report_lcg": [
+     9.37,
+     13.13
+    ],
+    "cost_n": 38,
+    "first_route": "claude/sonnet@high",
+    "landed_on_rung1": 0.9211,
+    "one_shot": 0.3684,
+    "size": "L",
+    "tasks": 38
+   }
+  ]
+ },
+ "schema": "aa-v5.0.1-local-replay/1",
+ "snapshot": {
+  "dispatches": 8170,
+  "latest_dispatch_started_utc": "2026-11-13T19:10:42.029991+00:00",
+  "method": "cp of runs.db + runs.db-wal with source hash stable across the copy, WAL checkpointed into the private copy, sqlite backup to one file, integrity_check ok; the live file was never opened by SQLite",
+  "report_prices_sha256": "05d8252cd08a0695c2f11be2dba5ad52948ba8504ea72eb6936405a26ddb5fc0",
+  "report_tasks_cost_sha256": "ff0d08d7f8790a1104dc00c59028ece61060a1730f7ffacbb1b688cd9f38c1ec",
+  "runs_db_copy_sha256": "90d2c09453a46d74fddbbba8fdc86f0978c5c4aceea099e0d577e057e91561ff",
+  "scoreboard_sha256": "be0d2def6d453ddf7cf2f976d2c1f4e2ec583d0fe757cd5bf2c929df7d7e0fca"
+ }
+}
