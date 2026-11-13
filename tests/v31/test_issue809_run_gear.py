@@ -303,7 +303,9 @@ def test_dispatch_prints_run_gear_funded_gates_size_profile_and_actual_route(env
                 ideal.get("harness", harness.split("@")[0]) == harness.split("@")[0]:
             continue
         ref = f"{ideal.get('harness', '*')}/{ideal['model_id']}@{ideal['effort']}"
-        assert any(f"{ref} (unqualified)" in l or f"{ref} (in-slate)" in l for l in skipped), (ref, skipped)
+        # Since #1143 the S slate names claude Sonnet, which this fixture's catalog does not ship.
+        assert any(f"{ref} ({why})" in l for l in skipped for why in ("unqualified", "in-slate", "not-in-catalog")), \
+            (ref, skipped)
     assert all(" (selected)" not in l for l in skipped), skipped
 
 
@@ -468,9 +470,10 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
     # The M slate's leading routes are the effective policy's seed routes the pool holds (#871), not a frozen tuple.
-    pooled = {(c["model_id"], c["harness"]) for c in pool}
+    # Exact effort too: since #1143 the M seed names Terra High, which this Terra Medium pool does not hold.
+    pooled = {(c["model_id"], c["harness"], c["effort"]) for c in pool}
     seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
-            if (e["model_id"], e["harness"]) in pooled]
+            if (e["model_id"], e.get("harness"), e["effort"]) in pooled]
     assert seed, "the M seed must name at least one pooled route"
     m_slate = decide("M", pool, gear="M")["selection_disclosure"]["slate"]
     assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed)]} == \

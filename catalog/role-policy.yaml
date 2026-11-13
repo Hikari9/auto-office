@@ -19,9 +19,12 @@ executor:
     allow: {low: [XS], medium: [S]}
     deny: {high: [XS, S], xhigh: all, max: all}
   codex@0/gpt-6.1-terra:
-    allow: {low: [XS], medium: [S, M], high: [L]}
+    allow: {low: [XS], medium: [S, M], high: [M, L]}
+    deny: {high: [XS, S], xhigh: all, max: all}
+  claude@2/claude-sonnet-5-5:
+    allow: {medium: [M], high: [L]}
     deny: {high: [XS, S, M], xhigh: all, max: all}
-  claude@2|agy@1/claude-sonnet-5-5:
+  agy@1/claude-sonnet-5-5:
     allow: {medium: [M], high: [L]}
     deny: {high: [XS, S, M], xhigh: all, max: all}
   opencode/glm-5.3-flash:

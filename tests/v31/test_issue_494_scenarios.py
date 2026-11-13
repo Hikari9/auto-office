@@ -1266,7 +1266,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
                    # T2: quota-wall cooldowns are additive shared routing state.
                    "route_cooldowns",
                    # #783: durable closeout-cleanup receipts (new table only).
-                   "cleanup_runs"}
+                   "cleanup_runs",
+                   # #1143: append-only Hydrogen canary opportunity ledger (new table only).
+                   "hydrogen_trial_opportunities"}
     assert all(after.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0 for t in new)
     after.close()
     again = old.connect(path)  # the previous runtime still opens it and keeps writing its own tables

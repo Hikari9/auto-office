@@ -7,6 +7,7 @@ generations:
   claude-sonnet-5-5: {lineage_key: anthropic/claude-sonnet, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
   claude-haiku-5-5: {lineage_key: anthropic/claude-haiku, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
   claude-opus-5-5: {lineage_key: anthropic/claude-opus, generation_version: '5.5', release_status: released, provenance: shipped-catalog}
+  claude-fable-5-2: {lineage_key: anthropic/claude-fable, generation_version: '5.2', release_status: released, provenance: 'Anthropic release 2026-11-09'}
   gpt-5.6-sol: {lineage_key: openai/gpt-sol, generation_version: '5.6', release_status: released, provenance: shipped-catalog}
   gpt-6.1-sol: {lineage_key: openai/gpt-sol, generation_version: '6.1', release_status: released, provenance: shipped-catalog}
   gpt-5.6-luna: {lineage_key: openai/gpt-luna, generation_version: '5.6', release_status: released, provenance: shipped-catalog}

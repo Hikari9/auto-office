@@ -347,6 +347,20 @@ def _run_probe(argv: list[str], unknown) -> dict:
     return unknown("command could not be run or parsed")  # pragma: no cover
 
 
+def _verified_pool(data: dict) -> dict:
+    """Carry only an explicitly verified provider/account/pool identity from a live probe.
+
+    A harness id, matching model family or similar percentage is NOT proof of
+    a shared account. Never turn absent metadata into shared quota identity.
+    """
+    fields = ("provider", "account_id", "pool_id")
+    if not isinstance(data, dict) or data.get("shared_pool_verified") is not True:
+        return {}
+    if not all(isinstance(data.get(f), str) and 0 < len(data[f].strip()) <= 160 for f in fields):
+        return {}
+    return {**{f: data[f].strip() for f in fields}, "shared_pool_verified": True}
+
+
 def _normalize_probe_result(data: dict, unknown) -> dict:
     if not isinstance(data, dict) or "tightest_remaining_percent" not in data:
         return unknown("command response missing tightest_remaining_percent")
@@ -354,7 +368,7 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
         result = unknown(str(data.get("cause") or "command returned null tightest_remaining_percent"))
         if isinstance(data.get("families"), dict):  # a known family can still gate its own models
             result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
-        return result
+        return {**result, **_verified_pool(data)}
     if isinstance(data["tightest_remaining_percent"], bool):
         return unknown("command returned a boolean tightest_remaining_percent")
     try:
@@ -363,7 +377,7 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
         return unknown("command could not be run or parsed")
     if not math.isfinite(percent):  # json accepts NaN and Infinity; neither is a reading
         return unknown("command returned a non-finite tightest_remaining_percent")
-    result = {"status": "ok", "tightest_remaining_percent": percent}
+    result = {"status": "ok", "tightest_remaining_percent": percent, **_verified_pool(data)}
 
     if isinstance(data.get("families"), dict):
         result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
@@ -379,8 +393,10 @@ def _normalize_family(family: str, raw) -> dict:
         remaining = None
     if remaining is None or not math.isfinite(remaining) or isinstance(raw.get("tightest_remaining_percent"), bool):
         return {"status": "unknown", "tightest_remaining_percent": None,
-                "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
-    return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
+                "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported",
+                **_verified_pool(raw)}
+    return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time"),
+            **_verified_pool(raw)}
 
 
 # Quota moves slowly relative to a dispatch; one successful probe result serves every
@@ -597,7 +613,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      quota_snapshot: dict[str, dict] | None = None,
                      discovery: dict | None = None,
                      user_policies: list[dict] | None = None,
-                     allow_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+                     allow_policies: list[dict] | None = None, manual_hydrogen: bool = False) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -628,6 +644,10 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
         state = route_policy.row_status(row)
+        # A generic user allow or discovery cannot promote a planner-only model.
+        if block := route_policy.fable_role_block(row, role):
+            skipped.append({"candidate": label, "category": "role-deny", "reason": block})
+            continue
         is_free_model = route_policy.is_free_model(row)
         if is_free_model and not free_models_allowed:
             skipped.append({"candidate": label, "category": "free-model-opt-in",
@@ -642,6 +662,12 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                 {"harness": harness, "harness_version": adapters.route_version(harness, adapter, sources),
                  "model_id": row.get("model_id"), "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}, role, allow_pols)
+        # #1143: generic user allows cannot convert experimental Hydrogen into
+        # an ordinary adaptive route. An explicitly named executor route is
+        # admitted only to run the separate, strict manual conformance checks.
+        if row.get("model_id") == "gemini-4-hydrogen":
+            allowed = ({"source": "hydrogen-manual", "rule": label}
+                       if role == "executor" and manual_hydrogen else None)
         if allowed and row.get("dispatchable") is False:
             # The user's allow outranks the catalog or an overlay: no proof, qualification or trust gate (#845).
             why = "a user catalog overlay disabled it" if row.get("user_disabled") else (
@@ -803,7 +829,11 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     family = model_family(candidate.get("model_id"))
     family = _AGY_QUOTA_FAMILY.get(family, family)
     family_result = families.get(family) if isinstance(families, dict) else None
-    return family_result if isinstance(family_result, dict) else result
+    if isinstance(family_result, dict):
+        # Provider-account metadata from the parent is only inherited when the
+        # family does not publish its own identity. Do not merge unverified IDs.
+        return {**_verified_pool(result), **family_result}
+    return result
 
 
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
@@ -852,6 +882,11 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
+    # Do not let direct --as, --review-as or a signed ordinary deny override
+    # bypass a planner-only technical qualification boundary.
+    if block := route_policy.fable_role_block(named, role):
+        raise Refused("route-denied", block, scope=role,
+                      next_step="complete exact Claude Code planner-role qualification before Fable activation")
     active_policy = route_policy.effective_role_state(named, role, required_user_policies(repo_root))
     policy_override = None
     if active_policy["state"] == "deny":
@@ -924,6 +959,22 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root, role=role or "executor",
                           run_id=run_id, scope=scope, claim=claim)
+    # #1143 is a hard exception to the legacy #845 quoted allow: even the
+    # user's --as cannot skip exact Hydrogen effort/identity qualification or
+    # select XL. No run/scope means there is no trustworthy size classification.
+    if cand.get("model_id") == "gemini-4-hydrogen" or cand.get("alias_resolved_to") == "gemini-4-hydrogen":
+        from contextlib import closing
+        from office import db, hydrogen_trials
+        if not run_id or not scope:
+            raise Refused("hydrogen-manual-unqualified", "Hydrogen manual routing needs a classified run/task and exact probe")
+        with closing(db.connect()) as proof_con:
+            pinned = state.get_run(proof_con, run_id)
+            task = state.get_task(proof_con, run_id, scope)
+            size = ((task or {}).get("descriptor") or {}).get("task_size") or ((pinned or {}).get("risk") or {}).get("size_class")
+            denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size)
+            if denial:
+                raise Refused("hydrogen-manual-unqualified", denial,
+                              next_step="run an exact conformance probe, verify account authorization and retry manually")
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -1134,10 +1185,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
                       route_policy.user_policy(config), *live]
+    manual_hydrogen = bool(manual and ("gemini-4-hydrogen" in (exact or "")
+                                       or "gemini-4-hydrogen" in (override or "")))
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[],
-                                           allow_policies=allow_policies)
+                                           allow_policies=allow_policies, manual_hydrogen=manual_hydrogen)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
@@ -1203,10 +1256,17 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "task_id": task_id,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
+        "require_classified_executor_size": ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"),
+        "hydrogen_policy": {"routing": {"hydrogen_trials": (config.get("routing") or {}).get("hydrogen_trials") or {}}},
+        "hydrogen_risk": run.get("risk") or {},
+        "hydrogen_descriptor": descriptor_for_route,
+        "hydrogen_independent_review": (run.get("gates") or {}).get("code_review") is True,
     }
     if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
         request["slate_anchor"] = True
+    if manual and exact and manual_hydrogen:
+        request["declared_route"] = exact
     if declared:
         request["declared_route"] = declared
     if exact:
@@ -1243,8 +1303,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             # Explicit user opt-in (#837): the seeded order is the whole order for this role.
             request["policy"]["strict_seed"] = True
             request["strict_seed_user_authorized"] = True
-        if override or manual:
-            request["manual_route"] = True
+    if override or manual:
+        request["manual_route"] = True
     with routing._using_executor_policy(executor_policy):
         result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
     if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_policy["floors"] and seed:

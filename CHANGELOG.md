@@ -2,9 +2,15 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.17.0
+## 3.18.0
+
+#1143: owner-approved XS–XL executor peer rungs, narrow Terra High M policy, verified account/pool quota cooldowns, identical RECHECK escalation and append-only atomic 3-in-20 Hydrogen S/M trial ledger. Hydrogen remains OFF pending real conformance and fallback evidence; XL, visual review and authorization safety are unchanged.
 
 Stage Gemini 4 Hydrogen Low/Medium/High/Xhigh as external-evidence, non-dispatchable Antigravity executor routes with missing pinned AA v4.3.2 scores and owner-approved advisory XS–XL seeds (#1142, #1143). Correct source provenance disclosures so third-party slugs never masquerade as local conformance; add exact-effort/argv, role safety, lineage, benchmark-isolation and distribution-parity tests. No Hydrogen canary, score cutover or visual-review replacement is enabled.
+
+## 3.17.0
+
+Registers Claude Fable 5.2 (`claude/claude-fable-5-2@low|medium|high|xhigh|max`) as a gated, planner-only, non-dispatchable catalog model (#1133). Its AA v4.3.2 scores are null; AA v5.0.1 scores are reference evidence only and never drive selection (#862). A hard role boundary refuses Fable for every non-planner role and for planner until an effort is separately qualified, including under user allows, aliases, `--as` and signed policy overrides.
 
 ## 3.16.0
 

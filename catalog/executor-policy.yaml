@@ -1,32 +1,32 @@
 # #871: Mutable executor/planner policy data. Runtime catalog route facts remain in TSV files.
 schema_version: 1
-policy_version: owner-xs-xl-seed-intent-2026-11-14-gated
+policy_version: owner-xs-xl-peer-rungs-2026-11-14-gated
 benchmark_index: Artificial Analysis Intelligence Index v4.3.2
 floors: {XS: 31, S: 38, M: 40, L: 44, XL: 47}
 # Owner-approved XS-XL advisory preference intent (not automatic model activation).
-# The seed list is FLAT and ranked by adaptive utility. | means conceptual
-# peer candidates, not equal numerical preference weights in this schema.
+# A `rung` is an advisory preference priority (1 first); equal rungs are
+# adaptive peers. Arrow fallbacks are soft, never eligibility guarantees.
 # Hydrogen routes stay dispatchable:false and lack a pinned v4 score.
 executor_preferred:
   XS:
-    - {model_id: claude-haiku-5-5, effort: medium, harness: claude}
-    - {model_id: gpt-6.1-terra, effort: low, harness: codex}
-    - {model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: medium, harness: claude}
+    - {rung: 2, model_id: gpt-6.1-terra, effort: low, harness: codex}
+    - {rung: 2, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
   S:
-    - {model_id: gpt-6.1-terra, effort: medium, harness: codex}
-    - {model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
-    - {model_id: claude-sonnet-5-5, effort: medium, harness: claude}
+    - {rung: 1, model_id: gpt-6.1-terra, effort: medium, harness: codex}
+    - {rung: 1, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
+    - {rung: 2, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
   M:
-    - {model_id: claude-sonnet-5-5, effort: medium, harness: claude}
-    - {model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
-    - {model_id: gpt-6.1-terra, effort: high, harness: codex}
+    - {rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
+    - {rung: 1, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
+    - {rung: 2, model_id: gpt-6.1-terra, effort: high, harness: codex}
   L:
-    - {model_id: claude-sonnet-5-5, effort: high, harness: claude}
-    - {model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
+    - {rung: 1, model_id: claude-sonnet-5-5, effort: high, harness: claude}
+    - {rung: 2, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
   XL:
-    - {model_id: claude-opus-5-5, effort: medium, harness: claude}
-    - {model_id: gpt-6.1-sol, effort: medium, harness: codex}
-    - {model_id: gemini-4-argon, effort: high, harness: agy}
+    - {rung: 1, model_id: claude-opus-5-5, effort: medium, harness: claude}
+    - {rung: 2, model_id: gpt-6.1-sol, effort: medium, harness: codex}
+    - {rung: 2, model_id: gemini-4-argon, effort: high, harness: agy}
 planner_preferred:
   M:
     - {model_id: claude-opus-5-5, effort: low, harness: claude}

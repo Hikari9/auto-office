@@ -75,6 +75,14 @@ def _seed_routes(rows):
     return [(row["model_id"], row["effort"], row.get("harness") or "claude") for row in rows]
 
 
+def _slate_rows(size):
+    """(every slate row, the ordinarily selectable rows in order, the conditional canary rows)."""
+    raw = POLICY["executor_preferred"][size]
+    every = _seed_routes(raw)
+    gated = {route for route, row in zip(every, raw) if row.get("conditional")}
+    return every, [route for route in every if route not in gated], gated
+
+
 @pytest.mark.parametrize("size", SIZES)
 def test_a_size_floor_is_enforced_exactly_at_its_value(size):
     floor = POLICY["floors"][size]
@@ -97,15 +105,18 @@ def test_a_size_floor_is_enforced_exactly_at_its_value(size):
 
 @pytest.mark.parametrize("size", SIZES)
 def test_the_router_follows_the_preferred_slate_order_and_falls_through_it(size):
-    rows = _seed_routes(POLICY["executor_preferred"][size])
+    every, rows, gated = _slate_rows(size)
     seed = slates.ideal_seed(size)
     for tried in range(len(rows)):
-        pool = [_route(model, effort, harness, CLEAR, status="untried" if i < tried else "available")
-                for i, (model, effort, harness) in reversed(list(enumerate(rows)))]
+        pool = [_route(model, effort, harness, CLEAR, status="untried" if (model, effort, harness) in rows[:tried]
+                       else "available") for model, effort, harness in reversed(every)]
         chosen = _decide(pool, size, seed=seed)
         assert chosen["status"] == "selected", (size, tried, chosen)
         assert _identity(chosen["candidate"]) == rows[tried], (size, tried)
-    exhausted = _decide([_route(m, e, h, CLEAR, status="untried") for m, e, h in rows], size, seed=seed)
+        # A conditional (Hydrogen canary) row is never an ordinary pick, even when available.
+        assert not gated or "hydrogen-safety" in _categories(chosen), (size, tried, chosen["rejected"])
+    exhausted = _decide([_route(m, e, h, CLEAR, status="available" if (m, e, h) in gated else "untried")
+                         for m, e, h in every], size, seed=seed)
     assert exhausted["status"] == "no_qualifying_candidate"
 
 
@@ -414,9 +425,9 @@ def test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_except
 
 @pytest.mark.parametrize("size", SIZES)
 def test_a_user_deny_beats_the_preferred_route_and_emits_no_waiver_for_it(size):
-    rows = _seed_routes(POLICY["executor_preferred"][size])
+    every, rows, _ = _slate_rows(size)
     seed = slates.ideal_seed(size)
-    pool = [_route(model, effort, harness, CLEAR) for model, effort, harness in reversed(rows)]
+    pool = [_route(model, effort, harness, CLEAR) for model, effort, harness in reversed(every)]
     model, effort, harness = rows[0]
     deny = {"role_rules": [{"role": "worker", "route": f"{harness}/{model}@{effort}", "state": "deny",
                             "sizes": [size]}], "denied": [], "overkill": [], "ceilings": {},
@@ -428,9 +439,13 @@ def test_a_user_deny_beats_the_preferred_route_and_emits_no_waiver_for_it(size):
                "context": {"gear": size, "size_class": size}, "preferred_seed": seed, "slate_anchor": True,
                "candidates": pool, "user_policies": [deny]}
     decision = routing.route(request)
+    assert "role-deny" in _categories(decision)
+    if len(rows) < 2:
+        # L has no ordinary fallback (#1143: the owner removed Opus Low; Hydrogen High is gated).
+        assert decision["status"] == "no_qualifying_candidate", decision
+        return
     assert decision["status"] == "selected", decision
     assert _identity(decision["candidate"]) == rows[1], (size, decision["selected"])
-    assert "role-deny" in _categories(decision)
     assert not [e for e in decision["routing"].get("floor_exceptions", ())
                 if e["candidate"].endswith(f"/{model}@{effort}")]
 
