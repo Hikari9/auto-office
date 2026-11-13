@@ -90,11 +90,11 @@ def test_manual_probe_honors_an_explicit_fable_model_denial(monkeypatch):
     assert denial and denial[0] == "route-denied"
 
 
-@pytest.mark.parametrize("role", ("planner", "*"))
-def test_manual_probe_honors_a_planner_role_deny(monkeypatch, role):
+@pytest.mark.parametrize("role", ("planner", "executor", "*"))
+def test_manual_probe_honors_a_planner_or_executor_role_deny(monkeypatch, role):
     rule = {"role": role, "route": f"claude/{FABLE}@high", "state": "deny"}
     _, denial = _probe_denial(monkeypatch, {"role_rules": [rule]})
-    assert denial == ("route-denied", "planner route explicitly denied by user policy")
+    assert denial == ("route-denied", "route explicitly denied for the planner or executor role by user policy")
 
 
 def test_manual_probe_honors_a_live_repo_denial(monkeypatch):

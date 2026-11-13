@@ -336,10 +336,12 @@ def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | Non
         for policy in policies:
             if reason := route_policy.is_denied(cand, policy):
                 return "route-denied", reason
-            if any(rule.get("state") == "deny" and rule.get("role") in ("planner", "*")
+            # A probe is executor-scoped (#837) and here observes a planner
+            # route, so an explicit deny for either role (or every role) holds.
+            if any(rule.get("state") == "deny" and rule.get("role") in ("planner", "executor", "*")
                    and route_policy._rule_matches(cand, rule.get("route"), state="deny")
                    for rule in policy.get("role_rules", ())):
-                return "route-denied", "planner route explicitly denied by user policy"
+                return "route-denied", "route explicitly denied for the planner or executor role by user policy"
         return None
     verdict = route_policy.effective_role_state(cand, "executor", policies)
     if verdict["state"] == "deny":
