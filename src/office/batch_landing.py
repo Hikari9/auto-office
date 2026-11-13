@@ -68,7 +68,7 @@ def _manifest(path: Path) -> dict:
         raise Usage("batch-invalid", "base must name a simple local branch (e.g. main)")
     version = manifest.get("version")
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
-        raise Usage("batch-invalid", "version must be an explicit semver-like release (e.g. 3.16.0)")
+        raise Usage("batch-invalid", "version must be an explicit semver-like release (e.g. 9.1.0)")
     version_file = _path(manifest.get("version_file", _DEFAULT_VERSION_FILE), "version_file")
     changelog_file = _path(manifest.get("changelog_file", "CHANGELOG.md"), "changelog_file")
     suite = manifest.get("full_suite")

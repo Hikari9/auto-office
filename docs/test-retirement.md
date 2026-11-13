@@ -241,6 +241,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_argon_catalog_809.py` | retire | pinned Argon catalog rows and the Argon slate tail; replaced by the data-driven exception and catalog-status contracts |
 | `tests/v31/test_batch_landing.py` | keep |  |
 | `tests/v31/test_benchmark_refresh.py` | keep |  |
+| `tests/v31/test_board_card.py` | keep |  |
 | `tests/v31/test_bug_hint.py` | keep |  |
 | `tests/v31/test_cap_diff.py` | keep |  |
 | `tests/v31/test_cli_override_harness.py` | keep |  |
@@ -526,7 +527,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/web/test_settings_api.py` | keep |  |
 | `tests/web/test_target_validation.py` | keep |  |
 
-Totals: {'keep': 309, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 310, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 

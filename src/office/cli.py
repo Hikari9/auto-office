@@ -77,6 +77,8 @@ Auto Office {ver}
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics|efficiency] [id]
   office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
+  office card status|sync | link <card>|--create
+                                    the run's display-only herdr-projects board card (docs/board-card.md)
   office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
                                     opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
@@ -264,6 +266,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
+    card_opt = s.add_mutually_exclusive_group()
+    card_opt.add_argument("--card", metavar="ID", help="show this run on that herdr-projects board card "
+                          "(default: $OFFICE_BOARD_CARD; with the board installed, Office adds its own)")
+    card_opt.add_argument("--no-card", action="store_true", help="no board card for this run")
     s.add_argument("--benchmark-refresh", action="store_true",
                    help="the user's intake opt-in: refresh missing benchmark scores in the background")
     s.add_argument("--end-state", choices=["ask", "preview", "merge", "e2e"],
@@ -397,6 +403,10 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("card", parents=[common], help="the run's display-only herdr-projects board card")
+    s.add_argument("action", choices=["status", "link", "sync"])
+    s.add_argument("target", nargs="?", metavar="CARD", help="link: the board card id (as rico-mode created it)")
+    s.add_argument("--create", action="store_true", help="link: add the run's own card, or adopt the one it has")
     s = sp.add_parser("context", parents=[common])
     s.add_argument("--since", type=int, metavar="SEQ", help="also list run events after this event cursor (bounded)")
     s = sp.add_parser("economics", parents=[common])
@@ -854,6 +864,7 @@ def _run(args, unknown) -> int:
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
+                              card=args.card, no_card=args.no_card,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -1058,6 +1069,8 @@ def _run(args, unknown) -> int:
         if cmd not in ("status", "resume", "preflight", "context"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
+        from office import board_card
+        board_card.sweep(con, state.get_run(con, run["id"]))  # the run's board card, if it has one
         return emit(res, args)
     finally:
         con.close()
@@ -1181,6 +1194,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "card":
+        from office import board_card
+        return board_card.command(con, run, args.action, args.target, create_card=args.create)
     if cmd == "context":
         from office import context_snapshot, root_wake
         res = context_snapshot.context(con, run, since=args.since)

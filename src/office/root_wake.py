@@ -910,6 +910,8 @@ def _supervise_tick(run_id: str) -> bool:
                         (run_id, now_iso()))
         poll(con, run)
         _recover_reinstall(con, run)
+        from office import board_card
+        board_card.sweep(con, run)  # the run's board card, if it has one
         return True
     finally:
         con.close()
