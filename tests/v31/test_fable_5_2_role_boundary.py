@@ -64,3 +64,40 @@ def test_discovery_does_not_turn_fable_into_a_worker(monkeypatch):
     assert len(rows) == 5
     for row in rows:
         assert route_policy.fable_role_block(row, "worker")
+
+
+# --probe-route is the manual qualification probe for an unqualified planner effort
+# (#1133). It may observe Fable, honors every explicit user denial, and never
+# turns into role authorization.
+def _probe_denial(monkeypatch, user_policy=None, live=()):
+    from office import route_probe
+    monkeypatch.setattr(candidates, "live_user_policies", lambda repo_root=None: list(live))
+    cand = {"harness": "claude", "model_id": FABLE, "invocation_model_id": FABLE, "effort": "high"}
+    config = {"routing": {"user_policy": user_policy or {}}}
+    return cand, route_probe._denial(cand, None, config)
+
+
+def test_manual_probe_may_observe_an_unqualified_fable_planner_effort(monkeypatch):
+    cand, denial = _probe_denial(monkeypatch)
+    assert denial is None
+    # observing it grants nothing: every role, planner included, stays refused
+    for role in ("planner", *ROLES):
+        assert route_policy.effective_role_state(cand, role, [])["state"] == "deny"
+
+
+def test_manual_probe_honors_an_explicit_fable_model_denial(monkeypatch):
+    _, denial = _probe_denial(monkeypatch, {"denied_models": [f"claude/{FABLE}@high"]})
+    assert denial and denial[0] == "route-denied"
+
+
+@pytest.mark.parametrize("role", ("planner", "*"))
+def test_manual_probe_honors_a_planner_role_deny(monkeypatch, role):
+    rule = {"role": role, "route": f"claude/{FABLE}@high", "state": "deny"}
+    _, denial = _probe_denial(monkeypatch, {"role_rules": [rule]})
+    assert denial == ("route-denied", "planner route explicitly denied by user policy")
+
+
+def test_manual_probe_honors_a_live_repo_denial(monkeypatch):
+    live = [{"denied": [f"claude/{FABLE}@high"], "role_rules": []}]
+    _, denial = _probe_denial(monkeypatch, live=live)
+    assert denial and denial[0] == "route-denied"
