@@ -1,0 +1,40 @@
+name: AA v5 research-only shadow validation
+
+on:
+  pull_request:
+    paths:
+      - "eval/aa_v5_*.py"
+      - "research/aa-v5.0.1/**"
+      - "tests/test_aa_v5_research.py"
+      - ".github/workflows/aa-v5-shadow-research.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-research-guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install -e '.[test]'
+      - name: Verify source, exact efforts, nulls, v4 isolation, and replay
+        run: |
+          python eval/aa_v5_evidence.py validate
+          python -m pytest -q tests/test_aa_v5_research.py tests/test_shipped_catalog_tables.py tests/v31/test_benchmark_refresh.py tests/v31/test_intelligence_floor.py
+      - name: Prove analysis refuses to invent missing local outcomes
+        run: |
+          python eval/aa_v5_calibrate.py --report /tmp/aa-v5-blocked.json > /dev/null
+          python - <<'PY'
+          import json
+          report = json.load(open("/tmp/aa-v5-blocked.json"))
+          assert report["status"] == "blocked_no_raw_outcomes"
+          assert report["production_index"] == "unchanged-v4.3.2"
+          assert "claude/claude-sonnet-5-5@medium" in report["policy_floor_shadow"]["M"]["blocked_by_old_floor"]
+          print("Shadow-only: no source-free training or production index mutation")
+          PY
