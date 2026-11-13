@@ -8,7 +8,7 @@
 
 | Size | Rung 1 / preferred pool | Rung 2 / fallback pool | Qualification notes |
 | --- | --- | --- | --- |
-| **XS** | **Claude Haiku 5.5 Medium** | **Codex GPT-6.1 Terra Low | Agy Gemini 4 Hydrogen Low** | Preserve Claude quota advantage; Hydra Low requires a qualified bounded XS probe; current discovery sizes exclude XS |
+| **XS** | **Claude Haiku 5.5 Medium** | **Codex GPT-6.1 Terra Low | Agy Gemini 4 Hydrogen Low** | Preserve Claude quota advantage; Hydrogen Low requires an independently qualified manual XS probe; current discovery sizes exclude XS |
 | **S** | **Codex GPT-6.1 Terra Medium | Agy Gemini 4 Hydrogen Medium** | **Claude Sonnet 5.5 Medium** | Terra has 13 reported attempts / 5 fully costed; Hydrogen unmeasured; Sonnet Medium S n=3 |
 | **M** | **Claude Sonnet 5.5 Medium | Agy Gemini 4 Hydrogen High** | **Codex GPT-6.1 Terra High** | Sonnet Medium strongest measured M economics; Terra High M currently denied |
 | **L** | **Claude Sonnet 5.5 High** | **Agy Gemini 4 Hydrogen High** | Owner explicitly removed Opus as an L fallback; Hydrogen remains unqualified |
@@ -37,7 +37,9 @@
 6. `routing.adaptive` utility incorporates cost, quota, reliability, speed and preference weights; `preferred_seed` is advisory, not a strict order. A valid equal-rung spec must not imply the runtime currently enforces it. `review.max_rounds:3` is existing convergence contract; the empirical report’s “escalate after 2 RECHECKs” is exploratory. Keep hard failures immediate, but stage a distinct, auditable, reversible escalation policy for review-loop failure instead of globally shortening review approval.
 7. Visual reviewer shipped primary is Gemini 3.8 Flash Low, then Terra Low, DeepSeek Max, and Agy Sonnet Medium. Hydrogen must pass image-sensitive probe before replacing that path. The “drop Flash” instruction can safely remove it from executor seeds now, but removing it from all visual paths before a proven replacement needs a separate explicit confirmation.
 8. Do not treat unknown-size subtasks as automatically L or let the absence of a size gate become implicit permission for Hydrogen/Opus. Classify or explicitly pin an assessed conservative policy, with risk/authority gates.
-9. Preserve historical v4 run snapshots and user role authority/overrides, and kee## Final owner decision: Hydrogen capped trials approved (2026-11-14)
+9. Preserve historical v4 run snapshots, user role authority/overrides, and separation from Fable's planner-only PR #1133.
+
+## Final owner decision: Hydrogen capped trials approved (2026-11-14)
 
 **Decision LOCKED:** after exact Agy model/effort conformance and successful builder security/permission verification, Auto Office MAY automatically trial Gemini 4 Hydrogen on **eligible low-risk S and M executor subtasks**, under ALL of:
 
@@ -52,7 +54,6 @@
 
 **No further executive decision is needed to begin engineering**. This approval is *conditional authorization after conformance*, not a merge, deployment, live config switch or immediate route promotion. The tracked implementation and acceptance source of truth is [#1143](https://github.com/Hikari9/auto-office/issues/1143); version-5 benchmark migration remains separate in [#862](https://github.com/Hikari9/auto-office/issues/862).
 
-3 Fable planner PR](https://github.com/Hikari9/auto-office/pull/1133).
 
 ## Lock-in after executive follow-up (2026-11-14)
 

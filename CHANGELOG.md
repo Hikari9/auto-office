@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.17.0
+
+Stage Gemini 4 Hydrogen Low/Medium/High/Xhigh as external-evidence, non-dispatchable Antigravity executor routes with missing pinned AA v4.3.2 scores and owner-approved advisory XS–XL seeds (#1142, #1143). Correct source provenance disclosures so third-party slugs never masquerade as local conformance; add exact-effort/argv, role safety, lineage, benchmark-isolation and distribution-parity tests. No Hydrogen canary, score cutover or visual-review replacement is enabled.
+
 ## 3.16.0
 
 Each run shows live on a display-only herdr-projects board card (`docs/board-card.md`): the key comes from rico-mode (`OFFICE_BOARD_CARD`, `office start --card`), or Office adds its own whenever the board is installed, never two per run. The card carries the run's state (blocked says "answer in rico-mode"), progress, the plan, every executor and reviewer route with its fallbacks and reasons, and every review round with its findings. New `office card status|link|sync`; config `board.card: auto|off`.

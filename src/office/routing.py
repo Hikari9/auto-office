@@ -147,7 +147,7 @@ def invocation_provenance(candidate: dict) -> str:
     if not source:
         return "proven"
     source = str(source).strip()
-    if source.startswith("documented") or source == "unproven":
+    if source.startswith(("documented", "external-evidence")) or source == "unproven":
         return "documented"
     if source.startswith("local-evidence") or source.startswith("proven"):
         return "proven"
