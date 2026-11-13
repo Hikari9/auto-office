@@ -55,6 +55,12 @@ cost_policy:
 # replayable and inspectable (office inspect route / learner); omit a key to
 # keep its default. Preference is weighted evidence, capped at 0.25.
 routing:
+  # Owner #1143 canary is independently disabled even when generic discovery is on.
+  # A local operator may only turn it on AFTER exact effort/identity, authorization,
+  # sandbox, process cleanup and fallback evidence are verified. Hard 3/20 caps
+  # and one trial/run cannot be relaxed with an allow or a config edit.
+  hydrogen_trials:
+    enabled: false
   discovery:
     # On for executor and worker only (#494). A route the catalog marks `discovery: eligible` is proven by one
     # exact conformance probe and then tried once, bounded, with a known-working fallback. A run pins this at

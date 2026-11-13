@@ -20,7 +20,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-from office import adaptive, executor_slates, route_learning, route_policy, scoring
+from office import adaptive, executor_slates, hydrogen_trials, route_learning, route_policy, scoring
 from office import config as office_config
 from office.util import sha256_obj
 
@@ -103,12 +103,25 @@ def shared_quota_pool_key(harness: str | None, model: str | None) -> str | None:
     return None
 
 
+def verified_shared_quota_pool_key(c: dict) -> str | None:
+    """Only explicit provider+account+pool metadata proves sibling variants share quota."""
+    q = c.get("quota") or {}
+    if q.get("shared_pool_verified") is not True:
+        return None
+    parts = [q.get(k) for k in ("provider", "account_id", "pool_id")]
+    if not all(isinstance(v, str) and v.strip() for v in parts):
+        return None
+    # The exact identity, not a guess from model/effort/provider name, is the cooldown key.
+    return "verified-pool:" + sha256_obj(parts)
+
+
 def _demotion_keys(c: dict) -> tuple[str, ...]:
     model = c.get("invocation_model_id") or c.get("model_id")
     keys = (demotion_key(c.get("harness"), model, c.get("effort")),
             harness_demotion_key(c.get("harness")))
     pool = shared_quota_pool_key(c.get("harness"), model)
-    return keys + ((pool,) if pool else ())
+    verified = verified_shared_quota_pool_key(c)
+    return keys + ((pool,) if pool else ()) + ((verified,) if verified else ())
 
 
 def preferred_rank(c, preferred_seed):
@@ -125,7 +138,7 @@ def preferred_rank(c, preferred_seed):
             continue
         if p.get("harness") and p.get("harness") != c.get("harness"):
             continue
-        return i
+        return p.get("rung", i + 1) - 1
     return None
 
 
@@ -166,7 +179,10 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
     elif quota.get("status") != "ok" or quota.get("tightest_remaining_percent") is None:
         reasons.append("was selected with quota headroom explicitly unknown")
     if rank is not None:
-        reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
+        if any("rung" in row for row in preferred_seed or []):
+            reasons.append(f"matched preferred rung #{rank + 1}; adaptive quality/cost/speed/quota still decide")
+        else:
+            reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
     invocation = chosen.get("invocation_model_id")
@@ -458,6 +474,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
     stage = []
 
     db_path = request.get("runs_db")
+    # A current XS-XL task whose planner has not classified its size must not
+    # inherit a convenient L route (or the historical unsized role floor).
+    ctx = request.get("context") or {}
+    declared_size = request.get("size_class") or ctx.get("size_class")
+    if (role == "executor" and request.get("require_classified_executor_size", True)
+            and ctx.get("gear") in executor_slates.SIZES and declared_size not in executor_slates.SIZES):
+        return {"status": "size_unclassified", "selected": None, "rejected": [],
+                "reason": "executor task size is unknown: classify XS/S/M/L/XL before routing",
+                "action": "classify the task and re-run routing; no L inference"}
 
     # Hard stop (§7.5.3): an override request without a valid, recorded authorization
     # halts before any candidate is evaluated. Pinned here (not only in the T2 shim)
@@ -509,6 +534,25 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
                 role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
+            # Permanent hard veto: no benchmark waiver, role override, generic
+            # 'allow', or adaptive exploration can turn Hydrogen into a normal
+            # executor. Trial candidates stay in the unqualified discovery pool.
+            hydro_denial = hydrogen_trials.route_refusal(
+                c, role=role, size=new_policy_size,
+                manual=bool(request.get("manual_route")),
+                config=request.get("hydrogen_policy"), risk=request.get("hydrogen_risk"),
+                descriptor=request.get("hydrogen_descriptor"))
+            if (not hydro_denial and hydrogen_trials.is_hydrogen(c) and request.get("manual_route")):
+                hydro_denial = hydrogen_trials.manual_conformance(
+                    con, c, role=role, size=new_policy_size)
+            if (not hydro_denial and hydrogen_trials.is_hydrogen(c)
+                    and not request.get("manual_route")
+                    and not request.get("hydrogen_independent_review")):
+                hydro_denial = "Hydrogen automatic trial needs independent code review"
+            if hydro_denial:
+                rejected.append({"candidate": cid, "stage": 1, "category": "hydrogen-safety",
+                                 "reason": hydro_denial})
+                continue
             if (scope := c.get("user_allow_sizes")) is not None and new_policy_size not in scope:
                 # A size-scoped allow lifted the catalog disable for these sizes only (#850).
                 rejected.append({"candidate": cid, "stage": 1, "reason": f"not dispatchable: the user's allow covers "
@@ -534,6 +578,10 @@ def route(request: dict, discovery_input: dict | None = None, *,
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
                                  "category": "size-model-restriction"})
+            elif hydrogen_trials.is_hydrogen(c) and not request.get("manual_route"):
+                # Even a future dispatchable catalog row must not bypass the
+                # reserved-trial path. A probe pass alone is not launch consent.
+                pool.append(c)
             elif c.get("route_status", "available") != "available" and not (
                     c.get("route_status") == "probe-passed" and cid == request.get("declared_route")):
                 # A route the user declared (--as, amend route) whose exact probe passed is a pinned route,
@@ -585,6 +633,13 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
+            if hydrogen_trials.is_hydrogen(c) and request.get("manual_route"):
+                # Only a manual route with fresh exact model+effort proof passed the
+                # hard stage-1 gate. Missing v4 AA score is disclosed, never
+                # invented; explicit manual choice is not an automatic trial.
+                eligibility[cid]["qualification"] = "explicit manual exact conformance; AA v4 may be unscored"
+                nxt.append(c)
+                continue
             waiver = (executor_slates.floor_exception(c, new_policy_size, role, executor_policy)
                       if role in ADAPTIVE_ROLES else None)
             passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))

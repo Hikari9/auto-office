@@ -855,6 +855,8 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
                               "fallbacks_taken": decision.get("fallbacks_taken") or [],
                               "planned_audit_id": planned.get("audit_id")}}
+        if decision.get("hydrogen_counter"):
+            audit["hydrogen_counter"] = decision["hydrogen_counter"]
         link, record = decision.get("discovery_link"), decision.get("trial_record")
         if link:
             audit["dispatch"]["discovery"] = {
@@ -889,6 +891,7 @@ def _route_payload(decision: dict) -> dict:
         "why": "fenced orchestrator-inline worker" if (decision.get("launch") or {}).get("inline")
                else "dedicated executor default or route requalification"}
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure"),
+           **({"hydrogen_counter": decision["hydrogen_counter"]} if decision.get("hydrogen_counter") else {}),
            "execution_mode": mode,
            "selected_route": (task_sizing.INLINE_ROUTE if mode["mode"] == "inline" else decision.get("selected")),
            "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
@@ -1041,21 +1044,50 @@ def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: 
 
 
 def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: bool) -> dict:
-    """The dispatch transaction's last word on a trial. Re-reads the caps, task risk, quota reserve, probe
-    record and fallback under the write lock; any failure dispatches the known-working fallback instead
-    and writes no `route_trials` row. Caller holds the transaction."""
+    """Atomically settle discovery and book an eligible Hydrogen opportunity.
+
+    A general discovered route cannot reserve Hydrogen without the independent
+    safety gate, a genuine exact probe receipt and an existing same-size fallback.
+    The append-only 20-opportunity ledger is written under the same writer lock
+    as the dispatch, so parallel Office processes cannot both take the last slot.
+    """
+    from office import hydrogen_trials
+    config = state.pinned_config(run)
     trial = decision.get("trial")
-    if not trial:
-        return decision
-    fallback, link = trial["fallback"], decision["discovery_link"]
-    blocked = None if launching else "not-launching"
-    blocked = blocked or _trial_blocked(con, run, decision, fallback, task)
+    manual = (decision.get("route_source") in ("override", "orchestrator")
+              or bool(decision.get("override"))
+              or bool((decision.get("route_authority") or {}).get("quote")))
+    eligible = bool(launching and not manual and decision.get("status") == "selected"
+                    and (decision.get("execution_mode") or {}).get("mode") != "inline"
+                    and hydrogen_trials.run_safe(config, run, task))
+    blocked = None
+    if trial:
+        fallback, link = trial["fallback"], decision["discovery_link"]
+        blocked = "not-launching" if not launching else _trial_blocked(con, run, decision, fallback, task)
+        if not blocked and hydrogen_trials.is_hydrogen(decision.get("candidate")):
+            blocked = hydrogen_trials.trial_refusal(con, run, task, decision["candidate"], fallback, config)
+    # A trial is a separate admission path. Even if a future catalog switches
+    # Hydrogen to dispatchable, it must never launch through ordinary scoring.
+    elif hydrogen_trials.is_hydrogen(decision.get("candidate")) and not manual:
+        raise Refused("hydrogen-trial-required", "automatic Hydrogen requires an atomic qualified trial reservation")
+    reservation = None
+    if eligible:
+        wants_hydrogen = bool(trial and not blocked and hydrogen_trials.is_hydrogen(decision.get("candidate")))
+        chosen = trial["fallback"]["selected"] if trial and blocked else decision.get("selected")
+        reservation = hydrogen_trials.book(con, run["id"], task["id"], chosen, experiment=wants_hydrogen,
+                                            fallback_route=trial["fallback"]["selected"] if trial else None)
+        if wants_hydrogen and not reservation["experimental"]:
+            blocked = reservation["blocked"] or "hydrogen-cap"
     if blocked:
-        return _annotated(fallback, link, blocked=blocked)
+        changed = _annotated(trial["fallback"], decision["discovery_link"], blocked=blocked)
+        return {**changed, **({"hydrogen_counter": reservation} if reservation else {})}
+    if not trial:
+        return {**decision, **({"hydrogen_counter": reservation} if reservation else {})}
     record = {"id": link["attempt_id"], "route": link["candidate"], "probe_key": link["probe_key"],
               "fallback_route": fallback["selected"], "policy_digest": link["policy_digest"],
               "reason": trial["reason"], "fallback": _route_payload(fallback)}
-    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record}
+    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record,
+            **({"hydrogen_counter": reservation} if reservation else {})}
 
 
 def _known_working(con, cand: dict) -> bool:
@@ -5177,6 +5209,8 @@ _ROUTE_FAILURE_SIGNATURES = (
                                  r"|invalid (model|effort|reasoning)|unsupported .{0,30}(effort|reasoning|model)"
                                  r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
                                  r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
+    ("quota", r"quota (exceeded|exhausted|limit)|rate[- ]?limit(ed)?|\b429\b|usage limit reached|"
+              r"credits? (exhausted|depleted)|weekly limit reached"),
     ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
     ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
                   r"|service unavailable|\b50[234]\b|overloaded"),
@@ -5214,6 +5248,12 @@ def _queue_route_fallback(con, run: dict, task: dict, d: dict) -> bool:
     keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
     if reason == "auth":
         keys.append(routing.harness_demotion_key(d.get("harness")))  # every route on a signed-out harness fails alike
+    if reason == "quota":
+        # Only a verified provider/account/pool receipt can demote siblings.
+        # Differently authenticated accounts are never inferred to share quota.
+        candidate = (d.get("route") or {}).get("candidate") or {}
+        if pooled := routing.verified_shared_quota_pool_key(candidate):
+            keys.append(pooled)
     for key in keys:
         con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
                     "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
@@ -5228,6 +5268,14 @@ def _queue_route_fallback(con, run: dict, task: dict, d: dict) -> bool:
                         "effort": d.get("effort"), "reason": reason, "classification": d.get("terminal_classification"),
                         "exit_code": d.get("exit_code"), "stderr_tail": detail, "demoted_until": expires,
                         "declared": declared})
+    # Authentication/authorization failures are hard security stops: a retry on
+    # another model or account would silently bypass the operator's permissions.
+    if reason == "auth" and not declared:
+        state.update_task(con, run["id"], tid, status="blocked",
+                          pause_reason=f"authorization failure on {d.get('triple')}; operator intervention required")
+        state.emit(con, run, "task.blocked", f"{tid} stopped after authorization failure; no automatic fallback",
+                   task_id=tid, dispatch_id=d["id"])
+        return True
     if declared:
         state.update_task(con, run["id"], tid, status="blocked",
                           pause_reason=f"declared route {d.get('triple')} failed ({reason}); choose another: office dispatch {tid} --reroute")

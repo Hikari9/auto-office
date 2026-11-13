@@ -47,7 +47,7 @@ def test_shipped_policy_is_resolved_against_catalog_facts():
             assert set(entry["_dispatchable_routes"]) <= set(entry["_resolved_routes"])
             assert all(facts[key].get("dispatchable") is not False for key in entry["_dispatchable_routes"])
         assert slates.ideal_seed(size) == [
-            {key: value for key, value in row.items() if key in ("model_id", "effort", "harness") and value is not None}
+            {key: value for key, value in row.items() if key in ("model_id", "effort", "harness", "rung") and value is not None}
             for row in entries
         ]
     for rule in slates.POLICY["floor_exceptions"]:
@@ -83,25 +83,23 @@ def test_policy_rejects_unhashable_yaml_mapping_keys(policy_root):
         slates.load_policy(policy_root)
 
 
-def test_conditional_unshipped_routes_remain_in_the_policy(policy_root):
+def test_hydrogen_conditional_is_known_but_unqualified_and_planner_conditional_remains(policy_root):
     data = yaml.safe_load((policy_root / "catalog" / "executor-policy.yaml").read_text())
-    glm = next(row for row in data["executor_preferred"]["M"] if row["model_id"] == "glm-5.3-flash")
+    hydrogen = next(row for row in data["executor_preferred"]["M"] if row["model_id"] == "gemini-4-hydrogen")
     argon = next(row for row in data["planner_preferred"]["M"] if row["model_id"] == "gemini-4-argon")
-    assert glm["conditional"] is True and argon["conditional"] is True
+    assert hydrogen["conditional"] is True and argon["conditional"] is True
     policy = _write_policy(policy_root, data)
-    assert policy["executor_preferred"]["M"][1]["_resolved_routes"] == []
+    h = next(row for row in policy["executor_preferred"]["M"] if row["model_id"] == "gemini-4-hydrogen")
+    assert h["_resolved_routes"] and not h["_dispatchable_routes"]
     assert policy["planner_preferred"]["M"][-1]["_resolved_routes"] == []
-    assert slates.ideal_seed("M", policy)[1] == {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode"}
-    assert slates.planner_seed("M", policy)[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
-
+    assert slates.ideal_seed("M", policy)[1]["rung"] == 1
+    data["executor_preferred"]["M"][1].update(model_id="unshipped-new-model")
     data["executor_preferred"]["M"][1].pop("conditional")
-    (policy_root / "catalog" / "executor-policy.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
     with pytest.raises(slates.ExecutorPolicyError, match="nonexistent catalog tuple"):
-        slates.load_policy(policy_root)
+        _write_policy(policy_root, data)
 
 
 @pytest.mark.parametrize(("role", "model", "effort", "harness", "expected_route"), [
-    ("executor", "glm-5.3-flash", "max", "opencode", "opencode@1/glm-5.3-flash@max"),
     ("planner", "gemini-4-argon", "low", "agy", "agy@1/gemini-4-argon@low"),
 ])
 def test_conditional_route_becomes_selectable_when_added_by_user_overlay(

@@ -158,7 +158,8 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
     _resolve_quota_reserves(effective, default, user_reserves)
     effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
-    problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
+    from office import hydrogen_trials
+    problems = (adaptive.validate(effective) + hydrogen_trials.validate(effective) + route_policy.validate_discovery(effective)
                 + route_policy.validate_user_policy(effective) + route_policy.validate_ceiling(effective))
     if problems:
         raise ValueError("; ".join(problems))
