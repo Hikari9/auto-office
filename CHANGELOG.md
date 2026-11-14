@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.18.1
+
+`office route policy` no longer says `office route allow` makes a Gemini 4 Hydrogen route dispatch (#1147, #1149). Hydrogen rows now name the canary veto: the role, the exact agy effort for each size, the `routing.hydrogen_trials` limits, and the exact conformance probe they still need. The view also says that agy probes currently refuse with `no-identity-readback` (#1148), so enabling the canary alone does not open it. Follow-ups: #1151.
+
 ## 3.18.0
 
 #1143: owner-approved XS–XL executor peer rungs, narrow Terra High M policy, verified account/pool quota cooldowns, identical RECHECK escalation and append-only atomic 3-in-20 Hydrogen S/M trial ledger. Hydrogen remains OFF pending real conformance and fallback evidence; XL, visual review and authorization safety are unchanged.
