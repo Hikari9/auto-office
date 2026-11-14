@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.19.0
+
+agy identity readback for exact conformance probes: the probe adds `--output-format stream-json --effort <effort>` (probe launch only), reads the model from the first `init` event, derives effort from the slug's tier suffix and checks the reply from the result event. agy rows no longer refuse with `no-identity-readback`; dispatch argv is unchanged.
+
 ## 3.18.0
 
 #1143: owner-approved XS–XL executor peer rungs, narrow Terra High M policy, verified account/pool quota cooldowns, identical RECHECK escalation and append-only atomic 3-in-20 Hydrogen S/M trial ledger. Hydrogen remains OFF pending real conformance and fallback evidence; XL, visual review and authorization safety are unchanged.

@@ -831,7 +831,7 @@ def test_codex_header_is_read_only_from_the_first_fenced_block():
 
 def test_a_harness_with_no_metadata_readback_is_never_probed(world):
     con = world.con()
-    assert "agy" not in route_probe._IDENTITY_READBACK
+    assert {"pi", "hermes"}.isdisjoint(route_probe._IDENTITY_READBACK)  # harnesses with no readback yet
     world.monkeypatch.setattr(route_probe, "_IDENTITY_READBACK", {})
     refused = ensure(world, con, world.run())
     assert refused == Refused("no-identity-readback")
