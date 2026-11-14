@@ -52,7 +52,7 @@ def _canonicalize(spec: str) -> str:
 
 def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True, *,
                    candidate: dict | None = None, role: str = "executor", size: str | None = None,
-                   config: dict | None = None, probe: dict | None = None) -> tuple[bool, str]:
+                   config: dict | None = None, probe: dict | None = None) -> tuple[bool | None, str]:
     """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
@@ -60,7 +60,9 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
                  "both require a fresh exact conformance probe pass; agy probes currently refuse with no-identity-readback")
-        refusal = (hydrogen_trials.route_refusal(candidate, role=role, size=size, manual=False, config=config)
+        refusal = (hydrogen_trials.route_refusal(candidate, role=role, size=size, manual=False, config=config,
+                   risk={"size_class": size, "blast_radius": "local"},
+                   descriptor={"task_size": size, "bounds": "bounded", "domain": "repo"})
                    if size or role != "executor" else "depends on task size")
         if state["state"] == "deny":
             refusal = f"denied by {state['source']}"
@@ -69,6 +71,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
         elif role == "executor" and not has_profile:
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
+        if refusal is None and not proof:
+            return None, ("can dispatch as an automatic canary trial on eligible bounded, reversible, low-risk S/M tasks, "
+                          "within 3 per rolling 20 and 1 per run, after a cold start of 19 recorded opportunities; " + rules)
+        if refusal is None:
+            refusal = "automatic Hydrogen requires a bounded, reversible, low-risk S/M task"
         return False, f"{refusal}; {rules}{proof}"
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
@@ -164,9 +171,10 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                 result["by_size"] = by_size
             output.append(result)
             count[state["state"]] += 1
-            dispatching += dispatches
+            dispatching += dispatches is True
             role_lines.append(f"  {result['route']}: {state['state']} ({state['source']}) -> "
-                              + ("dispatches" if dispatches else "does not dispatch") + f" ({why})"
+                              + ("conditionally dispatches" if dispatches is None else
+                                 "dispatches" if dispatches else "does not dispatch") + f" ({why})"
                               + (" at an unknown size" if by_size else "")
                               + (f"; by size: {_by_size_text(by_size)}" if by_size else ""))
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")

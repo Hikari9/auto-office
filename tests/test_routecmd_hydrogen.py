@@ -32,7 +32,7 @@ def test_reviewer_and_sized_canary_reasons():
     dispatches, sized = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config=config,
                                                 probe={"result": "pass"})
     assert not dispatches
-    assert "automatic Hydrogen requires a bounded, reversible, low-risk S/M task" in sized
+    assert "can dispatch as an automatic canary trial" in sized
     assert "cannot dispatch until" not in sized
     _, disabled = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config={})
     assert "automatic Hydrogen canary is disabled" in disabled
@@ -92,9 +92,13 @@ def test_policy_uses_exact_probe_and_enabled_config(monkeypatch, tmp_path):
     con.execute("INSERT INTO route_probes (key, result, probed_at) VALUES (?, 'pass', ?)",
                 (route_probe.key(candidate, adapter), now_iso()))
     con.close()
-    row = routecmd.policy(role="executor", size="S").data["effective"][0]
-    assert not row["dispatches"]
-    assert "bounded, reversible, low-risk" in row["dispatch_reason"]
+    result = routecmd.policy(role="executor", size="S")
+    row = result.data["effective"][0]
+    assert row["dispatches"] is None
+    assert "can dispatch as an automatic canary trial" in row["dispatch_reason"]
+    assert "3 per rolling 20 and 1 per run" in row["dispatch_reason"]
+    assert "cold start of 19 recorded opportunities" in row["dispatch_reason"]
+    assert any("conditionally dispatches" in line and "does not dispatch" not in line for line in result.lines)
     assert "cannot dispatch until" not in row["dispatch_reason"]
 
 
