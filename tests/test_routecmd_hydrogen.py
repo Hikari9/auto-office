@@ -15,28 +15,32 @@ def test_unsized_hydrogen_requires_proof(enabled, state):
     dispatches, reason = routecmd._dispatch_view(
         ROW, {"state": state, "source": "user"}, candidate=CANDIDATE,
         config={"routing": {"hydrogen_trials": {"enabled": enabled}}})
-    assert not dispatches
+    assert dispatches is False
     for text in ("depends on task size", "executor-only", "S/medium", "3 per rolling 20", "one per run",
                  "manual --as", "fresh exact conformance probe pass", "no-identity-readback",
                  "cannot dispatch until a fresh exact probe passes"):
         assert text in reason
+    assert ("automatic canary disabled" in reason) is (not enabled)
     assert "your allow overrides this" not in reason
     assert "`office route allow` makes it dispatch" not in reason
 
 
 def test_reviewer_and_sized_canary_reasons():
     state = {"state": "neutral", "source": "default"}
-    _, reviewer = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="code_reviewer")
+    dispatches, reviewer = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="code_reviewer")
+    assert dispatches is False
     assert "Hydrogen is executor-only" in reviewer
     config = {"routing": {"hydrogen_trials": {"enabled": True}}}
     dispatches, sized = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config=config,
                                                 probe={"result": "pass"})
-    assert not dispatches
+    assert dispatches is None
     assert "can dispatch as an automatic canary trial" in sized
     assert "cannot dispatch until" not in sized
-    _, disabled = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config={})
+    dispatches, disabled = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config={})
+    assert dispatches is False
     assert "automatic Hydrogen canary is disabled" in disabled
-    _, wrong_effort = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="M", config=config)
+    dispatches, wrong_effort = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="M", config=config)
+    assert dispatches is False
     assert "exact approved agy model/size/effort" in wrong_effort
 
 
@@ -56,7 +60,7 @@ def test_non_hydrogen_allow_behavior_unchanged():
 ])
 def test_hydrogen_overrides(role, state, installed, profile, expected):
     dispatches, reason = routecmd._dispatch_view(ROW, state, installed, profile, candidate=CANDIDATE, role=role)
-    assert not dispatches
+    assert dispatches is False
     assert reason.startswith(expected)
 
 
@@ -64,7 +68,7 @@ def test_sized_user_allow_does_not_override_canary():
     dispatches, reason = routecmd._dispatch_view(
         ROW, {"state": "allow", "source": "user"}, candidate=CANDIDATE, size="S",
         config={"routing": {"hydrogen_trials": {"enabled": True}}})
-    assert not dispatches
+    assert dispatches is False
     assert "bounded, reversible, low-risk" in reason
     assert "allow overrides" not in reason and "office route allow" not in reason
 
@@ -84,6 +88,7 @@ def test_policy_uses_exact_probe_and_enabled_config(monkeypatch, tmp_path):
     db_path = tmp_path / "runs.db"
     monkeypatch.setattr(paths, "runs_db", lambda: db_path)
     row = routecmd.policy(role="executor", size="S").data["effective"][0]
+    assert row["dispatches"] is False
     assert not db_path.exists()
     assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
 
@@ -115,5 +120,19 @@ def test_policy_with_invalid_probe_database(monkeypatch, tmp_path):
     db_path.write_text("not a database")
     monkeypatch.setattr(paths, "runs_db", lambda: db_path)
     row = routecmd.policy(role="executor", size="S").data["effective"][0]
+    assert row["dispatches"] is False
     assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
     assert db_path.read_text() == "not a database"
+
+
+@pytest.mark.parametrize("role,state,expected", [
+    ("executor", {"state": "deny", "source": "user"}, "denied by user"),
+    ("code_reviewer", {"state": "neutral", "source": "default"}, "Hydrogen is executor-only"),
+])
+def test_disabled_canary_note_only_on_unsized_executor(role, state, expected):
+    dispatches, reason = routecmd._dispatch_view(
+        ROW, state, candidate=CANDIDATE, role=role,
+        config={"routing": {"hydrogen_trials": {"enabled": False}}})
+    assert dispatches is False
+    assert reason.startswith(expected)
+    assert "automatic canary disabled" not in reason

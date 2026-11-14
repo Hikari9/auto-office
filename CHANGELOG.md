@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.19.1
+
+`office route policy` unsized Hydrogen rows now note when the automatic canary is disabled, and `tests/test_routecmd_hydrogen.py` pins `dispatches is False` vs `dispatches is None` (#1151).
+
 ## 3.19.0
 
 agy identity readback for exact conformance probes: the probe adds `--output-format stream-json --effort <effort>` (probe launch only), reads the model from the first `init` event, derives effort from the slug's tier suffix and checks the reply from the result event. agy rows no longer refuse with `no-identity-readback`; dispatch argv is unchanged.
