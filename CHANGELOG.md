@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.19.0
+
+agy identity readback for exact conformance probes: the probe adds `--output-format stream-json --effort <effort>` (probe launch only), reads the model from the first `init` event, derives effort from the slug's tier suffix and checks the reply from the result event. agy rows no longer refuse with `no-identity-readback`; dispatch argv is unchanged.
+
 ## 3.18.1
 
 `office route policy` no longer says `office route allow` makes a Gemini 4 Hydrogen route dispatch (#1147, #1149). Hydrogen rows now name the canary veto: the role, the exact agy effort for each size, the `routing.hydrogen_trials` limits, and the exact conformance probe they still need. The view also says that agy probes currently refuse with `no-identity-readback` (#1148), so enabling the canary alone does not open it. Follow-ups: #1151.
