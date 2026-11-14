@@ -74,6 +74,7 @@ def test_routing_route_manual_hydrogen_uses_plain_connect_without_crashing(tmp_p
     db_path = tmp_path / "runs.db"
     with db.connect(db_path) as con:
         cand = _hydrogen_candidate()
+        cand["route_status"] = "probe-passed"
         _seed_probe_row(con, cand, result="fail")
 
     req = {
@@ -81,6 +82,7 @@ def test_routing_route_manual_hydrogen_uses_plain_connect_without_crashing(tmp_p
         "run_gear": "S",
         "size_class": "S",
         "manual_route": True,
+        "declared_route": routing.candidate_id(cand),
         "runs_db": str(db_path),
         "candidates": [cand],
     }
@@ -93,4 +95,8 @@ def test_routing_route_manual_hydrogen_uses_plain_connect_without_crashing(tmp_p
         _seed_probe_row(con, cand, result="pass")
 
     decision_pass = routing.route(req)
+    assert decision_pass["selected"] == routing.candidate_id(cand)
+    assert {key: decision_pass["candidate"][key] for key in ("harness", "model_id", "effort")} == {
+        key: cand[key] for key in ("harness", "model_id", "effort")
+    }
     assert not any(r.get("category") == "hydrogen-safety" for r in decision_pass.get("rejected", []))
