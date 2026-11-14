@@ -19,6 +19,10 @@ invocation:
   argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}", "--print={prompt}"]
   prompt_transport: argv-bound
   cwd_transport: add-dir-plus-prompt-pin
+  effort_readback:
+    source: stream-json-init
+    command: [agy, -p, "<prompt>", --output-format, stream-json, --model, "{model}", --effort, "{effort}"]
+    notes: Conformance probes only; dispatch argv never gains these flags. The first NDJSON event is init with the model slug the harness resolved, and its tier suffix is the effort, which agy enforces against --effort (a contradiction exits nonzero). The reply text is never read for identity.
 safe_prompt_passing:
   shell: false
   supports_prompt_file: true
