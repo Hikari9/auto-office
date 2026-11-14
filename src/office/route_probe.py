@@ -148,7 +148,7 @@ def _row_dict(cur, row) -> dict | None:
         return None
     if isinstance(row, (dict, sqlite3.Row)):
         return dict(row)
-    return {col[0]: val for col, val in zip(cur.description, row)}
+    return {col[0]: val for col, val in zip(cur.description or (), row)}
 
 
 def _rows_dicts(cur) -> list[dict]:
