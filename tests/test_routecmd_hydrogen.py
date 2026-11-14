@@ -96,3 +96,20 @@ def test_policy_uses_exact_probe_and_enabled_config(monkeypatch, tmp_path):
     assert not row["dispatches"]
     assert "bounded, reversible, low-risk" in row["dispatch_reason"]
     assert "cannot dispatch until" not in row["dispatch_reason"]
+
+
+def test_policy_with_invalid_probe_database(monkeypatch, tmp_path):
+    from office import adapters, candidates, config, paths
+
+    monkeypatch.setattr(config, "resolve", lambda _: ({}, None))
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [ROW])
+    monkeypatch.setattr(adapters, "load_sources", lambda: {"agy": ({"source_notes": "adapter"}, None)})
+    monkeypatch.setattr(adapters, "route_version", lambda *args: "1.0")
+    monkeypatch.setattr(adapters, "installed", lambda _: True)
+    monkeypatch.setattr(adapters, "profile", lambda *_: True)
+    db_path = tmp_path / "runs.db"
+    db_path.write_text("not a database")
+    monkeypatch.setattr(paths, "runs_db", lambda: db_path)
+    row = routecmd.policy(role="executor", size="S").data["effective"][0]
+    assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
+    assert db_path.read_text() == "not a database"

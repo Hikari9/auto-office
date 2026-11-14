@@ -151,7 +151,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                 if con is not None:
                     try:
                         probe = route_probe.status(con, c, adapter=adapter)
-                    except sqlite3.OperationalError:
+                    except sqlite3.DatabaseError:
                         pass  # Missing or unreadable probe evidence cannot qualify the route.
             dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)),
                                              candidate=c, role=r, size=size, config=cfg_effective, probe=probe)
