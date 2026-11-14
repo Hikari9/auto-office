@@ -126,6 +126,8 @@ SHARED_COLUMNS = {
     # Every claim writes a new one; a requeue clears it. A row claimed by an
     # older runtime has none and keeps that runtime's pid liveness rule.
     "outbox": ["claim_token TEXT"],
+    # #1168: 1 marks a booked S canary dispatch; NULL is an ordinary opportunity.
+    "hydrogen_trial_opportunities": ["canary INTEGER"],
 }
 
 OFFICE_DDL = """

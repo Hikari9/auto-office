@@ -1272,6 +1272,12 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "hydrogen_descriptor": descriptor_for_route,
         "hydrogen_independent_review": (run.get("gates") or {}).get("code_review") is True,
     }
+    if role == "executor" and not override:
+        from office import hydrogen_trials
+        # Budget from the live config (a global runs.db cap); enabled and the user allow stay pinned.
+        budget = hydrogen_trials.live_budget(run)
+        if budget and hydrogen_trials.canary_active(con, config, run, {"descriptor": descriptor_for_route}, budget):
+            request["hydrogen_canary"] = hydrogen_trials.canary_progress(con, budget)
     if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
         request["slate_anchor"] = True

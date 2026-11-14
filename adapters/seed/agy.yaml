@@ -11,7 +11,7 @@ effort_mapping:
   low: low
   medium: medium
   high: high
-  xhigh: null
+  xhigh: xhigh
   max: null
 benchmark_slug_mapping: {}
 invocation:

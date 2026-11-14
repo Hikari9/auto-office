@@ -52,7 +52,8 @@ def _canonicalize(spec: str) -> str:
 
 def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True, *,
                    candidate: dict | None = None, role: str = "executor", size: str | None = None,
-                   config: dict | None = None, probe: dict | None = None) -> tuple[bool | None, str]:
+                   config: dict | None = None, probe: dict | None = None,
+                   canary: dict | None = None) -> tuple[bool | None, str]:
     """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
@@ -61,6 +62,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
                  "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "
                  "canary limits (enabled flag, S/M, risk) but still needs that pass")
+        if canary and canary.get("budget"):
+            # #1168: the S canary prefers the user-allowed agy/gemini-4-hydrogen@medium route until its budget is spent.
+            rules += ("; S canary complete " if canary.get("complete") else "; S canary ") + \
+                f"{canary['spent']}/{canary['budget']}" + (", ordinary scoring again" if canary.get("complete") else
+                                                           " (prefers the user-allowed S route, one per run)")
         # Synthetic risk/descriptor are hypothetical, for display only.
         allowed = hydrogen_trials.user_allowed(state)
         if size or role != "executor":
@@ -172,8 +178,16 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                         probe = route_probe.status(con, c, adapter=adapter)
                     except sqlite3.DatabaseError:
                         pass  # Missing or unreadable probe evidence cannot qualify the route.
+            canary = None
+            if hydrogen_trials.is_hydrogen(c) and con is not None:
+                try:
+                    canary = hydrogen_trials.canary_progress(
+                        con, hydrogen_trials.settings(cfg_effective)["canary_tasks"])
+                except sqlite3.DatabaseError:
+                    canary = None  # an older read-only runs.db without the canary column
             dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)),
-                                             candidate=c, role=r, size=size, config=cfg_effective, probe=probe)
+                                             candidate=c, role=r, size=size, config=cfg_effective, probe=probe,
+                                             canary=canary)
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,

@@ -1072,6 +1072,14 @@ def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: b
           and not (decision.get("candidate") or {}).get("hydrogen_user_allow")):
         raise Refused("hydrogen-trial-required", "automatic Hydrogen requires an atomic qualified trial reservation")
     reservation = None
+    canary = (decision.get("hydrogen_canary") if eligible and not trial
+              and hydrogen_trials.is_hydrogen(decision.get("candidate"))
+              and (decision.get("candidate") or {}).get("hydrogen_user_allow") else None)
+    if canary:
+        # #1168: the S canary books its own append-only row; the budget is re-checked under this lock.
+        reservation = hydrogen_trials.book_canary(con, run["id"], task["id"], decision.get("selected"),
+                                                  hydrogen_trials.live_budget(run))
+        return {**decision, "hydrogen_counter": reservation}
     if eligible:
         wants_hydrogen = bool(trial and not blocked and hydrogen_trials.is_hydrogen(decision.get("candidate")))
         chosen = trial["fallback"]["selected"] if trial and blocked else decision.get("selected")
