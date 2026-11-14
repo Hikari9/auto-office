@@ -1231,3 +1231,21 @@ def test_recovery_removes_a_dead_claude_probes_transcript_folder(world):
         assert not folder.exists()
     finally:
         ws.remove()
+
+
+def test_status_reads_probe_cache_on_plain_sqlite_connection_without_row_factory(world):
+    with world.con() as con:
+        res = ensure(world, con, world.run())
+        assert res["result"] == "pass"
+
+    plain = sqlite3.connect(world.db_path)
+    try:
+        assert plain.row_factory is None
+        c = cand()
+        rec = route_probe.status(plain, c)
+        assert rec is not None
+        assert rec["fresh"] is True
+        assert rec["result"] == "pass"
+        assert rec["key"] == route_probe.key(c, route_probe._adapter(c))
+    finally:
+        plain.close()
