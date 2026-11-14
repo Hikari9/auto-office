@@ -355,3 +355,9 @@ def test_report_replay_population_detects_changed_attempt_contents(tmp_path):
     assert replay.population(frozen,board())["frozen_tasks_missing_or_changed"]==0
     for changed in (board(o="rejected"),board(rej=1),board(disp=("a",)),board(size="L")):
         assert replay.population(frozen,changed)["frozen_tasks_missing_or_changed"]==1
+
+
+def test_shadow_doc_names_no_local_paths():
+    for rel in ("docs/benchmarks/aa-v5.0.1-shadow-862.md", "plugin-dist/docs/benchmarks/aa-v5.0.1-shadow-862.md"):
+        text=(evidence.ROOT/rel).read_text()
+        assert not re.search(r"~/|/Users/|/home/|/tmp/|\.local/share", text), rel

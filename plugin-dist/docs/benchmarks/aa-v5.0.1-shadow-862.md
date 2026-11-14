@@ -63,9 +63,9 @@ All inputs were read from hash-verified private copies under a `chmod 700` direc
 
 | Source | What was used | Integrity |
 |---|---|---|
-| `~/.local/share/auto-office/runs.db` | `cp` of `runs.db` + `runs.db-wal` while the source hash stayed constant, WAL checkpointed into the private copy, SQLite backup to one file. The live file was never opened by SQLite. 8,170 dispatches. | `integrity_check` ok; digest in the JSON |
+| Office `runs.db` (live data directory) | `cp` of `runs.db` + `runs.db-wal` while the source hash stayed constant, WAL checkpointed into the private copy, SQLite backup to one file. The live file was never opened by SQLite. 8,170 dispatches. | `integrity_check` ok; digest in the JSON |
 | `rico-mode/state/executor-scoreboard.jsonl` | Current file: 1,027 tasks / 1,374 attempts. Regenerated at 02:49, after the report. | digest in the JSON |
-| Report working files (`/tmp/sb`) | Frozen per-task attempt file the report's tables were computed from (`tasks-cost.json`), price table, extracted Claude/Codex usage. Survived on this machine and copied privately. | digests in the JSON |
+| Report working files (scratch directory) | Frozen per-task attempt file the report's tables were computed from (`tasks-cost.json`), price table, extracted Claude/Codex usage. Survived on this machine and copied privately. | digests in the JSON |
 | Claude Code transcripts | Raw session files **plus `subagents/` transcripts**, deduplicated by message id | read in place, read-only |
 
 ### Report reproduction
@@ -157,8 +157,9 @@ From a checkout, the committed evidence and tests:
 
 Private local replay. The outputs contain identifiers: keep them in the private directory and never commit or upload them.
 
-    P=~/private/office-aa-862; mkdir -p $P/src; chmod 700 $P
-    S=~/.local/share/auto-office
+    # P: a private directory outside any repo. S: the Office data directory that holds runs.db.
+    P=<private dir>; mkdir -p $P/src; chmod 700 $P
+    S=<office data dir>
     shasum -a 256 $S/runs.db $S/runs.db-wal > $P/before
     cp $S/runs.db $S/runs.db-wal $P/src/
     shasum -a 256 $S/runs.db $S/runs.db-wal | diff - $P/before   # must be empty, else repeat
