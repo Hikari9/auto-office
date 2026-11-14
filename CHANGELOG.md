@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.20.1
+
+Honor exact, size-scoped user allows when admitting Hydrogen executor candidates (#1166).
+
 ## 3.20.0
 
 An exact user allow of an agy Hydrogen executor route now dispatches as a normal executor route (exact probe pass required, no canary reservation, S/M/enabled/risk checks skipped) and `office route policy` says so (#1163, #1162).
