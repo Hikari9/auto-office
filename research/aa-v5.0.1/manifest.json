@@ -1,0 +1,198 @@
+{
+  "dataset_id": "office-aa-v5.0.1-evidence-2026-11-14",
+  "research_only": true,
+  "index_version": "Artificial Analysis Intelligence Index v5.0.1",
+  "component_editions": {
+    "frontier_code2": "FrontierCode-AA 2.0",
+    "terminal_bench4": "Terminal-Bench 4.0"
+  },
+  "engineering_index": "Artificial Analysis Engineering Index (same-day public snapshot; no cross-version assumption)",
+  "source_method": "exact effort public Artificial Analysis model HTML, decoded Next flight row; version checked",
+  "source_origin": "https://artificialanalysis.ai",
+  "policy_reference": "https://github.com/Hikari9/auto-office/issues/1143",
+  "production_index_unchanged": "Artificial Analysis Intelligence Index v4.3.2",
+  "targets": [
+    {
+      "route_key": "claude/claude-haiku-5-5@medium",
+      "aa_slug": "claude-haiku-5-5-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-haiku-5-5@high",
+      "aa_slug": "claude-haiku-5-5-high",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "codex/gpt-6.1-terra@low",
+      "aa_slug": "gpt-6-1-terra-low",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "codex/gpt-6.1-terra@medium",
+      "aa_slug": "gpt-6-1-terra-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "codex/gpt-6.1-terra@high",
+      "aa_slug": "gpt-6-1-terra-high",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-sonnet-5-5@medium",
+      "aa_slug": "claude-sonnet-5-5-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/claude-sonnet-5-5@medium",
+      "aa_slug": "claude-sonnet-5-5-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-sonnet-5-5@high",
+      "aa_slug": "claude-sonnet-5-5-high",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/claude-sonnet-5-5@high",
+      "aa_slug": "claude-sonnet-5-5-high",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-opus-5-5@medium",
+      "aa_slug": "claude-opus-5-5-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/claude-opus-5-5@medium",
+      "aa_slug": "claude-opus-5-5-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "codex/gpt-6.1-sol@medium",
+      "aa_slug": "gpt-6-1-sol-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-argon@high",
+      "aa_slug": "gemini-4-argon",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-argon@medium",
+      "aa_slug": null,
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": "AA release publishes only Argon High; no exact-effort Medium measurement"
+    },
+    {
+      "route_key": "agy/gemini-3.8-flash@low",
+      "aa_slug": "gemini-3-8-flash-low",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-3.8-flash@medium",
+      "aa_slug": "gemini-3-8-flash-medium",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "codex/gpt-6-luna@high",
+      "aa_slug": "gpt-6-luna-high",
+      "role": "executor",
+      "catalog_status": "in_catalog",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-hydrogen@low",
+      "aa_slug": "gemini-4-hydrogen-low",
+      "role": "executor",
+      "catalog_status": "pending_pr_1142",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-hydrogen@medium",
+      "aa_slug": "gemini-4-hydrogen-medium",
+      "role": "executor",
+      "catalog_status": "pending_pr_1142",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-hydrogen@high",
+      "aa_slug": "gemini-4-hydrogen-high",
+      "role": "executor",
+      "catalog_status": "pending_pr_1142",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "agy/gemini-4-hydrogen@xhigh",
+      "aa_slug": "gemini-4-hydrogen",
+      "role": "executor",
+      "catalog_status": "pending_pr_1142",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-fable-5-2@low",
+      "aa_slug": "claude-fable-5-2-low",
+      "role": "planner",
+      "catalog_status": "pending_pr_1133",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-fable-5-2@medium",
+      "aa_slug": "claude-fable-5-2-medium",
+      "role": "planner",
+      "catalog_status": "pending_pr_1133",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-fable-5-2@high",
+      "aa_slug": "claude-fable-5-2-high",
+      "role": "planner",
+      "catalog_status": "pending_pr_1133",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-fable-5-2@xhigh",
+      "aa_slug": "claude-fable-5-2-xhigh",
+      "role": "planner",
+      "catalog_status": "pending_pr_1133",
+      "missing_source_reason": null
+    },
+    {
+      "route_key": "claude/claude-fable-5-2@max",
+      "aa_slug": "claude-fable-5-2",
+      "role": "planner",
+      "catalog_status": "pending_pr_1133",
+      "missing_source_reason": null
+    }
+  ]
+}
