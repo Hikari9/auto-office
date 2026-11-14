@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.20.2
+
+Research only (#862): AA v5.0.1 evidence sidecar, read-only Office outcome extractor and A/B/C shadow calibration replayed on local outcomes. No winner over a base rate; production v4.3.2 scoring, floors and #1143 policy unchanged (#1144).
+
 ## 3.20.1
 
 Honor exact, size-scoped user allows when admitting Hydrogen executor candidates (#1166).

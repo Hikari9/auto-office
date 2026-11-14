@@ -135,63 +135,63 @@
       "route_key": "agy/gemini-4-hydrogen@low",
       "aa_slug": "gemini-4-hydrogen-low",
       "role": "executor",
-      "catalog_status": "pending_pr_1142",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "agy/gemini-4-hydrogen@medium",
       "aa_slug": "gemini-4-hydrogen-medium",
       "role": "executor",
-      "catalog_status": "pending_pr_1142",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "agy/gemini-4-hydrogen@high",
       "aa_slug": "gemini-4-hydrogen-high",
       "role": "executor",
-      "catalog_status": "pending_pr_1142",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "agy/gemini-4-hydrogen@xhigh",
       "aa_slug": "gemini-4-hydrogen",
       "role": "executor",
-      "catalog_status": "pending_pr_1142",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "claude/claude-fable-5-2@low",
       "aa_slug": "claude-fable-5-2-low",
       "role": "planner",
-      "catalog_status": "pending_pr_1133",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "claude/claude-fable-5-2@medium",
       "aa_slug": "claude-fable-5-2-medium",
       "role": "planner",
-      "catalog_status": "pending_pr_1133",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "claude/claude-fable-5-2@high",
       "aa_slug": "claude-fable-5-2-high",
       "role": "planner",
-      "catalog_status": "pending_pr_1133",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "claude/claude-fable-5-2@xhigh",
       "aa_slug": "claude-fable-5-2-xhigh",
       "role": "planner",
-      "catalog_status": "pending_pr_1133",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     },
     {
       "route_key": "claude/claude-fable-5-2@max",
       "aa_slug": "claude-fable-5-2",
       "role": "planner",
-      "catalog_status": "pending_pr_1133",
+      "catalog_status": "in_catalog",
       "missing_source_reason": null
     }
   ]

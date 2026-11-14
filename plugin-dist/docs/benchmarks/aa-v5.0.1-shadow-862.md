@@ -2,7 +2,7 @@
 
 **November 14, 2026. Research-only; shadow mode. No production scoring/index/floor/trust/role/seed/trial-cap change or deployment.** Updated the same day with a local replay against real Office outcomes (section "Local replay").
 
-Tracking: [#862](https://github.com/Hikari9/auto-office/issues/862); [approved executor policy #1143](https://github.com/Hikari9/auto-office/issues/1143); independent model PRs [Hydrogen #1142](https://github.com/Hikari9/auto-office/pull/1142) and [Fable #1133](https://github.com/Hikari9/auto-office/pull/1133).
+Tracking: [#862](https://github.com/Hikari9/auto-office/issues/862); [approved executor policy #1143](https://github.com/Hikari9/auto-office/issues/1143); Hydrogen ([#1142](https://github.com/Hikari9/auto-office/pull/1142), landed via #1146) and Fable ([#1133](https://github.com/Hikari9/auto-office/pull/1133)) are now in the shipped catalog, so their evidence rows carry `in_catalog`.
 
 ## Evidence distinctions
 
@@ -200,7 +200,7 @@ A shadow ranking is **not** an instruction to alter the approved seeds or trial 
 
 ## CI, rollback and owner decision
 
-`.github/workflows/aa-v5-shadow-research.yml` is a narrow offline workflow: no AA network calls, no live dispatch, no deployment. Remote CI is off for this repository, so the same commands run locally through `scripts/validate.sh --pr`.
+Remote CI is off for this repository, so the research guards run locally: the Reproduce commands above, and `scripts/validate.sh --pr` on any change to these files. They make no AA network calls, no live dispatch and no deployment.
 
 - **Validates:** exact edition, effort, provenance and null handling; the pinned v4 catalog; the fixed #1143 shadow rungs; fixture replay; refusal to score without outcomes.
 - **Untouched:** runtime code, catalog benchmark tables, role eligibility, invocation slugs, review gates and trusted scores.
