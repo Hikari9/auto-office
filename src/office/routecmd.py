@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from office import adapters, candidates, config as cfg, configcmd, route_policy, scoring
+from office import adapters, candidates, config as cfg, configcmd, hydrogen_trials, route_policy, scoring
 from office.result import Result
 
 
@@ -49,9 +49,27 @@ def _canonicalize(spec: str) -> str:
     return f"{harness}@{major}/{target}@{effort}" if major.isdigit() else f"{harness}/{target}@{effort}"
 
 
-def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True) -> tuple[bool, str]:
-    """(dispatches, why) for one catalog route under one role (#845). An allow dispatches with no proof;
-    a catalog or overlay `dispatchable: false` only stops a route the user has not allowed."""
+def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True, *,
+                   candidate: dict | None = None, role: str = "executor", size: str | None = None,
+                   config: dict | None = None, probe: dict | None = None) -> tuple[bool, str]:
+    """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
+    if hydrogen_trials.is_hydrogen(candidate or row):
+        candidate = candidate or {**row, "harness": row.get("invocation_harness")}
+        rules = ("Hydrogen canary is executor-only; exact agy effort per size (XS/low, S/medium, M/high, L/high); "
+                 "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
+                 "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
+                 "both require a fresh exact conformance probe pass; agy probes currently refuse with no-identity-readback")
+        refusal = (hydrogen_trials.route_refusal(candidate, role=role, size=size, manual=False, config=config)
+                   if size or role != "executor" else "depends on task size")
+        if role == "executor":
+            if state["state"] == "deny":
+                refusal = f"denied by {state['source']}"
+            elif not installed:
+                refusal = f"{candidate.get('harness')} is not installed here"
+            elif not has_profile:
+                refusal = f"{candidate.get('harness')} has no launch profile for this role"
+        proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
+        return False, f"{refusal or 'depends on task eligibility and canary limits'}; {rules}{proof}"
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
     if not installed:
@@ -94,11 +112,12 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
     roles = (role,) if role else tuple(sorted(route_policy.POLICY_ROLES))
     show_rows = role is not None or effective
     output = []
-    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate; "
+    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate, except the Hydrogen canary; "
              "a runtime failure is logged and falls back to the next eligible route:"]
     lines.append(f"  for task size {size}" if size else
                  "  task size unknown: size-scoped rules do not apply (use --size XS|S|M|L|XL)")
     unknown_versions = set()
+    con = None
     for r in roles:
         count = {"allow": 0, "neutral": 0, "deny": 0}
         kind = candidates.KIND_FOR_ROLE.get(r, "worker")
@@ -118,7 +137,14 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
             state = route_policy.effective_role_state(c, r, [seed, p], size)
-            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)))
+            probe = None
+            if hydrogen_trials.is_hydrogen(c):
+                from office import db, route_probe
+                if con is None:
+                    con = db.connect()
+                probe = route_probe.status(con, c)
+            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)),
+                                             candidate=c, role=r, size=size, config=cfg_effective, probe=probe)
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
@@ -136,6 +162,8 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
         if show_rows:
             lines += role_lines
+    if con is not None:
+        con.close()
     rows = candidates.catalog_rows()
     for r in roles:
         seed = route_policy.preferred_seed_policy(r, candidates.role_policy(cfg_effective, r).get("preferred_seed"))
@@ -212,7 +240,7 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     backup = configcmd._write(path, raw)
     lines = [f"{role}/{label}: {'cleared user rule' if action == 'clear' else action} (user config)"]
     if action == "allow":
-        lines.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
+        lines.append("an allowed route dispatches with no proof or qualification gate, except the Hydrogen canary; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
     if action == "clear":
