@@ -1068,7 +1068,8 @@ def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: b
             blocked = hydrogen_trials.trial_refusal(con, run, task, decision["candidate"], fallback, config)
     # A trial is a separate admission path. Even if a future catalog switches
     # Hydrogen to dispatchable, it must never launch through ordinary scoring.
-    elif hydrogen_trials.is_hydrogen(decision.get("candidate")) and not manual:
+    elif (hydrogen_trials.is_hydrogen(decision.get("candidate")) and not manual
+          and not (decision.get("candidate") or {}).get("hydrogen_user_allow")):
         raise Refused("hydrogen-trial-required", "automatic Hydrogen requires an atomic qualified trial reservation")
     reservation = None
     if eligible:
