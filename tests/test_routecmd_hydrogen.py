@@ -123,3 +123,16 @@ def test_policy_with_invalid_probe_database(monkeypatch, tmp_path):
     assert row["dispatches"] is False
     assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
     assert db_path.read_text() == "not a database"
+
+
+@pytest.mark.parametrize("role,state,expected", [
+    ("executor", {"state": "deny", "source": "user"}, "denied by user"),
+    ("code_reviewer", {"state": "neutral", "source": "default"}, "Hydrogen is executor-only"),
+])
+def test_disabled_canary_note_only_on_unsized_executor(role, state, expected):
+    dispatches, reason = routecmd._dispatch_view(
+        ROW, state, candidate=CANDIDATE, role=role,
+        config={"routing": {"hydrogen_trials": {"enabled": False}}})
+    assert dispatches is False
+    assert reason.startswith(expected)
+    assert "automatic canary disabled" not in reason
