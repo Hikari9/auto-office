@@ -1231,3 +1231,52 @@ def test_recovery_removes_a_dead_claude_probes_transcript_folder(world):
         assert not folder.exists()
     finally:
         ws.remove()
+
+
+def test_status_reads_probe_cache_on_plain_sqlite_connection_without_row_factory(world):
+    with world.con() as con:
+        res = ensure(world, con, world.run())
+        assert res["result"] == "pass"
+
+    plain = sqlite3.connect(world.db_path)
+    try:
+        assert plain.row_factory is None
+        c = cand()
+        rec = route_probe.status(plain, c)
+        assert rec is not None
+        assert rec["fresh"] is True
+        assert rec["result"] == "pass"
+        assert rec["key"] == route_probe.key(c, route_probe._adapter(c))
+    finally:
+        plain.close()
+
+
+def test_reserve_and_expire_stale_work_on_plain_sqlite_connection_without_row_factory(world):
+    with world.con() as con:
+        pass  # ensure schema exists
+
+    c = cand()
+    run = world.run()
+    old_stamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    plain = sqlite3.connect(world.db_path)
+    try:
+        assert plain.row_factory is None
+        first = route_probe.reserve(plain, run, c, attempt_id="att-old", context=ctx(world))
+        assert isinstance(first, dict) and first.get("reserved") is True
+
+        # Second reserve() hits _inflight() on the plain connection and returns Refused("probe-in-flight", ...).
+        second = route_probe.reserve(plain, run, c, attempt_id="att-new", context=ctx(world))
+        assert isinstance(second, Refused)
+        assert second.reason == "probe-in-flight"
+
+        # Backdate reservation so expire_stale() hits _rows_dicts, _close, and _reserved_event on plain connection.
+        plain.execute("UPDATE route_probe_reservations SET reserved_at=? WHERE id=?", (old_stamp, "att-old"))
+        plain.commit()
+        route_probe._release("att-old")
+
+        expired = route_probe.expire_stale(plain)
+        assert expired == ["att-old"]
+        assert route_probe.status(plain, c) is None
+    finally:
+        plain.close()

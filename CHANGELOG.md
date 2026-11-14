@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.19.2
+
+`route_probe` cache and reservation reads now build dicts from `cursor.description` so callers passing a plain `sqlite3.Connection` without `row_factory = sqlite3.Row` (such as `routing.route` -> `hydrogen_trials.manual_conformance` on rerun) no longer crash (#1156).
+
 ## 3.19.1
 
 `office route policy` unsized Hydrogen rows now note when the automatic canary is disabled, and `tests/test_routecmd_hydrogen.py` pins `dispatches is False` vs `dispatches is None` (#1151).

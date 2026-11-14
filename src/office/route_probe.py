@@ -142,9 +142,24 @@ def _parsed(value: str | None) -> datetime | None:
     return dt
 
 
+def _row_dict(cur, row) -> dict | None:
+    """Convert a fetched row to a dict whether or not the connection uses sqlite3.Row."""
+    if row is None:
+        return None
+    if isinstance(row, (dict, sqlite3.Row)):
+        return dict(row)
+    return {col[0]: val for col, val in zip(cur.description or (), row)}
+
+
+def _rows_dicts(cur) -> list[dict]:
+    """Convert all fetched rows to dicts regardless of the connection's row_factory."""
+    cols = [col[0] for col in (cur.description or ())]
+    return [dict(row) if isinstance(row, (dict, sqlite3.Row)) else dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 def _cache_row(con, probe_key: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_probes WHERE key=?", (probe_key,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_probes WHERE key=?", (probe_key,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def _is_fresh(rec: dict, ttl_days: float, timeout_s: float, now: datetime) -> bool:
@@ -697,9 +712,9 @@ def candidate_from_spec(spec: str) -> dict:
 # ------------------------------------------------------------------ reserve
 
 def _inflight(con, probe_key: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_probe_reservations WHERE probe_key=? AND status='reserved'",
-                      (probe_key,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_probe_reservations WHERE probe_key=? AND status='reserved'",
+                      (probe_key,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dict | None = None,
@@ -803,9 +818,9 @@ def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dic
 # ------------------------------------------------------------------ expiry
 
 def _reserved_event(con, attempt_id: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? AND kind='probe-reserved' "
-                      "ORDER BY seq LIMIT 1", (attempt_id,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? AND kind='probe-reserved' "
+                      "ORDER BY seq LIMIT 1", (attempt_id,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def _close(con, attempt_id: str, status_: str, detail: str, *, kind: str, outcome: str) -> bool:
@@ -817,7 +832,8 @@ def _close(con, attempt_id: str, status_: str, detail: str, *, kind: str, outcom
         if cur.rowcount != 1:
             return False
         reserved = _reserved_event(con, attempt_id)
-        row = con.execute("SELECT probe_key, run_id FROM route_probe_reservations WHERE id=?", (attempt_id,)).fetchone()
+        row_cur = con.execute("SELECT probe_key, run_id FROM route_probe_reservations WHERE id=?", (attempt_id,))
+        row = _row_dict(row_cur, row_cur.fetchone())
         # The cache holds verdicts. An attempt that reached none leaves nothing behind.
         con.execute("DELETE FROM route_probes WHERE key=? AND attempt_id=? AND result='pending'",
                     (row["probe_key"], attempt_id))
@@ -849,7 +865,7 @@ def expire_stale(con, *, now: datetime | None = None) -> list[str]:
     now = now or _utcnow()
     expired = []
     try:
-        rows = con.execute("SELECT * FROM route_probe_reservations WHERE status='reserved'").fetchall()
+        rows = _rows_dicts(con.execute("SELECT * FROM route_probe_reservations WHERE status='reserved'"))
     except sqlite3.OperationalError:
         return expired
     for row in rows:
