@@ -1030,11 +1030,16 @@ def _agy_events(text: str) -> list[dict]:
 def _agy_init(text: str, ws=None) -> dict[str, str] | None:
     """The model agy itself reports in its first `init` event, and the effort tier that
     slug names. agy enforces the slug's tier against `--effort` (a contradiction exits
-    nonzero), so the tier is the effort the session ran at. Only the first event is read,
+    nonzero), so the tier is the effort the session ran at. Only the first `init` before any step or result event is read,
     and the model's reply, which is JSON-escaped inside later events, is never identity
     evidence."""
-    events = _agy_events(text)
-    init = events[0].get("init") if events and events[0].get("event") == "init" else None
+    init = None
+    for event in _agy_events(text):
+        if event.get("event") in ("step_update", "result"):
+            break  # the session has started: no later init is the harness's own
+        if event.get("event") == "init":
+            init = event.get("init")
+            break
     model = init.get("model") if isinstance(init, dict) else None
     if not isinstance(model, str) or not model:
         return None

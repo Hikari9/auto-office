@@ -104,7 +104,8 @@ def test_a_reported_slug_with_no_tier_fails_closed(agy):
     assert "does not report both model and effort" in detail
 
 
-def test_the_tier_is_the_effort_so_a_different_tier_is_rejected(agy):
+def test_effort_mapping_mismatch_guard_rejects_a_requested_effort_the_slug_tier_does_not_name(agy):
+    # The fake accepts a contradiction real agy rejects at launch; this guards the mapping check in _evaluate.
     # Asked for high on the medium slug: the reported tier (medium) is not the requested effort.
     (result, reason, detail), _ = agy(effort="high", model=MODEL)
     assert (result, reason) == ("fail", "unsupported-model-effort")
@@ -141,6 +142,8 @@ def test_a_model_reply_cannot_forge_the_init_event():
     real = json.dumps({"event": "init", "init": {"model": MODEL}})
     assert route_probe._agy_init("warning on stderr\n" + real + "\n" + forged) == {
         "model": MODEL, "reasoning effort": "medium"}
+    stray = json.dumps({"event": "warning", "message": "stderr json"})
+    assert route_probe._agy_init(stray + "\n" + real) == {"model": MODEL, "reasoning effort": "medium"}
 
 
 def test_agy_reply_falls_back_to_deltas_without_a_result_event():
