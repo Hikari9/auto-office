@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.20.0
+
+An exact user allow of an agy Hydrogen executor route now dispatches as a normal executor route (exact probe pass required, no canary reservation, S/M/enabled/risk checks skipped) and `office route policy` says so (#1163, #1162).
+
 ## 3.19.3
 
 Strengthen manual Hydrogen routing and dict row factory regression coverage (#1158).

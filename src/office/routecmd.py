@@ -59,11 +59,13 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
         rules = ("Hydrogen canary is executor-only; exact agy effort per size (XS/low, S/medium, M/high, L/high); "
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
-                 "both require a fresh exact conformance probe pass; agy probes currently refuse with no-identity-readback")
+                 "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "
+                 "canary limits (enabled flag, S/M, risk) but still needs that pass")
         # Synthetic risk/descriptor are hypothetical, for display only.
+        allowed = hydrogen_trials.user_allowed(state)
         if size or role != "executor":
             refusal = hydrogen_trials.route_refusal(
-                candidate, role=role, size=size, manual=False, config=config,
+                candidate, role=role, size=size, manual=False, user_allowed=allowed, config=config,
                 risk={"size_class": size, "blast_radius": "local"},
                 descriptor={"task_size": size, "bounds": "bounded", "domain": "repo"})
         else:
@@ -76,6 +78,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
         elif role == "executor" and not has_profile:
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
+        if refusal is None and allowed and size:
+            if not proof:
+                return True, ("dispatches (user allow; exact probe passed) as a normal executor route for this size, "
+                              "outside the automatic canary limits; " + rules)
+            return False, f"user allow; {rules}{proof}"
         if refusal is None and not proof:
             return None, ("can dispatch as an automatic canary trial on eligible bounded, reversible, low-risk S/M tasks, "
                           "within 3 per rolling 20 and 1 per run, after a cold start of 19 recorded opportunities; " + rules)

@@ -48,10 +48,24 @@ def exact_effort(size: str) -> str | None:
     return {"XS": "low", "S": "medium", "M": "high", "L": "high"}.get(size)
 
 
+def user_allowed(rule: dict | None) -> bool:
+    """Whether an effective role rule is the user's own exact-route allow (#1163).
+
+    `rule` is route_policy.effective_role_state for this candidate, role and size, so size scope
+    is already applied. A wildcard route, a shipped/seed/override source or a non-allow never counts.
+    """
+    from office import route_policy
+    rule = rule or {}
+    return (rule.get("state") == "allow" and rule.get("source") == "user"
+            and route_policy._is_exact_spec(rule.get("rule")))
+
+
 def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
                   config: dict | None = None, risk: dict | None = None,
-                  descriptor: dict | None = None) -> str | None:
-    """Hard veto even when a user allow, benchmark bypass or adaptive exploration exists."""
+                  descriptor: dict | None = None, user_allowed: bool = False) -> str | None:
+    """Hard veto even when a user allow, benchmark bypass or adaptive exploration exists.
+
+    `user_allowed` (see `user_allowed()`) skips only the automatic-canary checks, like `manual`."""
     if not is_hydrogen(candidate):
         return None
     if role != "executor":
@@ -60,8 +74,8 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
         return "Hydrogen is excluded for XL and unclassified tasks"
     if candidate.get("harness") != "agy" or candidate.get("effort") != exact_effort(size):
         return "Hydrogen requires the exact approved agy model/size/effort"
-    if manual:
-        return None  # exact conformance checked separately; manual never opens the automatic canary
+    if manual or user_allowed:
+        return None  # exact conformance checked separately; neither opens the automatic canary
     if size not in ("S", "M"):
         return "Hydrogen XS/L requires explicit manual selection after conformance"
     if not settings(config)["enabled"]:

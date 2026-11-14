@@ -542,16 +542,21 @@ def route(request: dict, discovery_input: dict | None = None, *,
             # Permanent hard veto: no benchmark waiver, role override, generic
             # 'allow', or adaptive exploration can turn Hydrogen into a normal
             # executor. Trial candidates stay in the unqualified discovery pool.
+            # A user's exact-route allow is admitted like a manual route: exact probe pass, no canary.
+            user_allow = hydrogen_trials.is_hydrogen(c) and hydrogen_trials.user_allowed(role_rule)
+            if user_allow or c.get("hydrogen_user_allow"):
+                c = {**{k: v for k, v in c.items() if k != "hydrogen_user_allow"},
+                     **({"hydrogen_user_allow": True} if user_allow else {})}
+            exact_only = bool(request.get("manual_route")) or user_allow
             hydro_denial = hydrogen_trials.route_refusal(
                 c, role=role, size=new_policy_size,
-                manual=bool(request.get("manual_route")),
+                manual=bool(request.get("manual_route")), user_allowed=user_allow,
                 config=request.get("hydrogen_policy"), risk=request.get("hydrogen_risk"),
                 descriptor=request.get("hydrogen_descriptor"))
-            if (not hydro_denial and hydrogen_trials.is_hydrogen(c) and request.get("manual_route")):
+            if not hydro_denial and hydrogen_trials.is_hydrogen(c) and exact_only:
                 hydro_denial = hydrogen_trials.manual_conformance(
                     con, c, role=role, size=new_policy_size)
-            if (not hydro_denial and hydrogen_trials.is_hydrogen(c)
-                    and not request.get("manual_route")
+            if (not hydro_denial and hydrogen_trials.is_hydrogen(c) and not exact_only
                     and not request.get("hydrogen_independent_review")):
                 hydro_denial = "Hydrogen automatic trial needs independent code review"
             if hydro_denial:
@@ -583,7 +588,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
                                  "category": "size-model-restriction"})
-            elif hydrogen_trials.is_hydrogen(c) and not request.get("manual_route"):
+            elif hydrogen_trials.is_hydrogen(c) and not exact_only:
                 # Even a future dispatchable catalog row must not bypass the
                 # reserved-trial path. A probe pass alone is not launch consent.
                 pool.append(c)
@@ -638,11 +643,13 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
-            if hydrogen_trials.is_hydrogen(c) and request.get("manual_route"):
-                # Only a manual route with fresh exact model+effort proof passed the
-                # hard stage-1 gate. Missing v4 AA score is disclosed, never
-                # invented; explicit manual choice is not an automatic trial.
-                eligibility[cid]["qualification"] = "explicit manual exact conformance; AA v4 may be unscored"
+            if hydrogen_trials.is_hydrogen(c) and (request.get("manual_route") or c.get("hydrogen_user_allow")):
+                # Only a manual route or exact user allow with fresh exact model+effort proof
+                # passed the hard stage-1 gate. Missing v4 AA score is disclosed, never
+                # invented; neither is an automatic trial.
+                eligibility[cid]["qualification"] = ("explicit manual exact conformance; AA v4 may be unscored"
+                                                     if request.get("manual_route") else
+                                                     "user allow with exact conformance; AA v4 may be unscored")
                 nxt.append(c)
                 continue
             waiver = (executor_slates.floor_exception(c, new_policy_size, role, executor_policy)

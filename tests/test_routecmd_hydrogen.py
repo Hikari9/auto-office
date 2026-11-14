@@ -17,12 +17,13 @@ def test_unsized_hydrogen_requires_proof(enabled, state):
         config={"routing": {"hydrogen_trials": {"enabled": enabled}}})
     assert dispatches is False
     for text in ("depends on task size", "executor-only", "S/medium", "3 per rolling 20", "one per run",
-                 "manual --as", "fresh exact conformance probe pass", "no-identity-readback",
+                 "manual --as", "fresh exact conformance probe pass",
                  "cannot dispatch until a fresh exact probe passes"):
         assert text in reason
     assert ("automatic canary disabled" in reason) is (not enabled)
     assert "your allow overrides this" not in reason
     assert "`office route allow` makes it dispatch" not in reason
+    assert "no-identity-readback" not in reason
 
 
 def test_reviewer_and_sized_canary_reasons():
@@ -136,3 +137,20 @@ def test_disabled_canary_note_only_on_unsized_executor(role, state, expected):
     assert dispatches is False
     assert reason.startswith(expected)
     assert "automatic canary disabled" not in reason
+
+
+def test_exact_user_allow_dispatches_only_with_a_fresh_pass():
+    state = {"state": "allow", "source": "user", "rule": "agy/gemini-4-hydrogen@medium"}
+    dispatches, reason = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S",
+                                                 probe={"result": "pass"})
+    assert dispatches is True
+    assert reason.startswith("dispatches (user allow; exact probe passed)")
+    assert "cannot dispatch until" not in reason and "no-identity-readback" not in reason
+    dispatches, reason = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S")
+    assert dispatches is False
+    assert "cannot dispatch until a fresh exact probe passes" in reason
+    assert not reason.startswith("dispatches")
+    for bad in ({**state, "rule": "agy/gemini-4-hydrogen"}, {**state, "source": "shipped"}):
+        dispatches, reason = routecmd._dispatch_view(ROW, bad, candidate=CANDIDATE, size="S",
+                                                     probe={"result": "pass"})
+        assert dispatches is not True
