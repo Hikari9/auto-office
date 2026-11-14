@@ -1251,6 +1251,17 @@ def test_status_reads_probe_cache_on_plain_sqlite_connection_without_row_factory
         plain.close()
 
 
+def test_status_reads_same_record_with_dict_row_factory(world):
+    with world.con() as con:
+        assert ensure(world, con, world.run())["result"] == "pass"
+        expected = route_probe.status(con, cand())
+        assert expected is not None
+
+    with sqlite3.connect(world.db_path) as con:
+        con.row_factory = lambda cursor, row: dict(zip((col[0] for col in cursor.description), row))
+        assert route_probe.status(con, cand()) == expected
+
+
 def test_reserve_and_expire_stale_work_on_plain_sqlite_connection_without_row_factory(world):
     with world.con() as con:
         pass  # ensure schema exists
