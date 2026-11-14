@@ -918,7 +918,7 @@ _PATTERNS = (
         r"unsupported (?:reasoning[ _-]?)?(?:effort|model|value)|invalid (?:reasoning[ _-]?)?(?:effort|model)|"
         r"(?:effort|reasoning_effort)[^\n]{0,60}(?:not supported|invalid|unsupported|unknown)|"
         r"(?:not supported|does not support)[^\n]{0,60}(?:effort|reasoning)|"
-        r"(?:unknown|unrecognized|no such) model|"
+        r"(?:unknown|unrecognized|no such) model|conflicts with --effort|"
         r"model[^\n]{0,60}(?:not found|does not exist|not supported|is not available)", re.I)),
     ("transient", re.compile(
         r"timed? ?out|connection (?:reset|refused|closed|error)|network (?:error|unreachable)|temporar(?:y|ily)|"
@@ -1010,9 +1010,57 @@ def _claude_transcript(ws: "_Workspace") -> dict[str, str] | None:
     return final
 
 
+_AGY_TIER = re.compile(r"-(low|medium|high|xhigh)$")
+
+
+def _agy_events(text: str) -> list[dict]:
+    """The NDJSON events of an `agy --output-format stream-json` run. stderr shares the
+    stream, so a line that is not a JSON object is skipped."""
+    events = []
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            events.append(record)
+    return events
+
+
+def _agy_init(text: str, ws=None) -> dict[str, str] | None:
+    """The model agy itself reports in its first `init` event, and the effort tier that
+    slug names. agy enforces the slug's tier against `--effort` (a contradiction exits
+    nonzero), so the tier is the effort the session ran at. Only the first event is read,
+    and the model's reply, which is JSON-escaped inside later events, is never identity
+    evidence."""
+    events = _agy_events(text)
+    init = events[0].get("init") if events and events[0].get("event") == "init" else None
+    model = init.get("model") if isinstance(init, dict) else None
+    if not isinstance(model, str) or not model:
+        return None
+    tier = _AGY_TIER.search(model.strip().lower())
+    return {"model": model, **({"reasoning effort": tier.group(1)} if tier else {})}
+
+
+def _agy_reply(text: str) -> str:
+    """The reply text of a stream-json run: the final `result` event's `response`, else the
+    concatenated agent_response deltas. It is what the probe's reply check reads."""
+    events = _agy_events(text)
+    for event in reversed(events):
+        result = event.get("result") if event.get("event") == "result" else None
+        if isinstance(result, dict) and isinstance(result.get("response"), str):
+            return result["response"]
+    return "".join(str(step.get("text_delta") or "") for event in events
+                   for step in [event.get("step_update")] if isinstance(step, dict)
+                   and step.get("step_type") == "agent_response")
+
+
 # Harness id -> reader of authoritative model and effort metadata, given the launch's output and workspace.
 # A harness absent here is never probed.
-_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws)}
+_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws),
+                      "agy": _agy_init}
+# Harness id -> extra probe-only launch argv (given the mapped effort). Real dispatch argv never gains these.
+_PROBE_ARGV = {"agy": lambda effort: ["--output-format", "stream-json", "--effort", effort]}
 
 
 def classify_text(text: str) -> str | None:
@@ -1281,7 +1329,8 @@ def _evaluate(launch: dict, ws: _Workspace, prompt: str, harness: str, expected_
         return "fail", "conformance-failed", f"harness reported model {seen_model}, asked {expected_model}"
     if expected_effort is None or _normal(seen_effort) != _normal(expected_effort):
         return ("fail", "unsupported-model-effort", f"harness reported effort {seen_effort}, asked {expected_effort}")
-    if not re.search(rf"^[ \t]*PROBE-OK[ \t]+{re.escape(ws.token)}[ \t]*$", text, re.M):
+    reply = _agy_reply(text) if harness == "agy" else text
+    if not re.search(rf"^[ \t]*PROBE-OK[ \t]+{re.escape(ws.token)}[ \t]*$", reply, re.M):
         return "fail", classify_text(text) or "conformance-failed", f"no well-formed probe reply: {tail}"
     written = ws.output_file()
     if written is None or written.strip() != ws.token:
@@ -1307,12 +1356,14 @@ def _run_probe(reservation: dict, cand: dict, adapter: dict) -> tuple[str, str |
                                              effort=fp["effort"], cwd=ws.wt)
         except adapters.AdapterError as exc:
             return "fail", "isolation-missing", str(exc)
+        effort = adapters.effort_value(adapter, fp["effort"])
+        if effort is not None and fp["harness"] in _PROBE_ARGV:
+            argv = [*argv, *_PROBE_ARGV[fp["harness"]](effort)]
         env = _probe_env(reservation["attempt_id"], reservation["probe_key"], ws, fp["harness"], uuid.uuid4().hex)
         launch = _launch([*_boundary_argv(ws), *argv], prof, prompt, ws.wt, env, float(settings["probe_timeout_s"]),
                          reservation["attempt_id"], ws.base,
                          observe=(lambda: watch_claude_transcript(ws)) if fp["harness"] == "claude" else None)
-        return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"],
-                         adapters.effort_value(adapter, fp["effort"]))
+        return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"], effort)
     finally:
         ws.remove()
 
