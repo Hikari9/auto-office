@@ -613,7 +613,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      quota_snapshot: dict[str, dict] | None = None,
                      discovery: dict | None = None,
                      user_policies: list[dict] | None = None,
-                     allow_policies: list[dict] | None = None, manual_hydrogen: bool = False) -> tuple[list[dict], list[dict]]:
+                     allow_policies: list[dict] | None = None, manual_hydrogen: bool = False,
+                     task_size: str | None = None) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -657,17 +658,25 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             state = {**state, "reason": row["status_reason"]}
         floor = below_family_floor(row.get("model_id"), family_floors)
         allowed = None
+        identity = {"harness": harness, "model_id": row.get("model_id"),
+                    "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
+                    "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}
         if (row.get("dispatchable") is False or floor) and allow_pols and adapter and adapters.installed(adapter):
-            allowed = route_policy.user_allows(
-                {"harness": harness, "harness_version": adapters.route_version(harness, adapter, sources),
-                 "model_id": row.get("model_id"), "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
-                 "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}, role, allow_pols)
-        # #1143: generic user allows cannot convert experimental Hydrogen into
-        # an ordinary adaptive route. An explicitly named executor route is
-        # admitted only to run the separate, strict manual conformance checks.
+            identity["harness_version"] = adapters.route_version(harness, adapter, sources)
+            allowed = route_policy.user_allows(identity, role, allow_pols)
         if row.get("model_id") == "gemini-4-hydrogen":
-            allowed = ({"source": "hydrogen-manual", "rule": label}
-                       if role == "executor" and manual_hydrogen else None)
+            from office import hydrogen_trials
+            if role == "executor" and manual_hydrogen:
+                allowed = {"source": "hydrogen-manual", "rule": label}
+            else:
+                sizes = [size for size in route_policy.SIZES
+                         if hydrogen_trials.user_allowed(route_policy.effective_role_state(identity, role, allow_pols, size))
+                         and hydrogen_trials.route_refusal(identity, role=role, size=size, manual=False,
+                                                           user_allowed=True) is None]
+                if not allowed or (task_size is not None and task_size not in sizes) or not sizes:
+                    allowed = None
+                else:
+                    allowed = {**allowed, "sizes": sizes}
         if allowed and row.get("dispatchable") is False:
             # The user's allow outranks the catalog or an overlay: no proof, qualification or trust gate (#845).
             why = "a user catalog overlay disabled it" if row.get("user_disabled") else (
@@ -1190,7 +1199,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[],
-                                           allow_policies=allow_policies, manual_hydrogen=manual_hydrogen)
+                                           allow_policies=allow_policies, manual_hydrogen=manual_hydrogen,
+                                           task_size=effective_task_size)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
