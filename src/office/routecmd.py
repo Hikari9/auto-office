@@ -7,6 +7,7 @@ created by setting a persistent role rule.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from office import adapters, candidates, config as cfg, configcmd, hydrogen_trials, route_policy, scoring
@@ -61,15 +62,14 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
                  "both require a fresh exact conformance probe pass; agy probes currently refuse with no-identity-readback")
         refusal = (hydrogen_trials.route_refusal(candidate, role=role, size=size, manual=False, config=config)
                    if size or role != "executor" else "depends on task size")
-        if role == "executor":
-            if state["state"] == "deny":
-                refusal = f"denied by {state['source']}"
-            elif not installed:
-                refusal = f"{candidate.get('harness')} is not installed here"
-            elif not has_profile:
-                refusal = f"{candidate.get('harness')} has no launch profile for this role"
+        if state["state"] == "deny":
+            refusal = f"denied by {state['source']}"
+        elif role == "executor" and not installed:
+            refusal = f"{candidate.get('harness')} is not installed here"
+        elif role == "executor" and not has_profile:
+            refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
-        return False, f"{refusal or 'depends on task eligibility and canary limits'}; {rules}{proof}"
+        return False, f"{refusal}; {rules}{proof}"
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
     if not installed:
@@ -118,6 +118,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                  "  task size unknown: size-scoped rules do not apply (use --size XS|S|M|L|XL)")
     unknown_versions = set()
     con = None
+    probe_db_checked = False
     for r in roles:
         count = {"allow": 0, "neutral": 0, "deny": 0}
         kind = candidates.KIND_FOR_ROLE.get(r, "worker")
@@ -139,10 +140,19 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
             state = route_policy.effective_role_state(c, r, [seed, p], size)
             probe = None
             if hydrogen_trials.is_hydrogen(c):
-                from office import db, route_probe
-                if con is None:
-                    con = db.connect()
-                probe = route_probe.status(con, c)
+                from office import paths, route_probe
+                if not probe_db_checked:
+                    probe_db_checked = True
+                    try:
+                        con = sqlite3.connect(f"{paths.runs_db().resolve().as_uri()}?mode=ro", uri=True)
+                        con.row_factory = sqlite3.Row
+                    except sqlite3.OperationalError:
+                        pass
+                if con is not None:
+                    try:
+                        probe = route_probe.status(con, c, adapter=adapter)
+                    except sqlite3.OperationalError:
+                        pass  # Missing or unreadable probe evidence cannot qualify the route.
             dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)),
                                              candidate=c, role=r, size=size, config=cfg_effective, probe=probe)
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",

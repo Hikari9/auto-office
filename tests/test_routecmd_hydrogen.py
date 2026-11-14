@@ -48,22 +48,51 @@ def test_non_hydrogen_allow_behavior_unchanged():
         False, "its catalog row is not dispatchable; `office route allow` makes it dispatch")
 
 
-def test_policy_uses_exact_probe_and_enabled_config(monkeypatch, tmp_path):
-    from office import adapters, candidates, config, db, route_probe
+@pytest.mark.parametrize("role,state,installed,profile,expected", [
+    ("executor", {"state": "deny", "source": "user"}, True, True, "denied by user"),
+    ("code_reviewer", {"state": "deny", "source": "seed"}, True, True, "denied by seed"),
+    ("executor", {"state": "neutral", "source": "default"}, False, True, "agy is not installed"),
+    ("executor", {"state": "neutral", "source": "default"}, True, False, "agy has no launch profile"),
+])
+def test_hydrogen_overrides(role, state, installed, profile, expected):
+    dispatches, reason = routecmd._dispatch_view(ROW, state, installed, profile, candidate=CANDIDATE, role=role)
+    assert not dispatches
+    assert reason.startswith(expected)
 
+
+def test_sized_user_allow_does_not_override_canary():
+    dispatches, reason = routecmd._dispatch_view(
+        ROW, {"state": "allow", "source": "user"}, candidate=CANDIDATE, size="S",
+        config={"routing": {"hydrogen_trials": {"enabled": True}}})
+    assert not dispatches
+    assert "bounded, reversible, low-risk" in reason
+    assert "allow overrides" not in reason and "office route allow" not in reason
+
+
+def test_policy_uses_exact_probe_and_enabled_config(monkeypatch, tmp_path):
+    from office import adapters, candidates, config, db, paths, route_probe
+    from office.util import now_iso
+
+    adapter = {"source_notes": "resolved adapter"}
     monkeypatch.setattr(config, "resolve", lambda _: ({"routing": {"hydrogen_trials": {"enabled": True}}}, None))
     monkeypatch.setattr(candidates, "catalog_rows", lambda: [ROW])
-    monkeypatch.setattr(adapters, "load_sources", lambda: {"agy": ({}, None)})
+    monkeypatch.setattr(adapters, "load_sources", lambda: {"agy": (adapter, None)})
+    monkeypatch.setattr(adapters, "load_all", lambda: {"agy": {"source_notes": "different adapter"}})
     monkeypatch.setattr(adapters, "route_version", lambda *args: "1.0")
     monkeypatch.setattr(adapters, "installed", lambda _: True)
     monkeypatch.setattr(adapters, "profile", lambda *_: True)
-    connect = db.connect
-    monkeypatch.setattr(db, "connect", lambda: connect(tmp_path / "runs.db"))
-    seen = []
-    monkeypatch.setattr(route_probe, "status", lambda con, candidate: seen.append(candidate.copy()) or None)
-    result = routecmd.policy(role="executor", size="S")
-    row = result.data["effective"][0]
-    assert seen[0]["effort"] == "medium" and seen[0]["harness"] == "agy"
+    db_path = tmp_path / "runs.db"
+    monkeypatch.setattr(paths, "runs_db", lambda: db_path)
+    row = routecmd.policy(role="executor", size="S").data["effective"][0]
+    assert not db_path.exists()
+    assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
+
+    candidate = {**CANDIDATE, "harness_version": "1.0"}
+    con = db.connect(db_path)
+    con.execute("INSERT INTO route_probes (key, result, probed_at) VALUES (?, 'pass', ?)",
+                (route_probe.key(candidate, adapter), now_iso()))
+    con.close()
+    row = routecmd.policy(role="executor", size="S").data["effective"][0]
     assert not row["dispatches"]
     assert "bounded, reversible, low-risk" in row["dispatch_reason"]
-    assert "cannot dispatch until a fresh exact probe passes" in row["dispatch_reason"]
+    assert "cannot dispatch until" not in row["dispatch_reason"]
