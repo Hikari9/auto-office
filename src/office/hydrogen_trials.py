@@ -14,6 +14,8 @@ MODEL = "gemini-4-hydrogen"
 WINDOW = 20
 CAP = 3
 MAX_PER_RUN = 1
+REVIEW_ROLES = frozenset(("code_reviewer",))  # H3 (#1168): owner promoted Hydrogen to a voting code reviewer
+REVIEW_EFFORT = "high"  # the effort that ran the 5-case planted-bug set (research/hydrogen-shadow)
 CANARY_MAX = 10  # #1168: owner-approved S canary budget ceiling; a config value above it is refused
 HIGH_RISK = frozenset((
     "security", "credential", "credentials", "secret", "secrets", "payment", "payments",
@@ -74,8 +76,17 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
     `user_allowed` (see `user_allowed()`) skips only the automatic-canary checks, like `manual`."""
     if not is_hydrogen(candidate):
         return None
+    if role in REVIEW_ROLES:
+        # H3 (#1168): owner-promoted voting code reviewer. Only the exact @high route that ran the
+        # planted-bug set, only by manual selection or the user's exact allow, always behind a fresh
+        # exact probe (manual_conformance), never through discovery or adaptive exploration.
+        if candidate.get("harness") != "agy" or candidate.get("effort") != REVIEW_EFFORT:
+            return f"Hydrogen reviews only as the exact agy/{MODEL}@{REVIEW_EFFORT} route"
+        if not (manual or user_allowed):
+            return f"Hydrogen review needs the user's exact allow of agy/{MODEL}@{REVIEW_EFFORT} for {role}"
+        return None
     if role != "executor":
-        return "Hydrogen is executor-only (never a reviewer, worker or planner)"
+        return "Hydrogen is an executor or code reviewer only (never a worker, planner or other reviewer)"
     if size not in ("XS", "S", "M", "L"):
         return "Hydrogen is excluded for XL and unclassified tasks"
     if candidate.get("harness") != "agy" or candidate.get("effort") != exact_effort(size):

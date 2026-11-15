@@ -57,7 +57,8 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
-        rules = ("Hydrogen canary is executor-only; exact agy effort per size (XS/low, S/medium, M/high, L/high); "
+        rules = ("Hydrogen executes, and reviews code only as the exact user-allowed agy/gemini-4-hydrogen@high; "
+                 "exact agy effort per size (XS/low, S/medium, M/high, L/high); "
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
                  "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "

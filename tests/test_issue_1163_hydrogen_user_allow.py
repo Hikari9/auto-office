@@ -123,3 +123,48 @@ def test_settle_discovery_launches_user_allowed_hydrogen_without_a_reservation(t
     allowed = {**base, "candidate": {**_cand(), "hydrogen_user_allow": True}}
     settled = dispatch.settle_discovery(None, run, task, allowed, launching=True)
     assert settled["selected"] == "x" and "hydrogen_counter" not in settled
+
+
+# H3 (#1168): Rico promoted Hydrogen to a voting code reviewer at the planted-bug effort (@high).
+REVIEW_SPEC = "agy/gemini-4-hydrogen@high"
+
+
+def test_exact_user_allow_makes_hydrogen_high_a_code_reviewer(tmp_path):
+    cand = _cand("high")
+    decision, _ = _route(tmp_path, cand, _policy(REVIEW_SPEC, role="code_reviewer"), role="code_reviewer")
+    assert decision["status"] == "selected", decision
+    assert decision["selected"] == routing.candidate_id(cand)
+    assert decision["candidate"]["hydrogen_user_allow"] is True
+
+
+@pytest.mark.parametrize("probe", [None, "fail"])
+def test_code_reviewer_hydrogen_still_needs_a_fresh_probe_pass(tmp_path, probe):
+    decision, _ = _route(tmp_path, _cand("high"), _policy(REVIEW_SPEC, role="code_reviewer"),
+                         role="code_reviewer", probe=probe)
+    assert decision["selected"] is None
+    assert any("conformance receipt" in r["reason"] for r in _hydrogen_rejections(decision)), decision
+
+
+@pytest.mark.parametrize("name,policy,effort,role", [
+    ("no-allow", {**_policy(REVIEW_SPEC, role="code_reviewer"), "role_rules": []}, "high", "code_reviewer"),
+    ("wildcard", _policy("agy/gemini-4-hydrogen", role="code_reviewer"), "high", "code_reviewer"),
+    ("seed-source", _policy(REVIEW_SPEC, role="code_reviewer", source="preferred_seed"), "high", "code_reviewer"),
+    ("medium", _policy(SPEC, role="code_reviewer"), "medium", "code_reviewer"),
+    ("plan-reviewer", _policy(REVIEW_SPEC, role="plan_reviewer"), "high", "plan_reviewer"),
+    ("visual-reviewer", _policy(REVIEW_SPEC, role="visual_reviewer"), "high", "visual_reviewer"),
+    ("planner", _policy(REVIEW_SPEC, role="planner"), "high", "planner"),
+])
+def test_reviewer_promotion_is_exact_and_code_review_only(tmp_path, name, policy, effort, role):
+    decision, _ = _route(tmp_path, _cand(effort), policy, role=role)
+    assert decision.get("selected") is None, (name, decision)
+
+
+def test_reviewer_refusal_reasons():
+    c = {"model_id": h.MODEL, "harness": "agy", "effort": "high"}
+    assert h.route_refusal(c, role="code_reviewer", size=None, manual=False, user_allowed=True) is None
+    assert h.route_refusal(c, role="code_reviewer", size=None, manual=True) is None
+    assert "exact allow" in h.route_refusal(c, role="code_reviewer", size=None, manual=False)
+    assert "exact agy/gemini-4-hydrogen@high" in h.route_refusal({**c, "effort": "medium"}, role="code_reviewer",
+                                                                  size=None, manual=False, user_allowed=True)
+    assert "never a worker, planner or other reviewer" in h.route_refusal(c, role="plan_reviewer", size=None,
+                                                                           manual=True)
