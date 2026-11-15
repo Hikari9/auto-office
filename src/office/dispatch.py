@@ -1728,6 +1728,10 @@ def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, sto
         with db.transaction(con):
             state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {why}", audience="runtime",
                        task_id=d.get("task_id"), dispatch_id=d["id"])
+            if d.get("lease_id") and d.get("kind") == "reviewer":
+                # Fences a late `office review submit` from the reviewer this revoke stops.
+                con.execute("UPDATE leases SET revoked_at=?, revoke_reason='revoked' WHERE id=? AND released_at IS NULL "
+                            "AND revoked_at IS NULL", (now_iso(), d["lease_id"]))
     if stop and d.get("launcher") not in (None, "external", "sync"):
         stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
     if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
@@ -1800,9 +1804,12 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
     """Stop and cancel the integrate jobs that own the integration reviews, so
     ending a reviewer cannot make a live job start a fallback or retry."""
     with db.transaction(con):
-        jobs_ = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? "
-                                              "AND kind='integrate' AND status IN ('queued','claimed')",
-                                              (run["id"],)).fetchall()]
+        # The integrate job, and the supervise job of a launched integration reviewer: either would record a result
+        # (or queue a fallback) for a review the orchestrator just ended.
+        jobs_ = [dict(r) for r in con.execute(
+            "SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND (kind='integrate' OR "
+            "(kind='review_supervise' AND json_extract(payload_json,'$.gate_id') IN "
+            "(SELECT id FROM gates WHERE run_id=? AND subject='integration')))", (run["id"], run["id"])).fetchall()]
         for j in jobs_:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))

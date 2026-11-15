@@ -469,18 +469,34 @@ def _review_composed(con, run: dict, job: dict, gid: str, ctx: dict) -> dict:
     commit, branch = ctx["commit"], ctx["branch"]
     results = dict(ctx["results"])
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
-    diff = gates.cap_diff(paths.git(repo, "diff", ctx["base"], commit))
-    checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
-    with db.transaction(con):
-        _set_integration(con, run, review_ctx=ctx)
-    try:
-        brief = briefs.code_review_brief(run, None, ctx["integ_rev"], diff,
-                                         ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
-                                         [], str(checkout), integration=True)
-        outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                                     job=job)
-    finally:
-        gates.remove_checkout(run, checkout)
+    outcome = None
+    if job["payload"].get(gates.SETTLE_KEY):
+        # The reviewer was launched by an earlier run of this review, which left its checkout for it to read.
+        checkout = paths.run_dir(run["id"]) / "checkouts" / f"integration-{gid}"
+        try:
+            outcome = gates.settle_reviewer(con, run, gate, job)
+        finally:
+            gates.remove_checkout(run, checkout)
+    else:
+        diff = gates.cap_diff(paths.git(repo, "diff", ctx["base"], commit))
+        checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
+        with db.transaction(con):
+            _set_integration(con, run, review_ctx=ctx)
+        try:
+            brief = briefs.code_review_brief(run, None, ctx["integ_rev"], diff,
+                                             ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
+                                             [], str(checkout), integration=True)
+            outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout,
+                                         include_dirs=[checkout], job=job)
+        finally:
+            if not gates.review_launched(outcome):  # a launched reviewer reads the checkout until its job settles it
+                gates.remove_checkout(run, checkout)
+    if gates.review_launched(outcome):
+        # The gate stays open: the review_supervise job re-enters this review once the reviewer ends and finishes the
+        # integration from its verdict, so nothing here finalizes the gate.
+        with db.transaction(con):
+            _set_integration(con, run, status="verifying", detail="integration review: the reviewer is running")
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
     if outcome.get("fallback_queued"):
         with db.transaction(con):
             _set_integration(con, run, status="verifying",

@@ -30,14 +30,17 @@ import signal
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from office import briefs, candidates, contract, db, jobs, paths, planfile, review_parse, routing, state, verification_coverage, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
+from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
+ATTEMPT_FILE = "review-attempt.json"  # what a launched reviewer dispatch leaves for the job that settles it
+SETTLE_KEY = "review_settle"  # the job payload key naming the launched dispatch a re-entered review job settles
 MAX_DIFF_CHARS = 120_000
 
 
@@ -921,7 +924,12 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
       review of any run) is re-dispatched, up to `gates.review_redispatch_max` times, before the unavailable outcome
       is returned to be ingested.
     * With no `job` (a caller outside the job flow) the attempts run here, one after another, until one settles
-      the review or the chain is exhausted.
+      the review or the chain is exhausted, each waited on.
+    * A `job` launches the reviewer without waiting and queues a `review_supervise` job (this returns
+      `{"supervise_queued": id, "dispatch_id": ...}`; the caller ingests nothing and keeps the review's checkout). That
+      job waits for the dispatch to end and re-enters the reviewing job with `review_settle` set, which lands here to
+      record the result like an executor's supervised end. `{"fallback_queued": id}` is also set, so a caller that
+      only knows the fallback job leaves the gate open.
 
     Which routes failed comes from this gate's recorded dispatches, never from memory. v3.1 bounds the attempts by
     `environment_retry_max`; the convergence contract walks the whole eligible chain (#337). None of it spends a
@@ -932,22 +940,47 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     route. `prefer_not` lists routes a review-only re-run starts away from: they are used again only when no other
     route qualifies."""
     fb = _fallback_state(job)
+    settling = ((job or {}).get("payload") or {}).get(SETTLE_KEY)
     # A job carries its chain's epoch. A caller outside the job flow starts a fresh chain on each call, so what an
     # earlier call of the same gate failed on is preferred against but no longer excluded.
     epoch = fb["epoch"] if fb else max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
     while True:
-        outcome, step = _review_attempt(con, run, gate, role, brief, cwd=cwd, plan_review=plan_review, visual=visual,
-                                        images=images, include_dirs=include_dirs, exclude=exclude, kind=kind,
-                                        resume_from=resume_from, prefer_not=prefer_not, epoch=epoch)
-        if step is None:
-            return outcome
-        if step.get("redispatch"):
-            queued = queue_review_fallback(con, run, gate, job, step["reason"], redispatch=True,
-                                           dispatch_id=step.get("dispatch_id")) if job is not None else None
-            return {"fallback_queued": queued} if queued else outcome
-        if job is None:
-            continue  # no job to carry the next attempt: run it here
-        return {"fallback_queued": queue_review_fallback(con, run, gate, job, step["reason"], dispatch_id=step["dispatch_id"])}
+        if settling:
+            outcome, step = settle_review(con, run, gate, settling["dispatch_id"])
+            settling = None  # a failed attempt's next route launches afresh
+        else:
+            outcome, step = _review_attempt(con, run, gate, role, brief, cwd=cwd, plan_review=plan_review, visual=visual,
+                                            images=images, include_dirs=include_dirs, exclude=exclude, kind=kind,
+                                            resume_from=resume_from, prefer_not=prefer_not, epoch=epoch,
+                                            supervise=job is not None)
+        concluded = _conclude_attempt(con, run, gate, job, outcome, step)
+        if concluded is not None:
+            return concluded
+        # no job to carry the next attempt: it runs here
+
+
+def _conclude_attempt(con, run: dict, gate: dict, job: dict | None, outcome: dict | None, step: dict | None) -> dict | None:
+    """What `run_reviewer` returns for one attempt's (outcome, step), or None when the next attempt runs in this call."""
+    if step is None:
+        return outcome
+    if step.get("launched"):
+        queued = queue_review_supervise(con, run, gate, job, step["launched"])
+        return {"supervise_queued": queued, "fallback_queued": queued, "dispatch_id": step["launched"]}
+    if step.get("redispatch"):
+        queued = queue_review_fallback(con, run, gate, job, step["reason"], redispatch=True,
+                                       dispatch_id=step.get("dispatch_id")) if job is not None else None
+        return {"fallback_queued": queued} if queued else outcome
+    if job is None:
+        return None
+    return {"fallback_queued": queue_review_fallback(con, run, gate, job, step["reason"], dispatch_id=step["dispatch_id"])}
+
+
+def settle_reviewer(con, run: dict, gate: dict, job: dict) -> dict:
+    """The result of the reviewer a `review_supervise` job waited on, in the shape `run_reviewer` returns to a job: the
+    outcome to ingest, or `{"fallback_queued": id}` when its attempt failed and the next route is queued. The reviewing
+    job calls this instead of rebuilding the review it already launched."""
+    outcome, step = settle_review(con, run, gate, job["payload"][SETTLE_KEY]["dispatch_id"])
+    return _conclude_attempt(con, run, gate, job, outcome, step)
 
 
 def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *, redispatch: bool = False,
@@ -964,7 +997,7 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
         nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, resume_from=None, correction=None)
     elif commit_retry:
         nxt.update(commit_retries=fb["commit_retries"] + 1, epoch=fb["epoch"] + 1, **commit_retry)
-    origin_payload = {k: v for k, v in job["payload"].items() if k != "review_fallback"}
+    origin_payload = {k: v for k, v in job["payload"].items() if k not in ("review_fallback", SETTLE_KEY)}
     how = "redispatch" if redispatch else "commit" if commit_retry else "next"
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
     with db.transaction(con):
@@ -977,6 +1010,44 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
                    f"re-running it ({how}, attempt chain {nxt['epoch']})", task_id=gate.get("task_id"),
                    dispatch_id=dispatch_id, payload={"gate": gate["id"], "how": how, "epoch": nxt["epoch"], "job": job_id})
     return job_id or "queued"
+
+
+def review_launched(outcome: dict | None) -> bool:
+    """Whether `run_reviewer` left its reviewer running under a queued `review_supervise` job: the caller ingests nothing
+    and keeps the checkout the reviewer reads until that job settles it."""
+    return bool(outcome and outcome.get("supervise_queued"))
+
+
+def queue_review_supervise(con, run: dict, gate: dict, job: dict, dispatch_id: str) -> str | None:
+    """Queue the `review_supervise` job that records the result of the reviewer `dispatch_id` once it submits or its
+    dispatch ends. It carries `job`'s kind and payload (its fallback chain included) so it can re-enter the reviewing
+    job. Returns the job id."""
+    origin_payload = {k: v for k, v in job["payload"].items() if k != SETTLE_KEY}
+    scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    with db.transaction(con):
+        job_id = state.enqueue(con, run, "review_supervise",
+                               {"gate_id": gate["id"], "dispatch_id": dispatch_id,
+                                "origin": {"kind": job["kind"], "payload": origin_payload}},
+                               dedup_key=f"review_supervise:{dispatch_id}", max_attempts=3)
+        state.emit(con, run, "review.launched", f"{scope} review {gate['id']}: reviewer {dispatch_id} launched; "
+                   "its result is recorded when it submits or ends", audience="runtime", task_id=gate.get("task_id"),
+                   dispatch_id=dispatch_id, payload={"gate": gate["id"], "job": job_id})
+    return job_id or "queued"
+
+
+def job_review_supervise(con, run: dict, job: dict) -> dict:
+    """Wait for the launched reviewer's dispatch to end, then re-enter the job that launched it to record its result.
+    A claim that dies is reclaimed by the next office command and waits again."""
+    p = job["payload"]
+    gate = con.execute("SELECT status FROM gates WHERE id=?", (p["gate_id"],)).fetchone()
+    if gate is None or gate["status"] not in ("queued", "running"):
+        return {"skipped": gate["status"] if gate else "missing"}
+    from office import dispatch as dispatch_mod
+    ended = dispatch_mod._wait_terminal(p["dispatch_id"])
+    origin = p["origin"]
+    inner = {**job, "kind": origin["kind"],
+             "payload": {**origin["payload"], "gate_id": p["gate_id"], SETTLE_KEY: {"dispatch_id": p["dispatch_id"]}}}
+    return {"ended": ended.get("terminal"), **(jobs.handler(origin["kind"])(con, run, inner) or {})}
 
 
 def job_review_fallback(con, run: dict, job: dict) -> dict:
@@ -999,10 +1070,11 @@ def _unavailable(con, convergence: bool, gate: dict, failures: list[str], cooled
 def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool, visual: bool,
                     images: list[Path] | None, include_dirs: list[Path] | None, exclude: list[str] | None,
                     kind: str | None, resume_from: str | None, prefer_not: list[str] | None,
-                    epoch: int) -> tuple[dict | None, dict | None]:
+                    epoch: int, supervise: bool = False) -> tuple[dict | None, dict | None]:
     """One reviewer attempt. Returns (outcome, step): step None is a settled result to ingest; a step with no outcome
     is a failed attempt whose next route runs; a step with `redispatch` carries the exhausted or unreadable outcome,
-    which a job may re-dispatch before ingesting it."""
+    which a job may re-dispatch before ingesting it. With `supervise` the reviewer is launched without waiting and the
+    step is `{"launched": dispatch_id}`: `settle_review` settles it once the dispatch ends."""
     # Route from the run as stored now, not the snapshot the calling job loaded: one
     # convergence job runs every self-review subagent in turn, and a user re-pin
     # (office config --apply-routing) made meanwhile must reach the next reviewer.
@@ -1125,6 +1197,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     output = ddir / "reply.txt"
     from office import dispatch as dispatch_mod
     d = state.get_dispatch(con, dispatch_id)
+    _record_reviewer_packet(con, run, gate, role, d, ddir, epoch=epoch)
     launch_form = decision.get("launch") or {}
     if resume:
         # The resumed reviewer continues its parent's session: it records that
@@ -1134,27 +1207,143 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                         (resume["parent"], resume["session_id"], dispatch_id))
     guard = _worktree_guard(d, profile_kind, cwd)
     # A guarded reviewer reviews a detached snapshot of the reviewed commit, so an edit another process makes
-    # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is always removed.
+    # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is removed once the review is
+    # settled.
     snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
+    # A job launches the reviewer and ends: a `review_supervise` job settles it once it ends. A guarded reviewer
+    # with no snapshot would have its fingerprint taken on a checkout the settling job recreates, so it is waited on.
+    detach = supervise and not (guard and not snapshot)
+    launched = False
     try:
         if snapshot:
             guard = _worktree_guard(d, profile_kind, snapshot)
         before = guard(None) if guard else None
-        dispatch_mod.launch(run, d, profile_kind, ddir, cwd=snapshot or cwd, wait=True, output=output,
+        attempt = _Attempt(run=run, gate=gate, role=role, plan_review=plan_review, visual=visual, profile_kind=profile_kind,
+                           screenshots=[Path(i).name for i in images or []], triple=triple, dispatch_id=dispatch_id,
+                           pinned=bool(pinned), cooled_pin=cooled_pin, failures=failures, attempts=attempts,
+                           producer=producer, ddir=ddir, drop_cwd=cwd)
+        if detach:
+            atomic_write_json(ddir / ATTEMPT_FILE, {**attempt.persisted(), "snapshot": str(snapshot) if snapshot else None,
+                                                    "before": before, "repo": run["repo_root"]})
+        dispatch_mod.launch(run, d, profile_kind, ddir, cwd=snapshot or cwd, wait=not detach, output=output,
                             images=images, include_dirs=include_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")), resume=resume)
+        launched = True
+    finally:
+        if snapshot and not (detach and launched):
+            _drop_review_snapshot(cwd, snapshot)
+    if detach:
+        return None, {"launched": dispatch_id}
+    return _settle_review(con, attempt, guard=guard, before=before, snapshot=snapshot)
+
+
+@dataclass
+class _Attempt:
+    """What settling one reviewer dispatch needs, whether the launching call or a later `review_supervise` job settles it."""
+    run: dict
+    gate: dict
+    role: str
+    plan_review: bool
+    visual: bool
+    profile_kind: str
+    screenshots: list[str]
+    triple: str
+    dispatch_id: str
+    pinned: bool
+    cooled_pin: tuple | list | None
+    failures: list[str]
+    attempts: list[dict]
+    producer: str | None
+    ddir: Path
+    drop_cwd: Path
+
+    def persisted(self) -> dict:
+        """The part a settling job cannot recompute: what the route decided before the reviewer ran (a pin that began to
+        cool because this very attempt failed must still read as pinned)."""
+        return {"role": self.role, "plan_review": self.plan_review, "visual": self.visual,
+                "profile_kind": self.profile_kind, "screenshots": self.screenshots, "triple": self.triple,
+                "pinned": self.pinned, "cooled_pin": list(self.cooled_pin) if self.cooled_pin else None,
+                "failures": self.failures, "producer": self.producer}
+
+
+def _attempt_from_record(con, run: dict, gate: dict, dispatch_id: str) -> tuple[_Attempt, dict] | None:
+    """The attempt a launched reviewer dispatch recorded for its settling job, with the raw record, or None."""
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    try:
+        rec = json.loads((ddir / ATTEMPT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("role") is None:
+        return None
+    history = review_attempts(con, gate["id"])
+    me = next((a for a in history if a["id"] == dispatch_id), None)
+    attempts = [a for a in history if me and a["epoch"] == me["epoch"] and a["id"] != dispatch_id]
+    return _Attempt(run=state.get_run(con, run["id"]) or run, gate=gate, role=rec["role"], plan_review=bool(rec["plan_review"]),
+                    visual=bool(rec["visual"]), profile_kind=rec["profile_kind"], screenshots=list(rec.get("screenshots") or []),
+                    triple=rec["triple"], dispatch_id=dispatch_id, pinned=bool(rec.get("pinned")),
+                    cooled_pin=tuple(rec["cooled_pin"]) if rec.get("cooled_pin") else None,
+                    failures=list(rec.get("failures") or []), attempts=attempts, producer=rec.get("producer"), ddir=ddir,
+                    drop_cwd=Path(rec.get("repo") or run["repo_root"])), rec
+
+
+def settle_review(con, run: dict, gate: dict, dispatch_id: str) -> tuple[dict | None, dict | None]:
+    """Record the end of a launched reviewer dispatch: its outcome, or the step that follows a failed attempt (the same
+    pair `_review_attempt` returns). The settling half of an attempt a job launched without waiting."""
+    found = _attempt_from_record(con, run, gate, dispatch_id)
+    if found is None:
+        raise Refused("review-attempt-missing", f"reviewer dispatch {dispatch_id} left no launch record to settle from")
+    attempt, rec = found
+    d = state.get_dispatch(con, dispatch_id)
+    snapshot = Path(rec["snapshot"]) if rec.get("snapshot") else None
+    if "changed" in rec:
+        # An earlier settle took the guard's verdict and dropped the snapshot before it died: that verdict stands, and a
+        # fingerprint of the removed snapshot would read as a change.
+        guard, before = (lambda _before, changed=rec["changed"]: changed), None
+    else:
+        guard, before = (_worktree_guard(d, attempt.profile_kind, snapshot) if snapshot else None), rec.get("before")
+    return _settle_review(con, attempt, guard=guard, before=before, snapshot=snapshot)
+
+
+def _record_guard_result(ddir: Path, changed) -> None:
+    """Keep the guard's verdict on the launch record before the snapshot it judged is removed, for a settle that retries."""
+    path = ddir / ATTEMPT_FILE
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        atomic_write_json(path, {**rec, "changed": changed})
+    except (OSError, ValueError):
+        pass
+
+
+def _settle_review(con, a: _Attempt, *, guard, before, snapshot: Path | None) -> tuple[dict | None, dict | None]:
+    """The reviewer dispatch has ended: read what it left and return (outcome, step) as `_review_attempt` does."""
+    from office import dispatch as dispatch_mod
+    run, gate, role, triple, dispatch_id, ddir = a.run, a.gate, a.role, a.triple, a.dispatch_id, a.ddir
+    plan_review, visual, producer, pinned, cooled_pin = a.plan_review, a.visual, a.producer, a.pinned, a.cooled_pin
+    failures, attempts, screenshots = a.failures, a.attempts, a.screenshots
+    convergence = contract.is_convergence(run)
+    rc = contract.of(run)
+    output = ddir / "reply.txt"
+    try:
         d = state.get_dispatch(con, dispatch_id)
+        with db.transaction(con):
+            con.execute("UPDATE leases SET released_at=? WHERE id=? AND released_at IS NULL AND revoked_at IS NULL",
+                        (now_iso(), d.get("lease_id")))
+        with contextlib.suppress(Exception):  # a session probe never costs a review its reply
+            dispatch_mod.backfill_session(con, run, d)
+            d = state.get_dispatch(con, dispatch_id)
         if dispatch_mod.was_revoked(con, d):
             # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion,
             # nothing recorded against its route, so it stays eligible.
             summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
             return reviewer_outcome(convergence, "revoked", summary=summary, route=triple, dispatch_id=dispatch_id,
                                     producer_route=producer), None
-        _note_headless_reviewer(con, run, d, profile_kind)
+        _note_headless_reviewer(con, run, d, a.profile_kind)
         changed = guard(before) if guard else None
+        if snapshot and (ddir / ATTEMPT_FILE).is_file():
+            _record_guard_result(ddir, changed)
     finally:
         if snapshot:
-            _drop_review_snapshot(cwd, snapshot)
+            _drop_review_snapshot(a.drop_cwd, snapshot)
 
     def failed(cls: str, reason: str, **kw) -> tuple[dict | None, dict]:
         """This attempt did not settle the review: record why on its dispatch, then the next route runs (a pinned
@@ -1178,7 +1367,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
         return failed("degraded", reason)
     text = _reply_text(d, ddir, output)
     parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc,
-                                screenshots=[Path(i).name for i in images or []] if visual else None)
+                                screenshots=screenshots if visual else None)
     wrote_file = output.is_file() and output.stat().st_size > 0
     pane_terminal_status = _reviewer_pane_terminal_without_reply(d, output)
     # Wall signatures come from the harness log, never from the review
@@ -1200,7 +1389,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
         replied = bool(text.strip())
         text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
                                                         plan_review=plan_review, visual=visual,
-                                                        screenshots=[Path(i).name for i in images or []] if visual else None)
+                                                        screenshots=screenshots if visual else None)
         never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
         if never_replied:
             with db.transaction(con):
@@ -1742,7 +1931,47 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict, *,
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], role, sha256_obj(role + gate["id"]),
                                           decision.get("selected"), decision.get("decision_hash"), now_iso()))
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (_reviewer_lease(con, run, role, dispatch_id), dispatch_id))
     return dispatch_id
+
+
+def _reviewer_lease(con, run: dict, role: str, dispatch_id: str) -> str:
+    """A fenced lease for one reviewer dispatch. It holds no scope (a reviewer is read-only, so it never blocks a task),
+    so only a revoke or the settled end changes it: a revoked reviewer's late `office review submit` is refused.
+    Caller holds the tx."""
+    from datetime import datetime, timedelta, timezone
+    from office import dispatch as dispatch_mod
+    now = datetime.now(timezone.utc)
+    lease_id = "L" + uuid.uuid4().hex[:8]
+    fencing = (con.execute("SELECT COALESCE(MAX(fencing),0) FROM leases WHERE run_id=?", (run["id"],)).fetchone()[0] or 0) + 1
+    con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, dispatch_id, "
+                "renewed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (lease_id, run["id"], role, "[]", dispatch_id, now.isoformat(),
+                 (now + timedelta(seconds=dispatch_mod.LEASE_TTL_SECONDS)).isoformat(), None, fencing, dispatch_id,
+                 now.isoformat()))
+    return lease_id
+
+
+def _record_reviewer_packet(con, run: dict, gate: dict, role: str, d: dict, ddir: Path, *, epoch: int) -> None:
+    """The reviewer dispatch's packet (what it was asked to review, under which lease and contract), written beside its
+    brief and bound to the dispatch row the way an executor's is."""
+    plan = state.current_plan(con, run["id"])
+    packet = state.packet_envelope(run, "reviewer-dispatch", {
+        "role": role, "dispatch_id": d["id"], "gate_id": gate["id"], "gate_kind": gate.get("kind"),
+        "task_id": gate.get("task_id"), "revision_id": gate.get("revision_id"), "scope": gate.get("scope"),
+        "input_key": gate.get("input_key"), "lease_id": d.get("lease_id"), "fencing": _lease_fencing(con, d.get("lease_id")),
+        "plan_version": plan["version"] if plan else 0, "requirements_version": run["requirements_version"],
+        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch, "session_id": d.get("session_id")})
+    state.check_packet(run, packet)
+    atomic_write_json(ddir / "packet.json", packet)
+    with db.transaction(con):
+        con.execute("UPDATE dispatches SET packet_hash=?, packet_path=? WHERE id=?",
+                    (packet["packet_hash"], str(ddir / "packet.json"), d["id"]))
+
+
+def _lease_fencing(con, lease_id: str | None) -> int | None:
+    row = con.execute("SELECT fencing FROM leases WHERE id=?", (lease_id,)).fetchone() if lease_id else None
+    return row[0] if row else None
 
 
 def _last_block(text: str) -> str:
@@ -1797,9 +2026,18 @@ def job_review(con, run: dict, job: dict) -> dict:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
+    if job["payload"].get(SETTLE_KEY):
+        # The reviewer was launched by an earlier run of this job, which left its checkout for it to read.
+        checkout = paths.run_dir(run["id"]) / "checkouts" / f"review-{gate['id']}"
+        try:
+            outcome = settle_reviewer(con, run, gate, job)
+        finally:
+            remove_checkout(run, checkout)
+        return _finish_review_job(con, run, gate, outcome)
     task = state.get_task(con, run["id"], gate["task_id"])
     rev = dict(con.execute("SELECT * FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone())
     checkout = detached_checkout(run, rev["commit_sha"], f"review-{gate['id']}", purpose="review")
+    outcome = None
     try:
         diff = paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"])
         diff = cap_diff(diff)
@@ -1821,7 +2059,14 @@ def job_review(con, run: dict, job: dict) -> dict:
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                exclude=exclude, prefer_not=job["payload"].get("exclude_routes"), job=job)
     finally:
-        remove_checkout(run, checkout)
+        if not review_launched(outcome):  # a launched reviewer reads the checkout until its supervise job settles it
+            remove_checkout(run, checkout)
+    return _finish_review_job(con, run, gate, outcome)
+
+
+def _finish_review_job(con, run: dict, gate: dict, outcome: dict) -> dict:
+    if review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
     if outcome.get("fallback_queued"):
         return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     with db.transaction(con):
@@ -2615,6 +2860,10 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='integrate' "
                            "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
                            (run["id"], gate["created_at"])).fetchall()
+        # The review's own jobs name the gate: the supervise job of a launched reviewer and a queued re-run.
+        rows += con.execute("SELECT * FROM outbox WHERE run_id=? AND kind IN ('review_supervise','review_fallback',"
+                            "'integration_review') AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                            (run["id"], f'%"{gate["id"]}"%')).fetchall()
     elif gate["kind"] == "self_review_subagent":
         # A self-review subagent gate is created and run inline by its lane's convergence review job, whose
         # payload names the lane gate, not this one: that job is its owner (#961). Only a lane holding its task.

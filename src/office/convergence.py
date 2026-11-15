@@ -796,8 +796,11 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                         (now_iso(), gate["id"]))
         return {"skipped": "stale"}
     commit = st["commit"]
+    if job["payload"].get(gates.SETTLE_KEY):
+        return _settle_lane_review(con, run, gate, job, commit)
     tasks = [state.get_task(con, run["id"], tid) for tid in scope["tasks"]]
     checkout = _checkout(run, commit, f"converge-{gate['id']}")
+    outcome = None
     try:
         diff = gates.cap_diff(paths.git(Path(run["repo_root"]), "diff", _base(run), commit))
         checks = []
@@ -866,22 +869,46 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                 brief = f"{role_line}\nCORRECTION: {fallback['correction']}\n{rest}"
             outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
                                          **_lane_review_options(con, run, job, gate, scope, st, "convergence_review"))
-            if outcome.get("fallback_queued"):
-                return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
-            problem = _stamp_reviewed_commit(run, commit, outcome)
-            if (problem and outcome.get("dispatch_id")
-                    and fallback.get("commit_retries", 0) < int((run.get("gates") or {}).get("review_reprompt_max", 3))):
-                queued = gates.queue_review_fallback(
-                    con, run, gate, job, problem, dispatch_id=outcome["dispatch_id"],
-                    commit_retry={"resume_from": outcome["dispatch_id"],
-                                  "correction": f"{problem}. Review again ONLY the checkout at {checkout} (commit "
-                                                f"{commit}); checkout paths named in earlier rounds are stale. Begin your "
-                                                f"reply with REVIEWED_COMMIT {commit}."})
-                return {"fallback": queued}
+            done = _lane_review_result(con, run, gate, job, commit, checkout, outcome)
+            if done is not None:
+                return done
             # ingest turns a still-wrong commit into INVALID_RESULT
     finally:
-        gates.remove_checkout(run, checkout)
+        if not gates.review_launched(outcome):  # a launched reviewer reads the checkout until its supervise job settles it
+            gates.remove_checkout(run, checkout)
     return _finish_lane_review(con, run, gate, outcome)
+
+
+def _lane_review_result(con, run: dict, gate: dict, job: dict, commit: str, checkout: Path, outcome: dict) -> dict | None:
+    """What the lane review job returns for a reviewer's outcome that is not final (launched, a queued fallback, a
+    REVIEWED_COMMIT correction), or None when the outcome is to be ingested."""
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
+    problem = _stamp_reviewed_commit(run, commit, outcome)
+    fallback = job["payload"].get("review_fallback") or {}
+    if (problem and outcome.get("dispatch_id")
+            and fallback.get("commit_retries", 0) < int((run.get("gates") or {}).get("review_reprompt_max", 3))):
+        queued = gates.queue_review_fallback(
+            con, run, gate, job, problem, dispatch_id=outcome["dispatch_id"],
+            commit_retry={"resume_from": outcome["dispatch_id"],
+                          "correction": f"{problem}. Review again ONLY the checkout at {checkout} (commit "
+                                        f"{commit}); checkout paths named in earlier rounds are stale. Begin your "
+                                        f"reply with REVIEWED_COMMIT {commit}."})
+        return {"fallback": queued}
+    return None
+
+
+def _settle_lane_review(con, run: dict, gate: dict, job: dict, commit: str) -> dict:
+    """Record the result of the lane reviewer an earlier run of this job launched, then remove the checkout it read."""
+    checkout = paths.run_dir(run["id"]) / "checkouts" / f"converge-{gate['id']}"
+    try:
+        outcome = gates.settle_reviewer(con, run, gate, job)
+        done = _lane_review_result(con, run, gate, job, commit, checkout, outcome)
+    finally:
+        gates.remove_checkout(run, checkout)
+    return done if done is not None else _finish_lane_review(con, run, gate, outcome)
 
 
 VISUAL_FORMAT = """\
@@ -919,6 +946,10 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         return {"skipped": "stale"}
     with db.transaction(con):
         con.execute("UPDATE gates SET status='running', started_at=COALESCE(started_at, ?) WHERE id=?", (now_iso(), gate["id"]))
+    settling = job["payload"].get(gates.SETTLE_KEY)
+    if settling:
+        # The capture and the vision reviewer's brief were made when it launched: only its result is left to record.
+        return _finish_visual_review(con, run, gate, gates.settle_reviewer(con, run, gate, job))
     rev = _rev(scope["id"], st["commit"])
     targets = visual_tasks(con, run, scope)
     undeclared = [t["id"] for t, app in targets if not t.get("visual") or (t.get("visual") or {}).get("none")]
@@ -1021,6 +1052,12 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
                                  **route_options)
+    return _finish_visual_review(con, run, gate, outcome)
+
+
+def _finish_visual_review(con, run: dict, gate: dict, outcome: dict) -> dict:
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
     if outcome.get("fallback_queued"):
         return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     parsed = outcome.get("parsed")
@@ -1922,7 +1959,7 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
     return Result(lines=[line], next="exceptions only; office status")
 
 
-LANE_REVOKE_JOBS = ("convergence_review", "lane_visual")
+LANE_REVOKE_JOBS = ("convergence_review", "lane_visual", "review_supervise")
 
 
 def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:

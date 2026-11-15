@@ -163,6 +163,10 @@ def submit(con, text: str) -> Result:
         raise Refused("review-identity", f"the submit identity does not match reviewer {did}")
     if d.get("ended_at") or d.get("status") in ("exited", "failed", "cancelled"):
         raise Refused("review-closed", f"reviewer {did} has already ended; its review can no longer be submitted")
+    if d.get("lease_id") and con.execute("SELECT 1 FROM leases WHERE id=? AND revoked_at IS NOT NULL",
+                                         (d["lease_id"],)).fetchone():
+        raise Refused("lease-lost", f"{d['lease_id']} is no longer reviewer {did}'s live lease; its review is fenced out",
+                      preserved="nothing was recorded")
     gate = db.row_dict(con.execute("SELECT * FROM gates WHERE id=?", (d["gate_id"],)).fetchone()) or {}
     if gate.get("status") not in ("queued", "running"):
         raise Refused("review-closed", f"review gate {d['gate_id']} is {gate.get('status') or 'gone'}")

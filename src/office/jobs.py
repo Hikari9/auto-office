@@ -74,6 +74,7 @@ def _handlers():
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
         "review_fallback": gates.job_review_fallback,
+        "review_supervise": gates.job_review_supervise,
         "integration_review": integration.job_integration_review,
         "plan_review": plans.job_plan_review,
         "visual_capture": visual.job_capture,
