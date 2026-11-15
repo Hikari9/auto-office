@@ -192,7 +192,8 @@ def book_canary(con, run_id: str, task_id: str, selected_route: str, budget: int
     """Book a canary dispatch under the caller's dispatch transaction.
 
     The live budget and per-run limit are re-checked under the writer lock. A lost race
-    still launches (the user allow already permits Hydrogen) but is not a canary."""
+    still launches (the user allow already permits Hydrogen) but books canary=0: it is
+    not spent budget, and like every canary-path row the trial path never reads it."""
     if not con.in_transaction:
         raise RuntimeError("Hydrogen canary booking requires a BEGIN IMMEDIATE dispatch transaction")
     used_run = _run_canaries(con, run_id)
@@ -201,14 +202,15 @@ def book_canary(con, run_id: str, task_id: str, selected_route: str, budget: int
     event_id = "HO" + uuid.uuid4().hex
     con.execute("INSERT INTO hydrogen_trial_opportunities(id, run_id, task_id, selected_route, experimental, "
                 "created_at, canary) VALUES (?,?,?,?,?,?,?)",
-                (event_id, run_id, task_id, selected_route, 1, now_iso(), 1 if counted else None))
+                (event_id, run_id, task_id, selected_route, 1, now_iso(), 1 if counted else 0))
     return {"id": event_id, "canary": counted, "spent": spent + int(counted), "budget": budget,
             "blocked": None if counted else ("canary-complete" if spent >= budget else "one-canary-per-run")}
 
 
 def snapshot(con) -> dict:
     """Last nineteen eligible opportunities, plus this pending opportunity."""
-    rows = con.execute("SELECT experimental FROM hydrogen_trial_opportunities "
+    # Canary-path rows (#1168, canary NOT NULL) are their own ledger; the trial window ignores them.
+    rows = con.execute("SELECT experimental FROM hydrogen_trial_opportunities WHERE canary IS NULL "
                        "ORDER BY seq DESC LIMIT ?", (WINDOW - 1,)).fetchall()
     count = sum(int(r[0]) for r in rows)
     return {"previous": len(rows), "trial_used": count, "trial_remaining": max(0, CAP - count),
@@ -227,7 +229,7 @@ def book(con, run_id: str, task_id: str, selected_route: str, *, experiment: boo
     before = snapshot(con)
     if experiment:
         used_run = con.execute("SELECT COUNT(*) FROM hydrogen_trial_opportunities WHERE run_id=? "
-                               "AND experimental=1", (run_id,)).fetchone()[0]
+                               "AND experimental=1 AND canary IS NULL", (run_id,)).fetchone()[0]
         if used_run >= MAX_PER_RUN:
             experiment = False
             blocked = "one-trial-per-run"

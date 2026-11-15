@@ -141,6 +141,7 @@ def test_lost_race_still_launches_but_is_not_a_canary(tmp_path, monkeypatch):
         assert settled["hydrogen_counter"] == {**settled["hydrogen_counter"], "canary": False,
                                                "blocked": "canary-complete"}
         assert h.canary_spent(con) == 2
+        assert con.execute("SELECT canary FROM hydrogen_trial_opportunities WHERE run_id='R1'").fetchone()[0] == 0
 
 
 def test_second_canary_in_a_run_is_not_counted(tmp_path, monkeypatch):
@@ -220,3 +221,42 @@ def test_agy_maps_xhigh():
     seed = yaml.safe_load((ROOT / "adapters" / "seed" / "agy.yaml").read_text())
     assert seed["effort_mapping"]["xhigh"] == "xhigh"
     assert seed["effort_mapping"]["max"] is None
+
+
+# ------------------------------------------------------------------ trial path ignores canary rows
+
+def _trial_rows(con, n, *, experimental=0):
+    with db.transaction(con):
+        for i in range(n):
+            con.execute("INSERT INTO hydrogen_trial_opportunities(id, run_id, task_id, selected_route, experimental, "
+                        "created_at) VALUES (?,?,?,?,?,?)", (f"HT{i}", f"trial-{i}", "T", "x", experimental, now_iso()))
+
+
+def _canary_rows(con, run_id, n):
+    with db.transaction(con):
+        for i in range(n):
+            h.book_canary(con, f"{run_id}-{i}" if n > 1 else run_id, "T", SPEC, 99 if i % 2 == 0 else 0)
+
+
+@pytest.mark.parametrize("trials,experimental", [(0, 0), (5, 0), (19, 0), (19, 1), (25, 1)])
+def test_trial_snapshot_is_unchanged_by_canary_rows(tmp_path, trials, experimental):
+    with db.connect(tmp_path / "a.db") as plain, db.connect(tmp_path / "b.db") as mixed:
+        _trial_rows(plain, trials, experimental=experimental)
+        _trial_rows(mixed, trials, experimental=experimental)
+        _canary_rows(mixed, "C", 12)  # counted (canary=1) and over-budget (canary=0) rows
+        assert h.snapshot(mixed) == h.snapshot(plain)
+
+
+def test_canary_rows_do_not_end_the_trial_cold_start(tmp_path):
+    with db.connect(tmp_path / "runs.db") as con:
+        _canary_rows(con, "C", 30)
+        assert h.snapshot(con)["cold_start"] is True and h.snapshot(con)["previous"] == 0
+
+
+def test_a_canary_in_a_run_does_not_use_its_trial_slot(tmp_path):
+    with db.connect(tmp_path / "runs.db") as con:
+        _trial_rows(con, 19)
+        _canary_rows(con, "R1", 1)
+        with db.transaction(con):
+            booked = h.book(con, "R1", "T2", SPEC, experiment=True, fallback_route="fallback")
+        assert booked["experimental"] is True and booked["blocked"] is None
