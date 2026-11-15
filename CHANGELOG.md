@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.22.2
+
+`office route policy` no longer repeats "dispatches (dispatches (" on user-allowed Hydrogen rows. Adds the H3 Hydrogen code-reviewer learning (#1168).
+
 ## 3.22.1
 
 H3 follow-up (#1168): a `preferred_seed` may order a catalog-disabled route that the user exactly allows for that role. So `agy/gemini-4-hydrogen@high` can sit in the code-reviewer order, while routing still enforces the Hydrogen exact-probe veto. `office route policy` now shows that route as a voting code reviewer, not as a canary trial.

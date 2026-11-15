@@ -41,6 +41,7 @@ def test_route_policy_shows_the_allowed_reviewer_as_a_voting_code_reviewer():
     row = {"model_id": "gemini-4-hydrogen", "invocation_harness": "agy", "effort": "high", "dispatchable": False}
     state = {"state": "allow", "source": "user", "rule": "agy/gemini-4-hydrogen@high"}
     ok, why = routecmd._dispatch_view(row, state, candidate=H, role="code_reviewer", probe={"result": "pass"})
-    assert ok is True and "voting code reviewer" in why and "canary trial" not in why.split(";")[0]
+    assert ok is True and why.startswith("user allow; exact probe passed; a voting code reviewer") and "dispatches" not in why.split(";")[0]
+    assert "voting code reviewer" in why and "canary trial" not in why.split(";")[0]
     ok, why = routecmd._dispatch_view(row, state, candidate=H, role="code_reviewer", probe=None)
     assert ok is False and why.startswith("user allow as a code reviewer")

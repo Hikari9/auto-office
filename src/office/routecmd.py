@@ -88,11 +88,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
         if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
             # H3 (#1168): the exact user-allowed @high route is a voting code reviewer, never a canary trial.
             if not proof:
-                return True, "dispatches (user allow; exact probe passed) as a voting code reviewer; " + rules
+                return True, "user allow; exact probe passed; a voting code reviewer; " + rules
             return False, f"user allow as a code reviewer; {rules}{proof}"
         if refusal is None and allowed and size:
             if not proof:
-                return True, ("dispatches (user allow; exact probe passed) as a normal executor route for this size, "
+                return True, ("user allow; exact probe passed; a normal executor route for this size, "
                               "outside the automatic canary limits; " + rules)
             return False, f"user allow; {rules}{proof}"
         if refusal is None and not proof:

@@ -144,7 +144,7 @@ def test_exact_user_allow_dispatches_only_with_a_fresh_pass():
     dispatches, reason = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S",
                                                  probe={"result": "pass"})
     assert dispatches is True
-    assert reason.startswith("dispatches (user allow; exact probe passed)")
+    assert reason.startswith("user allow; exact probe passed; a normal executor route")
     assert "cannot dispatch until" not in reason and "no-identity-readback" not in reason
     dispatches, reason = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S")
     assert dispatches is False
