@@ -254,7 +254,9 @@ def _keychain(agy, monkeypatch, stdout="", returncode=0, platform="darwin", rais
         calls.append((cmd, kw))
         if raises:
             raise raises
-        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+        assert not kw.get("text") and not kw.get("universal_newlines")  # real stdout is bytes
+        out = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
+        return subprocess.CompletedProcess(cmd, returncode, out, b"")
 
     monkeypatch.setattr(agy.subprocess, "run", run)
     return calls
@@ -307,6 +309,7 @@ SECRET_VALUE = "SECRET-DO-NOT-LEAK"
     ({"raises": subprocess.TimeoutExpired("security", 5)}, "TimeoutExpired"),
     ({"stdout": "go-keyring-base64:" + SECRET_VALUE + "!!"}, "Malformed"),
     ({"stdout": SECRET_VALUE}, "Malformed"),
+    ({"stdout": b"\xff\xfe" + SECRET_VALUE.encode()}, "Malformed"),
     ({"stdout": json.dumps({"token": {"access_token": SECRET_VALUE}})}, "no token.refresh_token"),
 ])
 def test_keychain_failures_are_distinct_and_leak_nothing(agy, monkeypatch, kw, needle):

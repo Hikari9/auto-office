@@ -257,7 +257,7 @@ def read_keychain_refresh_token():
     if sys.platform != "darwin":
         return None, None, False
     try:
-        res = subprocess.run(KEYCHAIN_CMD, capture_output=True, text=True, timeout=5, check=False)
+        res = subprocess.run(KEYCHAIN_CMD, capture_output=True, timeout=5, check=False)
     except FileNotFoundError:
         return None, None, False
     except (OSError, subprocess.SubprocessError) as e:
@@ -266,8 +266,8 @@ def read_keychain_refresh_token():
         return None, None, False
     if res.returncode != 0:
         return None, f"Failed to read {KEYCHAIN_SOURCE}: security exited {res.returncode}", True
-    value = (res.stdout or "").strip()
     try:
+        value = (res.stdout or b"").decode("utf-8").strip()
         if value.startswith(KEYCHAIN_PREFIX):
             value = base64.b64decode(value[len(KEYCHAIN_PREFIX):], validate=True).decode("utf-8")
         data = json.loads(value)
