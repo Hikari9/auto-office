@@ -217,3 +217,39 @@ def test_the_worktree_guard_stays_on_for_the_pane_reviewer(tmp_path):
     assert guard(before) is None
     (repo / "edited-by-the-pane-reviewer.txt").write_text("x")
     assert "untracked files" in guard(before)
+
+
+def _pane_dispatch(tmp_path, stdout_script, *, supervisor="pane"):
+    """A pane-supervised dispatch whose fake agy ran headless: its stdout is the dispatch log, as `office _supervise`
+    captures it."""
+    import json
+    import subprocess
+    import sys
+    ddir = tmp_path / "dispatch"
+    ddir.mkdir()
+    (ddir / "launch.json").write_text(json.dumps({"supervisor": supervisor}))
+    with (ddir / "output.log").open("wb") as log:
+        subprocess.run([sys.executable, "-c", stdout_script], stdout=log, check=True)
+    return {"id": "D1", "launcher": "herdr", "log_path": str(ddir / "output.log")}, ddir, ddir / "reply.txt"
+
+
+def test_pane_supervised_stdout_verdict_reaches_review_parse(tmp_path):
+    from office import gates, review_parse
+    d, ddir, reply = _pane_dispatch(tmp_path, "print('VERDICT: APPROVED\\nNEXT: land')")
+    text = gates._reply_text(d, ddir, reply)
+    assert "VERDICT: APPROVED" in text
+    assert review_parse.parse(gates._last_block(text), contract="convergence-v1").valid
+
+
+def test_pane_supervised_empty_stdout_is_no_verdict_not_a_pass(tmp_path):
+    from office import gates, review_parse
+    d, ddir, reply = _pane_dispatch(tmp_path, "pass")
+    text = gates._reply_text(d, ddir, reply)
+    assert text.strip() == ""
+    assert not review_parse.parse(gates._last_block(text), contract="convergence-v1").valid
+
+
+def test_a_herdr_agent_pane_without_the_supervisor_still_gets_no_log_reply(tmp_path):
+    from office import gates
+    d, ddir, reply = _pane_dispatch(tmp_path, "print('VERDICT: APPROVED\\nNEXT: land')", supervisor="")
+    assert gates._reply_text(d, ddir, reply) == ""

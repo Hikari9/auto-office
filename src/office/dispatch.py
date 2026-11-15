@@ -2477,6 +2477,7 @@ def _pane_supervise(run: dict, dispatch: dict, spec: dict, sup: list[str], pane:
         write_launch_spec(run, dispatch["id"], spec)
         _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; running headless instead")
         return None
+    spec["supervisor"] = "pane"  # the gate reads this form's stdout log as the headless path does
     _record_launch_form(run, dispatch, spec, "herdr", ["herdr", "pane", "run", pane, line], transport="pane shell",
                         herdr_kind=None, brief_delivery="argv prompt (headless supervisor in the pane)")
     _herdr_quiet("pane", "run", pane, line)
