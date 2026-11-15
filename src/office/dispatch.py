@@ -1270,12 +1270,7 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
                    "When the work and its checks are complete, run: office submit")
     else:
-        pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
-                   f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(output).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(output)} . " if output else "")
-                   + "Do not edit anything else.")
+        pointer = (review_submit.pointer(output, prompt_file=ddir / "brief.md") if output else "")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
@@ -3048,13 +3043,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                    "When the work and its checks are complete, run: office submit")
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
-        pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
-                   f"Write your complete review to {spec['output']}; Office reads only that file, never "
-                   "your terminal. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(spec['output']).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(spec['output'])} . " if spec.get("output") else "")
-                   + "Do not edit anything else.")
+        pointer = review_submit.pointer(spec["output"], prompt_file=spec["prompt_file"], images=images)
     from office import transcripts
     sent_at = time.time()
 

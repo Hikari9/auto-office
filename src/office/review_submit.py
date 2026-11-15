@@ -71,6 +71,42 @@ def codex_rules(output: str | Path) -> str:
             f"prefix_rule(pattern={tokens!r}, decision=\"allow\",\n"
             "            justification=\"hand this review back to Auto Office; it writes only Office state\")\n")
 MAX_CHARS = 200_000
+FALLBACK_EVENT = "review.reply_fallback"
+# Reviewer harnesses that cannot run a shell command, so they keep the reply file as their completion step
+# (their adapter reviewer profile says `submit: file`). Every other reviewer profile says `submit: shell`.
+NO_SHELL_HARNESSES = ("agy", "opencode", "pi")
+
+
+def pointer(output: str | Path, *, prompt_file: str | Path, images: str = "") -> str:
+    """The one-line prompt that sends a reviewer to its brief: `office review submit` is the completion step, the
+    reply file and the final reply are what a harness without a shell falls back to."""
+    return (f"Read and carry out the review brief at {prompt_file} exactly.{images} "
+            f"Finish with `office review submit`: write the complete review to "
+            f"{Path(output).parent / SUBMIT_FILE} and run exactly: {submit_command(output)} . "
+            f"If your tools cannot run that command, write the complete review to {output} instead "
+            "(Office reads only that file, never your terminal), or if they cannot write files, end your reply with the "
+            "complete review. Do not edit anything else.")
+
+
+def record_fallback(d: dict, source: str) -> None:
+    """Note once per dispatch that its review came back by a fallback (reply file, last message, stdout log) and not
+    by `office review submit`, so the fallback rate can be counted from events."""
+    if not d.get("id") or not d.get("run_id"):
+        return
+    try:
+        con = db.connect()
+        try:
+            if con.execute("SELECT 1 FROM events WHERE dispatch_id=? AND kind=?", (d["id"], FALLBACK_EVENT)).fetchone():
+                return
+            run = state.get_run(con, d["run_id"])
+            with db.transaction(con):
+                state.emit(con, run, FALLBACK_EVENT, f"{d.get('role')} {d['id']} returned its review by {source}, "
+                           "not office review submit", task_id=d.get("task_id"), dispatch_id=d["id"],
+                           audience="runtime", payload={"source": source, "harness": d.get("harness")})
+        finally:
+            con.close()
+    except Exception:  # a measurement must never cost a review its reply
+        return
 
 
 def _ddir(run_id: str, dispatch_id: str) -> Path:

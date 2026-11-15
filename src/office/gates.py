@@ -1269,18 +1269,26 @@ REPLY_FILE_RULE = ("Office reads your review only from that file; text you print
 
 
 def _reply_text(d: dict, ddir: Path, output: Path) -> str:
-    """The reviewer's reply: its reply file, or (headless only) the captured
-    stdout log, which is also a file the harness wrote. Never pane text."""
-    if output.is_file() and output.stat().st_size:
+    """The reviewer's reply: what `office review submit` stored (the reply file, with its submitted marker), else
+    the reply file written directly, else (headless only) the harness's last message or captured stdout log. Never
+    pane text. Each fallback is recorded on the dispatch."""
+    from office import review_submit
+    if review_submit.submitted(output):
         return output.read_text(encoding="utf-8", errors="replace")
-    if d.get("launcher") in ("herdr", "external"):
+    source, text = "reply_file", ""
+    if output.is_file() and output.stat().st_size:
+        text = output.read_text(encoding="utf-8", errors="replace")
+    elif d.get("launcher") in ("herdr", "external"):
         return ""
-    last_message = output.with_name("last-message.txt")
-    if last_message.is_file() and last_message.stat().st_size:
-        return last_message.read_text(encoding="utf-8", errors="replace")
-    return _log_text(d, ddir)
-
-
+    else:
+        last_message = output.with_name("last-message.txt")
+        if last_message.is_file() and last_message.stat().st_size:
+            source, text = "last_message", last_message.read_text(encoding="utf-8", errors="replace")
+        else:
+            source, text = "stdout_log", _log_text(d, ddir)
+    if text.strip():
+        review_submit.record_fallback(d, source)
+    return text
 def log_path(d: dict, ddir: Path) -> Path:
     """The harness's own output log for a dispatch."""
     return Path(d.get("log_path") or ddir / "output.log")
