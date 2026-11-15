@@ -124,7 +124,8 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
                 if test.startswith("tests/web/") and ("browser" not in test or "test_workbench" in test):
                     include(test, f"web asset: {path}")
     for source in relevant:
-        stem = Path(source).stem
+        # Hyphenated scripts (agy-usage.py) cannot be imported, so their tests use underscores.
+        stem = Path(source).stem.replace("-", "_")
         if stem in ("__init__", "_version"):
             continue
         pattern = re.compile(r"\b(?:from\s+office\s+import\s+|office\.|import\s+office\.|from\s+office\.)" + re.escape(stem) + r"\b")
