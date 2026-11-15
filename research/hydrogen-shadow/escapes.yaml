@@ -5,3 +5,6 @@
 - case: pr-1173
   summary: "Hydrogen's code_reviewer gate accepts a manual --review-as with no exact code_reviewer allow, contrary to the documented user-allow requirement."
   missed_by: [hydrogen]
+- case: pr-1173
+  summary: "build_candidates rebuilt an unsized Hydrogen allow as all five sizes, so code_reviewer routing (no task size) refused Hydrogen as an unknown size."
+  missed_by: [luna]

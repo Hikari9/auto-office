@@ -24,10 +24,11 @@ pr-1173:
   # luna 0: the `manual` bypass admits --review-as Hydrogen with no code_reviewer allow, against the documented gate.
   luna: {0: accept}
   # hydrogen 0: agy has no reviewer profile or reviewer_readonly_args, so build_candidates skips it (verified).
-  # hydrogen 1: rejected. An unsized allow returns sizes None, so user_allow_sizes is never set (candidates.py:729).
+  # hydrogen 1: real (corrected in #1180). The Hydrogen branch of build_candidates rebuilt an unsized allow as all
+  # five sizes, so user_allow_sizes was set and size-less reviewer routing was refused as an unknown size.
   # hydrogen 2: verified live; `office route policy` says "dispatches" for a route with no reviewer profile.
   # hydrogen 3: the synthetic-candidate test is why the missing profile went unnoticed.
-  hydrogen: {0: accept, 1: reject, 2: accept, 3: accept}
+  hydrogen: {0: accept, 1: accept, 2: accept, 3: accept}
 pr-1176:
   luna: {}
   hydrogen: {0: accept}  # same root cause as pr-1173 hydrogen 2, in the branch #1176 added
