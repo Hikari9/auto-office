@@ -80,7 +80,8 @@ office_profiles:
   # reviewer launch form. Headless only, an exception to #1027 launch parity: a pane reviewer must write
   # its reply file, and plan mode cannot write.
   # `--mode plan` is agy's read-only mode and no permission bypass is passed; agy has no verified sandbox,
-  # so Office fingerprints the worktree before and after and fails a review that changed it.
+  # so Office fingerprints the worktree before and after and fails a review that changed HEAD, the tracked
+  # diff or untracked files. Gitignored files and .git/ are outside that check; plan mode is the write barrier.
   reviewer:
     argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
