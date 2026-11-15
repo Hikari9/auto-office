@@ -4,9 +4,28 @@
 Reads OAuth credentials from the first of these that exists:
   1. ~/.gemini/antigravity-cli/antigravity-oauth-token   (legacy)
   2. ~/.gemini/jetski-standalone-oauth-token             (written by agy 1.3)
+  3. the macOS keychain item (service `gemini`, account `antigravity`), read with
+     `security find-generic-password -s gemini -a antigravity -w` (agy 1.5+).
+     The value is `go-keyring-base64:<base64 of JSON>` or plain JSON. Only
+     `token.refresh_token` is used. Keychain failures name the source
+     `keychain gemini/antigravity` and never include the value.
 refreshes the access token via Google OAuth2, and queries the CloudCode API endpoints:
 https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota         (per-model buckets)
 https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary  (account view: per-family 5h/weekly)
+https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist            (AI credit balance, best effort)
+
+AI credits: loadCodeAssist is POSTed `{"metadata": {"ideType": "ANTIGRAVITY",
+"pluginType": "GEMINI"}}`. Credits come from `paidTier.availableCredits[]`, else
+`currentTier.availableCredits[]` (`creditType`, `creditAmount` as string or int).
+`minimumCreditAmountForUsage` is taken from the credit entry, its tier, or the
+response top level, else 1. Output gains `credits: {status, balance, minimum,
+credit_type, source}`. status is `ok` (balance >= minimum), `exhausted` (balance
+below minimum) or `unknown` (with `cause`: call failed, no tier, no credits list).
+Unknown credits change nothing else. When credits are `exhausted` the quota is
+unusable whatever the windows say, so `tightest_remaining_percent` and every
+family read status `ok`, 0, `cause: "AI credits balance too low"`,
+`exhausted_by: "ai_credits"`, each family keeping its own `reset_time`, and
+`--percent` prints 0.
 
 Usage:
     ./agy-usage.py           # human-readable (Gemini models by default)
@@ -42,10 +61,13 @@ Note:
     `agy-office/scripts/agy-model.sh`) for the actual catalog instead.
 """
 
+import base64
+import binascii
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -87,6 +109,9 @@ QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 # (~/.gemini/antigravity-cli/log, quota_manager.go) and callable with the same
 # OAuth token and an empty JSON body.
 SUMMARY_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+LOAD_CODE_ASSIST_BODY = {"metadata": {"ideType": "ANTIGRAVITY", "pluginType": "GEMINI"}}
+CREDITS_EXHAUSTED_CAUSE = "AI credits balance too low"
 UA = "antigravity-cli"
 
 CLIENT_ID_RE = re.compile(rb"[0-9]{10,}-[a-z0-9]{28,}\.apps\.googleusercontent\.com")
@@ -214,27 +239,80 @@ def resolve_oauth_client():
     return candidates, key, None
 
 
-def get_refreshed_access_token():
-    paths = token_paths()
-    token_path = next((p for p in paths if os.path.exists(p)), None)
-    if not token_path:
-        return None, (
-            "Token file not found; tried " + ", ".join(paths) + " (run `agy` and log in)"
-        )
+KEYCHAIN_SOURCE = "keychain gemini/antigravity"
+KEYCHAIN_CMD = ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]
+KEYCHAIN_PREFIX = "go-keyring-base64:"
 
-    try:
-        with open(token_path, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        return None, f"Failed to read token file {token_path}: {e}"
 
+def _refresh_token_from(data):
     tok_obj = data.get("token") if isinstance(data, dict) else None
     refresh_token = tok_obj.get("refresh_token") if isinstance(tok_obj, dict) else None
-    if not refresh_token or not isinstance(refresh_token, str):
+    return refresh_token if refresh_token and isinstance(refresh_token, str) else None
+
+
+def read_keychain_refresh_token():
+    """(refresh_token, error, attempted). attempted is False off macOS, without
+    `security`, or when the item is absent: those are "not found", not failures.
+    Errors name the source and never include the keychain value."""
+    if sys.platform != "darwin":
+        return None, None, False
+    try:
+        res = subprocess.run(KEYCHAIN_CMD, capture_output=True, timeout=5, check=False)
+    except FileNotFoundError:
+        return None, None, False
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"Failed to read {KEYCHAIN_SOURCE}: {type(e).__name__}", True
+    if res.returncode == 44:  # errSecItemNotFound
+        return None, None, False
+    if res.returncode != 0:
+        return None, f"Failed to read {KEYCHAIN_SOURCE}: security exited {res.returncode}", True
+    try:
+        value = (res.stdout or b"").decode("utf-8").strip()
+        if value.startswith(KEYCHAIN_PREFIX):
+            value = base64.b64decode(value[len(KEYCHAIN_PREFIX):], validate=True).decode("utf-8")
+        data = json.loads(value)
+    except (ValueError, binascii.Error):
         return None, (
-            f"Token file {token_path} has an unrecognised format: no token.refresh_token "
+            f"Malformed value in {KEYCHAIN_SOURCE}: not base64 or JSON "
             "(agy may have changed its layout; run `agy` and log in again)"
-        )
+        ), True
+    refresh_token = _refresh_token_from(data)
+    if not refresh_token:
+        return None, (
+            f"{KEYCHAIN_SOURCE} has an unrecognised format: no token.refresh_token "
+            "(agy may have changed its layout; run `agy` and log in again)"
+        ), True
+    return refresh_token, None, True
+
+
+def read_refresh_token():
+    """(refresh_token, error): file locations in order, then the macOS keychain."""
+    paths = token_paths()
+    token_path = next((p for p in paths if os.path.exists(p)), None)
+    if token_path:
+        try:
+            with open(token_path, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            return None, f"Failed to read token file {token_path}: {e}"
+        refresh_token = _refresh_token_from(data)
+        if not refresh_token:
+            return None, (
+                f"Token file {token_path} has an unrecognised format: no token.refresh_token "
+                "(agy may have changed its layout; run `agy` and log in again)"
+            )
+        return refresh_token, None
+    refresh_token, err, _ = read_keychain_refresh_token()
+    if refresh_token or err:
+        return refresh_token, err
+    tried = paths + ([KEYCHAIN_SOURCE] if sys.platform == "darwin" else [])
+    return None, "Token not found; tried " + ", ".join(tried) + " (run `agy` and log in)"
+
+
+def get_refreshed_access_token():
+    refresh_token, err = read_refresh_token()
+    if err:
+        return None, err
 
     candidates, cache_key, cred_err = resolve_oauth_client()
     if cred_err:
@@ -281,14 +359,15 @@ def get_refreshed_access_token():
     return None, last_error or "No OAuth client candidates available"
 
 
-def _post_quota(url, access_token):
+def _post_quota(url, access_token, body=None):
     headers = {
         "Authorization": f"Bearer {access_token}",
         "User-Agent": UA,
         "Content-Type": "application/json"
     }
 
-    req = urllib.request.Request(url, data=b"{}", headers=headers)
+    data = json.dumps(body).encode("utf-8") if body is not None else b"{}"
+    req = urllib.request.Request(url, data=data, headers=headers)
 
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
@@ -302,17 +381,63 @@ def _post_quota(url, access_token):
         return None, f"Failed to query quota API: {e}"
 
 
+def _credit_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def credits_from(response):
+    """Credits block from a loadCodeAssist response. Never raises."""
+    unknown = {"status": "unknown", "balance": None, "minimum": None, "credit_type": None, "source": None}
+    if not isinstance(response, dict):
+        return {**unknown, "cause": "loadCodeAssist returned no usable response"}
+    tiers = [(n, response.get(n)) for n in ("paidTier", "currentTier") if isinstance(response.get(n), dict)]
+    if not tiers:
+        return {**unknown, "cause": "loadCodeAssist reported no tier"}
+    for source, tier in tiers:
+        entries = tier.get("availableCredits")
+        for entry in entries if isinstance(entries, list) else []:
+            balance = _credit_int(entry.get("creditAmount")) if isinstance(entry, dict) else None
+            if balance is None:
+                continue
+            minimum = next((m for m in (
+                _credit_int(c.get("minimumCreditAmountForUsage")) for c in (entry, tier, response)
+            ) if m is not None), 1)
+            return {
+                "status": "ok" if balance >= minimum else "exhausted",
+                "balance": balance,
+                "minimum": minimum,
+                "credit_type": entry.get("creditType"),
+                "source": source,
+            }
+    return {**unknown, "cause": "loadCodeAssist reported no availableCredits"}
+
+
 def fetch_agy_quota():
-    """(per-model quota, account-view summary, error). The summary is best effort:
-    None when that endpoint fails, in which case families fall back to the buckets."""
+    """(per-model quota, account-view summary, credits, error). Summary and credits
+    are best effort: the summary is None when its endpoint fails (families fall back
+    to the buckets) and credits are `unknown` when loadCodeAssist fails."""
     access_token, err = get_refreshed_access_token()
     if err:
-        return None, None, err
+        return None, None, None, err
     data, err = _post_quota(QUOTA_URL, access_token)
     if err:
-        return None, None, err
+        return None, None, None, err
     summary, _ = _post_quota(SUMMARY_URL, access_token)
-    return data, summary, None
+    loaded, load_err = _post_quota(LOAD_CODE_ASSIST_URL, access_token, LOAD_CODE_ASSIST_BODY)
+    credits = {
+        "status": "unknown", "balance": None, "minimum": None, "credit_type": None,
+        "source": None, "cause": f"loadCodeAssist failed: {load_err}",
+    } if load_err else credits_from(loaded)
+    return data, summary, credits, None
 
 
 def _summary_family(group):
@@ -423,7 +548,7 @@ def process_quota(data, all_models=False, include_claude=False):
 
 
 def main(argv):
-    raw_data, summary, err = fetch_agy_quota()
+    raw_data, summary, credits, err = fetch_agy_quota()
     if err:
         if "--json" in argv:
             unknown_family = {
@@ -461,6 +586,20 @@ def main(argv):
     else:
         processed["tightest_remaining_percent"] = None
         processed["cause"] = gemini.get("cause") or "quota unavailable"
+    processed["credits"] = credits
+    if credits and credits.get("status") == "exhausted":
+        for family in processed["families"].values():
+            family.update({
+                "tightest_remaining_percent": 0,
+                "status": "ok",
+                "cause": CREDITS_EXHAUSTED_CAUSE,
+                "exhausted_by": "ai_credits",
+            })
+        processed.update({
+            "tightest_remaining_percent": 0,
+            "cause": CREDITS_EXHAUSTED_CAUSE,
+            "exhausted_by": "ai_credits",
+        })
     tightest_pct = processed["tightest_remaining_percent"]
     if tightest_pct is None:
         processed.setdefault("cause", "no quota bucket with a readable remainingFraction")
@@ -478,6 +617,8 @@ def main(argv):
         print("=== AGY (Antigravity/Gemini) Quota ===")
         print(f"Scope: {processed['scope']}"
               + ("" if include_claude else "  (Claude excluded; pass --claude to include)"))
+        if credits and credits.get("status") != "unknown":
+            print(f"AI credits: {credits['status']} (balance {credits['balance']}, minimum {credits['minimum']})")
         print("Overall Tightest Headroom: "
               + (f"{tightest_pct}% left" if tightest_pct is not None else f"UNKNOWN ({processed['cause']})"))
         print("\nModel Breakdown (quota-tracked models only — NOT an exhaustive catalog;")

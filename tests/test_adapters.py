@@ -110,15 +110,26 @@ class TestAdapterConformance(unittest.TestCase):
         # without ever running the probe. The assertion below then describes the stub's
         # exit code rather than agy-usage.py's, so the test passed or failed on the
         # machine's Xcode state instead of on the behavior it names.
-        env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp/nonexistent-home-for-agy-quota-test'}
-        res = subprocess.run(
-            [_sys.executable, str(ROOT / 'scripts/agy-usage.py')],
-            env=env,
-            capture_output=True,
-            text=True
-        )
+        # A fake `security` that exits 44 (item not found) is the only thing on PATH, so
+        # the probe's keychain lookup can never read a real keychain.
+        import os
+        import stat
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake = os.path.join(td, 'security')
+            with open(fake, 'w') as fh:
+                fh.write('#!/bin/sh\nexit 44\n')
+            os.chmod(fake, os.stat(fake).st_mode | stat.S_IXUSR)
+            env = {'PATH': td, 'HOME': '/tmp/nonexistent-home-for-agy-quota-test'}
+            res = subprocess.run(
+                [_sys.executable, str(ROOT / 'scripts/agy-usage.py')],
+                env=env,
+                capture_output=True,
+                text=True
+            )
         self.assertEqual(res.returncode, 2)
-        self.assertIn('Token file not found', res.stderr)
+        self.assertIn('Token not found', res.stderr)
+        self.assertIn('keychain gemini/antigravity', res.stderr)
 
     def test_agy_family_quota_routes_each_model_family_independently(self):
         from unittest.mock import patch

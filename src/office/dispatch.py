@@ -5058,8 +5058,10 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
                 return  # another process recorded the end first; a recovery never overwrites it
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
-                con.execute("DELETE FROM route_cooldowns WHERE route=?",
-                            (routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort")),))
+                keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
+                if d.get("harness") == "agy":
+                    keys.append(routing.harness_demotion_key("agy"))  # an AI-credits wall is cleared by a working agy
+                con.executemany("DELETE FROM route_cooldowns WHERE route=?", [(k,) for k in keys])
             status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal", "context_cap") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
@@ -5067,7 +5069,13 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
             if classification != "success" and d.get("triple"):
                 d["terminal_classification"] = classification
                 if _quota_wall(run, d):
-                    _record_route_cooldown(con, run, d)
+                    credits = _record_route_cooldown(con, run, d)
+                    if credits:
+                        state.emit(con, run, "route.failed",
+                                   f"{d['task_id'] or d['role']} agy AI credits exhausted: every agy route skipped until "
+                                   f"{credits.isoformat()[:16]}Z", task_id=d["task_id"], dispatch_id=dispatch_id,
+                                   payload={"harness": "agy", "reason": "ai-credits-exhausted",
+                                            "demoted_until": credits.isoformat()})
             # A reviewer that ended without a reply is not a plain success: the gate re-prompts or retries it.
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
                        + (" with an empty reply: no reply file was written" if empty_reply else "")
@@ -5221,7 +5229,7 @@ _ROUTE_FAILURE_SIGNATURES = (
                                  r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
                                  r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
     ("quota", r"quota (exceeded|exhausted|limit)|rate[- ]?limit(ed)?|\b429\b|usage limit reached|"
-              r"credits? (exhausted|depleted)|credits? balance is too low|out of (ai )?credits|weekly limit reached"),
+              r"credits? (exhausted|depleted)|weekly limit reached|credits? balance .{0,20}too low|resource_exhausted|out of (ai )?credits"),
     ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
     ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
                   r"|service unavailable|\b50[234]\b|overloaded"),
@@ -5915,8 +5923,20 @@ def _clear_route_cooldown(con, route: str, harness: str | None = None,
                 (_cooldown_key(route, harness, invocation_model_id),))
 
 
-def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = None) -> None:
-    """Persist a quota wall for this invocation across efforts, runs and processes."""
+_AI_CREDITS_WALL = re.compile(r"AI credits balance is too low", re.I)
+
+
+def _ai_credits_wall(run: dict, d: dict) -> bool:
+    """agy printed its account-wide AI-credits wall in the last log lines (not narration above them)."""
+    from office import gates
+    text = gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"])
+    return any(_AI_CREDITS_WALL.search(ln) and not ln.startswith("[office]")
+               for ln in [ln.strip() for ln in text.splitlines() if ln.strip()][-5:])
+
+
+def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = None) -> datetime | None:
+    """Persist a quota wall for this invocation across efforts, runs and processes. An agy AI-credits wall
+    also cools the whole harness; returns that expiry, else None."""
     cfg = state.pinned_config(run)
     minutes = max(0.0, float((cfg.get("quota") or {}).get("cooldown_minutes", 15)))
     now = now or datetime.now(timezone.utc)
@@ -5925,10 +5945,16 @@ def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = No
     limit = _usage_limit(gates._log_text(d, log_path), now=now)
     expires = limit.get("resets_at") if limit else None
     expires = expires or (now + timedelta(minutes=minutes))
-    con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
-                (_cooldown_key(d.get("triple") or "", d.get("harness"), d.get("invocation_model_id")),
-                 expires.astimezone(timezone.utc).isoformat(), now.isoformat()))
+    expires = expires.astimezone(timezone.utc)
+    keys = [_cooldown_key(d.get("triple") or "", d.get("harness"), d.get("invocation_model_id"))]
+    credits = d.get("harness") == "agy" and _ai_credits_wall(run, d)
+    if credits:
+        keys.append(routing.harness_demotion_key("agy"))
+    for key in keys:
+        con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                    (key, expires.isoformat(), now.isoformat()))
+    return expires if credits else None
 
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:

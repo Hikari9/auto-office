@@ -491,3 +491,27 @@ def test_builder_change_selects_its_contract_module(pr_repo):
     assert changed == ["scripts/build_plugin_distribution.py"]
     assert "tests/contracts/test_plugin_distribution.py" in chosen
     assert all((pr_repo / p).is_file() for p in chosen)
+
+
+def _commit_all(pr_repo, message: str) -> None:
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", message], check=True)
+
+
+def test_hyphenated_script_selects_its_underscore_test(pr_repo):
+    (pr_repo / "scripts").mkdir()
+    (pr_repo / "scripts/agy-usage.py").write_text("print('agy')\n")
+    (pr_repo / "tests/test_agy_usage.py").write_text("def test_agy(): pass\n")
+    _commit_all(pr_repo, "hyphenated script and test")
+    _, changed, chosen = selection(pr_repo)
+    assert "scripts/agy-usage.py" in changed
+    assert "tests/test_agy_usage.py" in chosen
+
+
+def test_unmatched_hyphenated_script_still_fails_closed(pr_repo):
+    (pr_repo / "scripts").mkdir()
+    (pr_repo / "scripts/orphan-usage.py").write_text("print('x')\n")
+    _commit_all(pr_repo, "unmatched hyphenated script")
+    with pytest.raises(SelectionError, match="No tests mapped to changed runtime module scripts/orphan-usage.py"):
+        selection(pr_repo)
