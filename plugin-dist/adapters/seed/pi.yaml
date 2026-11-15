@@ -109,6 +109,7 @@ office_profiles:
   # fingerprints the worktree (HEAD, tracked diff, untracked files) before and after each review and fails
   # the route as degraded when it changed (verify_worktree_unchanged).
   reviewer:
+    submit: file
     argv: [--tools, "read,grep,find,ls", --print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
     prompt: stdin
     output: stdout
