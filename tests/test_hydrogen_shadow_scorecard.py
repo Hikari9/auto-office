@@ -95,6 +95,25 @@ def test_scores_recall_fp_agreement_escapes_and_holds_promotion(tmp_path):
     assert "Decision now: hold" in scorecard.render(s)
 
 
+def test_missing_planted_result_is_a_failed_miss(tmp_path):
+    for case in ("p1", "p2"):
+        (tmp_path / "planted" / case).mkdir(parents=True)
+        (tmp_path / "planted" / case / "truth.yaml").write_text(yaml.safe_dump(TRUTH))
+    hit = {"severity": "major", "file": "src/a.py", "line": 40, "summary": "race"}
+    _result(tmp_path, "p1", "luna", [hit])
+    _result(tmp_path, "p1", "hydrogen", [hit])
+    _result(tmp_path, "p2", "luna", [hit])  # hydrogen never ran p2
+    for i in range(10):
+        _result(tmp_path, f"pr-{i}", "luna", [])
+        _result(tmp_path, f"pr-{i}", "hydrogen", [])
+    s = scorecard.score(scorecard.load(tmp_path))
+    assert (s["hydrogen"]["caught"], s["hydrogen"]["planted"], s["hydrogen"]["planted_failed"]) == (1, 2, 1)
+    assert s["hydrogen"]["failed"] == ["p2: missing"]
+    assert (s["luna"]["caught"], s["luna"]["planted"]) == (2, 2)
+    ok, why = scorecard.promotion(s)
+    assert not ok and "planted run failed for hydrogen" in why
+
+
 def test_promotion_requires_lower_fp_and_equal_recall():
     base = {"recall": 1.0, "fp_rate": 0.2, "escapes": 0, "pending": 0, "live_prs": 10}
     assert scorecard.promotion({"luna": base, "hydrogen": {**base, "fp_rate": 0.1}})[0]

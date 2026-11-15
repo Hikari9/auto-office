@@ -98,15 +98,20 @@ def disposition(data: dict, case: str, reviewer: str, i: int, finding: dict) -> 
 
 def score(data: dict) -> dict:
     out: dict[str, dict] = {}
-    reviewers = sorted({r for recs in data["results"].values() for r in recs})
+    reviewers = sorted({BASELINE, CANDIDATE} | {r for recs in data["results"].values() for r in recs})
+    # Every planted case is scored for every reviewer: a missing result is a failed run, not an omission.
+    cases = sorted(set(data["results"]) | set(data["truths"]))
     for r in reviewers:
         s = {"planted": 0, "caught": 0, "planted_failed": 0, "failed": [], "matches": [], "findings": 0, "rejected": 0, "pending": 0,
              "agree": 0, "compared": 0, "live_prs": 0, "escapes": 0}
-        for case, recs in sorted(data["results"].items()):
+        for case in cases:
+            recs = data["results"].get(case) or {}
+            truth = data["truths"].get(case)
             rec = recs.get(r)
             if rec is None:
-                continue
-            truth = data["truths"].get(case)
+                if not truth:
+                    continue
+                rec = {"status": "missing"}
             if rec.get("status") != "ok":
                 # A failed planted run is a miss: it stays in the recall denominator and blocks promotion.
                 s["failed"].append(f"{case}: {rec.get('status')}")
