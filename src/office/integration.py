@@ -451,7 +451,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
             findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
             detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
             with db.transaction(con):
-                _set_integration(con, run, status="blocked" if outcome["verdict"] != "UNAVAILABLE" else "unavailable",
+                _set_integration(con, run, status="unavailable" if outcome["verdict"] in ("UNAVAILABLE", "REVOKED") else "blocked",
                                  detail=f"integration review {outcome['verdict']}: {detail[:200]}")
                 state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
             return results

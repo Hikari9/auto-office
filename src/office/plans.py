@@ -591,7 +591,7 @@ def require_dispatchable(con, run: dict) -> None:
             raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
                           scope="plan", next_step='re-prompt the reviewer in its pane to write the file, or the user may '
                                                 'waive: office approve waive plan-review --quote "<words>"')
-        if rs["first_verdict"] == "UNAVAILABLE" and rs["last_verdict"] in (None, "UNAVAILABLE"):
+        if rs["first_verdict"] in ("UNAVAILABLE", "REVOKED") and rs["last_verdict"] in (None, "UNAVAILABLE", "REVOKED"):
             raise Refused("plan-review-unavailable", "no plan reviewer could review the plan", scope="plan",
                           next_step='resolve the reviewer route, or the user may waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= rs["first_version"]:
@@ -769,7 +769,7 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
         state.update_run(con, run["id"], plan_review=pr)
         return
     else:
-        state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
+        state.emit(con, run, "plan.unavailable", f"PLAN REVIEW {verdict if verdict == 'REVOKED' else 'UNAVAILABLE'} p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")
     if verdict != "PASS":
         _spend_budget_without_pass(con, run, pr, [outcome.get("route")] if outcome.get("route") else None)

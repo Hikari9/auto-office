@@ -149,8 +149,11 @@ def next_action(con, run: dict) -> str:
             if block:
                 reroute = gates_review.cooling_pin_recovery(con, run, t, block["id"]) or (
                     f"Re-run only the review on a fallback reviewer: office review {tid} [--as <harness>/<model>[@effort]]")
-                return (f"{tid} code review of {block['revision_id']} returned no verdict "
-                        f"({block['verdict'] or block.get('review_status')}; runtime status, no round spent). {reroute}; or review it "
+                state_ = block['verdict'] or block.get('review_status')
+                why = ("was revoked by the orchestrator (not a reviewer failure)" if "REVOKED" in (block["verdict"], block.get("review_status"))
+                       else "returned no verdict")
+                return (f"{tid} code review of {block['revision_id']} {why} "
+                        f"({state_}; runtime status, no round spent). {reroute}; or review it "
                         f"yourself as the orchestrator (recorded degraded, non-independent; refused for the session that "
                         f"produced it): office review {tid} --report <file>; office resume retries the same reviewer chain. "
                         f"A waiver is the user's last resort: office approve waive {tid}:code --quote \"<words>\"")

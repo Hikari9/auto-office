@@ -32,7 +32,7 @@ CONTRACTS = (LEGACY, CONVERGENCE)
 DEFAULT = CONVERGENCE
 
 VERDICTS = ("APPROVED", "RECHECK", "INTAKE_GAP")
-LEGACY_VERDICTS = ("PASS", "CHANGES_REQUIRED", "PLAN_DEFECT", "BRIEF_DEFECT", "UNAVAILABLE")
+LEGACY_VERDICTS = ("PASS", "CHANGES_REQUIRED", "PLAN_DEFECT", "BRIEF_DEFECT", "UNAVAILABLE", "REVOKED")
 SEVERITIES = ("high", "medium", "low")
 
 # Runtime/evidence status of one review attempt. Only COMPLETED carries a verdict.
@@ -40,7 +40,12 @@ COMPLETED = "COMPLETED"
 UNAVAILABLE = "UNAVAILABLE"
 EVIDENCE_BLOCKED = "EVIDENCE_BLOCKED"
 INVALID_RESULT = "INVALID_RESULT"
-STATUSES = (COMPLETED, UNAVAILABLE, EVIDENCE_BLOCKED, INVALID_RESULT)
+# The orchestrator stopped the reviewer on purpose (#1007): no verdict and not a reviewer failure. On v3.1 runs
+# the same outcome is the legacy verdict "REVOKED".
+REVOKED = "REVOKED"
+STATUSES = (COMPLETED, UNAVAILABLE, EVIDENCE_BLOCKED, INVALID_RESULT, REVOKED)
+# Outcomes where no reviewer answered: both settle a gate as unavailable, and only the wording differs.
+NO_ANSWER = (UNAVAILABLE, REVOKED)
 
 # The substantive-round ceiling for every RECHECK sequence (plan, convergence,
 # visual) and for executor self-review. Not configurable: #337 locks it.

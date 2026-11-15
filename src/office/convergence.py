@@ -1167,7 +1167,7 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
             _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"), owned)
     label = "visual" if gate["kind"] == "visual" else "convergence"
     if status != contract.COMPLETED:
-        state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status} (runtime/evidence status, "
+        state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status}{' (revoked by the orchestrator, not a reviewer failure)' if status == contract.REVOKED else ''} (runtime/evidence status, "
                    f"not a verdict; no round spent): {(outcome.get('summary') or '')[:300]}",
                    payload={"scope": scope["id"], "kind": gate["kind"], "status": status,
                             "exhausted": bool(outcome.get("exhausted"))})
@@ -1220,7 +1220,7 @@ def settle(con, run: dict, scope: dict) -> None:
     if blocked and not rechecks:
         g = blocked[0]
         exhausted = g.get("review_status") in FALLBACK_STATUSES
-        _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") == contract.UNAVAILABLE
+        _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") in contract.NO_ANSWER
                    else "evidence_blocked" if g.get("review_status") == contract.EVIDENCE_BLOCKED else "attention",
                    detail=f"{g['kind']} {g.get('review_status')}: {(g.get('summary') or '')[:200]}",
                    fallback_available=bool(exhausted), fallback_kind=g["kind"])
@@ -1969,7 +1969,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
                   f"{scope['id']}:{m.group(2).lower()} --report <file> reviews it yourself; a waiver needs landing authority)")
 
 
-FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+FALLBACK_STATUSES = (*contract.NO_ANSWER, contract.INVALID_RESULT)
 SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual block cannot be captured (#454)
 # Scope states in which the current composition's review is the one in play (not held, repairing or recomposing).
 FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")

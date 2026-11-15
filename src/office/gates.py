@@ -153,8 +153,8 @@ def review_unavailable(gate: dict) -> bool:
     """A finished review that returned no verdict: no reviewer could answer (UNAVAILABLE), the one that
     answered left no readable reply (ATTENTION, v3.1; INVALID_RESULT, convergence-v1), or every route hit a
     quota or auth wall. None of these is a verdict, and none spends a substantive round."""
-    return gate["verdict"] in ("UNAVAILABLE", "ATTENTION") \
-        or gate.get("review_status") in (contract.UNAVAILABLE, contract.INVALID_RESULT)
+    return gate["verdict"] in ("UNAVAILABLE", "REVOKED", "ATTENTION") \
+        or gate.get("review_status") in (*contract.NO_ANSWER, contract.INVALID_RESULT)
 
 
 def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
@@ -782,6 +782,36 @@ def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | N
     return (routing.candidate_id(cand), until) if until else None
 
 
+def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
+                     dispatch_id: str | None = None, producer_route: str | None = None,
+                     env_failures: int | None = None) -> dict:
+    """The one result shape of `run_reviewer`. `kind` is completed | evidence_blocked | invalid | unavailable | revoked.
+    A convergence run reads `status` (only COMPLETED carries a verdict); a v3.1 run reads `verdict`
+    (`ATTENTION` for an unreadable reply, `UNAVAILABLE` for an exhausted chain, `REVOKED` for a stopped reviewer)."""
+    status = {"completed": contract.COMPLETED, "evidence_blocked": contract.EVIDENCE_BLOCKED,
+              "invalid": contract.INVALID_RESULT, "unavailable": contract.UNAVAILABLE, "revoked": contract.REVOKED}[kind]
+    legacy = {"invalid": "ATTENTION", "unavailable": "UNAVAILABLE", "revoked": "REVOKED"}
+    answered = kind in ("completed", "evidence_blocked")
+    verdict = parsed.verdict if answered and parsed and (kind == "completed" or not convergence) else None
+    if not convergence and kind in legacy:
+        verdict = legacy[kind]
+    out = {"verdict": verdict, "parsed": parsed if answered else None, "route": route}
+    if dispatch_id:
+        out["dispatch_id"] = dispatch_id
+    out["summary"] = summary
+    if kind != "unavailable":
+        out["producer_route"] = producer_route
+    if kind == "revoked":
+        out["revoked"] = True
+    if convergence:
+        out["status"] = status
+        if kind == "unavailable":
+            out["exhausted"] = True
+        if env_failures is not None:
+            out["env_failures"] = env_failures
+    return out
+
+
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
@@ -914,11 +944,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
         if dispatch_mod.was_revoked(con, d):
             # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion.
             summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
-            if convergence:
-                return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": triple,
-                        "dispatch_id": dispatch_id, "summary": summary, "revoked": True, "producer_route": producer}
-            return {"verdict": "UNAVAILABLE", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
-                    "summary": summary, "revoked": True, "producer_route": producer}
+            return reviewer_outcome(convergence, "revoked", summary=summary, route=triple, dispatch_id=dispatch_id,
+                                    producer_route=producer)
         _note_headless_reviewer(con, run, d, profile_kind)
         if guard and (changed := guard(before)):
             # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
@@ -1014,11 +1041,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                           task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
                                           gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
                                           digest=sha256_bytes(text.encode()))
-                if convergence:
-                    return {"status": contract.INVALID_RESULT, "verdict": None, "parsed": None, "route": triple,
-                            "dispatch_id": dispatch_id, "summary": attention, "producer_route": producer}
-                return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
-                        "summary": attention, "producer_route": producer}
+                return reviewer_outcome(convergence, "invalid", summary=attention, route=triple, dispatch_id=dispatch_id,
+                                        producer_route=producer)
             d = state.get_dispatch(con, dispatch_id)
         if parsed.valid and text and not (output.is_file() and output.stat().st_size):
             # The reply came from the headless harness's stdout log (no reply
@@ -1034,12 +1058,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             # A valid reply file is the result, whatever the exit classification.
             # The reviewer is done: snapshot and close its pane (R1).
             dispatch_mod.reclaim_pane(run, dispatch_id)
-            out = {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
-                   "summary": f"{parsed.verdict or parsed.evidence_status} by {triple}", "producer_route": producer}
-            if convergence:
-                out["status"] = contract.COMPLETED if parsed.verdict else contract.EVIDENCE_BLOCKED
-                out["env_failures"] = len(failures)
-            return out
+            return reviewer_outcome(convergence, "completed" if parsed.verdict or not convergence else "evidence_blocked",
+                                    summary=f"{parsed.verdict or parsed.evidence_status} by {triple}", parsed=parsed,
+                                    route=triple, dispatch_id=dispatch_id, producer_route=producer,
+                                    env_failures=len(failures) if convergence else None)
         # Only a launch failure reaches here: the agent never produced a reply
         # (never started, died first, or hit an auth or quota wall). That is the
         # one case where another route is substituted.
@@ -1062,11 +1084,9 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
     if cooled_pin:  # first, so the summary truncation below never cuts the recovery (#958)
         failures.insert(0, cooled_pin_recovery(con, gate["id"], *cooled_pin))
-    if convergence:
-        return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": None,
-                "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
-                "env_failures": len(failures), "exhausted": True}
-    return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+    summary = ("every eligible reviewer route failed: " + "; ".join(failures)[:560]) if convergence \
+        else "; ".join(failures)[:600]
+    return reviewer_outcome(convergence, "unavailable", summary=summary, env_failures=len(failures) if convergence else None)
 
 
 def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
@@ -1913,8 +1933,8 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"{kind_label} review needs attention: {outcome.get('summary', '')[:200]}")
         return
-    elif verdict == "UNAVAILABLE":
-        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:400]}; "
+    elif verdict in ("UNAVAILABLE", "REVOKED"):
+        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} {verdict}: {outcome.get('summary', '')[:400]}; "
                    "valid unrelated results are preserved", task_id=task["id"])
         if gate["kind"] == "checks":
             con.execute("UPDATE gates SET status='cancelled', stale_reason='checks unavailable' WHERE revision_id=? "
