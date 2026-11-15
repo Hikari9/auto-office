@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.27.1
+
+Quoted route overrides. `office route override` also accepts `--rico-quote "<verbatim words>"` with `--quoted-at "YYYY-MM-DD HH:MM"` (Manila): a non-worker caller relaying the user's real words issues a receipt without a terminal or the 'authorize' prompt. Workers (`OFFICE_DISPATCH_ID`) are still refused, the quote must be non-trivial, not future and within 24h, and every other check is unchanged. Receipts record issuer kind (terminal or quoted), quote, quote time and `HERDR_PANE_ID`, all in the HMAC body (older receipts keep their original body), and `--list` shows them.
+
 ## 3.27.0
 
 The agy Hydrogen reviewer launches in a Herdr pane like the worker (#1027 parity), with plan mode as the write barrier. The pane hosts the same headless `agy --mode plan --print` run (`interactive.supervisor: true`, `wall_cap: true`) and Office captures its stdout as the reply, so no agy permission setting is relied on. The profile keeps `routes: [gemini-4-hydrogen-high@high]` and `verify_worktree_unchanged`, passes no permission bypass, `--mode auto` or `accept-edits`, and a stalled pane ends at `max_minutes` as a reported no-verdict result. Headless stays the fallback when Herdr is unusable. The adapter hash changed: rerun `office doctor --probe-route agy/gemini-4-hydrogen@high` after the reinstall.
