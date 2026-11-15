@@ -263,3 +263,32 @@ def test_repeated_usage_limits_with_no_known_reset_escalate_the_cooldown(env):
     assert guide._usage_limit_cooldown(con, now, pool, route) == max(base, next_midnight - now)
     # Another pool's hits never escalate this one.
     assert guide._usage_limit_cooldown(con, now, "pool:other", "other@1/m@high") == cap(base)
+
+
+def test_agy_credit_wall_in_an_idle_pane_is_a_usage_limit_that_demotes_the_route_1194(env):
+    """#1194 (regression of #608): agy's empty-credits stop was reported as a plain idle stall,
+    so no cooldown was recorded and `--reroute` re-picked the walled route."""
+    _go(env)
+    session_env = _herdr(env, status="idle", pane="brief pointer landed\n⚠ Your AI credits balance is too low to continue.\n")
+    d = _as_herdr(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='agy', adapter_id='agy', model='gemini-4-hydrogen', "
+                "invocation_model_id='gemini-4-hydrogen', effort='medium' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = _wait(env, session_env, timeout="3")
+    assert code == 3 and "usage_limit" in out and "idle" not in out.split("usage_limit")[0].split(":")[-1], (code, out)
+    route = routing.demotion_key("agy", "gemini-4-hydrogen", "medium")
+    rows = {row["route"] for row in con.execute("SELECT route FROM route_cooldowns")}
+    assert route in rows, rows
+    assert con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
+                       (d["id"],)).fetchone()[0] == 1
+
+
+def test_credit_balance_wall_text_matches_the_quota_signatures_1194():
+    from office import gates
+    wall = "⚠ Your AI credits balance is too low to continue."
+    assert dispatch._usage_limit(wall) is not None
+    assert gates._quota_signature(wall)
+    assert dispatch.route_failure("nonzero", wall)[0] == "quota"
+    # A prompt echo below the wall means the agent went on.
+    assert dispatch._usage_limit(wall + "\n> continue") is None

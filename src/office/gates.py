@@ -1538,7 +1538,7 @@ def _pane_quota_wall(d: dict, ddir: Path) -> str | None:
 
 def _quota_signature(text: str) -> bool:
     return bool(re.search(r"rate.?limit|quota|usage limit|session limit|weekly limit|429|too many requests|exhausted"
-                          r"|resource_exhausted|credits? balance .{0,20}too low",
+                          r"|resource_exhausted|credits? balance .{0,20}too low|out of (ai )?credits",
                           text[-2000:], re.I))
 
 
