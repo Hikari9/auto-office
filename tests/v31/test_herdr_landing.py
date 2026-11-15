@@ -29,11 +29,11 @@ def test_codex_interactive_launch_pre_trusts_its_cwd(tmp_path):
         args, _ = adapters.interactive_argv(codex, kind, model="m", effort="high", cwd=tmp_path)
         key = json.dumps(str(tmp_path.resolve()))
         assert f'projects={{{key}={{trust_level="trusted"}}}}' in args, (kind, args)
-        # Headless `codex exec` shows no dialog and keeps its argv. The reviewer alone trusts its own sandbox
-        # dir, so codex loads the dispatch's office-review-submit rule there (#1042).
+        # Headless `codex exec` shows no dialog and keeps its argv. The code and visual reviewers trust their own
+        # sandbox dir, so codex loads the dispatch's office-review-submit rule there (#1042; vision since #1192).
         argv, _ = adapters.build_argv(codex, kind, model="m", effort="high", cwd=tmp_path)
         trusted = [a for a in argv if a.startswith("projects=")]
-        assert trusted == ([f'projects={{{key}={{trust_level="trusted"}}}}'] if kind == "reviewer" else []), (kind, argv)
+        assert trusted == ([f'projects={{{key}={{trust_level="trusted"}}}}'] if kind != "worker" else []), (kind, argv)
 
 
 @pytest.mark.approved

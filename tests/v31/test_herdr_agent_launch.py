@@ -320,10 +320,13 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         # R12: a reviewer may write its reply file, and gets that file's directory.
         assert str(out.parent) in args, args
         if kind == "claude":
-            assert args[args.index("--disallowedTools") + 1].startswith("Edit,NotebookEdit,Bash(ls),Bash(ls *),")
+            # #1187: safe read commands such as ls are allowed, so the deny list starts at the mutating ones.
+            denied = args[args.index("--disallowedTools") + 1]
+            assert denied.startswith("Edit,NotebookEdit,Bash(rm),Bash(rm *),") and "Bash(ls)" not in denied
             # Writes are allowed to the dispatch dir alone; dontAsk denies the rest.
-            assert args[args.index("--allowedTools") + 1] == (f"Read,Grep,Glob,Edit(/{out.parent}/**),"
-                                                              f"Bash(office review submit --file {out.parent}/review-submit.txt)")
+            # #1187: the exact submit comes first; the safe test runners follow (tests/v31/test_issue_1186_reviewer_shell.py).
+            assert args[args.index("--allowedTools") + 1].startswith(
+                f"Read,Grep,Glob,Edit(/{out.parent}/**),Bash(office review submit --file {out.parent}/review-submit.txt),")
             assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
         else:
@@ -418,12 +421,14 @@ def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
 
 
 @pytest.mark.approved
-def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
-    # `working` alone is not proof: codex reports it while a trust dialog holds the composer.
-    state_file, run, d, _, res = launch_in_herdr(env, monkeypatch, gets=["working"], reads=["> composer empty"])
+def test_unconfirmed_prompt_on_a_working_agent_is_not_relaunched_or_reported(env, monkeypatch):
+    # #583 (#1058): the pointer left the composer and herdr says working, so the agent most likely took the
+    # brief. The landing stays unconfirmed (not relaunched) and no did-not-land advice would deliver it twice.
+    # An idle agent with an empty composer is still reported (tests/v31/test_herdr_landing.py).
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, gets=["working"], reads=["> composer empty"])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is False
-    events = _launch_events(env, run)
-    assert len(events) == 1 and "did not land" in events[0] and res["agent"] in events[0]
+    assert _launch_events(env, run) == []
+    assert json.loads((ddir / "launch.json").read_text()).get("landing_unconfirmed_working") is True
 
 
 @pytest.mark.approved
