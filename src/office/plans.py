@@ -665,8 +665,7 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                            plan_review=True, exclude=job["payload"].get("exclude"),
-                                           resume_from=job["payload"].get("resume_from"),
-                                           review_override=job["payload"].get("review_override"))
+                                           resume_from=job["payload"].get("resume_from"))
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -1159,8 +1158,6 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
     if rounds >= round_cap(run):
         return None
     payload = {"exclude": list(exclude or [])}
-    if pr.get("review_override"):
-        payload["review_override"] = pr["review_override"]
     # Same reviewer across a RECHECK sequence when it is still available (#337).
     prev = recheck_reviewer(con, run)
     if prev and not payload["exclude"]:

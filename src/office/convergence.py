@@ -848,12 +848,10 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                 brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify and deduplicate in your one verdict):\n"
                 brief += "\n".join(str(r) for r in precheck["reports"])
             route_options = _lane_review_options(con, run, job, gate, scope, st, "convergence_review")
-            # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
-            pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
             reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
             for attempt in range(reprompts + 1):
                 outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout,
-                                             include_dirs=[checkout], review_override=pinned, **route_options)
+                                             include_dirs=[checkout], **route_options)
                 problem = _stamp_reviewed_commit(run, commit, outcome)
                 if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
                     break  # ingest turns a still-wrong commit into INVALID_RESULT
@@ -2049,14 +2047,11 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     if not blocked:
         raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
                       "there is no review-only recovery to run", scope=scope["id"], next_step="office status")
-    if pin:
-        if all(g["kind"] == "visual" for g in blocked):
-            raise Refused("no-visual-override", f"{scope['id']}: a visual review has no user-chosen reviewer route (no harness "
-                          "declares the vision capability); it re-runs on the next fallback route", scope=scope["id"],
-                          next_step=f"office review {scope['id']}:visual")
-        candidates.declared_decision(pin["as"], flag="--as", role="code_reviewer", config=state.pinned_config(run),
-                                    run_id=run["id"])
-        for tid in scope["tasks"]:  # a visual gate of the same call takes the next fallback route
+    if pin:  # the route must fit the role of every gate it re-runs
+        for role in sorted({"visual_reviewer" if g["kind"] == "visual" else "code_reviewer" for g in blocked}):
+            candidates.declared_decision(pin["as"], flag="--as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])
+        for tid in scope["tasks"]:
             state.update_task(con, run["id"], tid, review_override=pin)
     st = scope_state(run, scope["id"])
     pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
@@ -2065,7 +2060,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     for g in blocked:
         visual = g["kind"] == "visual"
         payload: dict = {"scope": scope["id"], "review_only": True}
-        if visual or not pinned:
+        if not pinned:
             tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
                                                 (run["id"], scope["id"], g["kind"], g["input_key"]))
             if tried:
@@ -2074,7 +2069,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
                            int(g.get("cycle") or 1))
         state.enqueue(con, run, "lane_visual" if visual else "convergence_review", {"gate_id": gid, **payload},
                       dedup_key=f"{g['kind']}:{gid}", max_attempts=2)
-        who = None if visual else (pin or pinned or {}).get("as")
+        who = (pin or pinned or {}).get("as")
         how = (f"reviewer {who}" + ("" if pin else ", pinned by the user and kept; --as names another")) if who \
             else "next fallback reviewer route"
         lines.append(f"{scope['id']} {'visual' if visual else 'convergence'} review re-run on {st['commit'][:10]} "

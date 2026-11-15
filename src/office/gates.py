@@ -177,6 +177,33 @@ def review_pin(review_as: str | None, cli: str | None = None, external: bool = F
     return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
 
 
+def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
+    """The one place a user's reviewer pin is read, for any role (code, convergence, visual, integration, plan).
+
+    A task-scoped review (the gate names a task, or a lane whose tasks are listed in its scope) reads the first
+    `review_override` on those tasks; the plan reviewer has no task and reads the run's plan-review record. Pins already
+    stored on a running run keep working. A pin whose route lacks what `role` requires (a code reviewer's route
+    cannot judge screenshots, say) does not apply to that role: it returns None and the role routes normally."""
+    run = state.get_run(con, run["id"]) or run
+    if role == "plan_reviewer":
+        pin = (run.get("plan_review") or {}).get("review_override")
+    else:
+        tids = [gate["task_id"]] if gate and gate.get("task_id") else []
+        if not tids and gate and gate.get("scope"):
+            from office import convergence
+            tids = list((convergence.find_scope(con, run, gate["scope"]) or {}).get("tasks") or [])
+        pin = next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in tids)
+                    if t and t.get("review_override")), None)
+    if not pin:
+        return None
+    try:
+        candidates.declared_decision(pin["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                     run_id=run["id"])
+    except Refused:
+        return None
+    return pin
+
+
 def review_pin_inert(run: dict) -> str | None:
     """Why a user's code-reviewer pin has no effect on this run, or None (#727): its gear runs no code review,
     so a pinned route never reviews (a convergence lane that changes a security-sensitive path still gets one)."""
@@ -289,7 +316,7 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
     if state.is_terminal(run):
         raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
-    if review_as:  # the route's shape and capability, before any pin is written
+    if review_as and not re.match(r"[LS]-", target, re.I):  # a lane checks the role of each gate it re-runs
         candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run),
                                     run_id=run["id"])
     pin = review_pin(review_as, review_cli, review_external)
@@ -815,7 +842,7 @@ def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None,
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
-                 review_override: dict | None = None, prefer_not: list[str] | None = None) -> dict:
+                 prefer_not: list[str] | None = None) -> dict:
     """Route, launch, and parse one independent review, substituting routes on
     environment/adapter/schema failure up to the configured bound.
 
@@ -838,11 +865,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     rc = contract.of(run)
     producer = _producer_route(con, gate)
     failures = []
-    task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
     # A user-pinned code reviewer (dispatch --review-as) replaces routing.
     # Independence is per agent: every reviewer is a fresh dispatch and session,
     # never the producer's, so the producer's model or family is not excluded.
-    pinned = review_override or ((task or {}).get("review_override") if role == "code_reviewer" else None)
+    pinned = reviewer_pin(con, run, role, gate)
     # #958: a pinned route still in a quota or usage-limit cooldown is not launched into the same wall. The review moves
     # to the next eligible route with a notice. The pin stays on the task, so a later review checks it again.
     cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
