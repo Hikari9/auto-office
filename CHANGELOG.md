@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.26.0
+
+Credit reporting and an agy-wide cooldown (#1195). The agy probe reads agy 1.5.x's keychain token, reports the AI credit balance, and reads low credits as exhausted. An agy `RESOURCE_EXHAUSTED` or AI-credits failure now sets an agy-wide cooldown instead of cooling one route. The PR gate maps hyphenated scripts to their underscore test modules, so `scripts/agy-usage.py` selects `tests/test_agy_usage.py`; a hyphenated script with no matching test still fails closed.
+
 ## 3.25.0
 
 H5 (Rico 2026-11-15): Hydrogen also reviews plans. `plan_reviewer` joins `code_reviewer` in the Hydrogen review roles, with the same gates: only the exact `agy/gemini-4-hydrogen@high` route, only under the user's exact allow for that role, behind a fresh exact probe, through agy's route-scoped read-only `reviewer` profile with the before/after fingerprint (a plan review fingerprints the run's repo root). With that allow, `roles.plan_reviewer.preferred_seed` accepts the route. Visual review stays closed: agy's `vision` profile runs with `--dangerously-skip-permissions` and no worktree check, so it has no write barrier. The `office route policy` header and `office route allow` message now say an allowed Hydrogen route also needs a fresh exact probe. Integration review stays closed.
