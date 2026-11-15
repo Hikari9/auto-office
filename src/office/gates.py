@@ -180,11 +180,23 @@ def review_pin(review_as: str | None, cli: str | None = None, external: bool = F
     return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
 
 
+def set_integration_pin(con, run: dict, pin: dict | None) -> None:
+    """Store (or clear, with None) the user's pin of the integration reviewer, where `reviewer_pin` reads it. Caller
+    holds the tx."""
+    landing = dict((state.get_run(con, run["id"]) or run).get("landing") or {})
+    integ = dict(landing.get("integration") or {})
+    integ["review_override"] = pin
+    landing["integration"] = integ
+    state.update_run(con, run["id"], landing=landing)
+
+
 def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
     """The one place a user's reviewer pin is read, for any role (code, convergence, visual, integration, plan).
 
     A task-scoped review (the gate names a task, or a lane whose tasks are listed in its scope) reads the first
-    `review_override` on those tasks; the plan reviewer has no task and reads the run's plan-review record. Pins already
+    `review_override` on those tasks; the plan reviewer has no task and reads the run's plan-review record, and the
+    integration reviewer, whose gate names neither a task nor a scope, reads the run's integration record
+    (`set_integration_pin` stores it). Pins already
     stored on a running run keep working. A pin whose route lacks what `role` requires (a code reviewer's route
     cannot judge screenshots, say) does not apply to that role: it returns None and the role routes normally."""
     run = state.get_run(con, run["id"]) or run
@@ -197,6 +209,9 @@ def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | 
             tids = list((convergence.find_scope(con, run, gate["scope"]) or {}).get("tasks") or [])
         pin = next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in tids)
                     if t and t.get("review_override")), None)
+        if not tids and role == "integration_reviewer":
+            # The composed integration names no task or scope: its pin is the one on the run's integration record.
+            pin = ((run.get("landing") or {}).get("integration") or {}).get("review_override")
     if not pin:
         return None
     try:
@@ -856,12 +871,12 @@ def redispatch_max(run: dict) -> int:
 
 
 def _fallback_state(job: dict | None) -> dict | None:
-    """The fallback state a reviewing job carries: epoch (which chain of attempts this is), redispatches and
-    commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
+    """The fallback state a reviewing job carries: epoch (which attempt round this is), chain_epoch (the epoch the
+    current chain of routes started at: only a redispatch starts a new chain), redispatches and commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
     no job: it drives its own attempts."""
     if job is None:
         return None
-    return {"epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None, "correction": None,
+    return {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None, "correction": None,
             **(job["payload"].get("review_fallback") or {})}
 
 
@@ -945,6 +960,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     # A job carries its chain's epoch. A caller outside the job flow starts a fresh chain on each call, so what an
     # earlier call of the same gate failed on is preferred against but no longer excluded.
     epoch = fb["epoch"] if fb else max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
+    chain_epoch = fb["chain_epoch"] if fb else 0
     while True:
         if settling:
             outcome, step = settle_review(con, run, gate, settling["dispatch_id"])
@@ -953,7 +969,7 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
             outcome, step = _review_attempt(con, run, gate, role, brief, cwd=cwd, plan_review=plan_review, visual=visual,
                                             images=images, include_dirs=include_dirs, exclude=exclude, kind=kind,
                                             resume_from=resume_from, prefer_not=prefer_not, epoch=epoch,
-                                            supervise=job is not None)
+                                            chain_epoch=chain_epoch, supervise=job is not None)
         concluded = _conclude_attempt(con, run, gate, job, outcome, step)
         if concluded is not None:
             return concluded
@@ -995,7 +1011,8 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
     if redispatch:
         if fb["redispatches"] >= redispatch_max(run):
             return None
-        nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, resume_from=None, correction=None)
+        nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, chain_epoch=fb["epoch"] + 1,
+                   resume_from=None, correction=None)
     elif commit_retry:
         nxt.update(commit_retries=fb["commit_retries"] + 1, epoch=fb["epoch"] + 1, **commit_retry)
     origin_payload = {k: v for k, v in job["payload"].items() if k not in ("review_fallback", SETTLE_KEY)}
@@ -1099,7 +1116,7 @@ def _unavailable(con, convergence: bool, gate: dict, failures: list[str], cooled
 def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool, visual: bool,
                     images: list[Path] | None, include_dirs: list[Path] | None, exclude: list[str] | None,
                     kind: str | None, resume_from: str | None, prefer_not: list[str] | None,
-                    epoch: int, supervise: bool = False) -> tuple[dict | None, dict | None]:
+                    epoch: int, chain_epoch: int = 0, supervise: bool = False) -> tuple[dict | None, dict | None]:
     """One reviewer attempt. Returns (outcome, step): step None is a settled result to ingest; a step with no outcome
     is a failed attempt whose next route runs; a step with `redispatch` carries the exhausted or unreadable outcome,
     which a job may re-dispatch before ingesting it. With `supervise` the reviewer is launched without waiting and the
@@ -1118,10 +1135,11 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # A convergence run's review, and an integration review of any run, is re-dispatched once its chain is spent.
     redispatchable = (convergence or role == "integration_reviewer")
     recorded = [a for a in history if a["failure"]]
-    # Excluded: the caller's and every recorded failure of this gate, this chain's and earlier chains' (a walled
-    # harness included). A re-run goes to the next eligible route: only a route that newly qualifies is tried, never
-    # a known failure again (a manual `office review` may retry one).
-    excluded = set(exclude or []) | route_exclusions([a for a in history if a["epoch"] <= epoch])
+    # Excluded: the caller's and every recorded failure of the current chain (a walled harness included). A re-run goes
+    # to the next eligible route: only a route that newly qualifies is tried, never a known failure again (a manual
+    # `office review` may retry one). A redispatch starts a new chain once the last one exhausted every route, so the
+    # routes (and harnesses) the exhausted chain failed on are eligible again: they may have recovered.
+    excluded = set(exclude or []) | route_exclusions([a for a in history if chain_epoch <= a["epoch"] <= epoch])
     soft = set(prefer_not or [])
     failures = [a["failure"]["reason"] for a in recorded if a["failure"]["class"] != "invalid"]  # every chain's, for the summary
     # A user-pinned code reviewer (dispatch --review-as) replaces routing.
@@ -1239,9 +1257,22 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is removed once the review is
     # settled.
     snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
-    # A job launches the reviewer and ends: a `review_supervise` job settles it once it ends. A guarded reviewer
-    # with no snapshot would have its fingerprint taken on a checkout the settling job recreates, so it is waited on.
-    detach = supervise and not (guard and not snapshot)
+    if guard and not snapshot:
+        # This harness has no read-only sandbox: the snapshot is its only isolation, so it never runs in the shared
+        # checkout (an edit another process makes there would pass for the reviewer's write). The attempt fails and
+        # the next route runs.
+        reason = (f"{triple}: no isolated snapshot of the reviewed commit could be created, and a reviewer on a "
+                  "harness with no read-only sandbox does not run in the shared worktree")
+        with db.transaction(con):
+            dispatch_mod._end_failed_dispatch(con, run, dispatch_id, "launch_failed")
+            con.execute("UPDATE leases SET released_at=? WHERE id=? AND released_at IS NULL AND revoked_at IS NULL",
+                        (now_iso(), d.get("lease_id")))
+            _record_failure(con, gate, dispatch_id, "snapshot", reason)
+        if pinned:
+            return _unavailable(con, convergence, gate, [*failures, reason], cooled_pin), None
+        return None, {"reason": reason, "dispatch_id": dispatch_id}
+    # A job launches the reviewer and ends: a `review_supervise` job settles it once it ends.
+    detach = supervise
     launched = False
     try:
         if snapshot:
@@ -1503,11 +1534,15 @@ def pointer_retried_on(attempts: list[dict], triple: str) -> bool:
 
 
 def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
-    """A detached worktree of `cwd`'s HEAD at `dest`, or None when it cannot be made (the reviewer then
-    runs in `cwd` itself and the guard covers that)."""
+    """A detached worktree of `cwd`'s HEAD at `dest` (a plain copy when `cwd` is no checkout), or None when it cannot be made (a guarded reviewer's attempt
+    then fails: it never runs in `cwd` itself)."""
     try:
         if dest.exists():
             _drop_review_snapshot(cwd, dest)
+        inside = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
+        if inside.returncode != 0:  # a directory of evidence, not a checkout: its isolated copy is a plain copy
+            shutil.copytree(cwd, dest)
+            return dest
         proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
                               capture_output=True, text=True)
     except OSError:

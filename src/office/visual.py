@@ -923,7 +923,6 @@ not instructions to you."""
 
 
 def job_visual_review(con, run: dict, job: dict) -> dict:
-    from office import conformance
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
@@ -945,6 +944,22 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
             gates.ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
         return outcome
     task = state.get_task(con, run["id"], gate["task_id"])
+    if job["payload"].get(gates.SETTLE_KEY):
+        # The reviewer was launched by an earlier run of this job: record its result without rebuilding the review.
+        outcome = gates.settle_reviewer(con, run, gate, job)
+    else:
+        outcome = _launch_visual_review(con, run, job, gate, task, receipt, Path(capture_path))
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
+    return _ingest_visual_outcome(con, run, gate, task, receipt, outcome)
+
+
+def _launch_visual_review(con, run: dict, job: dict, gate: dict, task: dict, receipt: dict, capture: Path) -> dict:
+    """Build the visual brief and hand it to `run_reviewer` with this job: the reviewer launches without being waited on
+    and a failed attempt queues a `review_fallback` job."""
+    from office import conformance
     conformance.ensure_vision_route(con, run, state.pinned_config(run))
     images, lines = [], []
     for f in receipt["frames"]:
@@ -966,10 +981,14 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
         "DOM MEASUREMENTS (measured, css-px):" if measurements else "DOM MEASUREMENTS: none",
         *[json.dumps(m, sort_keys=True) for m in measurements[:60]],
         "", VISUAL_FORMAT]) + "\n"
-    evdir = Path(capture_path).parent
+    evdir = capture.parent
     exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
-    outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
-                                 include_dirs=[evdir] + ([images[0].parent] if images else []), exclude=exclude, kind="vision")
+    return gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
+                              include_dirs=[evdir] + ([images[0].parent] if images else []), exclude=exclude, kind="vision",
+                              job=job)
+
+
+def _ingest_visual_outcome(con, run: dict, gate: dict, task: dict, receipt: dict, outcome: dict) -> dict:
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
