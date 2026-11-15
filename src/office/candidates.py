@@ -977,7 +977,9 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
     if cand.get("model_id") == "gemini-4-hydrogen" or cand.get("alias_resolved_to") == "gemini-4-hydrogen":
         from contextlib import closing
         from office import db, hydrogen_trials
-        if not run_id or not scope:
+        # A pinned code reviewer has no task size (H4, #1178): dispatch --review-as, review --as, rerun and the
+        # gate's pin checks name only the run. An executor still needs the task that classifies its size.
+        if not run_id or (not scope and (role or "executor") not in hydrogen_trials.REVIEW_ROLES):
             raise Refused("hydrogen-manual-unqualified", "Hydrogen manual routing needs a classified run/task and exact probe")
         with closing(db.connect()) as proof_con:
             pinned = state.get_run(proof_con, run_id)

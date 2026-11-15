@@ -128,6 +128,23 @@ def test_manual_review_bypass_is_refused_without_the_exact_allow():
                                                            user_allowed=True)
 
 
+def test_a_pinned_hydrogen_reviewer_needs_only_the_run_not_a_task(env):
+    """dispatch --review-as, review --as and rerun check the pin with run_id and no scope (#1178)."""
+    from office.state import Refused
+    db.connect().close()
+    # Past the scope gate: the remaining refusals are the exact allow, then the probe receipt.
+    with pytest.raises(Refused, match="exact allow"):
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config={}, run_id="r1")
+    with pytest.raises(Refused, match="conformance receipt"):
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_config(ALLOW),
+                                     run_id="r1")
+    # An executor still needs the task that classifies its size.
+    with pytest.raises(Refused, match="classified run/task"):
+        candidates.declared_decision("agy/gemini-4-hydrogen@medium", role="executor", config={}, run_id="r1")
+    with pytest.raises(Refused, match="classified run/task"):
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_config(ALLOW))
+
+
 def test_route_policy_reports_no_profile_for_non_executor_roles():
     row = {"invocation_harness": "agy", "model_id": "gemini-4-hydrogen", "effort": "high"}
     cand = {"harness": "agy", "model_id": "gemini-4-hydrogen", "effort": "high"}
