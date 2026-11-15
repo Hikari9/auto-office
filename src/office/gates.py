@@ -935,23 +935,33 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                 con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
                             (resume["parent"], resume["session_id"], dispatch_id))
         guard = _worktree_guard(d, profile_kind, cwd)
-        before = guard(None) if guard else None
-        dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
-                            include_dirs=include_dirs, cli=launch_form.get("cli"),
-                            external=bool(launch_form.get("external")),
-                            resume=resume if attempt == 0 else None)
-        d = state.get_dispatch(con, dispatch_id)
-        if dispatch_mod.was_revoked(con, d):
-            # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion.
-            summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
-            return reviewer_outcome(convergence, "revoked", summary=summary, route=triple, dispatch_id=dispatch_id,
-                                    producer_route=producer)
-        _note_headless_reviewer(con, run, d, profile_kind)
-        if guard and (changed := guard(before)):
+        # A guarded reviewer reviews a detached snapshot of the reviewed commit, so an edit another process makes
+        # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is always removed.
+        snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
+        try:
+            if snapshot:
+                guard = _worktree_guard(d, profile_kind, snapshot)
+            before = guard(None) if guard else None
+            dispatch_mod.launch(run, d, profile_kind, ddir, cwd=snapshot or cwd, wait=True, output=output,
+                                images=images, include_dirs=include_dirs, cli=launch_form.get("cli"),
+                                external=bool(launch_form.get("external")),
+                                resume=resume if attempt == 0 else None)
+            d = state.get_dispatch(con, dispatch_id)
+            if dispatch_mod.was_revoked(con, d):
+                # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion.
+                summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
+                return reviewer_outcome(convergence, "revoked", summary=summary, route=triple, dispatch_id=dispatch_id,
+                                        producer_route=producer)
+            _note_headless_reviewer(con, run, d, profile_kind)
+            changed = guard(before) if guard else None
+        finally:
+            if snapshot:
+                _drop_review_snapshot(cwd, snapshot)
+        if changed:
             # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
             # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
-            reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the reviewer is the "
-                      "likely cause, but an edit made by anyone else while it ran trips the same check")
+            reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the check ran on "
+                      "the reviewer's own snapshot, so the reviewer made the change")
             failures.append(reason)
             last_failed = (triple, reason)
             dispatch_mod.reclaim_pane(run, dispatch_id)
@@ -1087,6 +1097,28 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     summary = ("every eligible reviewer route failed: " + "; ".join(failures)[:560]) if convergence \
         else "; ".join(failures)[:600]
     return reviewer_outcome(convergence, "unavailable", summary=summary, env_failures=len(failures) if convergence else None)
+
+
+def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
+    """A detached worktree of `cwd`'s HEAD at `dest`, or None when it cannot be made (the reviewer then
+    runs in `cwd` itself and the guard covers that)."""
+    try:
+        if dest.exists():
+            _drop_review_snapshot(cwd, dest)
+        proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
+                              capture_output=True, text=True)
+    except OSError:
+        return None
+    return dest if proc.returncode == 0 else None
+
+
+def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
+    with contextlib.suppress(OSError):
+        subprocess.run(["git", "-C", str(cwd), "worktree", "remove", "--force", str(snapshot)],
+                       capture_output=True, text=True)
+    shutil.rmtree(snapshot, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        subprocess.run(["git", "-C", str(cwd), "worktree", "prune"], capture_output=True, text=True)
 
 
 def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
