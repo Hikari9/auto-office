@@ -1,0 +1,39 @@
+{
+  "case": "pr-1173",
+  "commit": "ea56a37f98c621a17f88fb6bb8ab9ef105ca6755",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/hydrogen_trials.py",
+      "line": 79,
+      "severity": "blocker",
+      "summary": "Admitting agy/gemini-4-hydrogen@high for code_reviewer fails end-to-end because adapters/seed/agy.yaml defines no reviewer launch profile (nor reviewer_readonly_args), so candidates.build_candidates skips the route as no-profile, adapters.build_argv raises AdapterError on launch, and candidates.declared_decision rejects --review-as/office review --as pre-checks that pass scope=None."
+    },
+    {
+      "file": "src/office/hydrogen_trials.py",
+      "line": 87,
+      "severity": "blocker",
+      "summary": "For a non-executor role like code_reviewer, candidates.build_candidates still populates user_allow_sizes on the dispatchable=False Hydrogen candidate even for an unsized allow while candidates.route_role omits request context/run_gear for non-adaptive roles, causing executor_slates.new_gear_size to return None and routing.route to reject the route as covering an unknown task size."
+    },
+    {
+      "file": "src/office/routecmd.py",
+      "line": 60,
+      "severity": "major",
+      "summary": "While updating the Hydrogen policy banner in _dispatch_view, the function still gates installed/has_profile checks on role == 'executor' and requires size for user_allowed, causing office route policy --role code_reviewer to hide the missing agy reviewer profile and misreport a probed user-allowed agy/gemini-4-hydrogen@high as an automatic S/M canary trial (or a normal executor route when --size is given)."
+    },
+    {
+      "file": "tests/test_issue_1163_hydrogen_user_allow.py",
+      "line": 132,
+      "severity": "major",
+      "summary": "The new code_reviewer admission test calls routing.route directly with a synthetic candidate dict and explicit run_gear instead of exercising candidates.route_role, candidates.build_candidates, or adapter profile lookup, leaving both the missing agy reviewer profile and the user_allow_sizes rejection untested."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"blocker\", \"file\": \"src/office/hydrogen_trials.py\", \"line\": 79, \"summary\": \"Admitting agy/gemini-4-hydrogen@high for code_reviewer fails end-to-end because adapters/seed/agy.yaml defines no reviewer launch profile (nor reviewer_readonly_args), so candidates.build_candidates skips the route as no-profile, adapters.build_argv raises AdapterError on launch, and candidates.declared_decision rejects --review-as/office review --as pre-checks that pass scope=None.\"}, {\"severity\": \"blocker\", \"file\": \"src/office/hydrogen_trials.py\", \"line\": 87, \"summary\": \"For a non-executor role like code_reviewer, candidates.build_candidates still populates user_allow_sizes on the dispatchable=False Hydrogen candidate even for an unsized allow while candidates.route_role omits request context/run_gear for non-adaptive roles, causing executor_slates.new_gear_size to return None and routing.route to reject the route as covering an unknown task size.\"}, {\"severity\": \"major\", \"file\": \"src/office/routecmd.py\", \"line\": 60, \"summary\": \"While updating the Hydrogen policy banner in _dispatch_view, the function still gates installed/has_profile checks on role == 'executor' and requires size for user_allowed, causing office route policy --role code_reviewer to hide the missing agy reviewer profile and misreport a probed user-allowed agy/gemini-4-hydrogen@high as an automatic S/M canary trial (or a normal executor route when --size is given).\"}, {\"severity\": \"major\", \"file\": \"tests/test_issue_1163_hydrogen_user_allow.py\", \"line\": 132, \"summary\": \"The new code_reviewer admission test calls routing.route directly with a synthetic candidate dict and explicit run_gear instead of exercising candidates.route_role, candidates.build_candidates, or adapter profile lookup, leaving both the missing agy reviewer profile and the user_allow_sizes rejection untested.\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "pr",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 377.8
+}
