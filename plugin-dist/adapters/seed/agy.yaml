@@ -53,7 +53,7 @@ conformance:
 source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery. The quota probe reports independent Gemini and Claude family results and retains a harness-wide compatibility value.
 # 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
 # IneligibleTierError. agy has no verified read-only sandbox, so it is a code
-# reviewer only through the route-scoped `reviewer` profile below (H4, #1178);
+# or plan reviewer only through the route-scoped `reviewer` profile below (H4, #1178; H5);
 # visual judgment runs in the run's private evidence directory.
 # Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
 # dispatch worktree, where write access is the point.
@@ -75,7 +75,7 @@ office_profiles:
       # The model is the combined native-Gemini slug (gemini-3.8-flash-medium); a
       # separate --effort is the claude/codex convention and must not be added.
       argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
-  # Code reviewer (H4, #1178; Rico 2026-11-15): only the exact user-allowed Hydrogen@high route, the one
+  # Code and plan reviewer (H4, #1178; H5; Rico 2026-11-15): only the exact user-allowed Hydrogen@high route, the one
   # that ran the planted-bug set. `routes` scopes the profile, so every other agy model still has no
   # reviewer launch form. Headless only, an exception to #1027 launch parity: a pane reviewer must write
   # its reply file, and plan mode cannot write.

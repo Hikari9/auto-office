@@ -57,7 +57,7 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
-        rules = ("Hydrogen executes, and reviews code only as the exact user-allowed agy/gemini-4-hydrogen@high; "
+        rules = ("Hydrogen executes, and reviews code and plans only as the exact user-allowed agy/gemini-4-hydrogen@high; "
                  "exact agy effort per size (XS/low, S/medium, M/high, L/high); "
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
@@ -86,10 +86,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
         if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
-            # H3 (#1168): the exact user-allowed @high route is a voting code reviewer, never a canary trial.
+            # H3 (#1168), H5: the exact user-allowed @high route is a voting reviewer, never a canary trial.
+            kind = {"plan_reviewer": "plan", "visual_reviewer": "visual"}.get(role, "code")
             if not proof:
-                return True, "user allow; exact probe passed; a voting code reviewer; " + rules
-            return False, f"user allow as a code reviewer; {rules}{proof}"
+                return True, f"user allow; exact probe passed; a voting {kind} reviewer; " + rules
+            return False, f"user allow as a {kind} reviewer; {rules}{proof}"
         if refusal is None and allowed and size:
             if not proof:
                 return True, ("user allow; exact probe passed; a normal executor route for this size, "
@@ -143,7 +144,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
     roles = (role,) if role else tuple(sorted(route_policy.POLICY_ROLES))
     show_rows = role is not None or effective
     output = []
-    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate, except the Hydrogen canary; "
+    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate, except Hydrogen, which also needs a fresh exact probe; "
              "a runtime failure is logged and falls back to the next eligible route:"]
     lines.append(f"  for task size {size}" if size else
                  "  task size unknown: size-scoped rules do not apply (use --size XS|S|M|L|XL)")
@@ -291,7 +292,7 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     backup = configcmd._write(path, raw)
     lines = [f"{role}/{label}: {'cleared user rule' if action == 'clear' else action} (user config)"]
     if action == "allow":
-        lines.append("an allowed route dispatches with no proof or qualification gate, except the Hydrogen canary; a runtime failure falls back to the next eligible route")
+        lines.append("an allowed route dispatches with no proof or qualification gate, except Hydrogen, which also needs a fresh exact probe; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
     if action == "clear":

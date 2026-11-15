@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.25.0
+
+H5 (Rico 2026-11-15): Hydrogen also reviews plans. `plan_reviewer` joins `code_reviewer` in the Hydrogen review roles, with the same gates: only the exact `agy/gemini-4-hydrogen@high` route, only under the user's exact allow for that role, behind a fresh exact probe, through agy's route-scoped read-only `reviewer` profile with the before/after fingerprint (a plan review fingerprints the run's repo root). With that allow, `roles.plan_reviewer.preferred_seed` accepts the route. Visual review stays closed: agy's `vision` profile runs with `--dangerously-skip-permissions` and no worktree check, so it has no write barrier. The `office route policy` header and `office route allow` message now say an allowed Hydrogen route also needs a fresh exact probe. Integration review stays closed.
+
 ## 3.24.1
 
 Codex visual reviewers can hand back with `office review submit` (#1186 follow-up). The codex `vision` profile now carries the same `submit_grant: codex-rules` and trusted dispatch dir as the code reviewer, so the one exact submit execpolicy rule applies. Claude visual reviewers already had the #1186 shell, and agy visual reviewers run with a full shell.
