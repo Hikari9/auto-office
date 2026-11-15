@@ -1,0 +1,9 @@
+id: p2-auth
+class: auth
+file: src/office/hydrogen_trials.py
+line: 59
+defect: >-
+  user_allowed drops the exact-route-spec check, so a user's wildcard allow (for example agy/* for executor)
+  now admits Hydrogen as a normal executor route, widening the hard Hydrogen veto.
+must_mention: [wildcard, exact, _is_exact_spec]
+keywords: [wildcard, exact, _is_exact_spec, glob, pattern]

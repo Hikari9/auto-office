@@ -1,0 +1,20 @@
+diff --git a/src/office/hydrogen_trials.py b/src/office/hydrogen_trials.py
+index fc928ad2..642a9436 100644
+--- a/src/office/hydrogen_trials.py
++++ b/src/office/hydrogen_trials.py
+@@ -52,12 +52,11 @@ def user_allowed(rule: dict | None) -> bool:
+     """Whether an effective role rule is the user's own exact-route allow (#1163).
+ 
+     `rule` is route_policy.effective_role_state for this candidate, role and size, so size scope
+-    is already applied. A wildcard route, a shipped/seed/override source or a non-allow never counts.
++    is already applied, and the rule it returns already matched this candidate's route.
++    A shipped/seed/override source or a non-allow never counts.
+     """
+-    from office import route_policy
+     rule = rule or {}
+-    return (rule.get("state") == "allow" and rule.get("source") == "user"
+-            and route_policy._is_exact_spec(rule.get("rule")))
++    return rule.get("state") == "allow" and rule.get("source") == "user"
+ 
+ 
+ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,

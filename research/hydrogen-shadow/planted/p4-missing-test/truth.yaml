@@ -1,0 +1,9 @@
+id: p4-missing-test
+class: missing-test
+file: src/office/jobs.py
+line: 94
+defect: >-
+  kick_throttle_seconds adds an OFFICE_KICK_THROTTLE_SECONDS override with validation (non-numeric, negative,
+  non-finite fall back to 10) but no test covers the override or its fallbacks.
+must_mention: [test, OFFICE_KICK_THROTTLE_SECONDS]
+keywords: [test, tests, untested, coverage, no test]

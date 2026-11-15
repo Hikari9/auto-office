@@ -1,0 +1,21 @@
+{
+  "case": "p1-logic",
+  "commit": "0f07899f87bce8ff68b2a577df674c5e14a670e3",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/util.py",
+      "line": 139,
+      "severity": "major",
+      "summary": "Replacing pid_state(pid) with pid_alive(pid) in claim_liveness treats non-ESRCH/non-EPERM OSErrors from os.kill(pid, 0) as DEAD instead of UNKNOWN, causing callers such as jobs.reclaim and startup._abandon_dead to falsely treat live processes as dead and prematurely reclaim legacy claims or abandon active startup prompts when probing is denied."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"major\", \"file\": \"src/office/util.py\", \"line\": 139, \"summary\": \"Replacing pid_state(pid) with pid_alive(pid) in claim_liveness treats non-ESRCH/non-EPERM OSErrors from os.kill(pid, 0) as DEAD instead of UNKNOWN, causing callers such as jobs.reclaim and startup._abandon_dead to falsely treat live processes as dead and prematurely reclaim legacy claims or abandon active startup prompts when probing is denied.\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "diff",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 59.0
+}

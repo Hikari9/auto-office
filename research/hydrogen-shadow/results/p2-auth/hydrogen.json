@@ -1,0 +1,21 @@
+{
+  "case": "p2-auth",
+  "commit": "0f07899f87bce8ff68b2a577df674c5e14a670e3",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/hydrogen_trials.py",
+      "line": 59,
+      "severity": "blocker",
+      "summary": "Removing route_policy._is_exact_spec(rule.get(\"rule\")) lets wildcard user allow rules (such as \"harness:agy\" or \"agy/gemini-4-hydrogen\" returned by effective_role_state) satisfy user_allowed(), widening Hydrogen access past the automatic canary, risk/size gates, and trial caps while breaking test_user_allowed_helper_requires_exact_user_allow."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"blocker\", \"file\": \"src/office/hydrogen_trials.py\", \"line\": 59, \"summary\": \"Removing route_policy._is_exact_spec(rule.get(\\\"rule\\\")) lets wildcard user allow rules (such as \\\"harness:agy\\\" or \\\"agy/gemini-4-hydrogen\\\" returned by effective_role_state) satisfy user_allowed(), widening Hydrogen access past the automatic canary, risk/size gates, and trial caps while breaking test_user_allowed_helper_requires_exact_user_allow.\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "diff",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 54.6
+}
