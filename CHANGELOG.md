@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.25.0
+
+Credit reporting and an agy-wide cooldown (#1195). The agy probe reads agy 1.5.x's keychain token, reports the AI credit balance, and reads low credits as exhausted. An agy `RESOURCE_EXHAUSTED` or AI-credits failure now sets an agy-wide cooldown instead of cooling one route. The PR gate maps hyphenated scripts to their underscore test modules, so `scripts/agy-usage.py` selects `tests/test_agy_usage.py`; a hyphenated script with no matching test still fails closed.
+
 ## 3.24.1
 
 Codex visual reviewers can hand back with `office review submit` (#1186 follow-up). The codex `vision` profile now carries the same `submit_grant: codex-rules` and trusted dispatch dir as the code reviewer, so the one exact submit execpolicy rule applies. Claude visual reviewers already had the #1186 shell, and agy visual reviewers run with a full shell.
