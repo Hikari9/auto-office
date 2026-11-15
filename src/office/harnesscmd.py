@@ -424,17 +424,25 @@ def check_full(adapter: dict, rows: list[dict] | None = None) -> tuple[list[str]
                 continue
             output = None if kind == "worker" else cwd / "dispatch" / "reply.md"
             images = [cwd / "probe.png"] if kind == "vision" else None
-            for effort in efforts:
+            routes = prof.get("routes")
+            if routes is not None and not (isinstance(routes, list) and routes and all(
+                    isinstance(r, str) and r.count("@") == 1 and all(r.split("@")) for r in routes)):
+                problems.append(f"{label}.routes must be a non-empty list of exact <invocation model>@<effort> routes")
+                continue
+            # A route-scoped profile (H4, #1178) renders only for its own routes.
+            targets = ([tuple(r.split("@")) for r in routes] if routes is not None
+                       else [("probe/model", e) for e in efforts])
+            for model, effort in targets:
                 try:
-                    rendered, _ = adapters.build_argv(adapter, kind, model="probe/model", effort=effort, cwd=cwd,
+                    rendered, _ = adapters.build_argv(adapter, kind, model=model, effort=effort, cwd=cwd,
                                                       output=output, images=images, include_dirs=[cwd],
                                                       session_id="probe-session")
                     forms = [("argv", rendered)]
-                    inter = adapters.interactive_argv(adapter, kind, model="probe/model", effort=effort, cwd=cwd,
+                    inter = adapters.interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd,
                                                       include_dirs=[cwd], output=output)
                     if inter:
                         forms.append(("interactive.argv", inter[0]))
-                    resumed = adapters.resume_argv(adapter, kind, session_id="probe-session", model="probe/model",
+                    resumed = adapters.resume_argv(adapter, kind, session_id="probe-session", model=model,
                                                    effort=effort, cwd=cwd, include_dirs=[cwd], output=output)
                     if resumed:
                         forms.append(("interactive.resume_argv", resumed[0]))
@@ -591,7 +599,11 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
     slug = (rows[0].get("invocation_model_id") or rows[0].get("model_id")) if rows else model
     effort = effort or (rows[0].get("effort") if rows else None) or "medium"
     profiles = adapter.get("office_profiles") or {}
-    kinds = [k for k in adapters.PROFILE_KINDS if isinstance(profiles.get(k), dict)]
+    # A route-scoped profile (H4, #1178) is a launch form only for its own routes.
+    kinds = [k for k in adapters.PROFILE_KINDS if isinstance(profiles.get(k), dict)
+             and adapters.profile_for(adapter, k, slug, effort)]
+    if not kinds:
+        raise OfficeError("no-profile", f"{aid} has no launch form for {slug}@{effort}", exit_code=1)
     # Prefer a form that carries no permission/trust flag; one that does runs only when asked.
     kind = next((k for k in kinds if not _unsafe_flags(adapter, profiles[k])), None)
     if kind is None:

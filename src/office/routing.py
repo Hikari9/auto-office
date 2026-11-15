@@ -555,7 +555,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
                 descriptor=request.get("hydrogen_descriptor"))
             if not hydro_denial and hydrogen_trials.is_hydrogen(c) and exact_only:
                 hydro_denial = hydrogen_trials.manual_conformance(
-                    con, c, role=role, size=new_policy_size)
+                    con, c, role=role, size=new_policy_size, user_allowed=user_allow)
             if (not hydro_denial and hydrogen_trials.is_hydrogen(c) and not exact_only
                     and not request.get("hydrogen_independent_review")):
                 hydro_denial = "Hydrogen automatic trial needs independent code review"

@@ -130,7 +130,9 @@ def test_doctor_reports_rules_present_and_missing(scope):
 def _reviewer_argv(adapters, adapter_id, kind, env, **kw):
     adapter = adapters.load_all()[adapter_id]
     out = env.tmp / "dispatch" / "reply.txt"
-    return adapters.build_argv(adapter, kind, model="m", effort="high", cwd=env.repo, output=out,
+    # A route-scoped profile (H4, #1178: agy reviews only as Hydrogen@high) renders only for its own route.
+    model, effort = (adapters.profile(adapter, kind).get("routes") or ["m@high"])[0].split("@")
+    return adapters.build_argv(adapter, kind, model=model, effort=effort, cwd=env.repo, output=out,
                                include_dirs=[env.repo], **kw)[0]
 
 

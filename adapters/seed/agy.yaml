@@ -52,8 +52,9 @@ conformance:
   live: pending
 source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery. The quota probe reports independent Gemini and Claude family results and retains a harness-wide compatibility value.
 # 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
-# IneligibleTierError. agy has no verified read-only isolation, so it is not a
-# code reviewer; visual judgment runs in the run's private evidence directory.
+# IneligibleTierError. agy has no verified read-only sandbox, so it is a code
+# reviewer only through the route-scoped `reviewer` profile below (H4, #1178);
+# visual judgment runs in the run's private evidence directory.
 # Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
 # dispatch worktree, where write access is the point.
 # How Office learns this harness's session id (resume needs it). agy takes no id at
@@ -74,6 +75,22 @@ office_profiles:
       # The model is the combined native-Gemini slug (gemini-3.8-flash-medium); a
       # separate --effort is the claude/codex convention and must not be added.
       argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
+  # Code reviewer (H4, #1178; Rico 2026-11-15): only the exact user-allowed Hydrogen@high route, the one
+  # that ran the planted-bug set. `routes` scopes the profile, so every other agy model still has no
+  # reviewer launch form. Headless only, an exception to #1027 launch parity: a pane reviewer must write
+  # its reply file, and plan mode cannot write.
+  # `--mode plan` is agy's read-only mode and no permission bypass is passed; agy has no verified sandbox,
+  # so Office fingerprints the worktree before and after and fails a review that changed HEAD, the tracked
+  # diff or untracked files. Gitignored files and .git/ are outside that check; plan mode is the write barrier.
+  reviewer:
+    argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
+    include_arg: [--add-dir, "{dir}"]
+    routes: [gemini-4-hydrogen-high@high]
+    max_minutes: 35
+    prompt: argv-bound
+    prompt_flag: "--print="
+    output: stdout
+    verify_worktree_unchanged: true
   vision:
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     max_minutes: 35

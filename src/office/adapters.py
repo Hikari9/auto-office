@@ -293,6 +293,21 @@ def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
 
 
+def profile_for(adapter: dict | None, kind: str, model: str | None, effort: str | None) -> dict | None:
+    """The `kind` launch profile for one exact route, or None.
+
+    `model` is the invocation model id (the string Office passes as `{model}`). A profile that declares
+    `routes` launches only those exact `<invocation model>@<effort>` routes, so a harness can open one
+    route for a role without opening every model it serves (H4, #1178: agy reviews only as Hydrogen@high)."""
+    prof = profile(adapter or {}, kind)
+    if not prof or not isinstance(prof, dict):
+        return prof or None
+    routes = prof.get("routes")
+    if routes is None:
+        return prof
+    return prof if isinstance(routes, list) and f"{model}@{effort}" in routes else None
+
+
 def pane_capable(adapter: dict | None, kind: str) -> bool:
     """Whether this profile has a Herdr pane form (`herdr_kind` plus `interactive`); without one it runs headless.
     Executors and reviewers launch the same way (Rico, 2026-11-02; #1027): a reviewer profile is pane-capable
@@ -503,6 +518,9 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     prof = profile(adapter, kind)
     if not prof:
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
+    if not profile_for(adapter, kind, model, effort):
+        raise AdapterError(f"adapter {adapter.get('id')} {kind} profile launches only {prof.get('routes')}, "
+                           f"not {model}@{effort}")
     exe = executable(adapter)
     mapped_effort = effort_value(adapter, effort)
     include_dirs = read_scope.with_read_dirs(kind, include_dirs)
@@ -634,6 +652,8 @@ def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: 
     if not prof.get("herdr_kind") or not inter.get("argv"):
         return None
     form = {"argv": inter["argv"], "include_arg": prof.get("include_arg")}
+    if "routes" in prof:
+        form["routes"] = prof["routes"]  # the pane form keeps the profile's route scope (H4, #1178)
     argv, _ = build_argv({**adapter, "office_profiles": {kind: form}}, kind,
                          model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output,
                          session_id=session_id)

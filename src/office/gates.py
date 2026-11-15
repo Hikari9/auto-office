@@ -1073,7 +1073,9 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
     """For a reviewer profile that declares `verify_worktree_unchanged` (a harness with no read-only
     sandbox), return `guard(before) -> dict | str | None`: `guard(None)` takes the fingerprint (HEAD,
     tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
-    or None. Returns None when the profile does not ask for the check."""
+    or None. Returns None when the profile does not ask for the check. Gitignored files and `.git/` are
+    not fingerprinted (caches and build outputs change outside the reviewer); the harness's read-only
+    mode is the write barrier for them."""
     from office import adapters
     adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
     if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):

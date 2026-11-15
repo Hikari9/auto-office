@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.23.0
+
+H4 (#1178): the Hydrogen code reviewer now actually dispatches. agy gains a headless, read-only (`--mode plan`, no permission bypass) `reviewer` profile with `verify_worktree_unchanged`, scoped by the new profile field `routes` to `gemini-4-hydrogen-high@high`, so no other agy model gains a reviewer launch form (candidate building, `office route policy`, `office harness validate`/`smoke` and `build_argv` all honor the scope). An unsized Hydrogen allow no longer carries a size scope that refused size-less reviewer routing. A manual `--review-as` no longer stands in for the user's exact `code_reviewer` allow. `office route policy` reports a missing harness or launch profile for every role, not just executors.
+
 ## 3.22.3
 
 Research (#1168): Hydrogen shadow-review results, dispositions and escapes for live PRs #1172, #1173, #1176 and #1177; the shadow lane surfaced #1178.
