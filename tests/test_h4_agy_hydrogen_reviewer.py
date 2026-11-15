@@ -76,12 +76,14 @@ def test_build_candidates_admits_only_hydrogen_high_as_agy_reviewer(env):
     assert ("gemini-4-hydrogen", "medium") not in {(c["model_id"], c["effort"]) for c in built}
 
 
-def test_plan_reviewer_never_gets_hydrogen(env):
+def test_integration_reviewer_never_gets_hydrogen(env):
+    # H5 opened plan review (tests/test_h5_hydrogen_plan_reviewer.py); integration review stays closed.
     cfg = {"routing": {"user_policy": {"role_rules": [
-        {"role": "plan_reviewer", "route": ALLOW, "state": "allow"}]}}}
-    built, _ = candidates.build_candidates(None, "plan_reviewer", probe=False,
-                                           allow_policies=[route_policy.user_policy(cfg)])
-    assert not [c for c in built if c["harness"] == "agy"]
+        {"role": "integration_reviewer", "route": ALLOW, "state": "allow"}]}}}
+    with db.connect(env / "runs.db") as con:
+        built, _ = candidates.build_candidates(con, "integration_reviewer", probe=False,
+                                               allow_policies=[route_policy.user_policy(cfg)])
+    assert not [c for c in built if hydrogen_trials.is_hydrogen(c)]
 
 
 def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env):

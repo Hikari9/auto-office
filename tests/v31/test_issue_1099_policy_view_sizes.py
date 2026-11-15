@@ -125,7 +125,8 @@ def test_a_route_change_says_how_running_runs_pick_up_the_rule_after_the_existin
     verb = "cleared user rule" if action == "clear" else action
     expected = [f"executor/{result.data['route']}: {verb} (user config)"]
     if action == "allow":
-        expected.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
+        expected.append(("an allowed route dispatches with no proof or qualification gate, except Hydrogen, which also needs a fresh "
+                        "exact probe; a runtime failure falls back to the next eligible route"))
     expected.append(running)
     assert result.lines == expected
 

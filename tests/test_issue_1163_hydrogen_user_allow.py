@@ -150,7 +150,8 @@ def test_code_reviewer_hydrogen_still_needs_a_fresh_probe_pass(tmp_path, probe):
     ("wildcard", _policy("agy/gemini-4-hydrogen", role="code_reviewer"), "high", "code_reviewer"),
     ("seed-source", _policy(REVIEW_SPEC, role="code_reviewer", source="preferred_seed"), "high", "code_reviewer"),
     ("medium", _policy(SPEC, role="code_reviewer"), "medium", "code_reviewer"),
-    ("plan-reviewer", _policy(REVIEW_SPEC, role="plan_reviewer"), "high", "plan_reviewer"),
+    ("plan-reviewer-medium", _policy(SPEC, role="plan_reviewer"), "medium", "plan_reviewer"),
+    ("integration-reviewer", _policy(REVIEW_SPEC, role="integration_reviewer"), "high", "integration_reviewer"),
     ("visual-reviewer", _policy(REVIEW_SPEC, role="visual_reviewer"), "high", "visual_reviewer"),
     ("planner", _policy(REVIEW_SPEC, role="planner"), "high", "planner"),
 ])
@@ -168,5 +169,8 @@ def test_reviewer_refusal_reasons():
     assert "exact allow" in h.route_refusal(c, role="code_reviewer", size=None, manual=False)
     assert "exact agy/gemini-4-hydrogen@high" in h.route_refusal({**c, "effort": "medium"}, role="code_reviewer",
                                                                   size=None, manual=False, user_allowed=True)
-    assert "never a worker, planner or other reviewer" in h.route_refusal(c, role="plan_reviewer", size=None,
-                                                                           manual=True)
+    # H5: plan review takes the same exact allow; visual and integration review stay vetoed.
+    assert h.route_refusal(c, role="plan_reviewer", size=None, manual=False, user_allowed=True) is None
+    assert "exact allow" in h.route_refusal(c, role="plan_reviewer", size=None, manual=True)
+    assert "never a worker, planner or other reviewer" in h.route_refusal(c, role="integration_reviewer", size=None,
+                                                                           manual=True, user_allowed=True)
