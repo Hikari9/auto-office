@@ -554,3 +554,98 @@ def test_a_lane_visual_review_settles_from_the_launch_without_capturing_or_launc
         assert convergence.job_lane_visual(con, run, job) == {"fallback": "Jnext"}
     finally:
         con.close()
+
+
+# ------------------------------------------------------------------ unit tier: the same behaviours on a scratch database
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """A scratch runs.db (foreign keys off, so a test inserts only the rows it reads) and a run directory under tmp_path."""
+    from office import db
+    con = db.connect(tmp_path / "runs.db")
+    con.execute("PRAGMA foreign_keys=OFF")
+    monkeypatch.setattr(paths, "run_dir", lambda run_id: tmp_path / "runs" / run_id)
+    run = {"id": "R1", "repo_root": str(tmp_path), "office_version": "3.1"}
+    yield con, run, tmp_path
+    con.close()
+
+
+def _gate_row(con, gid, *, subject="lane", kind="convergence_review", status="running"):
+    con.execute("INSERT INTO gates(id, run_id, subject, kind, input_key, status, created_at) VALUES(?,?,?,?,?,?,?)",
+                (gid, "R1", subject, kind, f"{subject}:k", status, "2026-01-01T00:00:00+00:00"))
+    return dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
+
+
+def _supervise_row(con, gid, did, kind="review_supervise"):
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)", ("J" + did, "R1", kind, f"k{did}", json.dumps({"gate_id": gid, "dispatch_id": did}),
+                                            "3.1", "queued", "2026-01-01T00:00:00+00:00"))
+    return "J" + did
+
+
+def test_a_stale_gate_frees_what_a_launched_reviewer_held(scratch, monkeypatch):
+    con, run, tmp = scratch
+    _gate_row(con, "G1", status="stale")
+    checkout = paths.run_dir("R1") / "checkouts" / "converge-G1"
+    snapshot = tmp / "snap"
+    for d in (checkout, snapshot):
+        d.mkdir(parents=True)
+    ddir = paths.run_dir("R1") / "dispatches" / "D1"
+    ddir.mkdir(parents=True)
+    (ddir / gates.ATTEMPT_FILE).write_text(json.dumps({"snapshot": str(snapshot)}))
+    con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, dispatch_id) "
+                "VALUES('L1','R1','code_reviewer','[]','D1','2026-01-01','2026-01-02','D1')")
+    import shutil
+    monkeypatch.setattr(gates, "remove_checkout", lambda run_, path: shutil.rmtree(path, ignore_errors=True))
+    monkeypatch.setattr(gates, "_drop_review_snapshot", lambda cwd, path: shutil.rmtree(path, ignore_errors=True))
+    job = {"payload": {"gate_id": "G1", "dispatch_id": "D1", "origin": {"kind": "convergence_review", "payload": {}}}}
+    assert gates.job_review_supervise(con, run, job) == {"skipped": "stale"}
+    assert not checkout.exists() and not snapshot.exists()
+    assert con.execute("SELECT released_at FROM leases WHERE id='L1'").fetchone()[0], "its lease is released"
+
+
+def test_a_retried_settle_records_the_attempts_environment_failure_once(scratch):
+    con, run, tmp = scratch
+    gate = _gate_row(con, "G2")
+    con.execute("INSERT INTO dispatches(id, run_id, route_json) VALUES('D2','R1','{}')")
+    gates._record_failure(con, gate, "D2", "launch", "first", count=True)
+    gates._record_failure(con, gate, "D2", "launch", "the same attempt, settled again", count=True)
+    assert con.execute("SELECT env_failures FROM gates WHERE id='G2'").fetchone()[0] == 1
+
+
+def test_a_lane_revoke_reaches_the_supervise_job_that_owns_the_review(scratch):
+    from office import convergence
+    con, run, tmp = scratch
+    gate = _gate_row(con, "G3")
+    mine = _supervise_row(con, "G3", "D3")
+    _supervise_row(con, "Gother", "D4")
+    owned = [j["id"] for j in gates.owning_jobs(con, run, gate) if j["kind"] in convergence.LANE_REVOKE_JOBS]
+    assert owned == [mine], "only this gate's supervise job is fenced by a lane revoke"
+
+
+def test_an_integration_review_launches_once_and_its_settling_run_accepts_without_launching_again(scratch, monkeypatch):
+    from office import integration
+    con, run, tmp = scratch
+    _gate_row(con, "Gint", subject="integration", kind="integration_review")
+    checkout = paths.run_dir("R1") / "checkouts" / "integration-Gint"
+    removed, launched, accepted = [], [], []
+    monkeypatch.setattr(gates, "detached_checkout", lambda *a, **k: (checkout.mkdir(parents=True, exist_ok=True), checkout)[1])
+    monkeypatch.setattr(gates, "remove_checkout", lambda run_, path: removed.append(Path(path)))
+    monkeypatch.setattr(gates, "run_reviewer", lambda *a, **k: (launched.append(1),
+                        {"supervise_queued": "Jsup", "fallback_queued": "Jsup", "dispatch_id": "Dint"})[1])
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"status": contract.COMPLETED, "verdict": "PASS",
+                                                                   "summary": "ok", "parsed": None})
+    monkeypatch.setattr(integration, "_accept_composed", lambda con_, run_, c: (accepted.append(c), {"accepted": True})[1])
+    monkeypatch.setattr(integration, "_set_integration", lambda *a, **k: None)
+    monkeypatch.setattr(integration.briefs, "code_review_brief", lambda *a, **k: "brief")
+    monkeypatch.setattr(integration.paths, "git", lambda *a, **k: "")
+    ctx = {"key": "k", "commit": "c" * 40, "base": "b" * 40, "branch": "b", "integ_rev": {"id": "I1"}, "results": {}}
+    first = integration._review_composed(con, run, {"id": "J1", "kind": "integration_review",
+                                                    "payload": {"gate_id": "Gint"}}, "Gint", ctx)
+    assert first == {"supervise": "Jsup", "dispatch_id": "Dint"} and removed == [] and accepted == []
+    assert con.execute("SELECT status FROM gates WHERE id='Gint'").fetchone()[0] == "running", "the gate stays open"
+    second = integration._review_composed(con, run, {"id": "J2", "kind": "integration_review", "payload": {
+        "gate_id": "Gint", gates.SETTLE_KEY: {"dispatch_id": "Dint"}}}, "Gint", ctx)
+    assert len(launched) == 1, "settling does not launch the review again"
+    assert removed == [checkout] and len(accepted) == 1 and second == {"accepted": True}
+    assert con.execute("SELECT verdict FROM gates WHERE id='Gint'").fetchone()[0] == "PASS"
