@@ -31,7 +31,7 @@ A run that fails (quota, timeout or an unparsed reply) is recorded with its stat
 
 ## Metrics
 
-- **Planted recall:** planted cases where at least one finding matches the truth. A finding matches when its file is the same and its line is within ±5, or when its summary names a truth keyword. Check the listed matches by hand.
+- **Planted recall:** planted cases where at least one finding matches the truth. A finding matches only when it names the truth's file and either its line is within ±5 or its summary names a `must_mention` term or keyword. A failed planted run (quota, timeout, unparsed) counts as a miss and blocks promotion until it is re-run. Check the listed matches by hand.
 - **Blocker agreement with Luna:** cases where both reviewers raise a blocker or major finding in the same file within ±10 lines, or neither raises one.
 - **False-positive rate:** rejected findings divided by all findings. A finding that matches a planted truth counts as accepted unless a disposition overrides it.
 - **Escapes:** entries in `escapes.yaml` that name the reviewer in `missed_by`.

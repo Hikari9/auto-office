@@ -34,7 +34,31 @@ def test_truth_match_by_line_window_or_keyword():
     assert scorecard.matches_truth({"file": "src/a.py", "line": 45, "summary": "x"}, TRUTH)
     assert not scorecard.matches_truth({"file": "src/a.py", "line": 46, "summary": "x"}, TRUTH)
     assert not scorecard.matches_truth({"file": "src/b.py", "line": 40, "summary": "x"}, TRUTH)
-    assert scorecard.matches_truth({"file": "tests/t.py", "line": 1, "summary": "Lost update: RACE on book"}, TRUTH)
+    assert scorecard.matches_truth({"file": "src/a.py", "line": 90, "summary": "Lost update: RACE on book"}, TRUTH)
+
+
+def test_keyword_in_another_file_is_not_a_catch():
+    assert not scorecard.matches_truth({"file": "tests/t.py", "line": 40, "summary": "a race in the fixture"}, TRUTH)
+    truth = {"file": "src/jobs.py", "line": 94, "keywords": ["test"], "must_mention": ["OFFICE_KICK"]}
+    assert not scorecard.matches_truth({"file": "src/other.py", "line": 3, "summary": "no test for rename"}, truth)
+    assert scorecard.matches_truth({"file": "src/jobs.py", "line": 300, "summary": "OFFICE_KICK override unchecked"}, truth)
+
+
+def test_failed_planted_run_is_a_miss_and_blocks_promotion(tmp_path):
+    (tmp_path / "planted" / "p1").mkdir(parents=True)
+    (tmp_path / "planted" / "p1" / "truth.yaml").write_text(yaml.safe_dump(TRUTH))
+    hit = {"severity": "major", "file": "src/a.py", "line": 40, "summary": "race"}
+    _result(tmp_path, "p1", "luna", [hit])
+    _result(tmp_path, "p1", "hydrogen", [], status="quota-blocked")
+    for i in range(10):
+        _result(tmp_path, f"pr-{i}", "luna", [])
+        _result(tmp_path, f"pr-{i}", "hydrogen", [])
+    s = scorecard.score(scorecard.load(tmp_path))
+    assert (s["hydrogen"]["caught"], s["hydrogen"]["planted"], s["hydrogen"]["planted_failed"]) == (0, 1, 1)
+    assert s["hydrogen"]["recall"] == 0.0
+    ok, why = scorecard.promotion(s)
+    assert not ok and "planted run failed for hydrogen" in why
+    assert "(0/1, 1 failed)" in scorecard.render(s)
 
 
 def test_blocker_agreement_needs_same_region_or_both_clean():

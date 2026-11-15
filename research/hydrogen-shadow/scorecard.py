@@ -51,14 +51,20 @@ def _line(f: dict) -> int | None:
 
 
 def matches_truth(finding: dict, truth: dict) -> str | None:
-    """Why a finding counts as catching the planted defect, or None."""
+    """Why a finding counts as catching the planted defect, or None.
+
+    The finding must name the truth's file, and then either point within LINE_SLACK lines of it
+    or name one of its must_mention terms or keywords. A keyword in another file is not a catch."""
+    if finding.get("file") != truth.get("file"):
+        return None
     line = _line(finding)
-    if finding.get("file") == truth.get("file") and line is not None and abs(line - int(truth["line"])) <= LINE_SLACK:
+    if line is not None and abs(line - int(truth["line"])) <= LINE_SLACK:
         return f"file and line within {LINE_SLACK}"
     summary = str(finding.get("summary") or "").lower()
-    hit = [k for k in truth.get("keywords") or [] if str(k).lower() in summary]
+    terms = list(truth.get("must_mention") or []) + list(truth.get("keywords") or [])
+    hit = [k for k in dict.fromkeys(map(str, terms)) if k.lower() in summary]
     if hit:
-        return f"summary names {', '.join(map(str, hit))}"
+        return f"same file, summary names {', '.join(hit)}"
     return None
 
 
@@ -94,16 +100,20 @@ def score(data: dict) -> dict:
     out: dict[str, dict] = {}
     reviewers = sorted({r for recs in data["results"].values() for r in recs})
     for r in reviewers:
-        s = {"planted": 0, "caught": 0, "failed": [], "matches": [], "findings": 0, "rejected": 0, "pending": 0,
+        s = {"planted": 0, "caught": 0, "planted_failed": 0, "failed": [], "matches": [], "findings": 0, "rejected": 0, "pending": 0,
              "agree": 0, "compared": 0, "live_prs": 0, "escapes": 0}
         for case, recs in sorted(data["results"].items()):
             rec = recs.get(r)
             if rec is None:
                 continue
-            if rec.get("status") != "ok":
-                s["failed"].append(f"{case}: {rec.get('status')}")
-                continue
             truth = data["truths"].get(case)
+            if rec.get("status") != "ok":
+                # A failed planted run is a miss: it stays in the recall denominator and blocks promotion.
+                s["failed"].append(f"{case}: {rec.get('status')}")
+                if truth:
+                    s["planted"] += 1
+                    s["planted_failed"] += 1
+                continue
             if truth:
                 s["planted"] += 1
                 why = next(((i, w) for i, f in enumerate(rec.get("findings") or [])
@@ -134,6 +144,9 @@ def promotion(scores: dict) -> tuple[bool, str]:
     b, c = scores.get(BASELINE), scores.get(CANDIDATE)
     if not b or not c:
         return False, "not enough data: both reviewers need results"
+    failed = [r for r, s in ((BASELINE, b), (CANDIDATE, c)) if s.get("planted_failed")]
+    if failed:
+        return False, f"hold: a planted run failed for {', '.join(failed)}; re-run it"
     if c["live_prs"] < MIN_LIVE_PRS:
         return False, f"hold: {c['live_prs']} of {MIN_LIVE_PRS} live PRs shadow-reviewed"
     if c["pending"] or b["pending"]:
@@ -160,7 +173,8 @@ def render(scores: dict) -> str:
              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
     for r, s in scores.items():
         agree = "baseline" if r == BASELINE else f"{_pct(s['agreement'])} ({s['agree']}/{s['compared']})"
-        lines.append(f"| {r} | {_pct(s['recall'])} ({s['caught']}/{s['planted']}) | {agree} | "
+        failed_note = f", {s['planted_failed']} failed" if s["planted_failed"] else ""
+        lines.append(f"| {r} | {_pct(s['recall'])} ({s['caught']}/{s['planted']}{failed_note}) | {agree} | "
                      f"{_pct(s['fp_rate'])} ({s['rejected']}/{s['findings']}) | {s['findings']} | {s['pending']} | "
                      f"{s['live_prs']} | {s['escapes']} | {'; '.join(s['failed']) or 'none'} |")
     lines += ["", "Planted matches (check by hand):"]
