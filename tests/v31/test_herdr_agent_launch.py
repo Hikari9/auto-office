@@ -882,8 +882,7 @@ def test_an_osc_link_before_the_cursor_glyph_is_stripped():
 
 @pytest.mark.approved
 def test_agy_hydrogen_reviewer_launches_in_a_plan_mode_pane_and_falls_back_headless(env, monkeypatch):
-    """The route-scoped agy reviewer gets a Herdr pane in plan mode with its submit allow; no Herdr runs it headless."""
-    import json
+    """The route-scoped agy reviewer hosts its plan-mode supervisor in a Herdr pane; no Herdr runs it headless."""
     state_file = _fake(env, monkeypatch, reads=[BUSY])
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("HERDR_ENV", "1")
@@ -899,13 +898,9 @@ def test_agy_hydrogen_reviewer_launches_in_a_plan_mode_pane_and_falls_back_headl
     res = dispatch.launch(run, rd, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
     assert res["launcher"] == "herdr", res
     calls = _calls(state_file)
-    start = [c for c in calls if c[:2] == ["agent", "start"]][-1]
-    assert start[start.index("--kind") + 1] == "agy"
-    args = start[start.index("--") + 1:]
-    assert args[:2] == ["--mode", "plan"] and "--dangerously-skip-permissions" not in args
-    assert json.loads(args[args.index("--settings") + 1])["permissions"] == {"allow": ["command(office review submit)"]}
-    prompt = [c for c in calls if c[:2] == ["agent", "prompt"]][-1]
-    assert "office review submit" in prompt[3] and "Write your complete review to" not in prompt[3]
+    assert not [c for c in calls if c[:2] == ["agent", "start"]]  # no interactive agent session, so no write allowance
+    line = [c for c in calls if c[:2] == ["pane", "run"] and "_supervise" in c[-1]][-1][-1]
+    assert f"_supervise {d['id']}" in line and "--settings" not in line and "--dangerously-skip-permissions" not in line
     # No Herdr: the headless plan-mode form runs as before.
     monkeypatch.delenv("HERDR_ENV")
     res = dispatch.launch(run, {**rd, "id": d["id"]}, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])

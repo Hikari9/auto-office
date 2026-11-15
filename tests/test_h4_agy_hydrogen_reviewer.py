@@ -176,32 +176,30 @@ def test_harness_validate_rejects_a_malformed_routes_scope():
     assert not [p for p in harnesscmd.check(agy) if "reviewer" in p]
 
 
-def test_pane_form_renders_plan_mode_with_the_survey_off_and_one_submit_allow(tmp_path):
-    import json
-    out = tmp_path / "dispatch" / "reply.txt"
-    args, kind = adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-high", effort="high",
-                                           cwd=tmp_path, output=out, include_dirs=[tmp_path])
+def test_pane_form_is_the_plan_mode_supervisor_with_no_settings_or_bypass(tmp_path):
+    adapter = _agy()
+    assert adapters.pane_capable(adapter, "reviewer") and adapters.pane_hosts_supervisor(adapter, "reviewer")
+    assert not adapters.pane_hosts_supervisor(adapter, "worker")
+    args, kind = adapters.interactive_argv(adapter, "reviewer", model="gemini-4-hydrogen-high", effort="high",
+                                           cwd=tmp_path, output=tmp_path / "reply.txt", include_dirs=[tmp_path])
     assert kind == "agy" and args[:2] == ["--mode", "plan"]
     assert "--dangerously-skip-permissions" not in args and "accept-edits" not in args and "auto" not in args
-    assert args[args.index("--model") + 1] == "gemini-4-hydrogen-high"
-    settings = json.loads(args[args.index("--settings") + 1])
-    assert settings == {"showFeedbackSurvey": False, "permissions": {"allow": ["command(office review submit)"]}}
-    # Without a reply to hand back there is no allow, only the survey switch.
-    bare, _ = adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-high", effort="high", cwd=tmp_path)
-    assert json.loads(bare[bare.index("--settings") + 1]) == {"showFeedbackSurvey": False}
+    assert "--settings" not in args
+    prof = adapters.profile(adapter, "reviewer")
+    assert prof["routes"] == ["gemini-4-hydrogen-high@high"] and prof["verify_worktree_unchanged"] is True
+    assert "--mode" in prof["argv"] and prof["argv"][prof["argv"].index("--mode") + 1] == "plan"
     with pytest.raises(adapters.AdapterError, match="launches only"):
-        adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-medium", effort="medium",
-                                  cwd=tmp_path, output=out)
+        adapters.interactive_argv(adapter, "reviewer", model="gemini-4-hydrogen-medium", effort="medium",
+                                  cwd=tmp_path, output=tmp_path / "reply.txt")
 
 
-def test_the_agy_pane_pointer_asks_for_stdin_submit_not_a_file_write(tmp_path):
+def test_the_pane_reviewer_is_wall_capped_at_max_minutes(monkeypatch):
     from office import dispatch
-    out = tmp_path / "reply.txt"
-    hint = dispatch._handback_hint("agy", "reviewer", out)
-    assert "office review submit" in hint and "standard input" in hint and "review-submit.txt" not in hint
-    assert "review-submit.txt" in dispatch._handback_hint("claude", "reviewer", out)
-    assert "review-submit.txt" in dispatch._handback_hint("agy", "vision", out)  # the vision pane may write
-    assert dispatch._handback_hint("agy", "reviewer", None) == ""
+    d = {"adapter_id": "agy"}
+    monkeypatch.delenv("OFFICE_WORKER_MAX_MINUTES", raising=False)
+    cap = dispatch._pane_wall_cap(d, {"kind": "reviewer"})
+    assert cap == adapters.profile(_agy(), "reviewer")["max_minutes"] * 60
+    assert dispatch._pane_wall_cap(d, {"kind": "worker"}) is None  # only the declaring form is capped
 
 
 def test_the_worktree_guard_stays_on_for_the_pane_reviewer(tmp_path):

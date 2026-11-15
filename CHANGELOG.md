@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.27.0
 
-The agy Hydrogen reviewer launches in a Herdr pane like the worker (#1027 parity), with plan mode as the write barrier. `agy --mode plan --settings <json>` in the pane form keeps `routes: [gemini-4-hydrogen-high@high]` and `verify_worktree_unchanged`, passes no permission bypass, `--mode auto` or `accept-edits`, and hands its review back with `office review submit` on stdin, the one command the settings allow (plan mode cannot write the reply file). The same settings turn off the feedback survey that stalls an agy pane; a stalled pane still ends at `max_minutes` as a reported no-verdict result. Headless stays the fallback when Herdr is unusable. The adapter hash changed: rerun `office doctor --probe-route agy/gemini-4-hydrogen@high` after the reinstall.
+The agy Hydrogen reviewer launches in a Herdr pane like the worker (#1027 parity), with plan mode as the write barrier. The pane hosts the same headless `agy --mode plan --print` run (`interactive.supervisor: true`, `wall_cap: true`) and Office captures its stdout as the reply, so no agy permission setting is relied on. The profile keeps `routes: [gemini-4-hydrogen-high@high]` and `verify_worktree_unchanged`, passes no permission bypass, `--mode auto` or `accept-edits`, and a stalled pane ends at `max_minutes` as a reported no-verdict result. Headless stays the fallback when Herdr is unusable. The adapter hash changed: rerun `office doctor --probe-route agy/gemini-4-hydrogen@high` after the reinstall.
 
 ## 3.26.0
 
