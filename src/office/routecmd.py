@@ -85,6 +85,11 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
         elif role == "executor" and not has_profile:
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
+        if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
+            # H3 (#1168): the exact user-allowed @high route is a voting code reviewer, never a canary trial.
+            if not proof:
+                return True, "dispatches (user allow; exact probe passed) as a voting code reviewer; " + rules
+            return False, f"user allow as a code reviewer; {rules}{proof}"
         if refusal is None and allowed and size:
             if not proof:
                 return True, ("dispatches (user allow; exact probe passed) as a normal executor route for this size, "
