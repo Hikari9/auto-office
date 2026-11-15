@@ -34,6 +34,15 @@ def agy(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "resolve_oauth_client", fake_resolve)
     monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
     mod.seen = seen
+    # Default keychain isolation: `security` reports a missing item. Tests that
+    # exercise the keychain override this through _keychain().
+    mod.keychain_calls = []
+
+    def missing_item(cmd, *a, **kw):
+        mod.keychain_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 44, b"", b"")
+
+    monkeypatch.setattr(mod.subprocess, "run", missing_item)
     return mod
 
 
@@ -73,6 +82,9 @@ def test_neither_present_names_every_path(agy, tmp_path):
     assert str(tmp_path / LEGACY) in err
     assert str(tmp_path / NEW) in err
     assert "body" not in agy.seen
+    # Any keychain lookup went through the fixture's fake, never a real `security`.
+    assert all(c[0] == "security" for c in agy.keychain_calls)
+    assert agy.subprocess.run.__name__ == "missing_item"
 
 
 @pytest.mark.parametrize("payload", [
