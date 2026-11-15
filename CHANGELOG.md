@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.21.0
+
+Hydrogen S executor canary (#1168): `routing.hydrogen_trials.canary_tasks` (0..10, read from the live config, shipped default 0) makes an eligible low-risk S task prefer the user-allowed `agy/gemini-4-hydrogen@medium` until the budget is booked, one per run, then routing reverts to normal scoring; canary rows are hidden from the trial path's window and per-run count (#1169, #1171). agy maps effort `xhigh` (#1169). Research: out-of-band Hydrogen shadow-review lane and planted-bug scorecard in `research/hydrogen-shadow/` (#1170).
+
 ## 3.20.2
 
 Research only (#862): AA v5.0.1 evidence sidecar, read-only Office outcome extractor and A/B/C shadow calibration replayed on local outcomes. No winner over a base rate; production v4.3.2 scoring, floors and #1143 policy unchanged (#1144).

@@ -260,3 +260,21 @@ def test_a_canary_in_a_run_does_not_use_its_trial_slot(tmp_path):
         with db.transaction(con):
             booked = h.book(con, "R1", "T2", SPEC, experiment=True, fallback_route="fallback")
         assert booked["experimental"] is True and booked["blocked"] is None
+
+
+def test_shipped_default_defines_canary_tasks_so_config_sets_it_without_force(tmp_path, monkeypatch):
+    """#1171: the shipped default must define the key, or `office config` refuses it without --force."""
+    import subprocess
+    import yaml
+    from office import configcmd
+    shipped = yaml.safe_load(cfg.default_config_path().read_text())
+    assert shipped["routing"]["hydrogen_trials"] == {"enabled": False, "canary_tasks": 0}
+    assert h.settings(shipped)["canary_tasks"] == 0 and h.validate(shipped) == []
+    user = tmp_path / "user.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(user))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.chdir(repo)
+    configcmd.config(key="routing.hydrogen_trials.canary_tasks", value="10", tier="user")
+    assert yaml.safe_load(user.read_text())["routing"]["hydrogen_trials"]["canary_tasks"] == 10

@@ -61,6 +61,9 @@ routing:
   # and one trial/run cannot be relaxed with an allow or a config edit.
   hydrogen_trials:
     enabled: false
+    # S canary budget (#1168), 0..10, read from the live config. While booked canaries < budget,
+    # an eligible S task prefers the user-allowed agy/gemini-4-hydrogen@medium route.
+    canary_tasks: 0
   discovery:
     # On for executor and worker only (#494). A route the catalog marks `discovery: eligible` is proven by one
     # exact conformance probe and then tried once, bounded, with a known-working fallback. A run pins this at
