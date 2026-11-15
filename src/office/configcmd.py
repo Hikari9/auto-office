@@ -86,6 +86,23 @@ def _row_serves(row: dict, required: set[str]) -> bool:
     return required <= set((adapter or {}).get("capabilities") or [])
 
 
+def _user_allowed_seed(entry: dict, role: str | None, config: dict | None) -> bool:
+    """Whether the user's own exact allow covers this exact seed route for this role.
+
+    An allow lifts a catalog `dispatchable: false` at routing time (#845), so a seed may order such a
+    route too (H3, #1168: the user-allowed agy/gemini-4-hydrogen@high code reviewer). Routing still
+    applies every gate, including the Hydrogen exact-probe veto; the seed only sets order."""
+    if not role or not config or not (entry.get("harness") and entry.get("effort")):
+        return False
+    from office import route_policy, route_probe
+    try:
+        cand = route_probe.candidate_from_spec(format_route(entry))
+    except Exception:  # noqa: BLE001 - an unresolvable spec is simply not allowed
+        return False
+    rule = route_policy.user_allows(cand, role, [route_policy.user_policy(config)])
+    return bool(rule and route_policy._is_exact_spec(rule.get("rule")))
+
+
 def validate_seed(entries: list[dict], *, role: str | None = None, config: dict | None = None) -> list[str]:
     """Problems with seed entries against the shipped catalog (empty when valid).
     With a role, an entry must also be a route that role can actually use: a
@@ -113,7 +130,7 @@ def validate_seed(entries: list[dict], *, role: str | None = None, config: dict 
         if any(r.get("alias_family") for r in same_model):
             pool = [r for r in rows if r.get("invocation_harness") in {x.get("invocation_harness") for x in same_model}]
         pool = [r for r in pool if e.get("harness") in (None, r.get("invocation_harness"))]
-        if not any(r.get("dispatchable") is not False for r in pool):
+        if not any(r.get("dispatchable") is not False for r in pool) and not _user_allowed_seed(e, role, config):
             problems.append(f"{label}: {e['model_id']} is not dispatchable (its catalog row is disabled or superseded)")
             continue
         if required and not any(_row_serves(r, required) for r in pool):
