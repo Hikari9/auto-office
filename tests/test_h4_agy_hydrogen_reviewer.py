@@ -196,9 +196,11 @@ def test_pane_form_is_the_plan_mode_supervisor_with_no_settings_or_bypass(tmp_pa
 def test_the_pane_reviewer_is_wall_capped_at_max_minutes(monkeypatch):
     from office import dispatch
     d = {"adapter_id": "agy"}
+    seed = _agy()
+    monkeypatch.setattr(adapters, "load_all", lambda: {"agy": seed})
     monkeypatch.delenv("OFFICE_WORKER_MAX_MINUTES", raising=False)
     cap = dispatch._pane_wall_cap(d, {"kind": "reviewer"})
-    assert cap == adapters.profile(_agy(), "reviewer")["max_minutes"] * 60
+    assert cap == adapters.profile(seed, "reviewer")["max_minutes"] * 60
     assert dispatch._pane_wall_cap(d, {"kind": "worker"}) is None  # only the declaring form is capped
 
 
