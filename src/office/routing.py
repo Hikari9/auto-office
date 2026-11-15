@@ -1145,6 +1145,23 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # owner-authorized floor exception in its durable routing receipt.
         if waiver := executor_slates.floor_exception(c, size, role, executor_policy):
             audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
+    canary = request.get("hydrogen_canary") if role == "executor" and not trial else None
+    ranked = {r["route"] for r in rec["rows"]}  # still qualifying after adaptive's own removals
+    canary_id = next((rid for rid, c in by_id.items()
+                      if rid in ranked and c.get("hydrogen_user_allow") and c.get("effort") == "medium"
+                      and hydrogen_trials.is_hydrogen(c)), None) if canary else None
+    if canary_id:
+        # #1168: the owner-approved S canary only reorders a user-allowed route that
+        # already passed every gate above; it never admits one. Booked at dispatch.
+        progress = f"hydrogen canary {canary['spent'] + 1}/{canary['budget']}"
+        entry = next((e for e in slate if e["route"] == canary_id), None) or {
+            "route": canary_id, "label": adaptive.label(by_id[canary_id]), "utility": None,
+            "strength": "user allow with exact conformance", "weakness": "no local quality evidence yet"}
+        entry = {**entry, "reason": progress}
+        slate = [entry, *[e for e in slate if e["route"] != canary_id]][:max(adaptive.SLATE_SIZE, len(slate))]
+        slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(slate)]
+        audit["slate"] = slate
+        audit["hydrogen_canary"] = {**canary, "route": canary_id}
     if disc:
         audit["discovery"] = disc
     for row in audit["candidates"]:
@@ -1193,6 +1210,8 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     if disc:
         # In the hash only when discovery is active, so discovery-off decisions hash exactly as before.
         hashed["discovery"] = disc
+    if canary_id:
+        hashed["hydrogen_canary"] = audit["hydrogen_canary"]
     if audit.get("lineage_supersession"):
         # Likewise only when a predecessor was superseded, so other decisions hash as before.
         hashed["lineage_supersession"] = audit["lineage_supersession"]
@@ -1206,4 +1225,5 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         "qualifying_candidates": by_id,
         "routing": audit,
         **({"discovery": disc} if disc else {}),
+        **({"hydrogen_canary": audit["hydrogen_canary"]} if canary_id else {}),
     }

@@ -14,6 +14,7 @@ MODEL = "gemini-4-hydrogen"
 WINDOW = 20
 CAP = 3
 MAX_PER_RUN = 1
+CANARY_MAX = 10  # #1168: owner-approved S canary budget ceiling; a config value above it is refused
 HIGH_RISK = frozenset((
     "security", "credential", "credentials", "secret", "secrets", "payment", "payments",
     "finance", "financial", "billing", "infrastructure", "production", "production-data",
@@ -29,18 +30,23 @@ def is_hydrogen(c: dict | None) -> bool:
 
 def settings(config: dict | None) -> dict:
     raw = ((config or {}).get("routing") or {}).get("hydrogen_trials") or {}
+    budget = raw.get("canary_tasks")
+    budget = budget if type(budget) is int and 0 <= budget <= CANARY_MAX else 0
     return {"enabled": raw.get("enabled") is True, "max_per_run": MAX_PER_RUN,
-            "max_rolling_20": CAP, "window": WINDOW}
+            "max_rolling_20": CAP, "window": WINDOW, "canary_tasks": budget}
 
 
 def validate(config: dict) -> list[str]:
     raw = ((config.get("routing") or {}).get("hydrogen_trials") or {})
     if not isinstance(raw, dict):
         return ["routing.hydrogen_trials must be a mapping"]
-    if set(raw) - {"enabled"}:
-        return ["routing.hydrogen_trials only accepts enabled; safety limits are immutable"]
+    if set(raw) - {"enabled", "canary_tasks"}:
+        return ["routing.hydrogen_trials only accepts enabled and canary_tasks; safety limits are immutable"]
     if "enabled" in raw and type(raw["enabled"]) is not bool:
         return ["routing.hydrogen_trials.enabled must be a boolean"]
+    if "canary_tasks" in raw and (type(raw["canary_tasks"]) is not int
+                                  or not 0 <= raw["canary_tasks"] <= CANARY_MAX):
+        return [f"routing.hydrogen_trials.canary_tasks must be an integer from 0 to {CANARY_MAX}"]
     return []
 
 
@@ -129,9 +135,82 @@ def run_safe(config: dict, run: dict, task: dict) -> bool:
     return safe_task(desc.get("task_size"), run.get("risk"), desc)
 
 
+def canary_spent(con) -> int:
+    """Booked S canary dispatches (#1168). Append-only rows, so the count never goes down."""
+    if con is None:
+        return 0
+    return int(con.execute("SELECT COUNT(*) FROM hydrogen_trial_opportunities WHERE canary=1").fetchone()[0])
+
+
+def live_budget(run: dict | None = None) -> int:
+    """The S canary budget from the live user/repo config, not the run's pinned snapshot (#1168).
+
+    The budget is one global cap counted in runs.db, so a run started before it was set
+    still sees it. It only reorders routes the run's pinned policy already admits
+    (pinned enabled flag plus the exact user allow); it never widens access.
+    An unreadable or invalid live config reads as no budget."""
+    from pathlib import Path
+    from office import config as cfg
+    root = (run or {}).get("repo_root")
+    try:
+        live, _ = cfg.resolve(Path(root) if root else None)
+    except Exception:  # noqa: BLE001 - fail closed: no canary preference
+        return 0
+    if validate(live):
+        return 0
+    return settings(live)["canary_tasks"]
+
+
+def canary_progress(con, budget: int) -> dict:
+    spent = canary_spent(con) if budget else 0
+    return {"budget": budget, "spent": min(spent, budget) if budget else spent,
+            "remaining": max(0, budget - spent), "complete": bool(budget) and spent >= budget}
+
+
+def _run_canaries(con, run_id: str | None) -> int:
+    return con.execute("SELECT COUNT(*) FROM hydrogen_trial_opportunities WHERE run_id=? AND canary=1",
+                       (run_id,)).fetchone()[0]
+
+
+def canary_active(con, config: dict | None, run: dict, task: dict | None, budget: int) -> bool:
+    """Whether this S task should prefer the user-allowed Hydrogen route (#1168).
+
+    `config` is the run's pinned config: its `enabled` flag must be true. `budget` is
+    `live_budget(run)`. The canary only reorders an already admitted user allow; every
+    hard veto and exact-probe check still runs. At the budget it reverts to ordinary
+    scoring. One canary per run keeps the evidence spread over independent runs."""
+    if con is None or not settings(config)["enabled"] or not budget:
+        return False
+    task = task or {}
+    desc = task.get("descriptor") or {}
+    if desc.get("task_size") != "S" or not run_safe(config or {}, run, task):
+        return False
+    return canary_spent(con) < budget and _run_canaries(con, run.get("id")) < MAX_PER_RUN
+
+
+def book_canary(con, run_id: str, task_id: str, selected_route: str, budget: int) -> dict:
+    """Book a canary dispatch under the caller's dispatch transaction.
+
+    The live budget and per-run limit are re-checked under the writer lock. A lost race
+    still launches (the user allow already permits Hydrogen) but books canary=0: it is
+    not spent budget, and like every canary-path row the trial path never reads it."""
+    if not con.in_transaction:
+        raise RuntimeError("Hydrogen canary booking requires a BEGIN IMMEDIATE dispatch transaction")
+    used_run = _run_canaries(con, run_id)
+    spent = canary_spent(con)
+    counted = bool(budget) and spent < budget and used_run < MAX_PER_RUN
+    event_id = "HO" + uuid.uuid4().hex
+    con.execute("INSERT INTO hydrogen_trial_opportunities(id, run_id, task_id, selected_route, experimental, "
+                "created_at, canary) VALUES (?,?,?,?,?,?,?)",
+                (event_id, run_id, task_id, selected_route, 1, now_iso(), 1 if counted else 0))
+    return {"id": event_id, "canary": counted, "spent": spent + int(counted), "budget": budget,
+            "blocked": None if counted else ("canary-complete" if spent >= budget else "one-canary-per-run")}
+
+
 def snapshot(con) -> dict:
     """Last nineteen eligible opportunities, plus this pending opportunity."""
-    rows = con.execute("SELECT experimental FROM hydrogen_trial_opportunities "
+    # Canary-path rows (#1168, canary NOT NULL) are their own ledger; the trial window ignores them.
+    rows = con.execute("SELECT experimental FROM hydrogen_trial_opportunities WHERE canary IS NULL "
                        "ORDER BY seq DESC LIMIT ?", (WINDOW - 1,)).fetchall()
     count = sum(int(r[0]) for r in rows)
     return {"previous": len(rows), "trial_used": count, "trial_remaining": max(0, CAP - count),
@@ -150,7 +229,7 @@ def book(con, run_id: str, task_id: str, selected_route: str, *, experiment: boo
     before = snapshot(con)
     if experiment:
         used_run = con.execute("SELECT COUNT(*) FROM hydrogen_trial_opportunities WHERE run_id=? "
-                               "AND experimental=1", (run_id,)).fetchone()[0]
+                               "AND experimental=1 AND canary IS NULL", (run_id,)).fetchone()[0]
         if used_run >= MAX_PER_RUN:
             experiment = False
             blocked = "one-trial-per-run"
