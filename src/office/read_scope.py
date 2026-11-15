@@ -18,6 +18,8 @@ exactly those, never a rule the user wrote.
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from pathlib import Path
 
 from office import paths
@@ -175,6 +177,67 @@ def write_denials(cwd: Path, output: Path | None) -> list[str]:
              if out_dir is None or not (out_dir == Path(t) or Path(t) in out_dir.parents)]
     rules += [f"Edit(/{r})" for r in readonly_roots()]
     return list(dict.fromkeys(rules))
+
+
+def claude_sandbox_available() -> bool:
+    """Claude Code's OS sandbox runs here: macOS Seatbelt, or Linux/WSL2 with bubblewrap and socat. Where it
+    cannot run, a Claude reviewer launched with `failIfUnavailable` would exit at startup, so it keeps the
+    submit-only shell instead (#1186)."""
+    if sys.platform == "darwin":
+        return True
+    return sys.platform.startswith("linux") and bool(shutil.which("bwrap")) and bool(shutil.which("socat"))
+
+
+def _deny_beside(root: Path, keep: Path) -> list[Path]:
+    """Every existing entry under `root` except the chain down to `keep` (which `root` contains): the sandbox
+    lets nothing under a writable root be re-allowed once denied, so a root that holds the dispatch dir is
+    fenced by denying its other children, level by level."""
+    denied: list[Path] = []
+    here = root
+    for part in keep.relative_to(root).parts:
+        try:
+            children = sorted(here.iterdir())
+        except OSError:
+            return denied
+        denied += [c for c in children if c.name != part]
+        here = here / part
+    return denied
+
+
+def sandbox_write_denials(cwd: Path, output: Path | None, include_dirs: list[Path] | None = None) -> list[str]:
+    """Absolute paths a sandboxed Claude reviewer's commands may not write. The sandbox lets Bash write its
+    cwd, the temp dir and every `--add-dir`; the reviewer may write only its dispatch dir and temp. So the
+    checkout it runs in, every include dir, Office's data home (runs.db) and worktrees, and the read-only
+    guidance roots are denied. A root holding the dispatch dir (the state home, or cwd for a vision reviewer)
+    is denied around it instead; an entry created there after launch is not covered (#1186)."""
+    out_dir = dispatch_dir(output)
+    home = Path.home()
+    roots = [Path(cwd), paths.data_home(), paths.worktrees_dir(), *(include_dirs or [])]
+    roots += [home / d for d in READONLY_DIRS] + [home / f for f in READONLY_FILES]
+    denied: list[Path] = []
+    for root in roots:
+        if out_dir is not None and (out_dir == root or root in out_dir.parents):
+            denied += _deny_beside(root, out_dir)
+        else:
+            denied.append(root)
+    return list(dict.fromkeys(s for p in denied for s in _spellings(p)))
+
+
+def claude_sandbox_settings(cwd: Path, output: Path | None, include_dirs: list[Path] | None = None) -> str:
+    """The `--settings` JSON for a Claude reviewer's shell (#1186): every Bash call runs in the OS sandbox with
+    no network and the write fence above, a sandbox failure never falls back to unsandboxed, and only the exact
+    `office review submit` command (which writes runs.db) runs outside it. `--settings` still applies under
+    `--restricted`, and a `false` there makes the sandbox admin-required, so repository settings cannot loosen it."""
+    from office import review_submit
+    sandbox: dict = {
+        "enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
+        "autoAllowBashIfSandboxed": False,
+        "network": {"allowedDomains": []},
+        "filesystem": {"denyWrite": sandbox_write_denials(cwd, output, include_dirs)},
+    }
+    if output:
+        sandbox["excludedCommands"] = [review_submit.submit_command(output)]
+    return json.dumps({"sandbox": sandbox}, separators=(",", ":"))
 
 
 def allow_rules() -> list[str]:

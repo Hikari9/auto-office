@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.24.0
+
+Claude reviewers get a shell (#1186). `--restricted` dropped Bash unless `--tools` named it, so the #1030 `office review submit` allow never applied and reviewers read code without running anything. Reviewer and vision profiles now name their tools and, where Claude Code's OS sandbox runs, pass sandbox settings: built-in read-only commands (git log/diff/show, ls, cat, grep, find) and targeted test runners (pytest, `pnpm test`, `npm test`, `node --test`) run sandboxed with no network and no writes outside the dispatch dir and temp; only the exact submit command runs outside the sandbox. Hosts without a sandbox keep the submit-only shell.
+
 ## 3.23.1
 
 H4 follow-up (#1178): a pinned Hydrogen code reviewer (`office dispatch --review-as`, `office review --as`, rerun and the review gate's pin checks) needs only the run, not a task scope, since a reviewer has no task size; it still needs the exact `code_reviewer` allow and a fresh exact probe. An executor still needs its classified task.

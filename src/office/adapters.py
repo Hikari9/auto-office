@@ -557,13 +557,28 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
             arg = arg.replace("{write_deny}", "".join("," + r for r in deny))
         granted = bool(output) and kind in read_scope.READER_KINDS
+        # #1186: a reviewer whose host runs Claude Code's OS sandbox gets a safe shell inside it; elsewhere it
+        # keeps the #1030 posture (the one submit command, the built-in read-only commands denied).
+        shell = granted and read_scope.claude_sandbox_available()
+        if "{sandbox_settings}" in arg:
+            if not shell:
+                if argv and argv[-1].startswith("-"):
+                    argv.pop()
+                continue
+            # Appended as is: the JSON holds paths, which must not go through the placeholder substitution below.
+            argv.append(arg.replace("{sandbox_settings}", read_scope.claude_sandbox_settings(cwd, output, include_dirs)))
+            continue
         if "{submit_allow}" in arg:  # exactly one command, no wildcard (#1030 narrow grant)
             from office import review_submit
             arg = arg.replace("{submit_allow}", f",Bash({review_submit.submit_command(output)})" if granted else "")
+        if "{bash_allow}" in arg:
+            from office import review_submit
+            allow = [r for c in review_submit.REVIEWER_TEST_BASH for r in (f"Bash({c})", f"Bash({c} *)")] if shell else []
+            arg = arg.replace("{bash_allow}", "".join("," + r for r in allow))
         if "{bash_deny}" in arg:
             from office import review_submit
-            deny = ([r for c in review_submit.CLAUDE_READONLY_BASH for r in (f"Bash({c})", f"Bash({c} *)")]
-                    if granted else ["Bash"])
+            cmds = review_submit.REVIEWER_BASH_DENY if shell else review_submit.CLAUDE_READONLY_BASH
+            deny = [r for c in cmds for r in (f"Bash({c})", f"Bash({c} *)")] if granted else ["Bash"]
             arg = arg.replace("{bash_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
                .replace("{last_message}", str(Path(output).with_name("last-message.txt") if output else Path(cwd) / "last-message.txt"))

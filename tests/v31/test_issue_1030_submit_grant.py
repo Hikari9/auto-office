@@ -19,7 +19,11 @@ def _tools(argv, flag):
 
 @pytest.mark.parametrize("kind", ["reviewer", "vision"])
 @pytest.mark.parametrize("pane", [False, True])
-def test_claude_reviewers_may_run_exactly_the_submit_command(kind, pane):
+def test_claude_reviewers_may_run_exactly_the_submit_command(kind, pane, monkeypatch):
+    # The #1030 posture is what a host without Claude Code's OS sandbox keeps (#1186 widens it only where the
+    # sandbox runs; tests/v31/test_issue_1186_reviewer_shell.py).
+    from office import read_scope
+    monkeypatch.setattr(read_scope, "claude_sandbox_available", lambda: False)
     a = adapters.load_all()["claude"]
     if pane:
         argv, _ = adapters.interactive_argv(a, kind, model="m", effort="high", cwd=Path("/tmp/co"), output=OUT)
@@ -27,6 +31,8 @@ def test_claude_reviewers_may_run_exactly_the_submit_command(kind, pane):
         argv, _ = adapters.build_argv(a, kind, model="m", effort="high", cwd=Path("/tmp/co"), output=OUT)
     allowed = _tools(argv, "--allowedTools")
     assert [t for t in allowed if t.startswith("Bash")] == [f"Bash({EXACT})"], allowed
+    # #1186: `--restricted` removes Bash unless `--tools` names it, which left this allow dead.
+    assert "--restricted" in argv and "Bash" in _tools(argv, "--tools") and "--settings" not in argv
     denied = _tools(argv, "--disallowedTools")
     assert "Bash" not in denied, "the blanket deny would override the one allow (deny wins)"
     for cmd in review_submit.CLAUDE_READONLY_BASH:
