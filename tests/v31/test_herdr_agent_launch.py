@@ -325,8 +325,12 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
             assert denied.startswith("Edit,NotebookEdit,Bash(rm),Bash(rm *),") and "Bash(ls)" not in denied
             # Writes are allowed to the dispatch dir alone; dontAsk denies the rest.
             # #1187: the exact submit comes first; the safe test runners follow (tests/v31/test_issue_1186_reviewer_shell.py).
-            assert args[args.index("--allowedTools") + 1].startswith(
-                f"Read,Grep,Glob,Edit(/{out.parent}/**),Bash(office review submit --file {out.parent}/review-submit.txt),")
+            runners = ("pytest", "python -m pytest", "python3 -m pytest", ".venv/bin/python -m pytest", ".venv/bin/pytest",
+                       "pnpm test", "npm test", "node --test")
+            assert args[args.index("--allowedTools") + 1] == ",".join([
+                "Read", "Grep", "Glob", f"Edit(/{out.parent}/**)",
+                f"Bash(office review submit --file {out.parent}/review-submit.txt)",
+                *(f"Bash({r}{tail})" for r in runners for tail in ("", " *"))])
             assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
         else:
