@@ -432,33 +432,80 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
                            + (f"; {hint}" if hint else ""))
             return results
-    if needs_review:
-        gid = _gate(con, run, integ_rev, "integration_review", commit)
-        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
-        diff = gates.cap_diff(paths.git(repo, "diff", compose_base(run), commit))
-        checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
-        try:
-            brief = briefs.code_review_brief(run, None, integ_rev, diff, ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
-                                             [], str(checkout), integration=True)
-            outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout, include_dirs=[checkout])
-        finally:
-            gates.remove_checkout(run, checkout)
-        with db.transaction(con):
-            con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
-                        (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
-        results["integration_review"] = outcome["verdict"]
-        if outcome["verdict"] != "PASS":
-            findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
-            detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
-            with db.transaction(con):
-                _set_integration(con, run, status="unavailable" if outcome["verdict"] in ("UNAVAILABLE", "REVOKED") else "blocked",
-                                 detail=f"integration review {outcome['verdict']}: {detail[:200]}")
-                state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
-            return results
-    # An independent integration reviewer has its own outcome/gate. The proof
-    # must come from the original passing check gate, not the last reviewer.
     executed = ([r["command"] for r in check_outcome.get("results") or [] if r.get("exit") == 0]
                 if check_outcome is not None else [])
+    # What the review and the acceptance after it need, kept on the run so a `review_fallback` job can finish them.
+    ctx = {"key": key, "commit": commit, "base": base, "branch": branch, "integ_rev": integ_rev, "run_checks": run_checks,
+           "executed": executed, "checks_gate_id": checks_gate_id, "results": results}
+    if needs_review:
+        gid = _gate(con, run, integ_rev, "integration_review", commit)
+        return _review_composed(con, run, {"id": job["id"], "kind": "integration_review",
+                                           "payload": {"gate_id": gid, "key": key}}, gid, ctx)
+    return _accept_composed(con, run, ctx)
+
+
+def job_integration_review(con, run: dict, job: dict) -> dict:
+    """Re-run the integration review of the composed commit after no reviewer returned a verdict (a `review_fallback`
+    job), then finish the integration the way the integrate job would have."""
+    gid = job["payload"]["gate_id"]
+    gate = con.execute("SELECT status FROM gates WHERE id=?", (gid,)).fetchone()
+    if gate is None or gate["status"] not in ("queued", "running"):
+        return {"skipped": gate["status"] if gate else "missing"}
+    run = state.get_run(con, run["id"])
+    integ = (run.get("landing") or {}).get("integration") or {}
+    ctx = integ.get("review_ctx")
+    if not ctx or integ.get("commit") != ctx["commit"] or compose_base(run) != ctx["base"]:
+        with db.transaction(con):
+            con.execute("UPDATE gates SET status='stale', stale_reason='integration recomposed', finished_at=? WHERE id=?",
+                        (now_iso(), gid))
+        return {"skipped": "integration recomposed"}
+    return _review_composed(con, run, job, gid, ctx)
+
+
+def _review_composed(con, run: dict, job: dict, gid: str, ctx: dict) -> dict:
+    """The independent review of the composed commit, then its acceptance. No verdict from any reviewer route queues
+    the bounded `review_fallback` job (the gate stays open) before the gate finalizes UNAVAILABLE."""
+    repo = Path(run["repo_root"])
+    commit, branch = ctx["commit"], ctx["branch"]
+    results = dict(ctx["results"])
+    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
+    diff = gates.cap_diff(paths.git(repo, "diff", ctx["base"], commit))
+    checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
+    with db.transaction(con):
+        _set_integration(con, run, review_ctx=ctx)
+    try:
+        brief = briefs.code_review_brief(run, None, ctx["integ_rev"], diff,
+                                         ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
+                                         [], str(checkout), integration=True)
+        outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout, include_dirs=[checkout],
+                                     job=job)
+    finally:
+        gates.remove_checkout(run, checkout)
+    if outcome.get("fallback_queued"):
+        with db.transaction(con):
+            _set_integration(con, run, status="verifying",
+                             detail="integration review: no reviewer returned a verdict; re-running it on the next route")
+        return {"fallback": outcome["fallback_queued"]}
+    with db.transaction(con):
+        con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
+                    (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
+    results["integration_review"] = outcome["verdict"]
+    if outcome["verdict"] != "PASS":
+        findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
+        detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
+        with db.transaction(con):
+            _set_integration(con, run, status="unavailable" if outcome["verdict"] in ("UNAVAILABLE", "REVOKED") else "blocked",
+                             detail=f"integration review {outcome['verdict']}: {detail[:200]}", review_ctx=None)
+            state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
+        return results
+    return _accept_composed(con, run, {**ctx, "results": results})
+
+
+def _accept_composed(con, run: dict, ctx: dict) -> dict:
+    """Accept the composed integration once its checks and any review passed. The proof must come from the original
+    passing check gate, not the last reviewer."""
+    repo = Path(run["repo_root"])
+    commit, base, branch, run_checks, executed = ctx["commit"], ctx["base"], ctx["branch"], ctx["run_checks"], ctx["executed"]
     coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
     incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
     detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
@@ -472,15 +519,15 @@ def _integrate(con, run: dict, job: dict) -> dict:
         direct = next((c for c in executed
                        if verification_coverage._complete_pytest_command(c)
                        or verification_coverage._scoped_validate(repo, commit, c)), None)
-        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct,
+        proof = ({"commit": commit, "gate": ctx["checks_gate_id"], "command": direct,
                   "scope": coverage[0] if coverage else None} if direct else None)
-        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
+        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof, review_ctx=None)
         if incomplete:
             state.emit(con, run, "integration.coverage_partial",
                        f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
         state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
                    if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
-    return results
+    return ctx["results"]
 
 
 MISSING_DEPS_HINT = ("the composed worktree is a fresh checkout with no installed dependencies (anything not in git, "

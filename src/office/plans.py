@@ -665,7 +665,9 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                            plan_review=True, exclude=job["payload"].get("exclude"),
-                                           resume_from=job["payload"].get("resume_from"))
+                                           resume_from=job["payload"].get("resume_from"), job=job)
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}

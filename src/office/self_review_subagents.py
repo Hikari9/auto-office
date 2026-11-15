@@ -28,6 +28,8 @@ from office import briefs, contract, db, paths, state
 from office.util import now_iso
 
 REVIEW_VERSION = "runtime-self-review-1"
+# audit_scope status: a subagent that never launched, to be retried through the bounded review fallback.
+RETRY = "RETRY"
 FUNDED_GEARS = ("S", "M", "L", "XL")
 RUBRICS = {
     "combined": "Review edge cases and test strength in ONE pass: empty or null input, parser ambiguity, retries, restart "
@@ -136,9 +138,13 @@ def _report(task_id: str, rubric: str, rid: str, **extra) -> dict:
     return {"task": task_id, "rubric": rubric, "revision": rid, **extra}
 
 
-def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, *, reviewer=None) -> dict:
+def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, *, reviewer=None,
+                retry: bool = False) -> dict:
     """Run every funded subagent review of `tasks` at `commit` (the checkout's HEAD, the commit convergence
-    reviews). Returns {status, reports, reason}; any status but COMPLETED means convergence must not run."""
+    reviews). Returns {status, reports, reason}; any status but COMPLETED means convergence must not run.
+    With `retry`, a subagent that was never launched (no reviewer route could start it) returns status RETRY
+    instead of EVIDENCE_BLOCKED, for the caller to retry through the bounded review fallback. A subagent that ran
+    and left a bad report, and a revoked one, stay blocked."""
     if not funded(run):
         return {"status": contract.COMPLETED, "reports": [], "reason": "no runtime self-review funded for this gear"}
     from office import gates
@@ -158,13 +164,22 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                 reports.append(_report(task["id"], rubric, rid, dispatch_id=saved["reviewer_dispatch_id"],
                                        advisory=saved["verdict"], summary=saved["summary"], reused=True))
                 continue
-            audit_gate = {"id": "G" + uuid.uuid4().hex[:8], "task_id": task["id"], "revision_id": rid,
-                          "plan_version": run.get("plan_version")}
+            # A subagent that never launched is retried on its own gate: the gate reopens, and its next attempt
+            # chain starts away from the routes the last one failed on.
+            unlaunched = con.execute("SELECT id FROM gates WHERE run_id=? AND kind='self_review_subagent' AND input_key=? "
+                                     "AND review_status=? ORDER BY created_at DESC LIMIT 1",
+                                     (run["id"], key, contract.UNAVAILABLE)).fetchone()
+            audit_gate = {"id": unlaunched["id"] if unlaunched else "G" + uuid.uuid4().hex[:8], "task_id": task["id"],
+                          "revision_id": rid, "plan_version": run.get("plan_version")}
             with db.transaction(con):
-                con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, plan_version, kind, "
-                            "input_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (audit_gate["id"], run["id"], task["id"], task["id"], rid, run.get("plan_version"),
-                             "self_review_subagent", key, "queued", now_iso()))
+                if unlaunched:
+                    con.execute("UPDATE gates SET status='queued', review_status=NULL, verdict=NULL, summary=NULL, "
+                                "finished_at=NULL WHERE id=?", (audit_gate["id"],))
+                else:
+                    con.execute("INSERT INTO gates(id, run_id, subject, task_id, revision_id, plan_version, kind, "
+                                "input_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                (audit_gate["id"], run["id"], task["id"], task["id"], rid, run.get("plan_version"),
+                                 "self_review_subagent", key, "queued", now_iso()))
                 state.emit(con, run, "self_review.subagent.queued",
                            f"{task['id']} {rubric}: independent subagent review before convergence",
                            task_id=task["id"], payload={"revision": rid, "rubric": rubric, "commit": commit})
@@ -183,10 +198,12 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                 outcome = {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
             good, reason = _valid(outcome, commit, run)
             parsed = outcome.get("parsed")
+            retried = bool(retry and not good and not outcome.get("dispatch_id")
+                           and outcome.get("status") != contract.COMPLETED)
             with db.transaction(con):
                 con.execute("UPDATE gates SET status='done', review_status=?, verdict=?, summary=?, route=?, "
                             "reviewer_dispatch_id=?, finished_at=? WHERE id=?",
-                            (contract.COMPLETED if good else contract.EVIDENCE_BLOCKED,
+                            (contract.COMPLETED if good else contract.UNAVAILABLE if retried else contract.EVIDENCE_BLOCKED,
                              parsed.verdict if good else None, (outcome.get("summary") or reason)[:500],
                              outcome.get("route"), outcome.get("dispatch_id"), now_iso(), audit_gate["id"]))
                 state.emit(con, run, "self_review.subagent.completed" if good else "self_review.subagent.blocked",
@@ -194,7 +211,7 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                            payload={"rubric": rubric, "revision": rid, "commit": commit,
                                     "dispatch_id": outcome.get("dispatch_id"), "success": good})
             if not good:
-                return {"status": contract.EVIDENCE_BLOCKED, "reports": reports,
+                return {"status": RETRY if retried else contract.EVIDENCE_BLOCKED, "reports": reports,
                         "reason": f"{task['id']} {rubric} self-review subagent: {reason}; "
                                   "convergence review cannot proceed without it"}
             reports.append(_report(task["id"], rubric, rid, dispatch_id=outcome["dispatch_id"],

@@ -682,11 +682,15 @@ def _lane_review_options(con, run: dict, job: dict, gate: dict, scope: dict, st:
                          kind: str) -> dict:
     """One source for code/visual reviewer continuation and retry exclusions."""
     excluded = list(st.get("exclude_routes") or [])
+    fallback = job["payload"].get("review_fallback")
     resume = _same_reviewer(con, run, scope["id"], kind, int(gate.get("cycle") or 1))
     if excluded or job["payload"].get("review_only"):
         resume = None
+    if fallback and fallback.get("epoch"):
+        # A re-run of the review: only a REVIEWED_COMMIT correction continues a reviewer, in its own session when it can.
+        resume = fallback.get("resume_from")
     return {"exclude": excluded or None, "resume_from": resume,
-            "prefer_not": job["payload"].get("exclude_routes")}
+            "prefer_not": job["payload"].get("exclude_routes"), "job": job}
 
 
 def _finish_lane_review(con, run: dict, gate: dict, outcome: dict) -> dict:
@@ -840,28 +844,41 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         # #809: funded self-review subagents precede the ONE independent convergence verdict. A missing,
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
         from office import self_review_subagents
-        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit)
+        fallback = job["payload"].get("review_fallback") or {}
+        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit,
+                                                     retry=fallback.get("redispatches", 0) < gates.redispatch_max(run))
+        if precheck["status"] == self_review_subagents.RETRY:
+            # A subagent that never launched is retried through the bounded fallback job, not blocked at once.
+            queued = gates.queue_review_fallback(con, run, gate, job, precheck["reason"], redispatch=True)
+            if queued:
+                return {"fallback": queued}
+            precheck = {**precheck, "status": contract.EVIDENCE_BLOCKED}
         if precheck["status"] != contract.COMPLETED:
             outcome = {"status": precheck["status"], "verdict": None, "parsed": None, "summary": precheck["reason"]}
         else:
             if precheck["reports"]:
                 brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify and deduplicate in your one verdict):\n"
                 brief += "\n".join(str(r) for r in precheck["reports"])
-            route_options = _lane_review_options(con, run, job, gate, scope, st, "convergence_review")
-            reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
-            for attempt in range(reprompts + 1):
-                outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout,
-                                             include_dirs=[checkout], **route_options)
-                problem = _stamp_reviewed_commit(run, commit, outcome)
-                if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
-                    break  # ingest turns a still-wrong commit into INVALID_RESULT
+            if fallback.get("correction"):
                 # The same reviewer is asked again, in its own session when the harness can resume it: a stale
                 # checkout path or commit from an earlier round is the usual cause (#706).
-                route_options["resume_from"] = outcome["dispatch_id"]
                 role_line, _, rest = brief.partition("\n")
-                brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
-                         f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
-                         f"REVIEWED_COMMIT {commit}.\n{rest}")
+                brief = f"{role_line}\nCORRECTION: {fallback['correction']}\n{rest}"
+            outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
+                                         **_lane_review_options(con, run, job, gate, scope, st, "convergence_review"))
+            if outcome.get("fallback_queued"):
+                return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
+            problem = _stamp_reviewed_commit(run, commit, outcome)
+            if (problem and outcome.get("dispatch_id")
+                    and fallback.get("commit_retries", 0) < int((run.get("gates") or {}).get("review_reprompt_max", 3))):
+                queued = gates.queue_review_fallback(
+                    con, run, gate, job, problem, dispatch_id=outcome["dispatch_id"],
+                    commit_retry={"resume_from": outcome["dispatch_id"],
+                                  "correction": f"{problem}. Review again ONLY the checkout at {checkout} (commit "
+                                                f"{commit}); checkout paths named in earlier rounds are stale. Begin your "
+                                                f"reply with REVIEWED_COMMIT {commit}."})
+                return {"fallback": queued}
+            # ingest turns a still-wrong commit into INVALID_RESULT
     finally:
         gates.remove_checkout(run, checkout)
     return _finish_lane_review(con, run, gate, outcome)
@@ -1004,6 +1021,8 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
                                  **route_options)
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
