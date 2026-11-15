@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.23.1
+
+H4 follow-up (#1178): a pinned Hydrogen code reviewer (`office dispatch --review-as`, `office review --as`, rerun and the review gate's pin checks) needs only the run, not a task scope, since a reviewer has no task size; it still needs the exact `code_reviewer` allow and a fresh exact probe. An executor still needs its classified task.
+
 ## 3.23.0
 
 H4 (#1178): the Hydrogen code reviewer now actually dispatches. agy gains a headless, read-only (`--mode plan`, no permission bypass) `reviewer` profile with `verify_worktree_unchanged`, scoped by the new profile field `routes` to `gemini-4-hydrogen-high@high`, so no other agy model gains a reviewer launch form (candidate building, `office route policy`, `office harness validate`/`smoke` and `build_argv` all honor the scope). An unsized Hydrogen allow no longer carries a size scope that refused size-less reviewer routing. A manual `--review-as` no longer stands in for the user's exact `code_reviewer` allow. `office route policy` reports a missing harness or launch profile for every role, not just executors.
