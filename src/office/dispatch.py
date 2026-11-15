@@ -1835,6 +1835,9 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
     notes: list[str] = []
     ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}", notes=notes)]
     from office import gates
+    for d in rows:
+        if d["id"] in ended:  # no supervise job is left to settle these reviewers
+            gates.release_launched_review(con, run, d["gate_id"], d["id"])
     with db.transaction(con):
         stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
                                               "AND status IN ('queued','running','waiting')", (run["id"],)).fetchall()]

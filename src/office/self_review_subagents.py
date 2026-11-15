@@ -160,8 +160,16 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
     results: dict[int, dict] = {}  # by id(item): the outcomes of reviews that ran together
     failures: dict[int, dict | None] = {}  # by id(item): what recording each of them found
     if _parallel_reviews(pending):
-        for item in pending:
-            _prepare(con, run, item, checkout, commit)
+        prepared = []
+        try:
+            for item in pending:
+                _prepare(con, run, item, checkout, commit)
+                prepared.append(item)
+        except Exception as exc:
+            for item in prepared:  # a gate left queued by an item that was never launched would stay open for good
+                _record(con, run, item, {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"},
+                        commit, retry=retry)
+            raise
         results = _run_together(run, pending, checkout, reviewer)
         # Every review that ran is recorded, so a sibling of one that failed leaves no gate open.
         failures = {id(i): _record(con, run, i, results[id(i)], commit, retry=retry) for i in pending}

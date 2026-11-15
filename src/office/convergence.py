@@ -2011,6 +2011,8 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
                                          "AND status IN ('launching','running')", (g["id"],)).fetchall()]
     ended = [d["id"] for d in live if dispatch._end_dispatch(con, run, d, "revoked", f"{scope['id']} {kind} revoked: {reason}",
                                                             notes=notes)]
+    for did in ended:  # no supervise job is left to settle these reviewers
+        gates.release_launched_review(con, run, g["id"], did)
     with db.transaction(con):  # the gate has no reviewer left; closing it settles the scope
         gates.mark_unavailable(con, run, g["id"], f"{scope['id']} {kind} revoked: {reason}")
         state.emit(con, run, "convergence.revoked", f"{scope['id']} {kind} review revoked: {reason}")

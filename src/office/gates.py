@@ -903,6 +903,7 @@ def _record_failure(con, gate: dict, dispatch_id: str, cls: str, reason: str, *,
     row = con.execute("SELECT route_json FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
     route = json.loads(row["route_json"] or "{}") if row else {}
     meta = route.setdefault("review_attempt", {})
+    count = count and "failure" not in meta  # a retried settle records the same attempt's failure once
     meta["failure"] = {"class": cls, "reason": reason[:600], **({"harness_wide": True} if harness_wide else {})}
     con.execute("UPDATE dispatches SET route_json=? WHERE id=?", (dumps(route), dispatch_id))
     if environment:
@@ -1035,19 +1036,47 @@ def queue_review_supervise(con, run: dict, gate: dict, job: dict, dispatch_id: s
     return job_id or "queued"
 
 
+def release_launched_review(con, run: dict, gate_id: str, dispatch_id: str) -> None:
+    """Free what a launched reviewer held when no settle will run for it (its gate closed, went stale or was revoked):
+    the checkout it read, its detached snapshot and its lease. Safe to repeat."""
+    for name in (f"review-{gate_id}", f"converge-{gate_id}", f"integration-{gate_id}"):
+        path = paths.run_dir(run["id"]) / "checkouts" / name
+        if path.exists():
+            remove_checkout(run, path)
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    snapshot = _launch_spec_file(ddir / ATTEMPT_FILE).get("snapshot")
+    if snapshot and Path(snapshot).exists():
+        _drop_review_snapshot(Path(run["repo_root"]), Path(snapshot))
+    with db.transaction(con):
+        con.execute("UPDATE leases SET released_at=? WHERE dispatch_id=? AND released_at IS NULL AND revoked_at IS NULL",
+                    (now_iso(), dispatch_id))
+
+
+def _launch_spec_file(path: Path) -> dict:
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
 def job_review_supervise(con, run: dict, job: dict) -> dict:
     """Wait for the launched reviewer's dispatch to end, then re-enter the job that launched it to record its result.
     A claim that dies is reclaimed by the next office command and waits again."""
     p = job["payload"]
     gate = con.execute("SELECT status FROM gates WHERE id=?", (p["gate_id"],)).fetchone()
     if gate is None or gate["status"] not in ("queued", "running"):
+        release_launched_review(con, run, p["gate_id"], p["dispatch_id"])
         return {"skipped": gate["status"] if gate else "missing"}
     from office import dispatch as dispatch_mod
     ended = dispatch_mod._wait_terminal(p["dispatch_id"])
     origin = p["origin"]
     inner = {**job, "kind": origin["kind"],
              "payload": {**origin["payload"], "gate_id": p["gate_id"], SETTLE_KEY: {"dispatch_id": p["dispatch_id"]}}}
-    return {"ended": ended.get("terminal"), **(jobs.handler(origin["kind"])(con, run, inner) or {})}
+    result = jobs.handler(origin["kind"])(con, run, inner) or {}
+    if "skipped" in result:  # the origin job found its gate or composition gone: nothing will settle the reviewer
+        release_launched_review(con, run, p["gate_id"], p["dispatch_id"])
+    return {"ended": ended.get("terminal"), **result}
 
 
 def job_review_fallback(con, run: dict, job: dict) -> dict:
@@ -1961,7 +1990,7 @@ def _record_reviewer_packet(con, run: dict, gate: dict, role: str, d: dict, ddir
         "task_id": gate.get("task_id"), "revision_id": gate.get("revision_id"), "scope": gate.get("scope"),
         "input_key": gate.get("input_key"), "lease_id": d.get("lease_id"), "fencing": _lease_fencing(con, d.get("lease_id")),
         "plan_version": plan["version"] if plan else 0, "requirements_version": run["requirements_version"],
-        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch, "session_id": d.get("session_id")})
+        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch})
     state.check_packet(run, packet)
     atomic_write_json(ddir / "packet.json", packet)
     with db.transaction(con):
