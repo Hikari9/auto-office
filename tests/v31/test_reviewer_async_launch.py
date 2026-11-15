@@ -734,6 +734,18 @@ def test_a_settling_visual_job_whose_attempt_failed_queues_the_next_route_and_in
     assert seen["ingest"] == []
 
 
+def test_a_settling_visual_job_whose_capture_is_gone_frees_the_launched_reviewer(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
+                                                        payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})
+    Path(job["payload"]["capture"]).unlink()
+    released = []
+    monkeypatch.setattr(gates, "release_launched_review", lambda con_, run_, gid, did: released.append((gid, did)))
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: pytest.fail("nothing to settle against"))
+    result = visual.job_visual_review(con, run, job)
+    assert result["verdict"] == "UNAVAILABLE" and released == [("Gv", "Dvis")]
+    assert [o["evidence_status"] for o in seen["ingest"]] == ["CAPTURE_BLOCKED"]
+
+
 def test_a_settled_visual_verdict_of_invalid_comparison_still_recaptures(scratch, monkeypatch):
     visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
                                                         payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})

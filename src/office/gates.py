@@ -1546,6 +1546,7 @@ def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
         proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
                               capture_output=True, text=True)
     except OSError:
+        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
         return None
     return dest if proc.returncode == 0 else None
 

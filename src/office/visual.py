@@ -931,8 +931,11 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
         row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at DESC LIMIT 1",
                           (job["payload"]["capture_gate_id"],)).fetchone()
         capture_path = row["path"] if row else None
+    settling = job["payload"].get(gates.SETTLE_KEY)
     if not capture_path or not Path(capture_path).is_file():
         outcome = {"verdict": "UNAVAILABLE", "evidence_status": "CAPTURE_BLOCKED", "summary": "no capture receipt to review"}
+        if settling:  # nothing will settle the launched reviewer: free what it held
+            gates.release_launched_review(con, run, gate["id"], settling["dispatch_id"])
         with db.transaction(con):
             gates.ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
         return outcome
@@ -940,11 +943,13 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
     if receipt.get("office_version") != run["office_version"] or receipt.get("revision") != gate["revision_id"]:
         outcome = {"verdict": "UNAVAILABLE", "evidence_status": "INVALID_COMPARISON",
                    "summary": "capture receipt does not bind to this revision/runtime"}
+        if settling:
+            gates.release_launched_review(con, run, gate["id"], settling["dispatch_id"])
         with db.transaction(con):
             gates.ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
         return outcome
     task = state.get_task(con, run["id"], gate["task_id"])
-    if job["payload"].get(gates.SETTLE_KEY):
+    if settling:
         # The reviewer was launched by an earlier run of this job: record its result without rebuilding the review.
         outcome = gates.settle_reviewer(con, run, gate, job)
     else:
