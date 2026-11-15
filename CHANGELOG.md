@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.22.3
+
+Research (#1168): Hydrogen shadow-review results, dispositions and escapes for live PRs #1172, #1173, #1176 and #1177; the shadow lane surfaced #1178.
+
 ## 3.22.2
 
 `office route policy` no longer repeats "dispatches (dispatches (" on user-allowed Hydrogen rows. Adds the H3 Hydrogen code-reviewer learning (#1168).

@@ -1,2 +1,7 @@
 # Post-merge defects traced to a shadow-reviewed PR: [{case: pr-N, summary: "...", missed_by: [luna, hydrogen]}]
-[]
+- case: pr-1173
+  summary: "agy has no reviewer launch profile, so the promoted agy/gemini-4-hydrogen@high code reviewer never dispatches (build_candidates skips it as no-profile) while office route policy reports it dispatches."
+  missed_by: [luna]
+- case: pr-1173
+  summary: "Hydrogen's code_reviewer gate accepts a manual --review-as with no exact code_reviewer allow, contrary to the documented user-allow requirement."
+  missed_by: [hydrogen]
