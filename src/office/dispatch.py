@@ -3250,7 +3250,9 @@ def _pane_busy(text: str) -> bool:
 # "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
 # "You've used 95% of your weekly limit" line is a warning, not a stop, and is
 # deliberately not matched (#253).
-_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit", re.I)
+# agy stops on an empty account with "Your AI credits balance is too low to continue." (#608, #1194).
+_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit"
+                        r"|credits? balance is too low|out of (?:ai )?credits", re.I)
 # "resets 9:30pm (Asia/Manila)" or the older "limit will reset at 9:30pm".
 _LIMIT_RESETS = re.compile(r"\breset(?:s|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
 LIMIT_TAIL_LINES = 40
@@ -5219,7 +5221,7 @@ _ROUTE_FAILURE_SIGNATURES = (
                                  r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
                                  r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
     ("quota", r"quota (exceeded|exhausted|limit)|rate[- ]?limit(ed)?|\b429\b|usage limit reached|"
-              r"credits? (exhausted|depleted)|weekly limit reached"),
+              r"credits? (exhausted|depleted)|credits? balance is too low|out of (ai )?credits|weekly limit reached"),
     ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
     ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
                   r"|service unavailable|\b50[234]\b|overloaded"),
