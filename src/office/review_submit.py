@@ -34,6 +34,22 @@ SUBMIT_FILE = "review-submit.txt"
 # would let them through, so each documented member is denied explicitly, bare and with arguments.
 CLAUDE_READONLY_BASH = ("ls", "cat", "echo", "pwd", "head", "tail", "grep", "find", "wc", "which", "diff",
                         "stat", "du", "cd", "git")
+# #1186 (Rico, 2026-11-15: "some bash commands should be allowed too by reviewers, as long as safe ones"). Where
+# Claude Code's OS sandbox runs, a Claude reviewer keeps the built-in read-only commands above (git status/log/diff/
+# show/blame, ls, cat, grep, find, ...) and may also run these targeted test runners, bare or with arguments. The
+# sandbox, not the command name, is the fence: the test code they execute cannot reach the network or write the
+# checkout, Office's state or the guidance roots (read_scope.claude_sandbox_settings).
+REVIEWER_TEST_BASH = ("pytest", "python -m pytest", "python3 -m pytest", ".venv/bin/python -m pytest",
+                      ".venv/bin/pytest", "pnpm test", "npm test", "node --test")
+# Defence in depth under that sandbox: dontAsk already denies anything no rule allows, and these name the
+# mutating commands a reviewer must never run even if a later Claude Code widened its read-only set.
+REVIEWER_BASH_DENY = ("rm", "rmdir", "mv", "cp", "chmod", "chown", "ln", "dd", "truncate", "sudo", "curl", "wget",
+                      "ssh", "scp", "rsync", "git push", "git commit", "git checkout", "git switch", "git restore",
+                      "git reset", "git clean", "git stash", "git rebase", "git merge", "git cherry-pick", "git am",
+                      "git apply", "git tag", "git branch", "git worktree", "git config", "git remote", "git fetch",
+                      "git pull", "git clone", "git gc", "git update-ref", "gh", "pip install", "pip3 install",
+                      "uv pip", "uv add", "uv sync", "npm install", "npm i", "npm ci", "pnpm install", "pnpm add",
+                      "pnpm i", "yarn", "brew", "find * -delete", "find * -exec", "find * -execdir", "find * -ok")
 
 
 def submit_argv(output: str | Path) -> list[str]:

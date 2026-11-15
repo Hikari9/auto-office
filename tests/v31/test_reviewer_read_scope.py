@@ -213,8 +213,9 @@ def test_claude_reviewer_cannot_edit_the_checkout_or_office_data(scope):
     out = env.tmp / "dispatch" / "reply.txt"
     argv = _reviewer_argv(adapters, "claude", "reviewer", env)
     denied = argv[argv.index("--disallowedTools") + 1].split(",")
-    # #1030 narrow grant: the blanket Bash deny became explicit read-only denies plus one exact submit allow.
-    assert {"Edit", "NotebookEdit", "Bash(cat *)", "Bash(git *)"} <= set(denied) and "Bash" not in denied
+    # #1030/#1186: no blanket Bash deny (it would override the submit allow); which commands are denied
+    # depends on the sandbox posture, pinned in test_issue_1030_submit_grant and test_issue_1186_reviewer_shell.
+    assert {"Edit", "NotebookEdit"} <= set(denied) and "Bash" not in denied
     # `Edit(path)` denies also block the Write tool; the reply file stays writable.
     assert f"Edit(/{env.repo}/**)" in denied and f"Edit(/{env.data}/**)" in denied
     assert f"Edit(/{env.state}/worktrees/**)" in denied
