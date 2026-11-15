@@ -61,11 +61,12 @@ def user_allowed(rule: dict | None) -> bool:
     """Whether an effective role rule is the user's own exact-route allow (#1163).
 
     `rule` is route_policy.effective_role_state for this candidate, role and size, so size scope
-    is already applied. A wildcard route, a shipped/seed/override source or a non-allow never counts.
+    is already applied. A wildcard route, an all-role (`role: "*"`) rule, a shipped/seed/override source or a
+    non-allow never counts: the allow must name the role (Luna on H5).
     """
     from office import route_policy
     rule = rule or {}
-    return (rule.get("state") == "allow" and rule.get("source") == "user"
+    return (rule.get("state") == "allow" and rule.get("source") == "user" and rule.get("role") != "*"
             and route_policy._is_exact_spec(rule.get("rule")))
 
 

@@ -355,7 +355,7 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
             # Equivalent spellings of one route can disagree; fail closed, deterministically.
             rule = next((r for r in best if r["state"] == "deny"), None) or sorted(best, key=lambda r: r["state"])[0]
             source = (policy.get("sources") or {}).get("role_rules") or "user"
-            return {"state": rule["state"], "source": source, "rule": rule["route"]}
+            return {"state": rule["state"], "source": source, "rule": rule["route"], "role": rule["role"]}
     for policy in reversed(policies):
         if reason := is_denied(cand, policy):
             return {"state": "deny", "source": "legacy-user-deny", "reason": reason}

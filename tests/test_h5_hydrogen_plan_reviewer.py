@@ -64,6 +64,7 @@ def test_plan_reviewer_routes_to_the_allowed_hydrogen_after_a_probe(env):
     ("no-probe", _config(), False),
     ("code-reviewer-allow-only", _config(role="code_reviewer"), True),
     ("medium-allow", _config(route="agy@1/gemini-4-hydrogen@medium"), True),
+    ("all-role-allow", _config(role="*"), True),
 ])
 def test_plan_reviewer_hydrogen_still_needs_the_exact_allow_and_probe(env, name, cfg, probe):
     _cand, decision = _route(env, cfg, probe=probe)
@@ -127,3 +128,12 @@ def test_policy_header_names_the_hydrogen_gates():
     """Luna recheck on H5: the #845 header must not say an allowed Hydrogen route dispatches without proof."""
     text = "\n".join(routecmd.policy(role="visual_reviewer").lines)
     assert "except Hydrogen, which also needs a fresh exact probe" in text
+
+
+def test_an_all_role_allow_is_not_the_exact_allow():
+    """Luna on H5: `role: "*"` matches every role in effective_role_state, but it does not name the role."""
+    cand = {"harness": "agy", "harness_version": "1.2.3", "model_id": hydrogen_trials.MODEL,
+            "invocation_model_id": "gemini-4-hydrogen-high", "effort": "high"}
+    for cfg, want in ((_config(role="*"), False), (_config(), True)):
+        state = route_policy.effective_role_state(cand, "plan_reviewer", [route_policy.user_policy(cfg)])
+        assert state["state"] == "allow" and hydrogen_trials.user_allowed(state) is want, (cfg, state)
