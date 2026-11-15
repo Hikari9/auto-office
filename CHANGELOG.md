@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.24.1
+
+Codex visual reviewers can hand back with `office review submit` (#1186 follow-up). The codex `vision` profile now carries the same `submit_grant: codex-rules` and trusted dispatch dir as the code reviewer, so the one exact submit execpolicy rule applies. Claude visual reviewers already had the #1186 shell, and agy visual reviewers run with a full shell.
+
 ## 3.24.0
 
 Claude reviewers get a shell (#1186). `--restricted` dropped Bash unless `--tools` named it, so the #1030 `office review submit` allow never applied and reviewers read code without running anything. Reviewer and vision profiles now name their tools and, where Claude Code's OS sandbox runs, pass sandbox settings: built-in read-only commands (git log/diff/show, ls, cat, grep, find) and targeted test runners (pytest, `pnpm test`, `npm test`, `node --test`) run sandboxed with no network and no writes outside the dispatch dir and temp; only the exact submit command runs outside the sandbox. Hosts without a sandbox keep the submit-only shell.
