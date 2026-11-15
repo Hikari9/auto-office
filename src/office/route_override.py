@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -52,6 +53,11 @@ QUOTED_AT_FORMAT = "%Y-%m-%d %H:%M"
 MAX_QUOTE_AGE = timedelta(hours=24)
 MIN_QUOTE_CHARS = 12
 MIN_QUOTE_WORDS = 3
+# Obvious stand-ins an orchestrator might pass instead of the user's words. This is a guard against
+# mistakes, not authentication: the receipt records the quote so Rico can audit it.
+_PLACEHOLDER = re.compile(r"<[^>]*>|\[[^\]]*\]|\b(?:placeholder|quote here|words here|insert\b.*\bhere|"
+                          r"user'?s (?:quote|words)|rico'?s (?:quote|words)|verbatim (?:quote|words)|"
+                          r"your (?:quote|words)|tbd|lorem ipsum)\b", re.IGNORECASE)
 
 
 def ensure_schema(con: sqlite3.Connection) -> None:
@@ -130,7 +136,7 @@ def validate_quote(quote: str | None, quoted_at: str | None, *, now: datetime | 
     if not quote or not quoted_at:
         raise Usage("quote-required", "--rico-quote and --quoted-at go together: the user's verbatim words and the "
                     "Manila time they said them (YYYY-MM-DD HH:MM)")
-    if len(text) < MIN_QUOTE_CHARS or len(text.split()) < MIN_QUOTE_WORDS or (text.startswith("<") and text.endswith(">")):
+    if (len(text) < MIN_QUOTE_CHARS or len(text.split()) < MIN_QUOTE_WORDS or _PLACEHOLDER.search(text)):
         raise Usage("quote-too-short", "--rico-quote must be the user's own verbatim words authorizing this override, "
                     f"not a placeholder (at least {MIN_QUOTE_WORDS} words)")
     try:

@@ -74,6 +74,8 @@ def test_worker_is_refused_on_the_quoted_path(home, monkeypatch):
 
 
 @pytest.mark.parametrize("kw", [{"quote": ""}, {"quote": "   "}, {"quote": "ok"}, {"quote": "<verbatim words>"},
+                                {"quote": "insert user's quote here please"}, {"quote": "Rico said [his words go here] ok"},
+                                {"quote": "this is a placeholder for the quote"}, {"quote": "TBD once rico answers"},
                                 {"quote": None}, {"quoted_at": None}, {"quote": "two words"}])
 def test_missing_or_trivial_quote_is_refused(home, kw):
     _, con = home
