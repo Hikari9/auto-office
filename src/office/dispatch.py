@@ -1234,6 +1234,20 @@ def _trial_launched(con, dispatch_id: str) -> None:
         set_trial_status(con, dict(trial), "launched", detail="the dispatch's agent was launched")
 
 
+def _handback_hint(harness: str | None, kind: str | None, output: str | Path | None) -> str:
+    """The pointer sentence that tells a pane reviewer how to hand its review back through `office review submit`.
+    The agy reviewer runs in plan mode, which refuses file writes, so it submits the review on stdin; every other
+    profile (agy vision included, which may write) writes the submit file."""
+    if not output:
+        return ""
+    if harness == "agy" and kind == "reviewer":
+        return ("You cannot write files. Instead run `office review submit` with your complete review as standard "
+                "input (a here-document), exactly that command and no other. ")
+    return (f"If your tools allow running it, you may instead write the review to "
+            f"{Path(output).parent / review_submit.SUBMIT_FILE} and run exactly: "
+            f"{review_submit.submit_command(output)} . ")
+
+
 def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> list[str]:
     """Where a dispatch's brief and identity live, and the herdr commands that
     start any agent on it by hand (SKILL.md "Herdr agents"). `output` makes it
@@ -1272,10 +1286,7 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
     else:
         pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
                    f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(output).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(output)} . " if output else "")
-                   + "Do not edit anything else.")
+                   + _handback_hint(d.get("harness"), "reviewer", output) + "Do not edit anything else.")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
@@ -3049,12 +3060,10 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
         pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
-                   f"Write your complete review to {spec['output']}; Office reads only that file, never "
-                   "your terminal. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(spec['output']).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(spec['output'])} . " if spec.get("output") else "")
-                   + "Do not edit anything else.")
+                   + ("" if dispatch.get("harness") == "agy" and spec["kind"] == "reviewer" else
+                      f"Write your complete review to {spec['output']}; Office reads only that file, never "
+                      "your terminal. ")
+                   + _handback_hint(dispatch.get("harness"), spec["kind"], spec.get("output")) + "Do not edit anything else.")
     from office import transcripts
     sent_at = time.time()
 

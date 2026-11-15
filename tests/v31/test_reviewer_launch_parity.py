@@ -19,9 +19,8 @@ def test_every_review_profile_launches_like_its_worker(harness):
     for kind in ("reviewer", "vision"):
         if adapters.profile(adapter, kind):
             if harness == "agy" and kind == "reviewer":
-                # H4 (#1178): agy reviews in read-only plan mode, which cannot write a pane reply file.
-                assert not adapters.pane_capable(adapter, kind) and adapters.profile(adapter, kind)["routes"]
-                continue
+                # H4 (#1178): the route-scoped plan-mode reviewer keeps its scope and launches in a pane like the worker.
+                assert adapters.profile(adapter, kind)["routes"]
             assert adapters.pane_capable(adapter, kind) == worker, (harness, kind)
 
 

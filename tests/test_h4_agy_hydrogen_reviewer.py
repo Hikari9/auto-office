@@ -45,7 +45,10 @@ def test_seed_reviewer_profile_is_read_only_and_scoped():
     assert prof["argv"][:2] == ["--mode", "plan"]
     assert prof["verify_worktree_unchanged"] is True
     assert not any("dangerously" in str(a) for a in prof["argv"])
-    assert not adapters.pane_capable(_agy(), "reviewer")
+    assert adapters.pane_capable(_agy(), "reviewer")
+    pane = prof["interactive"]["argv"]
+    assert pane[:2] == ["--mode", "plan"]
+    assert not any("dangerously" in str(a) or a in ("auto", "accept-edits") for a in pane)
 
 
 def test_profile_for_opens_only_the_hydrogen_route():
@@ -171,3 +174,46 @@ def test_harness_validate_rejects_a_malformed_routes_scope():
                                       "reviewer": {**agy["office_profiles"]["reviewer"], "routes": ["no-effort"]}}}
     assert any("routes must be" in p for p in harnesscmd.check(bad)), harnesscmd.check(bad)
     assert not [p for p in harnesscmd.check(agy) if "reviewer" in p]
+
+
+def test_pane_form_renders_plan_mode_with_the_survey_off_and_one_submit_allow(tmp_path):
+    import json
+    out = tmp_path / "dispatch" / "reply.txt"
+    args, kind = adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-high", effort="high",
+                                           cwd=tmp_path, output=out, include_dirs=[tmp_path])
+    assert kind == "agy" and args[:2] == ["--mode", "plan"]
+    assert "--dangerously-skip-permissions" not in args and "accept-edits" not in args and "auto" not in args
+    assert args[args.index("--model") + 1] == "gemini-4-hydrogen-high"
+    settings = json.loads(args[args.index("--settings") + 1])
+    assert settings == {"showFeedbackSurvey": False, "permissions": {"allow": ["command(office review submit)"]}}
+    # Without a reply to hand back there is no allow, only the survey switch.
+    bare, _ = adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-high", effort="high", cwd=tmp_path)
+    assert json.loads(bare[bare.index("--settings") + 1]) == {"showFeedbackSurvey": False}
+    with pytest.raises(adapters.AdapterError, match="launches only"):
+        adapters.interactive_argv(_agy(), "reviewer", model="gemini-4-hydrogen-medium", effort="medium",
+                                  cwd=tmp_path, output=out)
+
+
+def test_the_agy_pane_pointer_asks_for_stdin_submit_not_a_file_write(tmp_path):
+    from office import dispatch
+    out = tmp_path / "reply.txt"
+    hint = dispatch._handback_hint("agy", "reviewer", out)
+    assert "office review submit" in hint and "standard input" in hint and "review-submit.txt" not in hint
+    assert "review-submit.txt" in dispatch._handback_hint("claude", "reviewer", out)
+    assert "review-submit.txt" in dispatch._handback_hint("agy", "vision", out)  # the vision pane may write
+    assert dispatch._handback_hint("agy", "reviewer", None) == ""
+
+
+def test_the_worktree_guard_stays_on_for_the_pane_reviewer(tmp_path):
+    import subprocess
+    from office import gates
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for cmd in (["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    guard = gates._worktree_guard({"harness": "agy", "launcher": "herdr"}, "reviewer", repo)
+    assert guard is not None
+    before = guard(None)
+    assert guard(before) is None
+    (repo / "edited-by-the-pane-reviewer.txt").write_text("x")
+    assert "untracked files" in guard(before)

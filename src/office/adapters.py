@@ -508,6 +508,21 @@ def toml_path(path: Path) -> str:
     return json.dumps(str(resolved))
 
 
+AGY_SUBMIT_RULE = "command(office review submit)"
+
+
+def agy_session_settings(granted: bool) -> str:
+    """`agy --settings` JSON for a pane-hosted reviewer: the feedback survey off (it blocks a session while the
+    pane still reads idle, `interactive-survey-blocks-status-unreported`), and, for a reviewer with a reply
+    to hand back, one command allow so `office review submit` (the review on stdin) runs without a prompt.
+    Plan mode refuses editing tools, so the reviewer cannot write a reply file; it never gets a write allowance
+    or a permission bypass, and only that command is allowed."""
+    settings: dict = {"showFeedbackSurvey": False}
+    if granted:
+        settings["permissions"] = {"allow": [AGY_SUBMIT_RULE]}
+    return json.dumps(settings, separators=(",", ":"))
+
+
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
                include_dirs: list[Path] | None = None, session_id: str | None = None,
@@ -567,6 +582,9 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                 continue
             # Appended as is: the JSON holds paths, which must not go through the placeholder substitution below.
             argv.append(arg.replace("{sandbox_settings}", read_scope.claude_sandbox_settings(cwd, output, include_dirs)))
+            continue
+        if "{agy_settings}" in arg:
+            argv.append(agy_session_settings(granted))  # JSON holds no placeholders; appended as is
             continue
         if "{submit_allow}" in arg:  # exactly one command, no wildcard (#1030 narrow grant)
             from office import review_submit

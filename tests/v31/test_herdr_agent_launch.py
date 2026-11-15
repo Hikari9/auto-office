@@ -878,3 +878,35 @@ def test_an_osc_link_before_the_cursor_glyph_is_stripped():
     from office import dispatch
     assert dispatch._selected_option("Trust this folder?\n\x1b]8;;u\x07❯ Yes, I trust this folder") == \
         "Yes, I trust this folder"
+
+
+@pytest.mark.approved
+def test_agy_hydrogen_reviewer_launches_in_a_plan_mode_pane_and_falls_back_headless(env, monkeypatch):
+    """The route-scoped agy reviewer gets a Herdr pane in plan mode with its submit allow; no Herdr runs it headless."""
+    import json
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("You are a code reviewer\n")
+    out = ddir / "reply.txt"
+    rd = {**d, "adapter_id": "agy", "harness": "agy", "model": "gemini-4-hydrogen-high", "effort": "high"}
+    res = dispatch.launch(run, rd, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
+    assert res["launcher"] == "herdr", res
+    calls = _calls(state_file)
+    start = [c for c in calls if c[:2] == ["agent", "start"]][-1]
+    assert start[start.index("--kind") + 1] == "agy"
+    args = start[start.index("--") + 1:]
+    assert args[:2] == ["--mode", "plan"] and "--dangerously-skip-permissions" not in args
+    assert json.loads(args[args.index("--settings") + 1])["permissions"] == {"allow": ["command(office review submit)"]}
+    prompt = [c for c in calls if c[:2] == ["agent", "prompt"]][-1]
+    assert "office review submit" in prompt[3] and "Write your complete review to" not in prompt[3]
+    # No Herdr: the headless plan-mode form runs as before.
+    monkeypatch.delenv("HERDR_ENV")
+    res = dispatch.launch(run, {**rd, "id": d["id"]}, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
+    assert res["launcher"] == "process", res
