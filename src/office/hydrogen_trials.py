@@ -78,11 +78,12 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
         return None
     if role in REVIEW_ROLES:
         # H3 (#1168): owner-promoted voting code reviewer. Only the exact @high route that ran the
-        # planted-bug set, only by manual selection or the user's exact allow, always behind a fresh
-        # exact probe (manual_conformance), never through discovery or adaptive exploration.
+        # planted-bug set, only under the user's exact allow (a manual --review-as does not stand in
+        # for it, H4 #1178), always behind a fresh exact probe (manual_conformance), never through
+        # discovery or adaptive exploration.
         if candidate.get("harness") != "agy" or candidate.get("effort") != REVIEW_EFFORT:
             return f"Hydrogen reviews only as the exact agy/{MODEL}@{REVIEW_EFFORT} route"
-        if not (manual or user_allowed):
+        if not user_allowed:
             return f"Hydrogen review needs the user's exact allow of agy/{MODEL}@{REVIEW_EFFORT} for {role}"
         return None
     if role != "executor":
@@ -121,9 +122,11 @@ def safe_task(size: str | None, risk: dict | None, descriptor: dict | None) -> b
     return True
 
 
-def manual_conformance(con, candidate: dict, *, role: str, size: str | None) -> str | None:
-    """Manual XS/L (and manual S/M) needs a fresh *exact* model+effort probe receipt."""
-    denial = route_refusal(candidate, role=role, size=size, manual=True)
+def manual_conformance(con, candidate: dict, *, role: str, size: str | None,
+                       user_allowed: bool = False) -> str | None:
+    """Manual XS/L (and manual S/M) needs a fresh *exact* model+effort probe receipt.
+    A code review also needs the user's exact allow (`user_allowed`); manual selection alone is not one."""
+    denial = route_refusal(candidate, role=role, size=size, manual=True, user_allowed=user_allowed)
     if denial:
         return denial
     if con is None:

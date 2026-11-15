@@ -162,7 +162,9 @@ def test_reviewer_promotion_is_exact_and_code_review_only(tmp_path, name, policy
 def test_reviewer_refusal_reasons():
     c = {"model_id": h.MODEL, "harness": "agy", "effort": "high"}
     assert h.route_refusal(c, role="code_reviewer", size=None, manual=False, user_allowed=True) is None
-    assert h.route_refusal(c, role="code_reviewer", size=None, manual=True) is None
+    # H4 (#1178): a manual --review-as is not the user's exact allow.
+    assert "exact allow" in h.route_refusal(c, role="code_reviewer", size=None, manual=True)
+    assert h.route_refusal(c, role="code_reviewer", size=None, manual=True, user_allowed=True) is None
     assert "exact allow" in h.route_refusal(c, role="code_reviewer", size=None, manual=False)
     assert "exact agy/gemini-4-hydrogen@high" in h.route_refusal({**c, "effort": "medium"}, role="code_reviewer",
                                                                   size=None, manual=False, user_allowed=True)

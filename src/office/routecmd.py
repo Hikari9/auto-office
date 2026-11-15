@@ -80,9 +80,9 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
                        if not hydrogen_trials.settings(config)["enabled"] else "depends on task size")
         if state["state"] == "deny":
             refusal = f"denied by {state['source']}"
-        elif role == "executor" and not installed:
+        elif not installed:
             refusal = f"{candidate.get('harness')} is not installed here"
-        elif role == "executor" and not has_profile:
+        elif not has_profile:
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
         if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
@@ -191,7 +191,8 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                         con, hydrogen_trials.settings(cfg_effective)["canary_tasks"])
                 except sqlite3.DatabaseError:
                     canary = None  # an older read-only runs.db without the canary column
-            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)),
+            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile_for(
+                                                 adapter, kind, row.get("invocation_model_id") or row["model_id"], row["effort"])),
                                              candidate=c, role=r, size=size, config=cfg_effective, probe=probe,
                                              canary=canary)
             result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",

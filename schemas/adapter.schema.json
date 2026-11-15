@@ -188,6 +188,12 @@
           },
           "prompt_flag": {
             "type": "string"
+          },
+          "routes": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[^@\\s]+@[^@\\s]+$"},
+            "minItems": 1,
+            "description": "Exact `<invocation model>@<effort>` routes this profile may launch (the model string Office passes as {model}, then the Office effort). Absent: every route of the harness. Present: Office reports no launch profile for any other route, and build_argv refuses one (H4, #1178)."
           }
         }
       }

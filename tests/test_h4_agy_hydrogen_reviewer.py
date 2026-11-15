@@ -1,0 +1,154 @@
+"""H4 (#1178): agy reviews code only as the exact user-allowed Hydrogen@high route.
+
+The shipped agy adapter declares a read-only (`--mode plan`) reviewer profile scoped by `routes` to
+gemini-4-hydrogen-high@high. These tests run the real seed adapter and catalog rows through candidate
+building, routing, argv rendering and `office route policy`, not a synthetic candidate.
+"""
+from pathlib import Path
+
+import pytest
+
+from office import adapters, candidates, db, hydrogen_trials, route_policy, route_probe, routecmd, routing
+from office.util import now_iso
+
+HYDROGEN = "agy/gemini-4-hydrogen@high"
+ALLOW = "agy@1/gemini-4-hydrogen@high"
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(candidates, "required_user_policies", lambda *_: [])
+    monkeypatch.setattr(adapters, "installed", lambda _a: True)
+    monkeypatch.setattr(adapters, "route_version", lambda *_a: "1.2.3")
+    return tmp_path
+
+
+def _config(*routes):
+    return {"routing": {"user_policy": {"role_rules": [
+        {"role": "code_reviewer", "route": r, "state": "allow"} for r in routes]}}}
+
+
+def _agy():
+    return adapters.load_all()["agy"]
+
+
+def _labels(entries):
+    return {e["candidate"]: e for e in entries}
+
+
+def test_seed_reviewer_profile_is_read_only_and_scoped():
+    prof = adapters.profile(_agy(), "reviewer")
+    assert prof["routes"] == ["gemini-4-hydrogen-high@high"]
+    assert prof["argv"][:2] == ["--mode", "plan"]
+    assert prof["verify_worktree_unchanged"] is True
+    assert not any("dangerously" in str(a) for a in prof["argv"])
+    assert not adapters.pane_capable(_agy(), "reviewer")
+
+
+def test_profile_for_opens_only_the_hydrogen_route():
+    agy = _agy()
+    assert adapters.profile_for(agy, "reviewer", "gemini-4-hydrogen-high", "high")
+    for model, effort in [("gemini-4-hydrogen-medium", "medium"), ("gemini-4-hydrogen-high", "medium"),
+                          ("Claude Opus 5.5 (Low)", "low"), ("gemini-3.8-flash-medium", "medium"),
+                          ("gemini-4-argon-high", "high")]:
+        assert adapters.profile_for(agy, "reviewer", model, effort) is None, (model, effort)
+    # The worker profile declares no routes, so every agy route keeps it.
+    assert adapters.profile_for(agy, "worker", "gemini-3.8-flash-medium", "medium")
+
+
+def test_build_candidates_admits_only_hydrogen_high_as_agy_reviewer(env):
+    cfg = _config(ALLOW, "agy@1/gemini-4-hydrogen@medium", "agy@1/claude-opus-5-5@low")
+    built, skipped = candidates.build_candidates(None, "code_reviewer", probe=False,
+                                                 allow_policies=[route_policy.user_policy(cfg)])
+    agy_built = [c for c in built if c["harness"] == "agy"]
+    assert [(c["model_id"], c["effort"]) for c in agy_built] == [("gemini-4-hydrogen", "high")]
+    assert adapters.profile_for(_agy(), "reviewer", agy_built[0]["invocation_model_id"], "high")
+    skips = _labels(skipped)
+    # A user allow does not give a route a launch form: it is skipped as no-profile.
+    assert skips["agy/claude-opus-5-5@low"]["category"] == "no-profile"
+    # Dispatchable agy rows (no allow needed) are no reviewers either.
+    assert skips["agy/claude-opus-5-5@medium"]["category"] == "no-profile"
+    assert skips["agy/gemini-3.8-flash@medium"]["category"] == "no-profile"
+    # Hydrogen@medium is no reviewer route at all.
+    assert ("gemini-4-hydrogen", "medium") not in {(c["model_id"], c["effort"]) for c in built}
+
+
+def test_plan_reviewer_never_gets_hydrogen(env):
+    cfg = {"routing": {"user_policy": {"role_rules": [
+        {"role": "plan_reviewer", "route": ALLOW, "state": "allow"}]}}}
+    built, _ = candidates.build_candidates(None, "plan_reviewer", probe=False,
+                                           allow_policies=[route_policy.user_policy(cfg)])
+    assert not [c for c in built if c["harness"] == "agy"]
+
+
+def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env):
+    cfg = _config(ALLOW)
+    agy = _agy()
+    with db.connect(env / "runs.db") as con:
+        built, _ = candidates.build_candidates(con, "code_reviewer", probe=False,
+                                               allow_policies=[route_policy.user_policy(cfg)])
+        cand = next(c for c in built if c["harness"] == "agy")
+        fp = route_probe.fingerprint(cand, agy)
+        con.execute("INSERT INTO route_probes(key, harness, harness_version, adapter_hash, profile, "
+                    "invocation_model_id, effort, result, probed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (route_probe.key(cand, agy), fp["harness"], fp["harness_version"], fp["adapter_hash"],
+                     fp["profile"], fp["invocation_model_id"], fp["effort"], "pass", now_iso()))
+        con.commit()
+        seeded = {**cfg, "roles": {"code_reviewer": {"preferred_seed": [
+            {"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"}]}}}
+        decision = candidates.route_role(con, seeded, {"gear": "S", "risk": {"size_class": "S"}},
+                                         "code_reviewer", probe=False, observe=True)
+    assert decision["selected"] == routing.candidate_id(cand), decision
+
+
+def test_build_argv_renders_plan_mode_for_hydrogen_and_refuses_other_agy_models(tmp_path):
+    agy = _agy()
+    out = tmp_path / "dispatch" / "reply.md"
+    argv, prof = adapters.build_argv(agy, "reviewer", model="gemini-4-hydrogen-high", effort="high",
+                                     cwd=tmp_path, output=out, include_dirs=[tmp_path])
+    assert argv[:7] == ["agy", "--mode", "plan", "--print-timeout", "30m", "--model", "gemini-4-hydrogen-high"]
+    assert "--dangerously-skip-permissions" not in argv
+    assert prof["verify_worktree_unchanged"] is True
+    for model, effort in [("gemini-3.8-flash-medium", "medium"), ("gemini-4-hydrogen-medium", "medium"),
+                          ("Claude Opus 5.5 (Low)", "low")]:
+        with pytest.raises(adapters.AdapterError, match="launches only"):
+            adapters.build_argv(agy, "reviewer", model=model, effort=effort, cwd=tmp_path, output=out)
+
+
+def test_manual_review_bypass_is_refused_without_the_exact_allow():
+    c = {"model_id": hydrogen_trials.MODEL, "harness": "agy", "effort": "high",
+         "invocation_model_id": "gemini-4-hydrogen-high"}
+    assert "exact allow" in hydrogen_trials.route_refusal(c, role="code_reviewer", size=None, manual=True)
+    assert "exact allow" in hydrogen_trials.manual_conformance(None, c, role="code_reviewer", size=None)
+    # With the allow, only the probe evidence is left to check.
+    assert "runs.db" in hydrogen_trials.manual_conformance(None, c, role="code_reviewer", size=None,
+                                                           user_allowed=True)
+
+
+def test_route_policy_reports_no_profile_for_non_executor_roles():
+    row = {"invocation_harness": "agy", "model_id": "gemini-4-hydrogen", "effort": "high"}
+    cand = {"harness": "agy", "model_id": "gemini-4-hydrogen", "effort": "high"}
+    state = {"state": "allow", "source": "user", "rule": ALLOW}
+    pass_probe = {"result": "pass"}
+    ok, why = routecmd._dispatch_view(row, state, True, False, candidate=cand, role="code_reviewer",
+                                      probe=pass_probe)
+    assert ok is False and "no launch profile" in why
+    ok, why = routecmd._dispatch_view(row, state, False, True, candidate=cand, role="code_reviewer",
+                                      probe=pass_probe)
+    assert ok is False and "not installed" in why
+    ok, why = routecmd._dispatch_view(row, state, True, True, candidate=cand, role="code_reviewer",
+                                      probe=pass_probe)
+    assert ok is True and why.startswith("user allow; exact probe passed; a voting code reviewer")
+    assert "dispatches (" not in why
+
+
+def test_harness_validate_rejects_a_malformed_routes_scope():
+    from office import harnesscmd
+    agy = _agy()
+    bad = {**agy, "office_profiles": {**agy["office_profiles"],
+                                      "reviewer": {**agy["office_profiles"]["reviewer"], "routes": ["no-effort"]}}}
+    assert any("routes must be" in p for p in harnesscmd.check(bad)), harnesscmd.check(bad)
+    assert not [p for p in harnesscmd.check(agy) if "reviewer" in p]

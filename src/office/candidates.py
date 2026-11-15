@@ -676,7 +676,9 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                 if not allowed or (task_size is not None and task_size not in sizes) or not sizes:
                     allowed = None
                 else:
-                    allowed = {**allowed, "sizes": sizes}
+                    # Every size covered is an unsized allow: no user_allow_sizes, so a role that routes with
+                    # no task size (a code reviewer, H4 #1178) is not refused as "an unknown size".
+                    allowed = {**allowed, "sizes": None if len(sizes) == len(route_policy.SIZES) else sizes}
         if allowed and row.get("dispatchable") is False:
             # The user's allow outranks the catalog or an overlay: no proof, qualification or trust gate (#845).
             why = "a user catalog overlay disabled it" if row.get("user_disabled") else (
@@ -695,7 +697,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         if floor and not allowed:
             skipped.append({"candidate": label, "category": "floor", "reason": f"below model family floor {floor}"})
             continue
-        if not adapter or not adapters.profile(adapter, kind):
+        if not adapter or not adapters.profile_for(adapter, kind, row.get("invocation_model_id") or row.get("model_id"),
+                                                   row.get("effort")):
             skipped.append({"candidate": label, "category": "no-profile", "reason": f"no {kind} launch profile"})
             continue
         if not adapters.installed(adapter):
@@ -980,7 +983,11 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             pinned = state.get_run(proof_con, run_id)
             task = state.get_task(proof_con, run_id, scope)
             size = ((task or {}).get("descriptor") or {}).get("task_size") or ((pinned or {}).get("risk") or {}).get("size_class")
-            denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size)
+            # A manual --review-as is not the exact user allow a Hydrogen review needs (H4, #1178).
+            allowed = (role in hydrogen_trials.REVIEW_ROLES and hydrogen_trials.user_allowed(
+                route_policy.effective_role_state(cand, role, [route_policy.user_policy(config or {})], size)))
+            denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size,
+                                                        user_allowed=allowed)
             if denial:
                 raise Refused("hydrogen-manual-unqualified", denial,
                               next_step="run an exact conformance probe, verify account authorization and retry manually")
