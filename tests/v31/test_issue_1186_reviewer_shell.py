@@ -23,7 +23,9 @@ def shell(env, monkeypatch):
     monkeypatch.setenv("HOME", str(env.home))
     for d in (".claude/rules", ".claude/skills"):
         (env.home / d).mkdir(parents=True, exist_ok=True)
-    from office import adapters, read_scope, review_submit
+    from office import adapters
+    from office import read_scope
+    from office import review_submit  # one name per import: the PR selector reads single-name forms (#1119)
     monkeypatch.setattr(read_scope, "claude_sandbox_available", lambda: True)
     return env, adapters, read_scope, review_submit
 
