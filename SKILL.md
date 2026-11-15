@@ -158,8 +158,8 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
 
 New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` is the reference.
 - Plan, convergence and visual reviews answer APPROVED (advance now; findings get a disposition, not another review), RECHECK (producers repair
-  blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user the missing decision now). UNAVAILABLE and other runtime failures are not
-  verdicts: no round spent. Independent means a different producer and reviewer session.
+  blocking findings; the same reviewer rechecks) or INTAKE_GAP (ask the user the missing decision now). UNAVAILABLE, REVOKED and other runtime failures are not
+  verdicts: no round spent. A failed reviewer falls back to the next route and a failed chain is re-dispatched once, automatically. Independent means a different producer and reviewer session.
 - Plan RECHECK holds only the tasks its blocking findings name: revise `PLAN.md`, then `office amend plan --contract -- "<what changed>"`;
   dispatch unaffected work meanwhile. At the plan round cap (3, or `office start --plan-review-rounds N`) plan review closes unapproved and
   you own the findings: fix each in the plan or accept it, then `office disposition plan:<code> fixed|dismissed|follow-up -- "<rationale>"`.
@@ -180,7 +180,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 - Outside the cap, only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote "<words>"
   --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e or a merge is authorized. If your
   host blocks `--as orchestrator` as self-approval (Claude Code auto mode), never work around it: ask the user.
-- A review that returned no verdict (UNAVAILABLE, ATTENTION, INVALID_RESULT) is re-run alone on the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <route>]`
+- A review that returned no verdict (UNAVAILABLE, REVOKED, ATTENTION, INVALID_RESULT) is re-run alone on the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <route>]`
   (also `rerun --review-as`, `office resume`). No executor starts and no round is spent; the pinned reviewer is kept unless `--as` re-pins it, else the next fallback route runs.
 - When no specialist reviewer returns a verdict, you may review it yourself: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`; v3.1 runs: `office review T1 --report <file>`).
   Specialists come first. It counts as independent only when your session did not produce the work (that session is refused). Runs started before #423 record it as degraded and non-independent.
