@@ -2,7 +2,7 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.26.0
+## 3.27.0
 
 Reviewer dispatch rewrite (#1191). A reviewer that fails to settle is replaced on the next route by one `review_fallback` job and a whole failed chain is re-dispatched once; a revoked reviewer ends `REVOKED`, not as a failure; every reviewer role reads one pin helper; reviewers launch async with a packet, lease and session id and run on a detached snapshot; `office review submit` is the one completion transport. `scripts/review_no_verdict_rate.py` reports the no-verdict share of done review gates from `runs.db`.
 
