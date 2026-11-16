@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.27.0
+
+The agy Hydrogen reviewer launches in a Herdr pane like the worker (#1027 parity), with plan mode as the write barrier. The pane hosts the same headless `agy --mode plan --print` run (`interactive.supervisor: true`, `wall_cap: true`) and Office captures its stdout as the reply, so no agy permission setting is relied on. The profile keeps `routes: [gemini-4-hydrogen-high@high]` and `verify_worktree_unchanged`, passes no permission bypass, `--mode auto` or `accept-edits`, and a stalled pane ends at `max_minutes` as a reported no-verdict result. Headless stays the fallback when Herdr is unusable. The adapter hash changed: rerun `office doctor --probe-route agy/gemini-4-hydrogen@high` after the reinstall.
+
 ## 3.26.0
 
 Credit reporting and an agy-wide cooldown (#1195). The agy probe reads agy 1.5.x's keychain token, reports the AI credit balance, and reads low credits as exhausted. An agy `RESOURCE_EXHAUSTED` or AI-credits failure now sets an agy-wide cooldown instead of cooling one route. The PR gate maps hyphenated scripts to their underscore test modules, so `scripts/agy-usage.py` selects `tests/test_agy_usage.py`; a hyphenated script with no matching test still fails closed.

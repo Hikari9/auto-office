@@ -1192,10 +1192,12 @@ REPLY_FILE_RULE = ("Office reads your review only from that file; text you print
 
 def _reply_text(d: dict, ddir: Path, output: Path) -> str:
     """The reviewer's reply: its reply file, or (headless only) the captured
-    stdout log, which is also a file the harness wrote. Never pane text."""
+    stdout log, which is also a file the harness wrote (a pane-hosted supervisor counts as headless).
+    Never pane text."""
     if output.is_file() and output.stat().st_size:
         return output.read_text(encoding="utf-8", errors="replace")
-    if d.get("launcher") in ("herdr", "external"):
+    # A pane-hosted supervisor runs the headless form, so its stdout log is the reply exactly as headless.
+    if d.get("launcher") in ("herdr", "external") and _launch_spec(ddir).get("supervisor") != "pane":
         return ""
     last_message = output.with_name("last-message.txt")
     if last_message.is_file() and last_message.stat().st_size:

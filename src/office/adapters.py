@@ -316,6 +316,13 @@ def pane_capable(adapter: dict | None, kind: str) -> bool:
     return bool(prof.get("herdr_kind") and isinstance(prof.get("interactive"), dict))
 
 
+def pane_hosts_supervisor(adapter: dict | None, kind: str) -> bool:
+    """Whether the profile's pane form is the headless supervisor run in a visible pane (`interactive.supervisor:
+    true`) rather than an interactive agent session. The harness still runs its headless form, so its stdout is
+    the reply and nothing depends on an interactive write allowance (agy reviewer, H4 #1178)."""
+    return bool(((profile(adapter or {}, kind) or {}).get("interactive") or {}).get("supervisor"))
+
+
 def terminal_statuses_without_reply(adapter: dict | None, kind: str) -> set[str]:
     """Herdr statuses that mean this profile ended without producing its reply."""
     prof = profile(adapter or {}, kind) or {}

@@ -45,7 +45,10 @@ def test_seed_reviewer_profile_is_read_only_and_scoped():
     assert prof["argv"][:2] == ["--mode", "plan"]
     assert prof["verify_worktree_unchanged"] is True
     assert not any("dangerously" in str(a) for a in prof["argv"])
-    assert not adapters.pane_capable(_agy(), "reviewer")
+    assert adapters.pane_capable(_agy(), "reviewer")
+    pane = prof["interactive"]["argv"]
+    assert pane[:2] == ["--mode", "plan"]
+    assert not any("dangerously" in str(a) or a in ("auto", "accept-edits") for a in pane)
 
 
 def test_profile_for_opens_only_the_hydrogen_route():
@@ -171,3 +174,82 @@ def test_harness_validate_rejects_a_malformed_routes_scope():
                                       "reviewer": {**agy["office_profiles"]["reviewer"], "routes": ["no-effort"]}}}
     assert any("routes must be" in p for p in harnesscmd.check(bad)), harnesscmd.check(bad)
     assert not [p for p in harnesscmd.check(agy) if "reviewer" in p]
+
+
+def test_pane_form_is_the_plan_mode_supervisor_with_no_settings_or_bypass(tmp_path):
+    adapter = _agy()
+    assert adapters.pane_capable(adapter, "reviewer") and adapters.pane_hosts_supervisor(adapter, "reviewer")
+    assert not adapters.pane_hosts_supervisor(adapter, "worker")
+    args, kind = adapters.interactive_argv(adapter, "reviewer", model="gemini-4-hydrogen-high", effort="high",
+                                           cwd=tmp_path, output=tmp_path / "reply.txt", include_dirs=[tmp_path])
+    assert kind == "agy" and args[:2] == ["--mode", "plan"]
+    assert "--dangerously-skip-permissions" not in args and "accept-edits" not in args and "auto" not in args
+    assert "--settings" not in args
+    prof = adapters.profile(adapter, "reviewer")
+    assert prof["routes"] == ["gemini-4-hydrogen-high@high"] and prof["verify_worktree_unchanged"] is True
+    assert "--mode" in prof["argv"] and prof["argv"][prof["argv"].index("--mode") + 1] == "plan"
+    with pytest.raises(adapters.AdapterError, match="launches only"):
+        adapters.interactive_argv(adapter, "reviewer", model="gemini-4-hydrogen-medium", effort="medium",
+                                  cwd=tmp_path, output=tmp_path / "reply.txt")
+
+
+def test_the_pane_reviewer_is_wall_capped_at_max_minutes(monkeypatch):
+    from office import dispatch
+    d = {"adapter_id": "agy"}
+    seed = _agy()
+    monkeypatch.setattr(adapters, "load_all", lambda: {"agy": seed})
+    monkeypatch.delenv("OFFICE_WORKER_MAX_MINUTES", raising=False)
+    cap = dispatch._pane_wall_cap(d, {"kind": "reviewer"})
+    assert cap == adapters.profile(seed, "reviewer")["max_minutes"] * 60
+    assert dispatch._pane_wall_cap(d, {"kind": "worker"}) is None  # only the declaring form is capped
+
+
+def test_the_worktree_guard_stays_on_for_the_pane_reviewer(tmp_path):
+    import subprocess
+    from office import gates
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for cmd in (["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    guard = gates._worktree_guard({"harness": "agy", "launcher": "herdr"}, "reviewer", repo)
+    assert guard is not None
+    before = guard(None)
+    assert guard(before) is None
+    (repo / "edited-by-the-pane-reviewer.txt").write_text("x")
+    assert "untracked files" in guard(before)
+
+
+def _pane_dispatch(tmp_path, stdout_script, *, supervisor="pane"):
+    """A pane-supervised dispatch whose fake agy ran headless: its stdout is the dispatch log, as `office _supervise`
+    captures it."""
+    import json
+    import subprocess
+    import sys
+    ddir = tmp_path / "dispatch"
+    ddir.mkdir()
+    (ddir / "launch.json").write_text(json.dumps({"supervisor": supervisor}))
+    with (ddir / "output.log").open("wb") as log:
+        subprocess.run([sys.executable, "-c", stdout_script], stdout=log, check=True)
+    return {"id": "D1", "launcher": "herdr", "log_path": str(ddir / "output.log")}, ddir, ddir / "reply.txt"
+
+
+def test_pane_supervised_stdout_verdict_reaches_review_parse(tmp_path):
+    from office import gates, review_parse
+    d, ddir, reply = _pane_dispatch(tmp_path, "print('VERDICT: APPROVED\\nNEXT: land')")
+    text = gates._reply_text(d, ddir, reply)
+    assert "VERDICT: APPROVED" in text
+    assert review_parse.parse(gates._last_block(text), contract="convergence-v1").valid
+
+
+def test_pane_supervised_empty_stdout_is_no_verdict_not_a_pass(tmp_path):
+    from office import gates, review_parse
+    d, ddir, reply = _pane_dispatch(tmp_path, "pass")
+    text = gates._reply_text(d, ddir, reply)
+    assert text.strip() == ""
+    assert not review_parse.parse(gates._last_block(text), contract="convergence-v1").valid
+
+
+def test_a_herdr_agent_pane_without_the_supervisor_still_gets_no_log_reply(tmp_path):
+    from office import gates
+    d, ddir, reply = _pane_dispatch(tmp_path, "print('VERDICT: APPROVED\\nNEXT: land')", supervisor="")
+    assert gates._reply_text(d, ddir, reply) == ""

@@ -77,8 +77,11 @@ office_profiles:
       argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
   # Code and plan reviewer (H4, #1178; H5; Rico 2026-11-15): only the exact user-allowed Hydrogen@high route, the one
   # that ran the planted-bug set. `routes` scopes the profile, so every other agy model still has no
-  # reviewer launch form. Headless only, an exception to #1027 launch parity: a pane reviewer must write
-  # its reply file, and plan mode cannot write.
+  # reviewer launch form. It launches in a Herdr pane like the worker (#1027 parity) and falls back to the headless
+  # form when Herdr is unusable. Plan mode refuses editing tools, so the reviewer cannot write a reply file: the pane
+  # hosts the same headless `--mode plan --print` run (`interactive.supervisor`), and Office captures its stdout as
+  # the reply. No agy permission setting is relied on (agy's `--settings` allow rules are not documented), and the
+  # `--print` run raises no feedback survey, so nothing can stall the pane; `wall_cap` and max_minutes bound it.
   # `--mode plan` is agy's read-only mode and no permission bypass is passed; agy has no verified sandbox,
   # so Office fingerprints the worktree before and after and fails a review that changed HEAD, the tracked
   # diff or untracked files. Gitignored files and .git/ are outside that check; plan mode is the write barrier.
@@ -91,6 +94,11 @@ office_profiles:
     prompt_flag: "--print="
     output: stdout
     verify_worktree_unchanged: true
+    herdr_kind: agy
+    interactive:
+      supervisor: true
+      wall_cap: true
+      argv: [--mode, plan, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
   vision:
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     max_minutes: 35

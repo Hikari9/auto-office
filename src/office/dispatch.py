@@ -2430,7 +2430,12 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             _launch_notice(run, dispatch, f"{no_pane}; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
-        if pane:
+        if pane and inter and adapters.pane_hosts_supervisor(adapters.load_all().get(dispatch.get("adapter_id") or ""), kind):
+            started = _pane_supervise(run, dispatch, spec, sup, pane, cwd, ddir, label=label)
+            if started:
+                return _wait_terminal(dispatch["id"]) if wait else started
+            headless = "process-fallback"
+        elif pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
                 if wait:
@@ -2456,6 +2461,31 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _pane_supervise(run: dict, dispatch: dict, spec: dict, sup: list[str], pane: str, cwd: Path, ddir: Path, *,
+                    label: str | None = None) -> dict | None:
+    """Host the headless supervisor in a visible pane (`interactive.supervisor`): the pane shell sources the
+    dispatch identity and runs `office _supervise`, which runs the harness's headless form (plan mode for the agy
+    reviewer), captures its stdout as the reply, checks the worktree and applies the wall cap. None when the pane
+    shell never ran the line: the caller then runs the same supervisor as a detached process."""
+    env_file = write_agent_env(run, dispatch, ddir, worker=spec["kind"] == "worker", harness_env=_harness_env(run, dispatch, spec))
+    line = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))} && {shlex.join(sup)}"
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; running headless instead")
+        return None
+    spec["supervisor"] = "pane"  # the gate reads this form's stdout log as the headless path does
+    _record_launch_form(run, dispatch, spec, "herdr", ["herdr", "pane", "run", pane, line], transport="pane shell",
+                        herdr_kind=None, brief_delivery="argv prompt (headless supervisor in the pane)")
+    _herdr_quiet("pane", "run", pane, line)
+    spec["pane"] = pane
+    write_launch_spec(run, dispatch["id"], spec)
+    _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    _pane_ledger(run, dispatch, pane, agent=None, kind=None, worktree=cwd, session_id=None)
+    return {"launcher": "herdr", "pane": pane, "supervisor": "pane"}
 
 
 def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: dict) -> None:
