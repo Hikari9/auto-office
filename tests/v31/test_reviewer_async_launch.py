@@ -689,7 +689,14 @@ def test_the_visual_review_launches_through_its_job_and_leaves_the_gate_open(scr
 def test_a_visual_review_no_route_answered_queues_a_review_fallback_for_the_visual_job(scratch, monkeypatch):
     """No verdict from the attempt: the real run_reviewer queues the one fallback job, and the visual job ingests nothing."""
     visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch)
-    monkeypatch.setattr(gates, "_review_attempt", lambda *a, **k: (None, {"reason": "no reply", "dispatch_id": "Dv1"}))
+    attempts = []
+
+    def failing_attempt(*a, **k):
+        attempts.append(1)
+        assert len(attempts) == 1, "the next route ran in this call: the visual job was not handed to run_reviewer"
+        return None, {"reason": "no reply", "dispatch_id": "Dv1"}
+
+    monkeypatch.setattr(gates, "_review_attempt", failing_attempt)
     result = visual.job_visual_review(con, run, job)
     fallback = con.execute("SELECT id FROM outbox WHERE kind='review_fallback'").fetchone()[0]
     assert result == {"fallback": fallback}
