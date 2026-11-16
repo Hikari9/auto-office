@@ -682,11 +682,15 @@ def _lane_review_options(con, run: dict, job: dict, gate: dict, scope: dict, st:
                          kind: str) -> dict:
     """One source for code/visual reviewer continuation and retry exclusions."""
     excluded = list(st.get("exclude_routes") or [])
+    fallback = job["payload"].get("review_fallback")
     resume = _same_reviewer(con, run, scope["id"], kind, int(gate.get("cycle") or 1))
     if excluded or job["payload"].get("review_only"):
         resume = None
+    if fallback and fallback.get("epoch"):
+        # A re-run of the review: only a REVIEWED_COMMIT correction continues a reviewer, in its own session when it can.
+        resume = fallback.get("resume_from")
     return {"exclude": excluded or None, "resume_from": resume,
-            "prefer_not": job["payload"].get("exclude_routes")}
+            "prefer_not": job["payload"].get("exclude_routes"), "job": job}
 
 
 def _finish_lane_review(con, run: dict, gate: dict, outcome: dict) -> dict:
@@ -778,8 +782,14 @@ def _stamp_reviewed_commit(run: dict, commit: str, outcome: dict) -> str | None:
 
 
 def job_convergence_review(con, run: dict, job: dict) -> dict:
+    from office import self_review_subagents
+    if job["payload"].get("subagent"):  # a supervise or fallback job of one self-review subagent
+        return self_review_subagents.job_subagent_review(con, run, job)
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
+    composing = job["payload"].get(self_review_subagents.COLLECT_KEY) is not None  # its subagents read the checkout it left
     if gate["status"] not in ("queued", "running"):
+        if composing:
+            gates.remove_checkout(run, paths.run_dir(run["id"]) / "checkouts" / f"converge-{gate['id']}")
         return {"skipped": gate["status"]}
     run = state.get_run(con, run["id"])
     scope = find_scope(con, run, gate["scope"])
@@ -790,10 +800,15 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         with db.transaction(con):
             con.execute("UPDATE gates SET status='stale', stale_reason='scope recomposed', finished_at=? WHERE id=?",
                         (now_iso(), gate["id"]))
+        if composing:
+            gates.remove_checkout(run, paths.run_dir(run["id"]) / "checkouts" / f"converge-{gate['id']}")
         return {"skipped": "stale"}
     commit = st["commit"]
+    if job["payload"].get(gates.SETTLE_KEY):
+        return _settle_lane_review(con, run, gate, job, commit)
     tasks = [state.get_task(con, run["id"], tid) for tid in scope["tasks"]]
     checkout = _checkout(run, commit, f"converge-{gate['id']}")
+    outcome, waiting = None, False
     try:
         diff = gates.cap_diff(paths.git(Path(run["repo_root"]), "diff", _base(run), commit))
         checks = []
@@ -839,34 +854,73 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                       "production writes.\n")
         # #809: funded self-review subagents precede the ONE independent convergence verdict. A missing,
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
-        from office import self_review_subagents
-        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit)
+        fallback = job["payload"].get("review_fallback") or {}
+        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit, job=job,
+                                                     retry=fallback.get("redispatches", 0) < gates.redispatch_max(run))
+        if precheck["status"] == self_review_subagents.WAITING:
+            # Each subagent is supervised on its own; the last to settle queues this job again to compose them, and
+            # the checkout they read stays until then.
+            waiting = True
+            return {"subagents": "launched"}
+        if precheck["status"] == self_review_subagents.RETRY:
+            # A subagent that never launched is retried through the bounded fallback job, not blocked at once.
+            queued = gates.queue_review_fallback(con, run, gate, job, precheck["reason"], redispatch=True)
+            if queued:
+                return {"fallback": queued}
+            precheck = {**precheck, "status": contract.EVIDENCE_BLOCKED}
         if precheck["status"] != contract.COMPLETED:
             outcome = {"status": precheck["status"], "verdict": None, "parsed": None, "summary": precheck["reason"]}
         else:
             if precheck["reports"]:
                 brief += "\nPRE-CONVERGENCE SUBAGENT AUDITS (advisory; verify and deduplicate in your one verdict):\n"
                 brief += "\n".join(str(r) for r in precheck["reports"])
-            route_options = _lane_review_options(con, run, job, gate, scope, st, "convergence_review")
-            # A user-pinned reviewer (office dispatch --review-as) on any lane task reviews the lane.
-            pinned = next((t["review_override"] for t in tasks if t.get("review_override")), None)
-            reprompts = int((run.get("gates") or {}).get("review_reprompt_max", 3))
-            for attempt in range(reprompts + 1):
-                outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout,
-                                             include_dirs=[checkout], review_override=pinned, **route_options)
-                problem = _stamp_reviewed_commit(run, commit, outcome)
-                if problem is None or attempt == reprompts or not outcome.get("dispatch_id"):
-                    break  # ingest turns a still-wrong commit into INVALID_RESULT
+            if fallback.get("correction"):
                 # The same reviewer is asked again, in its own session when the harness can resume it: a stale
                 # checkout path or commit from an earlier round is the usual cause (#706).
-                route_options["resume_from"] = outcome["dispatch_id"]
                 role_line, _, rest = brief.partition("\n")
-                brief = (f"{role_line}\nCORRECTION: {problem}. Review again ONLY the checkout at {checkout} (commit "
-                         f"{commit}); checkout paths named in earlier rounds are stale. Begin your reply with "
-                         f"REVIEWED_COMMIT {commit}.\n{rest}")
+                brief = f"{role_line}\nCORRECTION: {fallback['correction']}\n{rest}"
+            outcome = gates.run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
+                                         **_lane_review_options(con, run, job, gate, scope, st, "convergence_review"))
+            done = _lane_review_result(con, run, gate, job, commit, checkout, outcome)
+            if done is not None:
+                return done
+            # ingest turns a still-wrong commit into INVALID_RESULT
+    finally:
+        if not waiting and not gates.review_launched(outcome):  # a launched reviewer reads the checkout until it settles
+            gates.remove_checkout(run, checkout)
+    return _finish_lane_review(con, run, gate, outcome)
+
+
+def _lane_review_result(con, run: dict, gate: dict, job: dict, commit: str, checkout: Path, outcome: dict) -> dict | None:
+    """What the lane review job returns for a reviewer's outcome that is not final (launched, a queued fallback, a
+    REVIEWED_COMMIT correction), or None when the outcome is to be ingested."""
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
+    problem = _stamp_reviewed_commit(run, commit, outcome)
+    fallback = job["payload"].get("review_fallback") or {}
+    if (problem and outcome.get("dispatch_id")
+            and fallback.get("commit_retries", 0) < int((run.get("gates") or {}).get("review_reprompt_max", 3))):
+        queued = gates.queue_review_fallback(
+            con, run, gate, job, problem, dispatch_id=outcome["dispatch_id"],
+            commit_retry={"resume_from": outcome["dispatch_id"],
+                          "correction": f"{problem}. Review again ONLY the checkout at {checkout} (commit "
+                                        f"{commit}); checkout paths named in earlier rounds are stale. Begin your "
+                                        f"reply with REVIEWED_COMMIT {commit}."})
+        return {"fallback": queued}
+    return None
+
+
+def _settle_lane_review(con, run: dict, gate: dict, job: dict, commit: str) -> dict:
+    """Record the result of the lane reviewer an earlier run of this job launched, then remove the checkout it read."""
+    checkout = paths.run_dir(run["id"]) / "checkouts" / f"converge-{gate['id']}"
+    try:
+        outcome = gates.settle_reviewer(con, run, gate, job)
+        done = _lane_review_result(con, run, gate, job, commit, checkout, outcome)
     finally:
         gates.remove_checkout(run, checkout)
-    return _finish_lane_review(con, run, gate, outcome)
+    return done if done is not None else _finish_lane_review(con, run, gate, outcome)
 
 
 VISUAL_FORMAT = """\
@@ -904,6 +958,10 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
         return {"skipped": "stale"}
     with db.transaction(con):
         con.execute("UPDATE gates SET status='running', started_at=COALESCE(started_at, ?) WHERE id=?", (now_iso(), gate["id"]))
+    settling = job["payload"].get(gates.SETTLE_KEY)
+    if settling:
+        # The capture and the vision reviewer's brief were made when it launched: only its result is left to record.
+        return _finish_visual_review(con, run, gate, gates.settle_reviewer(con, run, gate, job))
     rev = _rev(scope["id"], st["commit"])
     targets = visual_tasks(con, run, scope)
     undeclared = [t["id"] for t, app in targets if not t.get("visual") or (t.get("visual") or {}).get("none")]
@@ -1006,6 +1064,14 @@ def job_lane_visual(con, run: dict, job: dict) -> dict:
     outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
                                  include_dirs=[evdir] + sorted({i.parent for i in images}), kind="vision",
                                  **route_options)
+    return _finish_visual_review(con, run, gate, outcome)
+
+
+def _finish_visual_review(con, run: dict, gate: dict, outcome: dict) -> dict:
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status
@@ -1167,7 +1233,7 @@ def ingest(con, run: dict, gate_id: str, outcome: dict, *, independence: str = c
             _record_finding(con, run, scope, gate, f, outcome.get("dispatch_id"), owned)
     label = "visual" if gate["kind"] == "visual" else "convergence"
     if status != contract.COMPLETED:
-        state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status} (runtime/evidence status, "
+        state.emit(con, run, "convergence.unavailable", f"{scope['id']} {label} review {status}{' (revoked by the orchestrator, not a reviewer failure)' if status == contract.REVOKED else ''} (runtime/evidence status, "
                    f"not a verdict; no round spent): {(outcome.get('summary') or '')[:300]}",
                    payload={"scope": scope["id"], "kind": gate["kind"], "status": status,
                             "exhausted": bool(outcome.get("exhausted"))})
@@ -1220,7 +1286,7 @@ def settle(con, run: dict, scope: dict) -> None:
     if blocked and not rechecks:
         g = blocked[0]
         exhausted = g.get("review_status") in FALLBACK_STATUSES
-        _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") == contract.UNAVAILABLE
+        _set_scope(con, run, scope["id"], status="unavailable" if g.get("review_status") in contract.NO_ANSWER
                    else "evidence_blocked" if g.get("review_status") == contract.EVIDENCE_BLOCKED else "attention",
                    detail=f"{g['kind']} {g.get('review_status')}: {(g.get('summary') or '')[:200]}",
                    fallback_available=bool(exhausted), fallback_kind=g["kind"])
@@ -1905,7 +1971,7 @@ def decide(con, run: dict, scope_id: str, choice: str, *, quote: str | None, rea
     return Result(lines=[line], next="exceptions only; office status")
 
 
-LANE_REVOKE_JOBS = ("convergence_review", "lane_visual")
+LANE_REVOKE_JOBS = ("convergence_review", "lane_visual", "review_supervise")
 
 
 def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
@@ -1915,7 +1981,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
     # Environment markers are advisory (a worker could unset them), as for waive and decide.
     if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-revoke", "a producer, planner or reviewer cannot revoke a lane review; the orchestrator does")
-    from office import dispatch
+    from office import dispatch, self_review_subagents
     from office.util import claim_signalable
     m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
     kind = KIND_ALIASES.get(m.group(2).lower()) if m else None
@@ -1941,6 +2007,8 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
         for j in jobs_:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (why, now_iso(), j["id"]))
+    # A self-review subagent has a gate of its own: its supervise job names it and, nested, the lane gate.
+    subagent_gates = self_review_subagents.supervised_gates(jobs_)
     unstopped = []
     for j in jobs_:
         if j["status"] != "claimed" or not jobs.claim_live(j):
@@ -1953,11 +2021,18 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
         while jobs.claim_live(j) and time.time() < deadline:
             time.sleep(0.05)
     notes: list[str] = []
-    live = [dict(r) for r in con.execute("SELECT * FROM dispatches WHERE gate_id=? AND ended_at IS NULL "
-                                         "AND status IN ('launching','running')", (g["id"],)).fetchall()]
+    owned = [g["id"], *subagent_gates]
+    live = [dict(r) for r in con.execute(f"SELECT * FROM dispatches WHERE gate_id IN ({','.join('?' * len(owned))}) "
+                                         "AND ended_at IS NULL AND status IN ('launching','running')", owned).fetchall()]
     ended = [d["id"] for d in live if dispatch._end_dispatch(con, run, d, "revoked", f"{scope['id']} {kind} revoked: {reason}",
                                                             notes=notes)]
+    for did in ended:  # no supervise job is left to settle these reviewers
+        gates.release_launched_review(con, run, g["id"], did)
     with db.transaction(con):  # the gate has no reviewer left; closing it settles the scope
+        for sid in subagent_gates:  # nothing settles a subagent whose lane review is revoked
+            con.execute("UPDATE gates SET status='done', review_status=?, summary=?, finished_at=? "
+                        "WHERE id=? AND status IN ('queued','running')",
+                        (contract.EVIDENCE_BLOCKED, "its lane review was revoked", now_iso(), sid))
         gates.mark_unavailable(con, run, g["id"], f"{scope['id']} {kind} revoked: {reason}")
         state.emit(con, run, "convergence.revoked", f"{scope['id']} {kind} review revoked: {reason}")
     lines = [f"{scope['id']} {kind} revoked | ended {', '.join(ended) if ended else 'no live reviewer'}"
@@ -1969,7 +2044,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
                   f"{scope['id']}:{m.group(2).lower()} --report <file> reviews it yourself; a waiver needs landing authority)")
 
 
-FALLBACK_STATUSES = (contract.UNAVAILABLE, contract.INVALID_RESULT)
+FALLBACK_STATUSES = (*contract.NO_ANSWER, contract.INVALID_RESULT)
 SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual block cannot be captured (#454)
 # Scope states in which the current composition's review is the one in play (not held, repairing or recomposing).
 FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")
@@ -2049,14 +2124,11 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     if not blocked:
         raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
                       "there is no review-only recovery to run", scope=scope["id"], next_step="office status")
-    if pin:
-        if all(g["kind"] == "visual" for g in blocked):
-            raise Refused("no-visual-override", f"{scope['id']}: a visual review has no user-chosen reviewer route (no harness "
-                          "declares the vision capability); it re-runs on the next fallback route", scope=scope["id"],
-                          next_step=f"office review {scope['id']}:visual")
-        candidates.declared_decision(pin["as"], flag="--as", role="code_reviewer", config=state.pinned_config(run),
-                                    run_id=run["id"])
-        for tid in scope["tasks"]:  # a visual gate of the same call takes the next fallback route
+    if pin:  # the route must fit the role of every gate it re-runs
+        for role in sorted({"visual_reviewer" if g["kind"] == "visual" else "code_reviewer" for g in blocked}):
+            candidates.declared_decision(pin["as"], flag="--as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])
+        for tid in scope["tasks"]:
             state.update_task(con, run["id"], tid, review_override=pin)
     st = scope_state(run, scope["id"])
     pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
@@ -2065,7 +2137,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     for g in blocked:
         visual = g["kind"] == "visual"
         payload: dict = {"scope": scope["id"], "review_only": True}
-        if visual or not pinned:
+        if not pinned:
             tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
                                                 (run["id"], scope["id"], g["kind"], g["input_key"]))
             if tried:
@@ -2074,7 +2146,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
                            int(g.get("cycle") or 1))
         state.enqueue(con, run, "lane_visual" if visual else "convergence_review", {"gate_id": gid, **payload},
                       dedup_key=f"{g['kind']}:{gid}", max_attempts=2)
-        who = None if visual else (pin or pinned or {}).get("as")
+        who = (pin or pinned or {}).get("as")
         how = (f"reviewer {who}" + ("" if pin else ", pinned by the user and kept; --as names another")) if who \
             else "next fallback reviewer route"
         lines.append(f"{scope['id']} {'visual' if visual else 'convergence'} review re-run on {st['commit'][:10]} "

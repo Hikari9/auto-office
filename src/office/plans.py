@@ -591,7 +591,7 @@ def require_dispatchable(con, run: dict) -> None:
             raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
                           scope="plan", next_step='re-prompt the reviewer in its pane to write the file, or the user may '
                                                 'waive: office approve waive plan-review --quote "<words>"')
-        if rs["first_verdict"] == "UNAVAILABLE" and rs["last_verdict"] in (None, "UNAVAILABLE"):
+        if rs["first_verdict"] in ("UNAVAILABLE", "REVOKED") and rs["last_verdict"] in (None, "UNAVAILABLE", "REVOKED"):
             raise Refused("plan-review-unavailable", "no plan reviewer could review the plan", scope="plan",
                           next_step='resolve the reviewer route, or the user may waive: office approve waive plan-review --quote "<words>"')
         if rs["first_verdict"] == "CHANGES_REQUIRED" and run["plan_version"] <= rs["first_version"]:
@@ -643,7 +643,11 @@ def _after_plan_next(con, run: dict) -> str:
 
 def job_plan_review(con, run: dict, job: dict) -> dict:
     from office import gates as gate_engine
+    from office import xl_review
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
+    if gate["kind"] == xl_review.GOLDFISH_KIND:
+        # A Goldfish's supervise or fallback job names its own gate: the review it belongs to is the lead's.
+        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["xl"]["lead_gate"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
     plan = state.get_plan(con, run["id"], gate["plan_version"])
@@ -657,16 +661,19 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
-    from office import xl_review
     if xl_review.eligible(con, run, gate):
-        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer.
-        outcome = xl_review.audit_plan(con, run, gate, plan, brief, Path(run["repo_root"]),
-                                       exclude=job["payload"].get("exclude"))
+        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer. Each launches
+        # through this job and is settled by its supervise job, which enters this job again for the stage.
+        outcome = xl_review.audit_plan_job(con, run, gate, plan, brief, Path(run["repo_root"]), job,
+                                           exclude=job["payload"].get("exclude"))
     else:
         outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                            plan_review=True, exclude=job["payload"].get("exclude"),
-                                           resume_from=job["payload"].get("resume_from"),
-                                           review_override=job["payload"].get("review_override"))
+                                           resume_from=job["payload"].get("resume_from"), job=job)
+    if gate_engine.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     with db.transaction(con):
         ingest_plan_review(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome.get("verdict")}
@@ -769,7 +776,7 @@ def ingest_plan_review(con, run: dict, gate_id: str, outcome: dict) -> None:
         state.update_run(con, run["id"], plan_review=pr)
         return
     else:
-        state.emit(con, run, "plan.unavailable", f"PLAN REVIEW UNAVAILABLE p{gate['plan_version']}: "
+        state.emit(con, run, "plan.unavailable", f"PLAN REVIEW {verdict if verdict == 'REVOKED' else 'UNAVAILABLE'} p{gate['plan_version']}: "
                    f"{outcome.get('summary') or 'no qualifying reviewer answered'}")
     if verdict != "PASS":
         _spend_budget_without_pass(con, run, pr, [outcome.get("route")] if outcome.get("route") else None)
@@ -1008,6 +1015,7 @@ def _review_state_convergence(con, run: dict) -> dict:
         "ended": bool(pr.get("ended")),
         "ended_reason": pr.get("ended_reason"),
         "status": pr.get("status") or ("pending" if review_required(run) else "not-required"),
+        "revoked": bool(pr.get("revoked")) and pr.get("status") == "unavailable",
         "lifecycle": pr.get("lifecycle") or INITIAL,
         "initial": next((h for h in history if h.get("lifecycle") == INITIAL), None),
         "history": history,
@@ -1159,8 +1167,6 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
     if rounds >= round_cap(run):
         return None
     payload = {"exclude": list(exclude or [])}
-    if pr.get("review_override"):
-        payload["review_override"] = pr["review_override"]
     # Same reviewer across a RECHECK sequence when it is still available (#337).
     prev = recheck_reviewer(con, run)
     if prev and not payload["exclude"]:
@@ -1176,6 +1182,7 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
                   dedup_key=f"plan_review:{gate_id}", max_attempts=2)
     if pr.get("status") in (None, "unavailable", "attention"):
         pr["status"] = "pending"
+        pr.pop("revoked", None)
         state.update_run(con, run["id"], plan_review=pr)
     return gate_id
 
@@ -1185,8 +1192,9 @@ def _require_dispatchable_convergence(con, run: dict) -> None:
     if not rs["required"] or rs["ended"]:
         return
     if rs["status"] == "unavailable":
-        raise Refused("plan-review-unavailable", "no plan reviewer route could review the plan (runtime status, not a "
-                      "verdict)", scope="plan", next_step='office resume retries the reviewer chain; or the user may '
+        what = ("the plan review was REVOKED by the orchestrator (not a reviewer failure)" if rs["revoked"] else
+                "no plan reviewer route could review the plan (runtime status, not a verdict)")
+        raise Refused("plan-review-unavailable", what, scope="plan", next_step='office resume retries the reviewer chain; or the user may '
                       'waive: office approve waive plan-review --quote "<words>"')
     if rs["status"] == "attention":
         raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
@@ -1268,9 +1276,10 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
     if status != contract.COMPLETED:
         # Runtime status, not a verdict: no round is spent.
         pr["status"] = "attention" if status == contract.INVALID_RESULT else "unavailable"
+        pr["revoked"] = status == contract.REVOKED
         state.update_run(con, run["id"], plan_review=pr)
         kind = "plan.attention" if status == contract.INVALID_RESULT else "plan.unavailable"
-        state.emit(con, run, kind, f"PLAN REVIEW {status} {v} (runtime status, not a verdict; no round spent): "
+        state.emit(con, run, kind, f"PLAN REVIEW {status} {v} ({'revoked by the orchestrator, not a reviewer failure' if status == contract.REVOKED else 'runtime status, not a verdict'}; no round spent): "
                    f"{(outcome.get('summary') or 'no qualifying reviewer answered')[:240]}")
         return
     from office import gates as gate_engine

@@ -34,6 +34,10 @@ FINDING ID | severity (critical/high/medium/low) | blocking yes/no | file:line o
 
 APPROVED is permitted only when no blocking finding remains on that same revision. RECHECK means the coordinator must resolve blockers and request another independent look. INTAKE_GAP means requirements/authority are genuinely missing; escalate that exact decision to the owner and do not infer consent. A reviewer that cannot launch, lacks source access, fails readback or produces an invalid reply gives UNAVAILABLE, not APPROVED, and consumes no substantive round.
 
+## Completion transport
+
+A reviewer that can run a shell hands its review back with `office review submit` (the exact command its prompt names); Office detects completion from that submit first. The reply file, then the harness's last message or stdout log, are fallbacks, and each use is recorded on the dispatch as a `review.reply_fallback` event. Harnesses without a shell (their adapter reviewer profile says `submit: file`: agy, opencode, pi) keep the reply file as their completion step. This is the one completion transport: Office launches the reviewer without waiting, a revoked reviewer ends `REVOKED` (not a failure, no fallback), and a reviewer that fails to launch or leaves no reply is replaced by the next route automatically.
+
 ## Invoker-controlled remediation; at most three substantive rounds
 
 The agent that invoked /auto-review COORDINATES remediation; it need NOT personally fix anything. It can fix inline (executor invoker), delegate one or more fixes to separate executors (orchestrator invoker), or coordinate a specifically assigned other owner. Preserve explicit assignments. The reviewer remains independent, read-only and separate from the actual producer/fixer in every case.

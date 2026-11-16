@@ -1270,12 +1270,7 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
                    "When the work and its checks are complete, run: office submit")
     else:
-        pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
-                   f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(output).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(output)} . " if output else "")
-                   + "Do not edit anything else.")
+        pointer = (review_submit.pointer(output, prompt_file=ddir / "brief.md") if output else "")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
@@ -1733,6 +1728,10 @@ def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, sto
         with db.transaction(con):
             state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {why}", audience="runtime",
                        task_id=d.get("task_id"), dispatch_id=d["id"])
+            if d.get("lease_id") and d.get("kind") == "reviewer":
+                # Fences a late `office review submit` from the reviewer this revoke stops.
+                con.execute("UPDATE leases SET revoked_at=?, revoke_reason='revoked' WHERE id=? AND released_at IS NULL "
+                            "AND revoked_at IS NULL", (now_iso(), d["lease_id"]))
     if stop and d.get("launcher") not in (None, "external", "sync"):
         stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
     if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
@@ -1805,9 +1804,12 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
     """Stop and cancel the integrate jobs that own the integration reviews, so
     ending a reviewer cannot make a live job start a fallback or retry."""
     with db.transaction(con):
-        jobs_ = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? "
-                                              "AND kind='integrate' AND status IN ('queued','claimed')",
-                                              (run["id"],)).fetchall()]
+        # The integrate job, and the supervise job of a launched integration reviewer: either would record a result
+        # (or queue a fallback) for a review the orchestrator just ended.
+        jobs_ = [dict(r) for r in con.execute(
+            "SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND (kind='integrate' OR "
+            "(kind='review_supervise' AND json_extract(payload_json,'$.gate_id') IN "
+            "(SELECT id FROM gates WHERE run_id=? AND subject='integration')))", (run["id"], run["id"])).fetchall()]
         for j in jobs_:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
@@ -1833,6 +1835,9 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
     notes: list[str] = []
     ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}", notes=notes)]
     from office import gates
+    for d in rows:
+        if d["id"] in ended:  # no supervise job is left to settle these reviewers
+            gates.release_launched_review(con, run, d["gate_id"], d["id"])
     with db.transaction(con):
         stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
                                               "AND status IN ('queued','running','waiting')", (run["id"],)).fetchall()]
@@ -3078,13 +3083,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                    "When the work and its checks are complete, run: office submit")
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
-        pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
-                   f"Write your complete review to {spec['output']}; Office reads only that file, never "
-                   "your terminal. "
-                   + (f"If your tools allow running it, you may instead write the review to "
-                      f"{Path(spec['output']).parent / review_submit.SUBMIT_FILE} and run exactly: "
-                      f"{review_submit.submit_command(spec['output'])} . " if spec.get("output") else "")
-                   + "Do not edit anything else.")
+        pointer = review_submit.pointer(spec["output"], prompt_file=spec["prompt_file"], images=images)
     from office import transcripts
     sent_at = time.time()
 

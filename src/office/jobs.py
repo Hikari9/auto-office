@@ -73,6 +73,9 @@ def _handlers():
         "notify_worker": dispatch.job_notify_worker,
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
+        "review_fallback": gates.job_review_fallback,
+        "review_supervise": gates.job_review_supervise,
+        "integration_review": integration.job_integration_review,
         "plan_review": plans.job_plan_review,
         "visual_capture": visual.job_capture,
         "visual_review": visual.job_visual_review,
@@ -80,6 +83,11 @@ def _handlers():
         "auto_rebase": land.job_auto_rebase,
         "landing_verify": landing_recovery.job_verify,
     }
+
+
+def handler(kind: str):
+    """The function that runs a job of `kind`."""
+    return _handlers()[kind]
 
 
 def mode() -> str:

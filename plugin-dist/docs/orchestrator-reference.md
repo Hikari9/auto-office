@@ -190,8 +190,11 @@ always (`office approve plan --quote`, `office amend ...`). `office card status`
 `office card sync` resends; `office card link <id>|--create` attaches one to a running run. Detail: `docs/board-card.md`.
 
 ## Review recovery, checks and stale dependents
+- A reviewer that fails to launch or leaves no reply is retried by Office on the next eligible route, and a whole failed chain is re-dispatched
+  once, so `UNAVAILABLE` reaches you only after that. A reviewer you revoke ends as `REVOKED`: no fallback runs and no route is excluded. Re-run
+  it with `office review ...` or `office resume`. Reviewers launch asynchronously and hand back with `office review submit`.
 
-- A review that returned no verdict (UNAVAILABLE, ATTENTION, INVALID_RESULT) blocks its gate with a runtime status, not a verdict. Re-run only
+- A review that returned no verdict (UNAVAILABLE, REVOKED, ATTENTION, INVALID_RESULT) blocks its gate with a runtime status, not a verdict. Re-run only
   that review of the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <harness>/<model>[@effort] [--cli ARGV | --external]]`,
   `office rerun <task> --review-as <route>` or `office resume`. No executor starts and no round is spent. A pinned reviewer is kept unless `--as`
   re-pins it (checked against the reviewer role before any pin is written); without `--as` the next fallback route runs, and a re-run never

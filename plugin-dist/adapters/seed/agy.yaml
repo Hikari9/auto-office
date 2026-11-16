@@ -86,6 +86,7 @@ office_profiles:
   # so Office fingerprints the worktree before and after and fails a review that changed HEAD, the tracked
   # diff or untracked files. Gitignored files and .git/ are outside that check; plan mode is the write barrier.
   reviewer:
+    submit: file
     argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
     include_arg: [--add-dir, "{dir}"]
     routes: [gemini-4-hydrogen-high@high]
@@ -100,6 +101,7 @@ office_profiles:
       wall_cap: true
       argv: [--mode, plan, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
   vision:
+    submit: file
     argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     max_minutes: 35
     include_arg: [--add-dir, "{dir}"]

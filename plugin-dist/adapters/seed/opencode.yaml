@@ -145,6 +145,7 @@ office_profiles:
   #   edit on the exact reply file only (absolute, realpath, cwd-relative).
   # No --auto anywhere: a permission nobody granted is denied, never approved.
   reviewer:
+    submit: file
     argv: [run, --standalone, --agent, office-reviewer, --model, "{model}#{effort}"]
     prompt: argv
     output: stdout

@@ -71,6 +71,7 @@ office_profiles:
       argv: [-c, "projects={{cwd_toml}={trust_level=\"trusted\"}}", --yolo, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{cwd}"]
       resume_argv: [resume, "{session_id}"]
   reviewer:
+    submit: shell
     argv: [exec, -c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "-"]
     submit_grant: codex-rules
     prompt: stdin
@@ -82,6 +83,7 @@ office_profiles:
   vision:
     # Visual reviewers hand back like code reviewers (Rico 2026-11-15: "there should also be an office submit for
     # visual reviewers"): the trusted dispatch dir carries the one exact submit execpolicy rule (#1030, #1186).
+    submit: shell
     argv: [exec, -c, "projects={{sandbox_dir_toml}={trust_level=\"trusted\"}}", --sandbox, workspace-write, --skip-git-repo-check, -m, "{model}", -c, "model_reasoning_effort=\"{effort}\"", --cd, "{sandbox_dir}", -o, "{last_message}", "{images}", "-"]
     image_arg: [--image, "{image}"]
     image_transport: argv
