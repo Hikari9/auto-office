@@ -4,6 +4,7 @@ from __future__ import annotations
 import inspect
 import json
 
+import pytest
 from conftest import approved_run
 from test_review_reroute import EXECUTOR, V31
 from office import candidates, gates, state
@@ -71,3 +72,30 @@ def test_the_plan_reviewer_reads_the_run_level_pin_and_ignores_task_pins(env, mo
 @V31
 def test_run_reviewer_has_no_pin_parameter_of_its_own():
     assert "review_override" not in inspect.signature(gates.run_reviewer).parameters
+
+
+@V31
+def test_a_declared_visual_pin_takes_its_capability_from_the_vision_launch_profile(env):
+    approved_run(env, executor=EXECUTOR)
+    config = state.pinned_config(state.get_run(env.con(), env.con().execute("SELECT id FROM runs").fetchone()["id"]))
+    got = candidates.declared_decision("codex/gpt-6-luna@xhigh", role="visual_reviewer", config=config)
+    assert "vision" in got["candidate"]["capabilities"]
+    assert "vision" not in candidates.declared_candidate("codex", "gpt-6-luna", "xhigh")["capabilities"]  # only the visual role earns it
+    with pytest.raises(Refused) as no_profile:  # opencode has a reviewer profile and no vision profile
+        candidates.declared_decision("opencode/some-model@high", role="visual_reviewer", config=config)
+    assert no_profile.value.category == "capability-missing"
+
+
+@V31
+@pytest.mark.parametrize("role", ["code_reviewer", "visual_reviewer", "plan_reviewer", "integration_reviewer"])
+def test_a_pinned_route_below_the_quota_reserve_is_blocked_for_every_role(env, monkeypatch, role):
+    approved_run(env, executor=EXECUTOR)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()["id"])
+    monkeypatch.delenv("OFFICE_QUOTA_PROBE", raising=False)
+    quota = {"status": "ok", "tightest_remaining_percent": 1.0}
+    monkeypatch.setattr(candidates, "probe_quota", lambda adapter: quota)
+    got = gates._reserve_blocked_pin(run, PIN, role)
+    assert got and got[0].startswith("codex") and "reserve" in got[1]
+    quota = {"status": "ok", "tightest_remaining_percent": 90.0}
+    assert gates._reserve_blocked_pin(run, PIN, role) is None

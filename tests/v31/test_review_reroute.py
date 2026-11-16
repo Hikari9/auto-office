@@ -505,15 +505,18 @@ def test_a_lane_review_only_on_the_named_route_never_resumes_the_earlier_reviewe
     assert _triples(env)[-1] == other, _triples(env)
 
 
-def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin(env, monkeypatch, tmp_path):
+def test_a_visual_review_runs_a_declared_route_once_never_pins_it_and_then_takes_the_next_fallback(env, monkeypatch, tmp_path):
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
            visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
     env.office("dispatch", "T1", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
-    tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer'")}
+    # A declared visual reviewer is the user's own allow (its vision launch profile is its capability), so the re-run
+    # starts on it, but the route is not kept as a pin: the next re-run is routed again.
     code, out = env.office("review", "L-T1:visual", "--as", _reviewer(env))
-    assert code == 4 and "no-visual-override" in out and _pin(env) is None, out
+    assert code == 0 and f"reviewer {_reviewer(env)}" in out and _pin(env) is None, out
+    tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer'")}
+    assert _reviewer(env).replace("/", "@1/", 1) in tried, tried
     env.script(visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}])
     code, out = env.office("review", "L-T1:visual", env=MANUAL)
     assert code == 0 and "visual review re-run" in out and "next fallback reviewer route" in out, out
@@ -894,7 +897,8 @@ def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing
     assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
     # the failed round re-dispatched once on a fresh chain, where the one route is eligible again (A7), then the re-run
     assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
-        == [tried, tried, tried], "the re-run starts on the route the failed round used"
+        == [tried, tried, tried], ("the failed round ran its one route twice (the spent chain, then the redispatch's fresh "
+                                   "chain), and the re-run starts on the route that round used")
     assert _executor_calls(env) == executors
     assert _scope(env, "L-T1")["status"] == "approved"
     assert _pin(env) is None

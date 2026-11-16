@@ -1105,7 +1105,9 @@ def test_a_redispatched_chain_never_resumes_the_old_chains_reviewer(scratch, mon
 
     assert call(_fb(0, 0, 0)) == "Dold", "a first review still resumes the reviewer it was asked to"
     assert call(_fb(1, 1, 1)) is None, "the first attempt of a redispatched chain starts fresh"
-    assert call(_fb(2, 1, 1)) == "Dold", "a later correction in that chain carries its own resume"
+    assert call({**_fb(2, 1, 1), "resume_from": "Dnew", "correction": "c"}) == "Dnew", \
+        "a correction in that chain carries its own resume, not the job's"
+    assert call(_fb(2, 1, 1)) is None, "past the first round the job's own resume_from is never used"
 
 
 def test_a_call_outside_the_job_flow_starts_a_fresh_chain(scratch, monkeypatch):

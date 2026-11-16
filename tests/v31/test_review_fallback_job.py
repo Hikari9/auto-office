@@ -306,54 +306,178 @@ def test_the_fallback_job_is_registered_and_owns_its_gate():
 
 # ------------------------------------------------------------------ the subagent and integration seams
 
-def test_a_subagent_that_was_not_launched_is_retried_not_blocked_when_retry_is_allowed(env, monkeypatch):
-    from office import contract, self_review_subagents as srs, state
+def _subagent_ctx(env):
+    from office import state
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    return con, run, [state.get_task(con, run["id"], "T1")]
 
-    class Reviewer:
-        calls = 0
 
-        def __call__(self, con, run, gate, role, brief, **kw):
-            Reviewer.calls += 1
-            return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "summary": "no route"}
+def _subagent_rows(con, commit):
+    return con.execute("SELECT id, status, review_status FROM gates WHERE kind='self_review_subagent' "
+                       f"AND input_key LIKE '%:{commit}:%' ORDER BY created_at, rowid").fetchall()
+
+
+def test_a_subagent_that_was_not_launched_is_retried_through_the_bounded_fallback_not_blocked(env):
+    from office import contract, self_review_subagents as srs
 
     env.hide_agy = True
     _start(env, gear="S", executor=EXECUTOR, code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
-    con = env.con()
+    con, run, tasks = _subagent_ctx(env)
+    job = {"id": "Jconv", "kind": "convergence_review", "payload": {"gate_id": "Gconv"}}
+    calls = []
+    answers = [{"fallback_queued": "Jfb"}, {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None,
+                                            "summary": "no route"}]
+
+    def reviewer(con_, run_, gate, role, brief, **kw):
+        calls.append((gate["id"], kw.get("job")))
+        return answers.pop(0)
+
     try:
-        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-        tasks = [state.get_task(con, run["id"], "T1")]
-        # a distinct commit key, so no earlier report is reused
-        blocked = srs.audit_scope(con, run, tasks, Path(env.repo), "c" * 40, reviewer=Reviewer())
-        retried = srs.audit_scope(con, run, tasks, Path(env.repo), "d" * 40, reviewer=Reviewer(), retry=True)
-        again = srs.audit_scope(con, run, tasks, Path(env.repo), "d" * 40, reviewer=Reviewer(), retry=False)
-        rows = con.execute("SELECT review_status, input_key FROM gates WHERE kind='self_review_subagent' "
-                           f"AND input_key LIKE '%:{'d' * 40}:%'").fetchall()
+        queued = srs.audit_scope(con, run, tasks, Path(env.repo), "d" * 40, reviewer=reviewer, job=job)
+        (open_gate,) = _subagent_rows(con, "d" * 40)
+        spent = srs.audit_scope(con, run, tasks, Path(env.repo), "c" * 40, reviewer=reviewer, job=job)
+        (blocked,) = _subagent_rows(con, "c" * 40)
     finally:
         con.close()
-    assert blocked["status"] == contract.EVIDENCE_BLOCKED
-    assert retried["status"] == srs.RETRY and "not launched" in retried["reason"]
-    assert again["status"] == contract.EVIDENCE_BLOCKED
-    assert len(rows) == 1, "the retried subagent reuses its own gate"
-    assert Reviewer.calls == 3
+    assert queued["status"] == srs.WAITING, "a subagent whose next route is queued is settled by its own jobs"
+    assert open_gate["status"] == "queued", "the subagent's gate stays open for the re-run"
+    assert [sub["payload"]["gate_id"] for _, sub in calls] == [open_gate["id"], blocked["id"]]
+    assert all(sub["payload"]["subagent"]["parent"]["payload"] == job["payload"] for _, sub in calls), \
+        "the owning job reaches the reviewer through the subagent's own job: its fallback lifecycle settles it"
+    assert spent["status"] == contract.EVIDENCE_BLOCKED and "no route" in spent["reason"], "a spent bound blocks"
+    assert blocked["review_status"] == contract.EVIDENCE_BLOCKED
 
 
-def test_a_subagent_that_ran_and_left_a_bad_report_stays_blocked_even_when_retry_is_allowed(env):
-    from office import contract, self_review_subagents as srs, state
+def test_a_finished_subagent_gate_is_history_a_later_retry_starts_a_clean_gate(env):
+    from office import contract, self_review_subagents as srs
+
+    env.hide_agy = True
+    _start(env, gear="S", executor=EXECUTOR, code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    con, run, tasks = _subagent_ctx(env)
+    gate_ids = []
+
+    def reviewer(con_, run_, gate, role, brief, **kw):
+        gate_ids.append(gate["id"])
+        return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "summary": "no route"}
+
+    try:
+        srs.audit_scope(con, run, tasks, Path(env.repo), "f" * 40, reviewer=reviewer)
+        srs.audit_scope(con, run, tasks, Path(env.repo), "f" * 40, reviewer=reviewer)
+        rows = _subagent_rows(con, "f" * 40)
+    finally:
+        con.close()
+    assert len(rows) == 2 and gate_ids[0] != gate_ids[1], (
+        "the exhausted chain's failures live on the finished gate: the retry's routes are all eligible")
+
+
+def test_a_subagent_that_ran_and_left_a_bad_report_stays_blocked(env):
+    from office import contract, self_review_subagents as srs
 
     def reviewer(con, run, gate, role, brief, **kw):
         return {"status": contract.EVIDENCE_BLOCKED, "verdict": None, "parsed": None, "summary": "bad", "dispatch_id": "D1"}
 
     _start(env, gear="S", executor=EXECUTOR, code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
-    con = env.con()
+    con, run, tasks = _subagent_ctx(env)
     try:
-        run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-        out = srs.audit_scope(con, run, [state.get_task(con, run["id"], "T1")], Path(env.repo), "e" * 40,
-                              reviewer=reviewer, retry=True)
+        out = srs.audit_scope(con, run, tasks, Path(env.repo), "e" * 40, reviewer=reviewer,
+                              job={"id": "J", "kind": "convergence_review", "payload": {"gate_id": "G"}})
     finally:
         con.close()
     assert out["status"] == contract.EVIDENCE_BLOCKED
+
+
+def test_a_subagents_fallback_job_names_the_owning_gate_so_the_owner_reruns(env):
+    from office import gates, state
+    _start(env, gear="S", executor=EXECUTOR, code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    con, run, _ = _subagent_ctx(env)
+    owner = {"id": "Jconv", "kind": "convergence_review", "payload": {"gate_id": "Gconv", "office_version": "x"}}
+    try:
+        job_id = gates.queue_review_fallback(con, run, {"id": "Gsub", "task_id": "T1"}, owner, "no route", redispatch=True,
+                                             dispatch_id="Dx")
+    finally:
+        con.close()
+    (job,) = [j for j in _jobs(env) if j["id"] == job_id]
+    assert job["payload"]["gate_id"] == "Gconv", "the owner re-runs on its own gate, not the subagent's"
+    assert job["payload"]["origin"]["kind"] == "convergence_review"
+    assert job["payload"]["fallback"]["chain_epoch"] == 1 and job["payload"]["fallback"]["epoch"] == 1
+
+
+# ------------------------------------------------------------------ a fresh chain starts clean
+
+def _job_with(fallback, **payload):
+    return {"id": "J", "kind": "plan_review", "payload": {"gate_id": "G", "review_fallback": fallback, **payload}}
+
+
+def _capture_attempts(monkeypatch):
+    from office import gates
+    seen = []
+
+    def attempt(con, run, gate, role, brief, **kw):
+        seen.append(kw)
+        return {"status": "COMPLETED", "verdict": "APPROVED"}, None
+
+    monkeypatch.setattr(gates, "_review_attempt", attempt)
+    return seen
+
+
+def test_a_redispatch_epoch_drops_the_jobs_resume_from_and_a_commit_rerun_keeps_its_own(monkeypatch):
+    from office import gates
+    seen = _capture_attempts(monkeypatch)
+    gate = {"id": "G"}
+    # the plan job's own resume_from (a plan-defect redirect with --reviewer same) is for its first round
+    gates.run_reviewer(None, {}, gate, "plan_reviewer", "b", cwd=Path("."), resume_from="Dold", job=_job_with({}))
+    # the fresh chain of a redispatch starts from routing, not from the exhausted chain's dispatch
+    redispatched = {"epoch": 1, "chain_epoch": 1, "redispatches": 1, "resume_from": None}
+    gates.run_reviewer(None, {}, gate, "plan_reviewer", "b", cwd=Path("."), resume_from="Dold",
+                       job=_job_with(redispatched, resume_from="Dold"))
+    # a REVIEWED_COMMIT re-run continues the reviewer it names, in the same chain
+    recheck = {"epoch": 1, "chain_epoch": 0, "commit_retries": 1, "resume_from": "Dnew", "correction": "c"}
+    gates.run_reviewer(None, {}, gate, "plan_reviewer", "b", cwd=Path("."), resume_from="Dold", job=_job_with(recheck))
+    assert [kw["resume_from"] for kw in seen] == ["Dold", None, "Dnew"]
+    assert [(kw["epoch"], kw["chain_epoch"]) for kw in seen] == [(0, 0), (1, 1), (1, 0)]
+
+
+def test_a_call_outside_the_job_flow_starts_a_fresh_chain(monkeypatch):
+    from office import gates
+    seen = _capture_attempts(monkeypatch)
+    monkeypatch.setattr(gates, "review_attempts", lambda con, gate_id: [
+        {"id": "D0", "triple": "t", "harness": "h", "epoch": 0, "failure": {"class": "launch", "reason": "x"}},
+        {"id": "D1", "triple": "u", "harness": "h", "epoch": 1, "failure": None}])
+    gates.run_reviewer(None, {}, {"id": "G"}, "code_reviewer", "b", cwd=Path("."))
+    assert (seen[0]["epoch"], seen[0]["chain_epoch"]) == (2, 2), "no earlier call's failure is excluded"
+
+
+def test_only_the_current_chains_failures_are_excluded(env, monkeypatch):
+    from office import gates
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    gate = _lane(env)
+    con, run, _ = _subagent_ctx(env)
+    failed = {"id": "D0", "triple": "codex@1/spent@low", "harness": "codex", "epoch": 0,
+              "failure": {"class": "wall", "reason": "quota", "harness_wide": True}}
+    monkeypatch.setattr(gates, "review_attempts", lambda con_, gate_id: [failed])
+    excluded = []
+
+    def route_role(con_, config, run_, role, **kw):
+        excluded.append(kw.get("exclude"))
+        return {"status": "none"}
+
+    monkeypatch.setattr(gates.candidates, "route_role", route_role)
+    try:
+        for epoch, chain_epoch in ((1, 1), (1, 0)):
+            gates._review_attempt(con, run, gate, "code_reviewer", "b", cwd=Path(env.repo), plan_review=False,
+                                  visual=False, images=None, include_dirs=None, exclude=None, kind=None,
+                                  resume_from=None, prefer_not=None, epoch=epoch, chain_epoch=chain_epoch)
+    finally:
+        con.close()
+    fresh, same = excluded
+    assert not fresh, "a fresh chain starts clean: the spent chain's routes and walled harness may have recovered"
+    assert same == {"codex@1/spent@low", "harness:codex"}, "a commit re-run stays in its chain"
 
 
 def test_an_integration_review_with_no_verdict_queues_the_bounded_fallback_instead_of_finalizing(env, monkeypatch):
@@ -396,3 +520,19 @@ def test_an_integration_review_with_no_verdict_queues_the_bounded_fallback_inste
     landing = state.get_run(con, run["id"])["landing"]["integration"]
     assert landing["status"] == "unavailable" and landing["review_ctx"] is None
     con.close()
+
+
+def test_a_subagent_that_never_answers_runs_through_the_owning_jobs_fallbacks_then_blocks_convergence(env):
+    _start(env, gear="S", executor=EXECUTOR, code_reviewer=[EMPTY], convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    subagents = _q(env, "SELECT id, review_status FROM gates WHERE kind='self_review_subagent'")
+    assert len(subagents) == 1, "every fallback continued on the one subagent gate"
+    assert subagents[0]["review_status"] == "EVIDENCE_BLOCKED", "the spent bound blocks as before"
+    owner = _lane(env)
+    jobs = _jobs(env)
+    assert subagents[0]["id"] in {j["payload"]["gate_id"] for j in jobs} <= {subagents[0]["id"], owner["id"]}, \
+        "the subagent's fallbacks re-run it on its own gate, supervised apart from the lane's convergence job"
+    assert {j["payload"]["origin"]["kind"] for j in jobs} == {"convergence_review"}
+    assert len([e for e in _redispatches(env)]) == 1, "the default bound is one re-dispatch per gate"
+    assert _attempts(env, subagents[0]["id"]) and not _attempts(env, owner["id"]), "convergence never ran without its evidence"
+    assert int(owner["round"]) == 1

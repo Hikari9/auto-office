@@ -164,7 +164,7 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
     reviewer = reviewer or gates.run_reviewer
     plan = _plan(con, run, tasks, commit)
     if job is not None:
-        return _audit_scope_job(con, run, plan, checkout, commit, job, retry=retry)
+        return _audit_scope_job(con, run, plan, checkout, commit, job, retry=retry, reviewer=reviewer)
     pending = [item for item in plan if item["kind"] == "review"]
     results: dict[int, dict] = {}  # by id(item): the outcomes of reviews that ran together
     failures: dict[int, dict | None] = {}  # by id(item): what recording each of them found
@@ -321,7 +321,8 @@ def _latest_gate(con, run_id: str, key: str):
 def _open_keys(con, run_id: str, keys: list[str]) -> list[str]:
     """The subagents among `keys` whose latest gate is still open."""
     return [k for k in keys if (g := _latest_gate(con, run_id, k)) is not None and g["status"] in ("queued", "running")]
-def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: str, job: dict, *, retry: bool) -> dict:
+def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: str, job: dict, *, retry: bool,
+                     reviewer) -> dict:
     """`audit_scope` in the convergence job: launch every subagent that needs a review, each supervised and settled
     on its own (they run together), then return WAITING. Composed from the recorded gates once the last one settles
     (the job queued again with COLLECT_KEY), or at once when none launched."""
@@ -349,7 +350,7 @@ def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: s
         for item in pending:
             sub = {**job, "payload": {**base, "gate_id": item["gate"]["id"], "subagent": {**base["subagent"], "key": item["key"]},
                                       **_fresh_chain(con, item["gate"]["id"])}}
-            outcome = _launch(con, run, item, checkout, sub)
+            outcome = _launch(con, run, item, checkout, sub, reviewer)
             if gates.review_launched(outcome) or outcome.get("fallback_queued"):
                 launched = True
             else:
@@ -381,11 +382,11 @@ def _fresh_chain(con, gate_id: str) -> dict:
     from office import gates
     epoch = max((a["epoch"] + 1 for a in gates.review_attempts(con, gate_id)), default=0)
     return {"review_fallback": {"epoch": epoch, "chain_epoch": epoch}} if epoch else {}
-def _launch(con, run: dict, item: dict, checkout: Path, job: dict) -> dict:
+def _launch(con, run: dict, item: dict, checkout: Path, job: dict, reviewer=None) -> dict:
     from office import gates
     try:
-        return gates.run_reviewer(con, run, item["gate"], "code_reviewer", item["brief"], cwd=checkout,
-                                  include_dirs=[checkout], kind="reviewer", job=job)
+        return (reviewer or gates.run_reviewer)(con, run, item["gate"], "code_reviewer", item["brief"], cwd=checkout,
+                                                include_dirs=[checkout], kind="reviewer", job=job)
     except Exception as exc:
         return {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
 def _compose(con, run: dict, plan: list[dict], *, retry: bool, fresh: set[str], ran: dict[str, dict] | None = None) -> dict:
