@@ -312,7 +312,7 @@ def test_v19_database_migrates_to_v20_with_rows_intact(env_home):
     con = db.connect()
     try:
         assert "context_handoff_json" in db._columns(con, "dispatches")
-        assert db._schema_version(con) == db.SCHEMA_VERSION == 20
+        assert db._schema_version(con) == db.SCHEMA_VERSION >= 20  # v20 added the column; later steps run too
         assert con.execute("SELECT status, context_handoff_json FROM dispatches WHERE id='D1'").fetchone()[0] == "exited"
         notnull_default = [(r[3], r[4]) for r in con.execute("PRAGMA table_info(dispatches)")
                            if r[1] == "context_handoff_json"]
