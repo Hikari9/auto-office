@@ -813,6 +813,14 @@ def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | N
     return (routing.candidate_id(cand), until) if until else None
 
 
+def _reserve_blocked_pin(run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, why) when the user-pinned reviewer's route would cross the run's protected quota reserve, else None."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    why = candidates.reserve_block(cand, state.pinned_config(run), role)
+    return (routing.candidate_id(cand), why) if why else None
+
+
 def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
                      dispatch_id: str | None = None, producer_route: str | None = None,
                      env_failures: int | None = None) -> dict:
@@ -1044,6 +1052,10 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
     if cooled_pin:
         pinned = None
+    # The protected quota reserve binds a pinned route as it binds a routed one, for every reviewer role.
+    reserved_pin = _reserve_blocked_pin(run, pinned, role) if pinned else None
+    if reserved_pin:
+        pinned = None
     profile_kind = kind or ("vision" if visual else "reviewer")
     if first and resume_from:
         resume, same_route = _reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"])
@@ -1059,6 +1071,8 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                                            if started_away and not pinned else None)
     if cooled_pin:
         last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
+    elif reserved_pin:
+        last_failed = (reserved_pin[0], f"the pinned route {reserved_pin[0]}: {reserved_pin[1]}")
     if recorded:
         last_failed = (recorded[-1]["triple"], recorded[-1]["failure"]["reason"])
     # A route whose launch pointer never landed (#790) runs once more, in a fresh session, before any fallback.
@@ -1133,7 +1147,6 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                     "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
     ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text(brief, encoding="utf-8")
     output = ddir / "reply.txt"
     from office import dispatch as dispatch_mod
     d = state.get_dispatch(con, dispatch_id)
@@ -1149,11 +1162,14 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is always removed.
     snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
     try:
+        review_brief, review_dirs = brief, include_dirs
         if snapshot:
             guard = _worktree_guard(d, profile_kind, snapshot)
+            review_brief, review_dirs = _snapshot_paths(brief, include_dirs, cwd, snapshot)
+        (ddir / "brief.md").write_text(review_brief, encoding="utf-8")
         before = guard(None) if guard else None
         dispatch_mod.launch(run, d, profile_kind, ddir, cwd=snapshot or cwd, wait=True, output=output,
-                            images=images, include_dirs=include_dirs, cli=launch_form.get("cli"),
+                            images=images, include_dirs=review_dirs, cli=launch_form.get("cli"),
                             external=bool(launch_form.get("external")), resume=resume)
         d = state.get_dispatch(con, dispatch_id)
         if dispatch_mod.was_revoked(con, d):
@@ -1309,6 +1325,16 @@ def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
     return dest if proc.returncode == 0 else None
 
 
+def _snapshot_paths(brief: str, include_dirs: list[Path] | None, cwd: Path, snapshot: Path) -> tuple[str, list[Path] | None]:
+    """Point a guarded review at its snapshot: the brief's mentions of the shared checkout `cwd` and any
+    `include_dirs` inside it move to `snapshot`, so the reviewer cannot read the concurrently mutable checkout.
+    Directories outside `cwd` (evidence, images) are kept."""
+    brief = re.sub(re.escape(str(cwd)) + r"(?![\w-]|\.\w)", lambda _m: str(snapshot), brief)
+    dirs = None if include_dirs is None else [
+        snapshot / Path(i).relative_to(cwd) if Path(i).is_relative_to(cwd) else Path(i) for i in include_dirs]
+    return brief, dirs
+
+
 def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
     with contextlib.suppress(OSError):
         subprocess.run(["git", "-C", str(cwd), "worktree", "remove", "--force", str(snapshot)],
@@ -1457,7 +1483,7 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
             source, text = "last_message", last_message.read_text(encoding="utf-8", errors="replace")
         else:
             source, text = "stdout_log", _log_text(d, ddir)
-    if text.strip():
+    if text:
         review_submit.record_fallback(d, source)
     return text
 def log_path(d: dict, ddir: Path) -> Path:

@@ -269,6 +269,9 @@ def _plan_next_convergence(con, run: dict, rs: dict) -> str | None:
                 '"<rationale>". A fix that changes requirements or authority still needs the user')
     if rs["ended"]:
         return None
+    if st == "unavailable" and rs["revoked"]:
+        return ("plan review was REVOKED by the orchestrator (not a reviewer failure; no round spent): office resume "
+                'queues a fresh review, or the user may waive: office approve waive plan-review --quote "<words>"')
     if st == "unavailable":
         return ("plan review is UNAVAILABLE (runtime status, not a verdict; no round spent): office resume retries "
                 'the reviewer chain, or the user may waive: office approve waive plan-review --quote "<words>"')
@@ -370,7 +373,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     rs = plans.review_state(con, run)
     if rs["required"]:
         pr = "plan review " + ("closed (" + (rs["ended_reason"] or "") + ")" if rs["ended"] else
-                               (_plan_review_live(con, run) if rs["pending"] else (rs["last_verdict"] or "pending")))
+                               (_plan_review_live(con, run) if rs["pending"] else
+                                "REVOKED" if rs.get("revoked") else (rs["last_verdict"] or "pending")))
         if rs.get("lifecycle") and not rs["ended"]:
             pr += f" | {rs['lifecycle']} review, round {rs['rounds_used']}/{rs['max_rounds']}"
         res.add(pr)
