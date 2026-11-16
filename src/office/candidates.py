@@ -922,6 +922,12 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
                 "A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
                 f"in their own terminal: office route override {harness}/{model}@{named['effort']} --role {role} "
                 "--run <run> --reason \"<why>\""))
+    # A declared visual reviewer is the user's own allow, so the route's vision launch profile is the capability.
+    # The proof routed candidates need is not asked of it; a harness with no such profile still lacks `vision`.
+    capabilities = set(adapter.get("capabilities") or [])
+    if KIND_FOR_ROLE.get(role) == "vision" and adapters.profile_for(adapter, "vision", named["invocation_model_id"],
+                                                                    named["effort"]):
+        capabilities.add("vision")
     return {
         "harness": harness,
         "harness_version": version,
@@ -931,7 +937,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "effort": effort or (row or {}).get("effort") or "none",
         "benchmark_indexes": (row or {}).get("benchmark_indexes") or {},
         "task_benchmarks": (row or {}).get("task_benchmarks") or [],
-        "capabilities": sorted(set(adapter.get("capabilities") or [])),
+        "capabilities": sorted(capabilities),
         "adapter_id": adapter.get("id"),
         "adapter_hash": adapters.adapter_hash(adapter),
         "cost": _cost(row or {}),
@@ -954,6 +960,19 @@ def route_cooldown_until(con: sqlite3.Connection, candidate: dict) -> str | None
     marks = ",".join("?" for _ in keys)
     return con.execute(f"SELECT MAX(expires_at) FROM route_cooldowns WHERE expires_at>? AND route IN ({marks})",
                        (datetime.now(timezone.utc).isoformat(), *keys)).fetchone()[0]
+
+
+def reserve_block(candidate: dict, config: dict | None, role: str) -> str | None:
+    """Why a user-declared route may not launch for `role` under the run's protected quota reserve, or None.
+
+    A declared route skips routing, so it needs the check routing applies to every candidate: the harness's
+    quota is probed (as route_role does) and read through the same gate against the role's pinned reserve."""
+    adapter = adapters.load_all().get(candidate.get("adapter_id") or candidate.get("harness") or "")
+    if adapter is None or os.environ.get("OFFICE_QUOTA_PROBE") == "off":
+        return None
+    quota = quota_for_candidate(candidate, probe_quota(adapter))
+    gate = routing._quota_gate({**candidate, "quota": quota}, office_config.quota_reserve_percent(config, role))
+    return gate[1] if gate else None
 
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
