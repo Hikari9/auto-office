@@ -120,7 +120,7 @@ def test_independent_subagents_launch_in_one_job_and_one_compose_job_follows_the
                  if json.loads(r["result_json"] or "{}") == {"subagents": "launched"}]
     assert len(launching) == 1, "one convergence job launched both"
     composes = _q(env, "SELECT * FROM outbox WHERE dedup_key LIKE 'self_review_compose:%'")
-    assert len(composes) == 1 and json.loads(composes[0]["payload_json"])[srs.COLLECT_KEY] == [g["id"] for g in subs]
+    assert len(composes) == 1 and json.loads(composes[0]["payload_json"])[srs.COLLECT_KEY]["gates"] == [g["id"] for g in subs]
     con = env.con()
     try:
         run = state.get_run(con, subs[0]["run_id"])
@@ -1212,3 +1212,101 @@ def test_a_crash_between_an_integration_verdict_and_its_acceptance_leaves_the_ga
     assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gint'").fetchone()) == ("running", None)
     assert integration._review_composed(con, run, job, "Gint", ctx) == {"integration_review": "PASS"}  # the reclaimed run
     assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gint'").fetchone()) == ("done", "PASS")
+
+# ------------------------------------------------------------------ F11 on the unit tier: the job reaches every reviewer
+def _plan_gate(con):
+    row = _gate_row(con, "Glead", subject="plan", kind="plan_review")
+    return {**row, "plan_version": 1, "round": 1}
+def _launch_result(job_id="Jsup", dispatch="Dgf"):
+    return {"supervise_queued": job_id, "fallback_queued": job_id, "dispatch_id": dispatch}
+def test_the_first_goldfish_launches_with_the_job_and_its_launch_ends_the_call(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (seen.append((gate, kw)), _launch_result())[1])
+    job = {"kind": "plan_review", "payload": {"gate_id": "Glead", "resume_from": "Dold"}}
+    out = xl_review.audit_plan_job(con, {**run, "risk": {}}, _plan_gate(con), {"tasks": []}, "ROLE r\nbody", tmp, job)
+    assert out["supervise_queued"] == "Jsup", "the call ends at the launch: nothing waits for the Goldfish"
+    ((gate, kw),) = seen
+    stage = kw["job"]["payload"]["xl"]["current"]
+    assert gate["id"] == stage["gate"] != "Glead" and stage["name"] == "requirements"
+    assert kw["job"]["payload"]["gate_id"] == gate["id"] and kw["job"]["payload"]["xl"]["lead_gate"] == "Glead"
+    assert con.execute("SELECT subject FROM gates WHERE id=?", (gate["id"],)).fetchone()["subject"] == "goldfish:requirements"
+def test_a_settling_goldfish_job_settles_its_stage_and_launches_the_next_without_rerunning_it(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    lead = _plan_gate(con)
+    stage_gate = _gate_row(con, "Gfish1", subject="goldfish:requirements", kind=xl_review.GOLDFISH_KIND)
+    launched, settled = [], []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (launched.append((gate["id"], kw["job"])), _launch_result("Jnext", "Dnext"))[1])
+    monkeypatch.setattr(gates, "settle_reviewer", lambda con_, run_, gate, job: (settled.append(gate["id"]), {"status": "COMPLETED"})[1])
+    monkeypatch.setattr(xl_review, "_record_goldfish", lambda con_, run_, g, name, outcome, dispatches, sessions, *, live: {"rubric": name})
+    xl = {"lead_gate": "Glead", "reports": [], "dispatches": [], "sessions": [], "current": {"name": "requirements", "gate": "Gfish1"}}
+    job = {"kind": "plan_review", "payload": {"gate_id": "Gfish1", gates.SETTLE_KEY: {"dispatch_id": "Dgf"}, "xl": xl}}
+    out = xl_review.audit_plan_job(con, {**run, "risk": {}}, lead, {"tasks": []}, "ROLE r\nbody", tmp, job)
+    assert settled == ["Gfish1"] and out["supervise_queued"] == "Jnext"
+    ((next_gate, next_job),) = launched
+    assert next_gate != "Gfish1" and gates.SETTLE_KEY not in next_job["payload"], "the next stage launches afresh"
+    assert next_job["payload"]["xl"]["reports"] == [{"rubric": "requirements"}] and next_job["payload"]["xl"]["current"]["name"] == "architecture"
+def test_a_goldfish_fallback_job_reruns_the_same_stage_on_its_own_gate(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    _gate_row(con, "Gfish1", subject="goldfish:requirements", kind=xl_review.GOLDFISH_KIND)
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (seen.append((gate["id"], kw["job"])), _launch_result())[1])
+    xl = {"lead_gate": "Glead", "reports": [], "dispatches": [], "sessions": [], "current": {"name": "requirements", "gate": "Gfish1"}}
+    fb = {"epoch": 0, "chain_epoch": 0}
+    job = {"kind": "plan_review", "payload": {"gate_id": "Gfish1", "review_fallback": fb, "xl": xl}}
+    xl_review.audit_plan_job(con, {**run, "risk": {}}, _plan_gate(con), {"tasks": []}, "ROLE r\nbody", tmp, job)
+    ((gid, rerun),) = seen
+    assert gid == "Gfish1" and rerun["payload"]["review_fallback"] == fb, "the next route of the same chain"
+    assert con.execute("SELECT COUNT(*) n FROM gates WHERE kind='goldfish_audit'").fetchone()["n"] == 1
+def test_a_compose_job_belongs_to_the_chain_it_was_queued_for():
+    mark = {"gates": ["G1", "G2"], "epoch": 1}
+    job = lambda fb: {"payload": {srs.COLLECT_KEY: mark, **({"review_fallback": fb} if fb else {})}}
+    assert srs.collected_gates(job({"epoch": 1})) == ["G1", "G2"]
+    assert srs.collected_gates(job({"epoch": 2})) is None, "a redispatch launches the subagents anew"
+    assert srs.collected_gates({"payload": {}}) is None
+    assert srs.collected_gates({"payload": {srs.COLLECT_KEY: {"gates": ["G1"], "epoch": 0}}}) == ["G1"]
+def test_only_the_supervise_jobs_of_subagents_name_subagent_gates():
+    row = lambda kind, **p: {"kind": kind, "payload_json": json.dumps(p)}
+    sub = {"origin": {"kind": "convergence_review", "payload": {"subagent": {"key": "k"}}}}
+    lane = {"origin": {"kind": "convergence_review", "payload": {"scope": "L-T1"}}}
+    assert srs.supervised_gates([row("review_supervise", gate_id="Gs", **sub), row("review_supervise", gate_id="Gl", **lane),
+                                 row("convergence_review", gate_id="Gx", **sub)]) == ["Gs"]
+
+def _subagent_scope(con, tmp, monkeypatch, rubrics=("edge-cases", "test-strength")):
+    """A funded run with one task whose accepted revision awaits `rubrics` subagent reviews, on a scratch database."""
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, base_commit, commit_sha, tree_sha, requirements_version, "
+                "plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                "VALUES('R1v','R1','T1',1,'b','c','t',1,1,1,'e','op','accepted','2026-01-01')")
+    monkeypatch.setattr(srs, "rubrics", lambda run, task: rubrics)
+    monkeypatch.setattr(srs.paths, "git", lambda *a, **k: "")
+    run = {"id": "R1", "repo_root": str(tmp), "office_version": "3.1", "gear": "S", "plan_version": 1, "risk": {},
+           "gates": {"gear_model_version": "run-gear-1"}}
+    return run, [{"id": "T1", "title": "t", "scope": [], "accepted_revision_id": "R1v"}]
+def test_every_subagent_launches_with_the_job_and_the_call_returns_waiting(scratch, monkeypatch):
+    """F11: independent subagents each launch through run_reviewer with the convergence job (none is waited on) and the
+    call returns at once; their supervise jobs settle them."""
+    con, run_, tmp = scratch
+    run, tasks = _subagent_scope(con, tmp, monkeypatch)
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run__, gate, role, brief, **kw: (seen.append((gate, kw)), _launch_result("J" + gate["id"], "D" + gate["id"]))[1])
+    job = {"kind": "convergence_review", "payload": {"gate_id": "Glane", "scope": "L-T1"}}
+    out = srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=True)
+    assert out["status"] == srs.WAITING
+    assert [kw["job"]["payload"]["subagent"]["key"].split(":")[2] for _, kw in seen] == ["edge-cases", "test-strength"]
+    for gate, kw in seen:
+        assert kw["job"]["payload"]["gate_id"] == gate["id"] and kw["job"]["payload"]["scope"] == "L-T1"
+        assert kw["job"]["payload"]["subagent"]["parent"]["payload"]["gate_id"] == "Glane"
+        assert kw["job"]["payload"]["subagent"]["keys"] == [k["job"]["payload"]["subagent"]["key"] for _, k in seen], "each knows its siblings"
+    assert {r["status"] for r in con.execute("SELECT status FROM gates WHERE kind='self_review_subagent'")} == {"queued"}
+    assert con.execute("SELECT COUNT(*) n FROM outbox WHERE dedup_key LIKE 'self_review_compose:%'").fetchone()["n"] == 0, \
+        "the last settle queues the compose job, not the launching call while one is still open"
+def test_subagents_that_find_no_route_are_composed_in_the_launching_call(scratch, monkeypatch):
+    con, run_, tmp = scratch
+    run, tasks = _subagent_scope(con, tmp, monkeypatch, rubrics=("combined",))
+    monkeypatch.setattr(gates, "run_reviewer", lambda *a, **k: {"status": contract.UNAVAILABLE, "summary": "no route"})
+    job = {"kind": "convergence_review", "payload": {"gate_id": "Glane", "scope": "L-T1"}}
+    assert srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=True)["status"] == srs.RETRY
+    assert srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=False)["status"] == contract.EVIDENCE_BLOCKED

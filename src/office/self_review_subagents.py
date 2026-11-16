@@ -20,6 +20,7 @@ rubric is reused on a later convergence round or a review-only re-run.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -326,7 +327,7 @@ def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: s
     (the job queued again with COLLECT_KEY), or at once when none launched."""
     from office import gates
     payload = job["payload"]
-    collected = payload.get(COLLECT_KEY)
+    collected = collected_gates(job)
     pending = [i for i in plan if i["kind"] == "review"]
     ran: dict[str, dict] = {}
     if collected is None and pending:
@@ -359,6 +360,21 @@ def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: s
             return {"status": WAITING, "reports": [], "reason": "the subagent reviews are running"}
     return _compose(con, run, plan, retry=retry, ran=ran,
                     fresh=set(collected or ()) | {i["gate"]["id"] for i in pending if "gate" in i})
+def collected_gates(job: dict) -> list[str] | None:
+    """The subagent gates a compose job composes, or None for a job that launches them. A compose job belongs to the chain
+    it was queued in: a redispatch (a later epoch) launches the subagents anew rather than composing the failed ones."""
+    mark = job["payload"].get(COLLECT_KEY)
+    if not mark or mark["epoch"] != (job["payload"].get("review_fallback") or {}).get("epoch", 0):
+        return None
+    return mark["gates"]
+def supervised_gates(jobs: list[dict]) -> list[str]:
+    """The subagent gates whose launched reviewers these `review_supervise` job rows wait on."""
+    out = []
+    for j in jobs:
+        p = json.loads(j["payload_json"] or "{}") if j["kind"] == "review_supervise" else {}
+        if ((p.get("origin") or {}).get("payload") or {}).get("subagent"):
+            out.append(p["gate_id"])
+    return out
 def _fresh_chain(con, gate_id: str) -> dict:
     """The job payload that starts a subagent's review on a fresh chain of routes when an earlier attempt of its gate
     failed (a retry of a subagent that never launched): the routes that attempt failed on are eligible again."""
@@ -409,11 +425,12 @@ def _queue_compose(con, run: dict, sa: dict) -> None:
     scope done at once: the dedup key keeps it to one job."""
     if _open_keys(con, run["id"], sa["keys"]):
         return
-    payload = {**sa["parent"]["payload"], COLLECT_KEY: sa["gates"]}
-    fb = payload.get("review_fallback") or {}
+    payload = {**sa["parent"]["payload"]}
+    epoch = (payload.get("review_fallback") or {}).get("epoch", 0)
+    payload[COLLECT_KEY] = {"gates": sa["gates"], "epoch": epoch}
     with db.transaction(con):
         state.enqueue(con, run, "convergence_review", payload, max_attempts=2,
-                      dedup_key=f"self_review_compose:{payload['gate_id']}:{sa['commit']}:{fb.get('epoch', 0)}")
+                      dedup_key=f"self_review_compose:{payload['gate_id']}:{sa['commit']}:{epoch}")
 def job_subagent_review(con, run: dict, job: dict) -> dict:
     """The convergence job entered for one subagent: its supervise job settled it, or its fallback runs the next route.
     Records its gate and, as the last of its scope to settle, queues the convergence job to compose them."""

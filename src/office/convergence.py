@@ -864,8 +864,7 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
             return {"subagents": "launched"}
         if precheck["status"] == self_review_subagents.RETRY:
             # A subagent that never launched is retried through the bounded fallback job, not blocked at once.
-            fresh_job = {**job, "payload": {k: v for k, v in job["payload"].items() if k != self_review_subagents.COLLECT_KEY}}
-            queued = gates.queue_review_fallback(con, run, gate, fresh_job, precheck["reason"], redispatch=True)
+            queued = gates.queue_review_fallback(con, run, gate, job, precheck["reason"], redispatch=True)
             if queued:
                 return {"fallback": queued}
             precheck = {**precheck, "status": contract.EVIDENCE_BLOCKED}
@@ -1982,7 +1981,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
     # Environment markers are advisory (a worker could unset them), as for waive and decide.
     if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
         raise Refused("worker-cannot-revoke", "a producer, planner or reviewer cannot revoke a lane review; the orchestrator does")
-    from office import dispatch
+    from office import dispatch, self_review_subagents
     from office.util import claim_signalable
     m = re.fullmatch(r"([LS]-[\w+.-]+):(\w+)", spec.strip())
     kind = KIND_ALIASES.get(m.group(2).lower()) if m else None
@@ -2009,8 +2008,7 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (why, now_iso(), j["id"]))
     # A self-review subagent has a gate of its own: its supervise job names it and, nested, the lane gate.
-    subagent_gates = [p["gate_id"] for p in (json.loads(j["payload_json"] or "{}") for j in jobs_ if j["kind"] == "review_supervise")
-                      if ((p.get("origin") or {}).get("payload") or {}).get("subagent")]
+    subagent_gates = self_review_subagents.supervised_gates(jobs_)
     unstopped = []
     for j in jobs_:
         if j["status"] != "claimed" or not jobs.claim_live(j):
