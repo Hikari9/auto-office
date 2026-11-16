@@ -46,6 +46,12 @@ def seeded(con):
     gate(con, "other1", verdict="UNAVAILABLE")
     attempt(con, "D3", "other1", "invalid")
     gate(con, "blocked1", kind="visual", evidence_status="EVIDENCE_BLOCKED")
+    gate(con, "plan1", kind="plan_review", verdict="REVOKED")
+    gate(con, "plan2", kind="plan_review", verdict="APPROVED")
+    gate(con, "int1", kind="integration_review", review_status="UNAVAILABLE")
+    attempt(con, "D5", "int1", "launch")
+    gate(con, "silent1", review_status="UNAVAILABLE")
+    attempt(con, "D6", "silent1", "silent")
     # not counted: wrong kind, not done, a reviewer attempt of another gate
     gate(con, "chk", kind="checks", verdict="UNAVAILABLE")
     gate(con, "open", status="running", verdict="UNAVAILABLE")
@@ -55,11 +61,29 @@ def seeded(con):
 def test_counts_split_by_reason(con):
     seeded(con)
     m = rate.measure(con)
-    assert m["done"] == 10
-    assert m["by_reason"] == {"revoked": 2, "launch": 2, "invalid": 2, "other": 1}
-    assert m["no_verdict"] == 7
-    assert m["share"] == round(7 / 10, 4)
-    assert m["evidence_blocked"] == 1
+    assert m["done"] == 14
+    assert m["by_reason"] == {"revoked": 3, "launch": 4, "invalid": 2, "evidence_blocked": 1, "other": 1}
+    assert m["no_verdict"] == 11
+    assert m["share"] == round(11 / 14, 4)
+
+
+def test_plan_and_integration_reviews_are_in_the_population(con):
+    gate(con, "p", kind="plan_review", verdict="REVOKED")
+    gate(con, "i", kind="integration_review", verdict="APPROVED")
+    m = rate.measure(con)
+    assert (m["done"], m["no_verdict"]) == (2, 1)
+
+
+def test_evidence_blocked_is_a_no_verdict_reason(con):
+    gate(con, "b", evidence_status="EVIDENCE_BLOCKED")
+    m = rate.measure(con)
+    assert (m["no_verdict"], m["by_reason"]["evidence_blocked"]) == (1, 1)
+
+
+def test_silent_failure_is_a_launch_failure(con):
+    gate(con, "s", verdict="UNAVAILABLE")
+    attempt(con, "D1", "s", "silent")
+    assert rate.measure(con)["by_reason"]["launch"] == 1
 
 
 def test_a_launch_failure_on_a_gate_that_has_a_verdict_is_not_counted(con):
@@ -72,7 +96,7 @@ def test_a_launch_failure_on_a_gate_that_has_a_verdict_is_not_counted(con):
 def test_non_reviewer_dispatch_does_not_make_a_launch_failure(con):
     gate(con, "u1", verdict="UNAVAILABLE")
     attempt(con, "D1", "u1", "launch", kind="executor")
-    assert rate.measure(con)["by_reason"] == {"revoked": 0, "launch": 0, "invalid": 0, "other": 1}
+    assert rate.measure(con)["by_reason"] == {"revoked": 0, "launch": 0, "invalid": 0, "evidence_blocked": 0, "other": 1}
 
 
 def test_window_is_inclusive_since_and_exclusive_until(con):
@@ -102,10 +126,10 @@ def test_cli_json_and_read_only(con, tmp_path):
     before = path.read_bytes()
     out = run_cli("--db", str(path), "--format", "json")
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout)["no_verdict"] == 7
+    assert json.loads(out.stdout)["no_verdict"] == 11
     assert path.read_bytes() == before
     text = run_cli("--db", str(path))
-    assert "no verdict: 7 (70.0%)" in text.stdout and "launch: 2" in text.stdout
+    assert "no verdict: 11 (78.6%)" in text.stdout and "launch: 4" in text.stdout
 
 
 def test_cli_missing_db_is_not_created_and_exits_2(tmp_path):

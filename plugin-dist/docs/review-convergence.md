@@ -372,7 +372,7 @@ Reviewer dispatch (what runs between a gate opening and its verdict):
   reviewer skill); the reply file and log are recorded fallbacks. Reviewers run on a detached snapshot of the
   reviewed commit and the worktree guard covers only their own writes.
 - `scripts/review_no_verdict_rate.py --db runs.db [--since D] [--until D]` reports, read-only, the done review gates in
-  a window and the share with no verdict, split by revoked, launch failure, invalid and other.
+  a window and the share with no verdict, split by revoked, launch failure, invalid, evidence blocked and other.
 ## 9. The round cap and operator decisions
 
 This section is about lanes and shared scopes. Plan review has no operator decision: at its cap the

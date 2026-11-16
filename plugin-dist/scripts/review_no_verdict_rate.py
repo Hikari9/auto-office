@@ -2,16 +2,17 @@
 """review_no_verdict_rate.py -- read-only share of done review gates that ended with no verdict.
 
 Reads one runs.db and, for a time window on `gates.finished_at`, counts the done review gates (kinds
-`code_review`, `visual` and `convergence_review`) and how many of them carry no verdict, split by why:
+`plan_review`, `code_review`, `visual`, `convergence_review` and `integration_review`) and how many of them carry
+no verdict, split by why:
 
   revoked      the orchestrator stopped the reviewer (REVOKED). Not a reviewer failure.
   launch       every route failed to launch or hit a quota or auth wall (UNAVAILABLE and one of the gate's reviewer
-               dispatches recorded a `launch`, `wall` or `pointer` failure)
+               dispatches recorded a `launch`, `wall`, `pointer` or `silent` failure)
   invalid      the reviewer answered with an unreadable reply (INVALID_RESULT, or ATTENTION on a v3.1 run)
+  evidence_blocked  EVIDENCE_BLOCKED: an answer with no verdict because evidence was missing
   other        UNAVAILABLE with no recorded launch failure
 
-A gate counts once, under the first matching reason in that order. EVIDENCE_BLOCKED is an answer with no verdict
-because evidence was missing; it is reported as `evidence_blocked` and is not in the no-verdict share.
+A gate counts once, under the first matching reason in that order. Every reason is in the no-verdict share.
 
 The file is opened through a SQLite URI with mode=ro and PRAGMA query_only=ON; it is never created or written.
 Nothing free-text, id or path is read into the output: only counts and the window.
@@ -31,9 +32,9 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-REVIEW_KINDS = ("code_review", "visual", "convergence_review")
-LAUNCH_CLASSES = ("launch", "wall", "pointer")
-REASONS = ("revoked", "launch", "invalid", "other")
+REVIEW_KINDS = ("plan_review", "code_review", "visual", "convergence_review", "integration_review")
+LAUNCH_CLASSES = ("launch", "wall", "pointer", "silent")
+REASONS = ("revoked", "launch", "invalid", "evidence_blocked", "other")
 
 
 def _has(value: str) -> str:
@@ -73,17 +74,16 @@ def measure(con: sqlite3.Connection, since: str | None = None, until: str | None
         f"COALESCE(SUM({_REVOKED}), 0), "
         f"COALESCE(SUM(NOT {_REVOKED} AND {_UNAVAILABLE} AND {_LAUNCH_FAILED}), 0), "
         f"COALESCE(SUM(NOT {_REVOKED} AND {_INVALID} AND NOT ({_UNAVAILABLE} AND {_LAUNCH_FAILED})), 0), "
-        f"COALESCE(SUM({_UNAVAILABLE} AND NOT {_REVOKED} AND NOT {_INVALID} AND NOT {_LAUNCH_FAILED}), 0), "
-        f"COALESCE(SUM({_EVIDENCE_BLOCKED} AND NOT {_REVOKED} AND NOT {_INVALID} AND NOT {_UNAVAILABLE}), 0) "
+        f"COALESCE(SUM({_EVIDENCE_BLOCKED} AND NOT {_REVOKED} AND NOT {_INVALID} AND NOT {_UNAVAILABLE}), 0), "
+        f"COALESCE(SUM({_UNAVAILABLE} AND NOT {_REVOKED} AND NOT {_INVALID} AND NOT {_LAUNCH_FAILED}), 0) "
         "FROM gates g WHERE " + " AND ".join(where)
     )
-    done, revoked, launch, invalid, other, blocked = con.execute(sql, args).fetchone()
-    no_verdict = revoked + launch + invalid + other
+    done, revoked, launch, invalid, blocked, other = con.execute(sql, args).fetchone()
+    no_verdict = revoked + launch + invalid + blocked + other
     return {
         "since": since, "until": until, "done": done, "no_verdict": no_verdict,
         "share": round(no_verdict / done, 4) if done else None,
-        "by_reason": {"revoked": revoked, "launch": launch, "invalid": invalid, "other": other},
-        "evidence_blocked": blocked,
+        "by_reason": {"revoked": revoked, "launch": launch, "invalid": invalid, "evidence_blocked": blocked, "other": other},
     }
 
 
@@ -92,7 +92,6 @@ def render_text(m: dict) -> str:
     lines = [f"window: {m['since'] or 'start'} .. {m['until'] or 'now'}",
              f"done review gates: {m['done']}", f"no verdict: {m['no_verdict']} ({share})"]
     lines += [f"  {r}: {m['by_reason'][r]}" for r in REASONS]
-    lines.append(f"evidence blocked (not in the share): {m['evidence_blocked']}")
     return "\n".join(lines)
 
 
