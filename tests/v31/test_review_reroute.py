@@ -893,7 +893,8 @@ def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing
     assert code == 0, out
     assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
     assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
-        == [tried, tried], "the re-run starts on the route the failed round used"
+        == [tried, tried, tried], ("the failed round ran its one route twice (the spent chain, then the redispatch's fresh "
+                                   "chain), and the re-run starts on the route that round used")
     assert _executor_calls(env) == executors
     assert _scope(env, "L-T1")["status"] == "approved"
     assert _pin(env) is None
