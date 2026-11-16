@@ -533,6 +533,11 @@ def test_a_subagent_that_never_answers_runs_through_the_owning_jobs_fallbacks_th
     assert subagents[0]["id"] in {j["payload"]["gate_id"] for j in jobs} <= {subagents[0]["id"], owner["id"]}, \
         "the subagent's fallbacks re-run it on its own gate, supervised apart from the lane's convergence job"
     assert {j["payload"]["origin"]["kind"] for j in jobs} == {"convergence_review"}
-    assert len([e for e in _redispatches(env)]) == 1, "the default bound is one re-dispatch per gate"
+    by_gate = {}
+    for e in _redispatches(env):
+        by_gate.setdefault(json.loads(e["payload_json"])["gate"], []).append(json.loads(e["payload_json"])["epoch"])
+    assert len(by_gate[owner["id"]]) == 1, "the lane's own bound is one re-dispatch"
+    assert by_gate[subagents[0]["id"]] == [1, 3], "the subagent re-dispatches once per chain: its own, then the lane's retry"
+    assert set(by_gate) == {owner["id"], subagents[0]["id"]}
     assert _attempts(env, subagents[0]["id"]) and not _attempts(env, owner["id"]), "convergence never ran without its evidence"
     assert int(owner["round"]) == 1
