@@ -32,6 +32,10 @@ from office.util import now_iso
 REVIEW_VERSION = "runtime-self-review-1"
 # audit_scope status: a subagent that never launched, to be retried through the bounded review fallback.
 RETRY = "RETRY"
+# audit_scope status in the job flow: the subagents are launched and supervised, and their last settle queues the
+# convergence job again to compose them.
+WAITING = "WAITING"
+COLLECT_KEY = "subagents_collected"  # the convergence job payload key naming the subagent gates it composes
 FUNDED_GEARS = ("S", "M", "L", "XL")
 RUBRICS = {
     "combined": "Review edge cases and test strength in ONE pass: empty or null input, parser ambiguity, retries, restart "
@@ -141,7 +145,7 @@ def _report(task_id: str, rubric: str, rid: str, **extra) -> dict:
 
 
 def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, *, reviewer=None,
-                retry: bool = False) -> dict:
+                retry: bool = False, job: dict | None = None) -> dict:
     """Run every funded subagent review of `tasks` at `commit` (the checkout's HEAD, the commit convergence
     reviews). Returns {status, reports, reason}; any status but COMPLETED means convergence must not run.
     With `retry`, a subagent that was never launched (no reviewer route could start it) returns status RETRY
@@ -150,12 +154,16 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
 
     The subagents of one scope share no mutable state (each owns its gate, dispatch, session and reply file, and reads
     the checkout without writing it), so those that still need a review launch together and are composed in task and
-    rubric order: the result is what running them one after another gives, up to the first one that did not pass."""
+    rubric order: the result is what running them one after another gives, up to the first one that did not pass.
+    With the convergence `job`, each launches through `run_reviewer` with it and is settled by its own supervise job
+    (status WAITING, the checkout stays); the last one to settle queues the job again, which composes them."""
     if not funded(run):
         return {"status": contract.COMPLETED, "reports": [], "reason": "no runtime self-review funded for this gear"}
     from office import gates
     reviewer = reviewer or gates.run_reviewer
     plan = _plan(con, run, tasks, commit)
+    if job is not None:
+        return _audit_scope_job(con, run, plan, checkout, commit, job, retry=retry)
     pending = [item for item in plan if item["kind"] == "review"]
     results: dict[int, dict] = {}  # by id(item): the outcomes of reviews that ran together
     failures: dict[int, dict | None] = {}  # by id(item): what recording each of them found
@@ -212,8 +220,9 @@ def _plan(con, run: dict, tasks: list[dict], commit: str) -> list[dict]:
             key = f"{rid}:{commit}:{rubric}:{REVIEW_VERSION}"
             saved = _reusable(con, run, key)
             if saved:
-                plan.append({"kind": "reused", "report": _report(task["id"], rubric, rid, dispatch_id=saved["reviewer_dispatch_id"],
-                                                                 advisory=saved["verdict"], summary=saved["summary"], reused=True)})
+                plan.append({"kind": "reused", "gate_id": saved["id"],
+                             "report": _report(task["id"], rubric, rid, dispatch_id=saved["reviewer_dispatch_id"],
+                                               advisory=saved["verdict"], summary=saved["summary"], reused=True)})
                 continue
             plan.append({"kind": "review", "task": task, "rubric": rubric, "rid": rid, "rev": dict(rev), "key": key})
     return plan
@@ -221,7 +230,6 @@ def _plan(con, run: dict, tasks: list[dict], commit: str) -> list[dict]:
 
 def _prepare(con, run: dict, item: dict, checkout: Path, commit: str) -> None:
     """Create (or reopen) the review's gate and write its brief onto `item`."""
-    from office import gates
     task, rubric, rid, rev, key = item["task"], item["rubric"], item["rid"], item["rev"], item["key"]
     # A subagent that never launched is retried on its own gate: the gate reopens, and its next attempt
     # chain starts away from the routes the last one failed on.
@@ -242,10 +250,15 @@ def _prepare(con, run: dict, item: dict, checkout: Path, commit: str) -> None:
         state.emit(con, run, "self_review.subagent.queued",
                    f"{task['id']} {rubric}: independent subagent review before convergence",
                    task_id=task["id"], payload={"revision": rid, "rubric": rubric, "commit": commit})
+    item["gate"] = audit_gate
+    _brief(con, run, item, checkout, commit)
+def _brief(con, run: dict, item: dict, checkout: Path, commit: str) -> None:
+    """Write the subagent's brief onto `item`."""
+    from office import gates
+    task, rubric, rid, rev = item["task"], item["rubric"], item["rid"], item["rev"]
     diff = gates.cap_diff(paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"]))
     checks = con.execute("SELECT summary FROM gates WHERE revision_id=? AND kind='checks' AND status='done' "
                          "ORDER BY created_at DESC LIMIT 1", (rid,)).fetchone()
-    item["gate"] = audit_gate
     item["brief"] = briefs.self_review_subagent_brief(run, task, rev, commit, diff,
                                                       checks["summary"] if checks else "none declared",
                                                       str(checkout), rubric, RUBRICS[rubric] + (
@@ -299,3 +312,140 @@ def _record(con, run: dict, item: dict, outcome: dict, commit: str, *, retry: bo
                    payload={"rubric": rubric, "revision": rid, "commit": commit,
                             "dispatch_id": outcome.get("dispatch_id"), "success": good})
     return None if good else {"reason": reason, "retried": retried}
+
+# ------------------------------------------------------------------ the job flow
+def _latest_gate(con, run_id: str, key: str):
+    return con.execute("SELECT * FROM gates WHERE run_id=? AND kind='self_review_subagent' AND input_key=? "
+                       "ORDER BY rowid DESC LIMIT 1", (run_id, key)).fetchone()
+def _open_keys(con, run_id: str, keys: list[str]) -> list[str]:
+    """The subagents among `keys` whose latest gate is still open."""
+    return [k for k in keys if (g := _latest_gate(con, run_id, k)) is not None and g["status"] in ("queued", "running")]
+def _audit_scope_job(con, run: dict, plan: list[dict], checkout: Path, commit: str, job: dict, *, retry: bool) -> dict:
+    """`audit_scope` in the convergence job: launch every subagent that needs a review, each supervised and settled
+    on its own (they run together), then return WAITING. Composed from the recorded gates once the last one settles
+    (the job queued again with COLLECT_KEY), or at once when none launched."""
+    from office import gates
+    payload = job["payload"]
+    collected = payload.get(COLLECT_KEY)
+    pending = [i for i in plan if i["kind"] == "review"]
+    ran: dict[str, dict] = {}
+    if collected is None and pending:
+        prepared = []
+        try:
+            for item in pending:
+                _prepare(con, run, item, checkout, commit)
+                prepared.append(item)
+        except Exception as exc:
+            for item in prepared:  # a gate left queued by an item that was never launched would stay open for good
+                _record(con, run, item, {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"},
+                        commit, retry=retry)
+            raise
+        parent = {"payload": {k: v for k, v in payload.items() if k != gates.SETTLE_KEY}}
+        base = {"scope": payload.get("scope"), "subagent": {
+            "parent": parent, "commit": commit, "retry": retry, "keys": [i["key"] for i in pending],
+            "gates": [i["gate"]["id"] for i in pending]}}
+        launched = False
+        for item in pending:
+            sub = {**job, "payload": {**base, "gate_id": item["gate"]["id"], "subagent": {**base["subagent"], "key": item["key"]},
+                                      **_fresh_chain(con, item["gate"]["id"])}}
+            outcome = _launch(con, run, item, checkout, sub)
+            if gates.review_launched(outcome) or outcome.get("fallback_queued"):
+                launched = True
+            else:
+                ran[item["gate"]["id"]] = outcome
+                _record(con, run, item, outcome, commit, retry=retry)
+        if launched:
+            _queue_compose(con, run, base["subagent"])  # every sibling may have settled while the rest were launching
+            return {"status": WAITING, "reports": [], "reason": "the subagent reviews are running"}
+    return _compose(con, run, plan, retry=retry, ran=ran,
+                    fresh=set(collected or ()) | {i["gate"]["id"] for i in pending if "gate" in i})
+def _fresh_chain(con, gate_id: str) -> dict:
+    """The job payload that starts a subagent's review on a fresh chain of routes when an earlier attempt of its gate
+    failed (a retry of a subagent that never launched): the routes that attempt failed on are eligible again."""
+    from office import gates
+    epoch = max((a["epoch"] + 1 for a in gates.review_attempts(con, gate_id)), default=0)
+    return {"review_fallback": {"epoch": epoch, "chain_epoch": epoch}} if epoch else {}
+def _launch(con, run: dict, item: dict, checkout: Path, job: dict) -> dict:
+    from office import gates
+    try:
+        return gates.run_reviewer(con, run, item["gate"], "code_reviewer", item["brief"], cwd=checkout,
+                                  include_dirs=[checkout], kind="reviewer", job=job)
+    except Exception as exc:
+        return {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
+def _compose(con, run: dict, plan: list[dict], *, retry: bool, fresh: set[str], ran: dict[str, dict] | None = None) -> dict:
+    """The scope's result from the recorded gates, in task and rubric order up to the first subagent that did not
+    pass. `fresh` names the gates this chain ran: their reports carry their findings, a reused one its summary. `ran`
+    holds the outcomes of the ones that settled in the launching call itself."""
+    from office import gates, review_parse
+    reports = []
+    for item in plan:
+        if item["kind"] == "blocked":
+            return {"status": contract.EVIDENCE_BLOCKED, "reports": reports, "reason": item["reason"]}
+        reused = item["kind"] == "reused"
+        if reused and item["gate_id"] not in fresh:
+            reports.append(item["report"])
+            continue
+        gate = con.execute("SELECT * FROM gates WHERE id=?", (item["gate_id"],)).fetchone() if reused \
+            else _latest_gate(con, run["id"], item["key"])
+        task_id, rubric, rid = ((item["report"]["task"], item["report"]["rubric"], item["report"]["revision"]) if reused
+                                else (item["task"]["id"], item["rubric"], item["rid"]))
+        if gate is None or gate["review_status"] != contract.COMPLETED:
+            unlaunched = gate is not None and gate["review_status"] == contract.UNAVAILABLE
+            reason = gate["summary"] if gate is not None and gate["summary"] else "subagent was not launched and completed"
+            return {"status": RETRY if unlaunched and retry else contract.EVIDENCE_BLOCKED, "reports": reports,
+                    "reason": f"{task_id} {rubric} self-review subagent: {reason}; convergence review cannot proceed without it"}
+        parsed = (ran or {}).get(gate["id"], {}).get("parsed")
+        if parsed is None:
+            reply = paths.run_dir(run["id"]) / "dispatches" / gate["reviewer_dispatch_id"] / "reply.txt"
+            parsed = review_parse.parse(gates._last_block(reply.read_text(encoding="utf-8", errors="replace")),
+                                        contract=contract.of(run))
+        reports.append(_report(task_id, rubric, rid, dispatch_id=gate["reviewer_dispatch_id"], advisory=parsed.verdict,
+                               reused=False,
+                               findings=[{k: f.get(k) for k in ("code", "severity", "location", "summary", "action", "blocking")}
+                                         for f in parsed.findings]))
+    return {"status": contract.COMPLETED, "reports": reports}
+def _queue_compose(con, run: dict, sa: dict) -> None:
+    """Queue the convergence job again to compose the subagents once none of them is open. Many settles may find the
+    scope done at once: the dedup key keeps it to one job."""
+    if _open_keys(con, run["id"], sa["keys"]):
+        return
+    payload = {**sa["parent"]["payload"], COLLECT_KEY: sa["gates"]}
+    fb = payload.get("review_fallback") or {}
+    with db.transaction(con):
+        state.enqueue(con, run, "convergence_review", payload, max_attempts=2,
+                      dedup_key=f"self_review_compose:{payload['gate_id']}:{sa['commit']}:{fb.get('epoch', 0)}")
+def job_subagent_review(con, run: dict, job: dict) -> dict:
+    """The convergence job entered for one subagent: its supervise job settled it, or its fallback runs the next route.
+    Records its gate and, as the last of its scope to settle, queues the convergence job to compose them."""
+    from office import gates
+    sa = job["payload"]["subagent"]
+    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
+    lane_id = sa["parent"]["payload"]["gate_id"]
+    lane = con.execute("SELECT status FROM gates WHERE id=?", (lane_id,)).fetchone()
+    checkout = paths.run_dir(run["id"]) / "checkouts" / f"converge-{lane_id}"
+    if gate["status"] not in ("queued", "running"):
+        return {"skipped": gate["status"]}
+    if lane is None or lane["status"] not in ("queued", "running"):  # nothing will compose it: free what it held
+        gates.remove_checkout(run, checkout)
+        with db.transaction(con):
+            con.execute("UPDATE gates SET status='done', review_status=?, summary=?, finished_at=? WHERE id=?",
+                        (contract.EVIDENCE_BLOCKED, "its lane review closed before it settled", now_iso(), gate["id"]))
+        return {"skipped": lane["status"] if lane else "missing"}
+    task = state.get_task(con, run["id"], gate["task_id"])
+    rev = con.execute("SELECT * FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone()
+    rubric = sa["key"].split(":")[2]
+    item = {"task": task, "rubric": rubric, "rid": gate["revision_id"], "rev": dict(rev), "key": sa["key"], "gate": gate}
+    if job["payload"].get(gates.SETTLE_KEY):
+        outcome = gates.settle_reviewer(con, run, gate, job)
+    elif checkout.is_dir():
+        _brief(con, run, item, checkout, sa["commit"])
+        outcome = _launch(con, run, item, checkout, job)
+    else:
+        outcome = {"status": contract.UNAVAILABLE, "summary": "the checkout the subagent reads is gone"}
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}
+    _record(con, run, item, outcome, sa["commit"], retry=sa["retry"])
+    _queue_compose(con, run, sa)
+    return {"recorded": gate["id"]}

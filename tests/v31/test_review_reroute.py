@@ -892,8 +892,9 @@ def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing
     code, out = env.office("review", "L-T1:convergence", check=0)
     assert code == 0, out
     assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
+    # the failed round re-dispatched once on a fresh chain, where the one route is eligible again (A7), then the re-run
     assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
-        == [tried, tried], "the re-run starts on the route the failed round used"
+        == [tried, tried, tried], "the re-run starts on the route the failed round used"
     assert _executor_calls(env) == executors
     assert _scope(env, "L-T1")["status"] == "approved"
     assert _pin(env) is None

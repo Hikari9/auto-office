@@ -2973,6 +2973,10 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
         rows = [r for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='convergence_review' "
                                        "AND status IN ('queued','claimed')", (run["id"],)).fetchall()
                 if (json.loads(r["payload_json"] or "{}") or {}).get("scope") in lanes]
+        # The supervise job of its launched reviewer and a queued re-run name the gate.
+        rows += con.execute("SELECT * FROM outbox WHERE run_id=? AND kind IN ('review_supervise','review_fallback') "
+                            "AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                            (run["id"], f'%"{gate["id"]}"%')).fetchall()
     else:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()

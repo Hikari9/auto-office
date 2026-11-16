@@ -643,7 +643,11 @@ def _after_plan_next(con, run: dict) -> str:
 
 def job_plan_review(con, run: dict, job: dict) -> dict:
     from office import gates as gate_engine
+    from office import xl_review
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
+    if gate["kind"] == xl_review.GOLDFISH_KIND:
+        # A Goldfish's supervise or fallback job names its own gate: the review it belongs to is the lead's.
+        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["xl"]["lead_gate"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
     plan = state.get_plan(con, run["id"], gate["plan_version"])
@@ -657,15 +661,17 @@ def job_plan_review(con, run: dict, job: dict) -> dict:
     else:
         brief = briefs.plan_review_brief(run, plan, req["frozen"], open_defects(con, run["id"]), rereview,
                                          used_codes=gate_engine.finding_codes(con, *_defect_plan_scope(run)))
-    from office import xl_review
     if xl_review.eligible(con, run, gate):
-        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer.
-        outcome = xl_review.audit_plan(con, run, gate, plan, brief, Path(run["repo_root"]),
-                                       exclude=job["payload"].get("exclude"))
+        # #809: only a pinned XL run's initial review has the Goldfish; it never resumes a reviewer. Each launches
+        # through this job and is settled by its supervise job, which enters this job again for the stage.
+        outcome = xl_review.audit_plan_job(con, run, gate, plan, brief, Path(run["repo_root"]), job,
+                                           exclude=job["payload"].get("exclude"))
     else:
         outcome = gate_engine.run_reviewer(con, run, gate, "plan_reviewer", brief, cwd=Path(run["repo_root"]),
                                            plan_review=True, exclude=job["payload"].get("exclude"),
                                            resume_from=job["payload"].get("resume_from"), job=job)
+    if gate_engine.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
     if outcome.get("fallback_queued"):
         return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     with db.transaction(con):

@@ -62,6 +62,60 @@ def test_xl_initial_plan_review_runs_three_goldfish_then_one_distinct_lead(env):
     assert len(sessions) == len(set(sessions))
 
 
+def _spy_launches(env, monkeypatch):
+    from office import dispatch
+    calls, settles, waits = [], [], {}
+    real_run, real_settle, real_launch = gates.run_reviewer, gates.settle_reviewer, dispatch.launch
+
+    def run_reviewer(con, run, gate, role, brief, **kw):
+        calls.append((gate["id"], kw.get("job")))
+        return real_run(con, run, gate, role, brief, **kw)
+
+    def settle(con, run, gate, job):
+        settles.append(gate["id"])
+        return real_settle(con, run, gate, job)
+
+    def launch(run, d, kind, ddir, **kw):
+        waits[d["id"]] = kw.get("wait")
+        return real_launch(run, d, kind, ddir, **kw)
+
+    monkeypatch.setattr(gates, "run_reviewer", run_reviewer)
+    monkeypatch.setattr(gates, "settle_reviewer", settle)
+    monkeypatch.setattr(dispatch, "launch", launch)
+    return calls, settles, waits
+
+
+def test_every_goldfish_and_the_lead_launch_through_the_job_and_settle_through_supervise_jobs(env, monkeypatch):
+    """F11: the Goldfish and the lead are job-supervised reviewers: none is waited on, each is settled (not re-run) by the
+    supervise job that waited for its dispatch, which enters the plan review job for its stage."""
+    calls, settles, waits = _spy_launches(env, monkeypatch)
+    env.trust()
+    env.script(plan_reviewer=[{"reply": APPROVED}])
+    start_inline(env, plan=PLAN_ONE, gear="XL")
+    fish, (lead,) = _goldfish(env), _plan_gates(env)
+    stage_gates = [g["id"] for g in fish] + [lead["id"]]
+    assert [g for g, _ in calls] == stage_gates and all(job is not None for _, job in calls), "each launches with the job"
+    assert settles == stage_gates, "each settles from its supervise job without launching again"
+    assert len(waits) == 4 and not any(waits.values()), "no launch waits for its reviewer"
+    sups = _rows(env, "SELECT payload_json FROM outbox WHERE kind='review_supervise' ORDER BY created_at")
+    import json
+    payloads = [json.loads(r["payload_json"]) for r in sups]
+    assert [p["gate_id"] for p in payloads] == stage_gates
+    assert {p["origin"]["kind"] for p in payloads} == {"plan_review"}
+    assert lead["verdict"] == "APPROVED" and all(g["review_status"] == contract.COMPLETED for g in fish)
+
+
+def test_a_goldfish_whose_first_route_fails_is_rerun_on_its_own_gate_and_the_stages_carry_on(env):
+    env.trust()
+    env.script(plan_reviewer=[{"exit": 1}, {"reply": APPROVED}])
+    start_inline(env, plan=PLAN_ONE, gear="XL")
+    fish, (lead,) = _goldfish(env), _plan_gates(env)
+    assert len(fish) == 3, "the failed attempt's next route runs on the same Goldfish gate"
+    assert all(g["review_status"] == contract.COMPLETED for g in fish) and lead["verdict"] == "APPROVED"
+    first = _rows(env, "SELECT COUNT(*) n FROM dispatches WHERE gate_id=?", (fish[0]["id"],))[0]["n"]
+    assert first == 2
+
+
 def test_goldfish_get_their_rubric_and_the_lead_gets_their_reports(env):
     env.trust()
     env.script(plan_reviewer=[{"reply": APPROVED}])
