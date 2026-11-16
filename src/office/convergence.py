@@ -845,14 +845,9 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
         # invalid or wrong-commit subagent report is a runtime evidence failure: no verdict, no round spent.
         from office import self_review_subagents
         fallback = job["payload"].get("review_fallback") or {}
-        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit,
-                                                     retry=fallback.get("redispatches", 0) < gates.redispatch_max(run))
-        if precheck["status"] == self_review_subagents.RETRY:
-            # A subagent that never launched is retried through the bounded fallback job, not blocked at once.
-            queued = gates.queue_review_fallback(con, run, gate, job, precheck["reason"], redispatch=True)
-            if queued:
-                return {"fallback": queued}
-            precheck = {**precheck, "status": contract.EVIDENCE_BLOCKED}
+        precheck = self_review_subagents.audit_scope(con, run, tasks, checkout, commit, job=job)
+        if precheck["status"] == self_review_subagents.QUEUED:
+            return {"fallback": precheck["fallback"]}  # a subagent is re-run through the bounded fallback job
         if precheck["status"] != contract.COMPLETED:
             outcome = {"status": precheck["status"], "verdict": None, "parsed": None, "summary": precheck["reason"]}
         else:

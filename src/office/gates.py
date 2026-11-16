@@ -853,13 +853,14 @@ def redispatch_max(run: dict) -> int:
 
 
 def _fallback_state(job: dict | None) -> dict | None:
-    """The fallback state a reviewing job carries: epoch (which chain of attempts this is), redispatches and
-    commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
+    """The fallback state a reviewing job carries: epoch (which round of attempts this is), chain_epoch (the first
+    epoch of the current chain: a redispatch starts a fresh chain, a REVIEWED_COMMIT re-run continues it), redispatches
+    and commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
     no job: it drives its own attempts."""
     if job is None:
         return None
-    return {"epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None, "correction": None,
-            **(job["payload"].get("review_fallback") or {})}
+    return {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None,
+            "correction": None, **(job["payload"].get("review_fallback") or {})}
 
 
 def review_attempts(con, gate_id: str) -> list[dict]:
@@ -932,13 +933,22 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     route. `prefer_not` lists routes a review-only re-run starts away from: they are used again only when no other
     route qualifies."""
     fb = _fallback_state(job)
-    # A job carries its chain's epoch. A caller outside the job flow starts a fresh chain on each call, so what an
-    # earlier call of the same gate failed on is preferred against but no longer excluded.
-    epoch = fb["epoch"] if fb else max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
+    # A job carries its chain's epochs. A caller outside the job flow starts a fresh chain on each call, so what an
+    # earlier call of the same gate failed on is preferred against but eligible again.
+    if fb:
+        epoch, chain_epoch = fb["epoch"], fb["chain_epoch"]
+        if epoch > 0:
+            # Past the first round the job's own `resume_from` (a plan-defect redirect) belongs to a chain that is over:
+            # only a REVIEWED_COMMIT re-run resumes a reviewer, and it carries that in the fallback state.
+            resume_from = fb["resume_from"]
+    else:
+        epoch = max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
+        chain_epoch = epoch
     while True:
         outcome, step = _review_attempt(con, run, gate, role, brief, cwd=cwd, plan_review=plan_review, visual=visual,
                                         images=images, include_dirs=include_dirs, exclude=exclude, kind=kind,
-                                        resume_from=resume_from, prefer_not=prefer_not, epoch=epoch)
+                                        resume_from=resume_from, prefer_not=prefer_not, epoch=epoch,
+                                        chain_epoch=chain_epoch)
         if step is None:
             return outcome
         if step.get("redispatch"):
@@ -961,7 +971,8 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
     if redispatch:
         if fb["redispatches"] >= redispatch_max(run):
             return None
-        nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, resume_from=None, correction=None)
+        nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, chain_epoch=fb["epoch"] + 1,
+                   resume_from=None, correction=None)
     elif commit_retry:
         nxt.update(commit_retries=fb["commit_retries"] + 1, epoch=fb["epoch"] + 1, **commit_retry)
     origin_payload = {k: v for k, v in job["payload"].items() if k != "review_fallback"}
@@ -969,7 +980,8 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
     with db.transaction(con):
         job_id = state.enqueue(con, run, "review_fallback",
-                               {"gate_id": gate["id"], "origin": {"kind": job["kind"], "payload": origin_payload},
+                               {"gate_id": job["payload"].get("gate_id") or gate["id"],
+                                "origin": {"kind": job["kind"], "payload": origin_payload},
                                 "fallback": nxt, "reason": reason[:300]},
                                dedup_key=f"review_fallback:{gate['id']}:{dispatch_id or uuid.uuid4().hex[:8]}:{how}",
                                max_attempts=2)
@@ -999,7 +1011,7 @@ def _unavailable(con, convergence: bool, gate: dict, failures: list[str], cooled
 def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool, visual: bool,
                     images: list[Path] | None, include_dirs: list[Path] | None, exclude: list[str] | None,
                     kind: str | None, resume_from: str | None, prefer_not: list[str] | None,
-                    epoch: int) -> tuple[dict | None, dict | None]:
+                    epoch: int, chain_epoch: int = 0) -> tuple[dict | None, dict | None]:
     """One reviewer attempt. Returns (outcome, step): step None is a settled result to ingest; a step with no outcome
     is a failed attempt whose next route runs; a step with `redispatch` carries the exhausted or unreadable outcome,
     which a job may re-dispatch before ingesting it."""
@@ -1017,10 +1029,10 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # A convergence run's review, and an integration review of any run, is re-dispatched once its chain is spent.
     redispatchable = (convergence or role == "integration_reviewer")
     recorded = [a for a in history if a["failure"]]
-    # Excluded: the caller's and every recorded failure of this gate, this chain's and earlier chains' (a walled
-    # harness included). A re-run goes to the next eligible route: only a route that newly qualifies is tried, never
-    # a known failure again (a manual `office review` may retry one).
-    excluded = set(exclude or []) | route_exclusions([a for a in history if a["epoch"] <= epoch])
+    # Excluded: the caller's and every failure this chain recorded (a walled harness included): the next attempt goes
+    # to a route that has not failed. A redispatch or a call outside the job flow starts a new chain once the last one
+    # is spent, so the routes it failed on are eligible again: they may have recovered.
+    excluded = set(exclude or []) | route_exclusions([a for a in history if chain_epoch <= a["epoch"] <= epoch])
     soft = set(prefer_not or [])
     failures = [a["failure"]["reason"] for a in recorded if a["failure"]["class"] != "invalid"]  # every chain's, for the summary
     # A user-pinned code reviewer (dispatch --review-as) replaces routing.
