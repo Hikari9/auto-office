@@ -960,7 +960,13 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     # A job carries its chain's epoch. A caller outside the job flow starts a fresh chain on each call, so what an
     # earlier call of the same gate failed on is preferred against but no longer excluded.
     epoch = fb["epoch"] if fb else max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
-    chain_epoch = fb["chain_epoch"] if fb else 0
+    # A caller outside the job flow starts a fresh chain on each call, so what an earlier call failed on is eligible again.
+    chain_epoch = fb["chain_epoch"] if fb else epoch
+    if fb and fb["epoch"] == fb["chain_epoch"] > 0:
+        # The first attempt of a redispatched chain is fresh: the job's own `resume_from` (a plan-defect redirect) belonged
+        # to the exhausted chain and would send this one back to that route. A later REVIEWED_COMMIT correction in this
+        # chain carries its own resume in the fallback state.
+        resume_from = None
     while True:
         if settling:
             outcome, step = settle_review(con, run, gate, settling["dispatch_id"])
@@ -1256,7 +1262,14 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # A guarded reviewer reviews a detached snapshot of the reviewed commit, so an edit another process makes
     # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is removed once the review is
     # settled.
-    snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
+    snapshot = (_review_snapshot(cwd, ddir / "snapshot") or _evidence_copy(cwd, ddir / "snapshot")) if guard else None
+    if snapshot:
+        # The reviewer reads only the snapshot: a path in its brief, its include dirs or its images that names the
+        # shared checkout would let a concurrent edit there reach the review.
+        brief = _retarget_text(brief, cwd, snapshot)
+        include_dirs = [_retarget_path(p, cwd, snapshot) for p in include_dirs] if include_dirs else include_dirs
+        images = [_retarget_path(p, cwd, snapshot) for p in images] if images else images
+        (ddir / "brief.md").write_text(brief, encoding="utf-8")
     if guard and not snapshot:
         # This harness has no read-only sandbox: the snapshot is its only isolation, so it never runs in the shared
         # checkout (an edit another process makes there would pass for the reviewer's write). The attempt fails and
@@ -1290,7 +1303,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                             external=bool(launch_form.get("external")), resume=resume)
         launched = True
     finally:
-        if snapshot and not (detach and launched):
+        if snapshot and not launched:  # once launched, its settle fingerprints the snapshot and then removes it
             _drop_review_snapshot(cwd, snapshot)
     if detach:
         return None, {"launched": dispatch_id}
@@ -1534,21 +1547,44 @@ def pointer_retried_on(attempts: list[dict], triple: str) -> bool:
 
 
 def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
-    """A detached worktree of `cwd`'s HEAD at `dest` (a plain copy when `cwd` is no checkout), or None when it cannot be made (a guarded reviewer's attempt
+    """A detached worktree of `cwd`'s HEAD at `dest`, or None when it cannot be made (a guarded reviewer's attempt
     then fails: it never runs in `cwd` itself)."""
     try:
         if dest.exists():
             _drop_review_snapshot(cwd, dest)
-        inside = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
-        if inside.returncode != 0:  # a directory of evidence, not a checkout: its isolated copy is a plain copy
-            shutil.copytree(cwd, dest)
-            return dest
         proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
                               capture_output=True, text=True)
     except OSError:
-        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
         return None
     return dest if proc.returncode == 0 else None
+
+
+def _evidence_copy(cwd: Path, dest: Path) -> Path | None:
+    """A plain copy of `cwd` at `dest` when it is a directory of evidence (a visual review's captures) and no checkout,
+    else None: a checkout whose snapshot could not be made is never copied around the failure."""
+    try:
+        if not Path(cwd).is_dir() or subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
+                                                     capture_output=True, text=True).returncode == 0:
+            return None
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(cwd, dest)
+        return dest
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
+        return None
+
+
+def _retarget_path(path: Path, cwd: Path, snapshot: Path) -> Path:
+    """`path` as it sits in `snapshot` when it is `cwd` or lies under it, else unchanged."""
+    try:
+        return snapshot / Path(path).relative_to(cwd)
+    except ValueError:
+        return Path(path)
+
+
+def _retarget_text(text: str, cwd: Path, snapshot: Path) -> str:
+    """`text` with every path of the checkout `cwd` (and of anything under it) naming `snapshot` instead."""
+    return re.sub(re.escape(str(cwd)) + r"(?![\w\-]|\.\w)", lambda _m: str(snapshot), text)
 
 
 def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
