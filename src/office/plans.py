@@ -1008,6 +1008,7 @@ def _review_state_convergence(con, run: dict) -> dict:
         "ended": bool(pr.get("ended")),
         "ended_reason": pr.get("ended_reason"),
         "status": pr.get("status") or ("pending" if review_required(run) else "not-required"),
+        "revoked": bool(pr.get("revoked")) and pr.get("status") == "unavailable",
         "lifecycle": pr.get("lifecycle") or INITIAL,
         "initial": next((h for h in history if h.get("lifecycle") == INITIAL), None),
         "history": history,
@@ -1176,6 +1177,7 @@ def _queue_convergence_review(con, run: dict, plan_version: int, *, exclude: lis
                   dedup_key=f"plan_review:{gate_id}", max_attempts=2)
     if pr.get("status") in (None, "unavailable", "attention"):
         pr["status"] = "pending"
+        pr.pop("revoked", None)
         state.update_run(con, run["id"], plan_review=pr)
     return gate_id
 
@@ -1185,8 +1187,9 @@ def _require_dispatchable_convergence(con, run: dict) -> None:
     if not rs["required"] or rs["ended"]:
         return
     if rs["status"] == "unavailable":
-        raise Refused("plan-review-unavailable", "no plan reviewer route could review the plan (runtime status, not a "
-                      "verdict)", scope="plan", next_step='office resume retries the reviewer chain; or the user may '
+        what = ("the plan review was REVOKED by the orchestrator (not a reviewer failure)" if rs["revoked"] else
+                "no plan reviewer route could review the plan (runtime status, not a verdict)")
+        raise Refused("plan-review-unavailable", what, scope="plan", next_step='office resume retries the reviewer chain; or the user may '
                       'waive: office approve waive plan-review --quote "<words>"')
     if rs["status"] == "attention":
         raise Refused("plan-review-attention", "the plan reviewer answered but left no readable reply file",
@@ -1268,9 +1271,10 @@ def _ingest_convergence(con, run: dict, gate_id: str, outcome: dict) -> None:
     if status != contract.COMPLETED:
         # Runtime status, not a verdict: no round is spent.
         pr["status"] = "attention" if status == contract.INVALID_RESULT else "unavailable"
+        pr["revoked"] = status == contract.REVOKED
         state.update_run(con, run["id"], plan_review=pr)
         kind = "plan.attention" if status == contract.INVALID_RESULT else "plan.unavailable"
-        state.emit(con, run, kind, f"PLAN REVIEW {status} {v} (runtime status, not a verdict; no round spent): "
+        state.emit(con, run, kind, f"PLAN REVIEW {status} {v} ({'revoked by the orchestrator, not a reviewer failure' if status == contract.REVOKED else 'runtime status, not a verdict'}; no round spent): "
                    f"{(outcome.get('summary') or 'no qualifying reviewer answered')[:240]}")
         return
     from office import gates as gate_engine
