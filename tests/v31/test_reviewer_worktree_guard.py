@@ -65,3 +65,32 @@ def test_reviewer_write_in_the_snapshot_still_degrades_it(env):
     assert _events(env, "review.worktree_changed")
     for cwd in _reviewer_cwds(env):
         assert not cwd.exists(), "snapshots are removed after a failed review too"
+
+
+def test_snapshot_paths_rewrite_the_checkout_and_keep_outside_dirs(tmp_path):
+    checkout, snap, evidence = tmp_path / "wt", tmp_path / "snap", tmp_path / "evidence"
+    brief = f"Review {checkout}/src and {checkout}. Not {checkout}2/x. Evidence {evidence}."
+    text, dirs = gates._snapshot_paths(brief, [checkout, checkout / "src", evidence], checkout, snap)
+    assert text == f"Review {snap}/src and {snap}. Not {checkout}2/x. Evidence {evidence}."
+    assert dirs == [snap, snap / "src", evidence]
+    assert gates._snapshot_paths("x", None, checkout, snap) == ("x", None)
+
+
+def test_guarded_review_with_no_job_keeps_the_snapshot_until_settled(tmp_path, monkeypatch):
+    """The no-job reviewer path checks the guard before the snapshot goes, and removes it after."""
+    repo = _git_repo(tmp_path)
+    snap = gates._review_snapshot(repo, tmp_path / "snap")
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", snap)
+    before = guard(None)
+    (repo / "a.txt").write_text("concurrent edit\n")  # the shared worktree moves during the review
+    assert guard(before) is None  # checked while the snapshot still exists: not degraded
+    gates._drop_review_snapshot(repo, snap)
+    assert not snap.exists()
+
+
+@pytest.mark.approved
+def test_reviewer_brief_names_the_snapshot_not_the_shared_checkout(env):
+    _pi_review(env, [PASS])
+    cwd = _reviewer_cwds(env)[0]
+    brief = (cwd.parent / "brief.md").read_text()
+    assert f"a read-only checkout is at {cwd}" in brief, brief
