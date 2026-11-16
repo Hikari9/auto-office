@@ -106,7 +106,8 @@ Runtime or evidence status is separate from both. Only `COMPLETED` carries a ver
 | Status | Meaning | Spends a round |
 |---|---|---|
 | `COMPLETED` | The reviewer answered with a readable verdict. | Yes, if it is a substantive round (section 8). |
-| `UNAVAILABLE` | No reviewer route could review (tooling, quota, provider failure) after walking the whole fallback chain. | No |
+| `UNAVAILABLE` | No reviewer route could review (tooling, quota, provider failure) after walking the whole fallback chain and the one automatic re-dispatch (section 8). | No |
+| `REVOKED` | The orchestrator stopped the reviewer (`office revoke`). Not a reviewer failure: no route is excluded and no fallback runs. | No |
 | `EVIDENCE_BLOCKED` | The evidence the review needs could not be produced (for example a visual capture). | No |
 | `INVALID_RESULT` | The reviewer answered but left no readable reply. | No |
 
@@ -350,11 +351,28 @@ Plan review).
 These never spend a round:
 
 - a reviewer or provider failure: Office walks the whole configured fallback chain automatically;
+- a revoked reviewer (`REVOKED`);
 - a malformed or missing reply (`INVALID_RESULT`);
 - a capture retry or evidence recovery (`EVIDENCE_BLOCKED`);
 - `office resume`, which retries unavailable, attention and evidence-blocked reviews on the same
   composed revision.
 
+Reviewer dispatch (what runs between a gate opening and its verdict):
+- Automatic fallback. A reviewer attempt that does not settle the review (launch failure, quota, auth or silent wall,
+  no reply) queues one `review_fallback` job that re-runs the same review on the next eligible route. Which routes
+  failed is read from the gate's recorded dispatches. When every eligible route has failed, a convergence review (and
+  an integration review of any run) is re-dispatched on a fresh chain, once by default (`gates.review_redispatch_max`),
+  before `UNAVAILABLE` is recorded. A pinned reviewer never substitutes another route.
+- One pin. Every reviewer role (plan, code, visual, integration) reads its pin through the same helper, so
+  `--review-as`, `office review --as` and rerun pins behave alike.
+- Async launch. The review job launches the reviewer with its packet, lease and session id and does not wait; a
+  `review_supervise` job waits for the dispatch to end and settles it. A launched reviewer is released when its gate
+  closes, goes stale or is revoked, and a revoked reviewer's late submit is refused.
+- One completion transport. `office review submit` is how a reviewer with a shell hands back its review (see the
+  reviewer skill); the reply file and log are recorded fallbacks. Reviewers run on a detached snapshot of the
+  reviewed commit and the worktree guard covers only their own writes.
+- `scripts/review_no_verdict_rate.py --db runs.db [--since D] [--until D]` reports, read-only, the done review gates in
+  a window and the share with no verdict, split by revoked, launch failure, invalid, evidence blocked and other.
 ## 9. The round cap and operator decisions
 
 This section is about lanes and shared scopes. Plan review has no operator decision: at its cap the

@@ -371,7 +371,7 @@ def test_a_revoked_reviewer_is_not_a_route_failure_and_takes_no_fallback(env, mo
            convergence_reviewer=[{"reply": APPROVED}] * 3)
     env.office("dispatch", "T1", check=0)
     gate = _gates(env, "convergence_review")[0]
-    assert gate["review_status"] == "UNAVAILABLE" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
+    assert gate["review_status"] == "REVOKED" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
     assert len(_q(env, f"SELECT id FROM dispatches WHERE gate_id='{gate['id']}'")) == 1
     assert not _q(env, "SELECT 1 FROM events WHERE kind='route.fallback'")
 

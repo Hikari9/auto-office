@@ -956,17 +956,20 @@ def test_unrunnable_check_is_status_not_a_verdict(env):
     assert task_row(env)["status"] == "blocked" and not _gates(env, "convergence_review")
 
 
-def test_unreadable_reply_is_invalid_result_and_spends_no_round(env):
-    """6, 11: an unparseable reply is INVALID_RESULT runtime status; the retry is round 1 again."""
+def test_unreadable_reply_is_redispatched_and_spends_no_round(env):
+    """6, 11: an unparseable reply is no verdict. Office re-dispatches the review itself, with no
+    orchestrator command (#1191 R6), and the verdict that follows is still round 1."""
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": "looks fine to me"}, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
-    first = _gates(env, "convergence_review")[0]
-    assert first["review_status"] == "INVALID_RESULT" and first["verdict"] is None
-    assert _scope(env, "L-T1")["status"] == "attention"
-    env.office("resume", check=0)
     gates = _gates(env, "convergence_review")
-    assert gates[-1]["verdict"] == "APPROVED" and gates[-1]["round"] == 1
+    assert [g["round"] for g in gates] == [1] * len(gates), "an attempt with no verdict spent no round"
+    assert gates[-1]["verdict"] == "APPROVED" and gates[-1]["review_status"] == "COMPLETED"
+    assert _scope(env, "L-T1")["status"] == "approved"
+    (queued,) = _events(env, "review.fallback_queued")  # the unreadable reply, recorded, then one redispatch
+    assert "no VERDICT line" in queued["summary"], queued["summary"]
+    launched = [e["dispatch_id"] or e["summary"].split()[4] for e in _events(env, "review.launched")]
+    assert len(launched) == 2 and launched[0] != launched[1], "the redispatch is a new reviewer dispatch"
 
 
 def test_recheck_routes_repairs_even_when_the_visual_evidence_is_blocked(env):

@@ -389,7 +389,8 @@ def test_review_plan_as_re_pins_and_re_runs_only_the_plan_review_without_spendin
     pr = _run(env)["plan_review"]
     assert pr["review_override"]["as"] == REPIN and pr["review_override"]["by"] == "user" and not pr["ended"]
     payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='plan_review' ORDER BY created_at DESC")[0]["payload_json"])
-    assert payload["gate_id"] == gate["id"] and payload["review_override"]["as"] == REPIN
+    # One pin mechanism (#1191 R8): the job carries only its gate; the pin is read from the plan-review record.
+    assert payload["gate_id"] == gate["id"] and "review_override" not in payload
     assert not _q(env, "SELECT 1 FROM authorizations WHERE target='plan:review'"), "re-pinning is not another review"
     (notice,) = _route_notices(env)
     assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "user"

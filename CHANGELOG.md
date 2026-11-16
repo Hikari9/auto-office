@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.0
+
+Reviewer dispatch rewrite (#1191). A reviewer that fails to settle is replaced on the next route by one `review_fallback` job and a whole failed chain is re-dispatched once; a revoked reviewer ends `REVOKED`, not as a failure; every reviewer role reads one pin helper; reviewers launch async with a packet, lease and session id and run on a detached snapshot; `office review submit` is the one completion transport. `scripts/review_no_verdict_rate.py` reports the no-verdict share of done review gates from `runs.db`.
+
 ## 3.27.1
 
 Quoted route overrides. `office route override` also accepts `--rico-quote "<verbatim words>"` with `--quoted-at "YYYY-MM-DD HH:MM"` (Manila): a non-worker caller relaying the user's real words issues a receipt without a terminal or the 'authorize' prompt. Workers (`OFFICE_DISPATCH_ID`) are still refused, the quote must be non-trivial, not future and within 24h, and every other check is unchanged. Receipts record issuer kind (terminal or quoted), quote, quote time and `HERDR_PANE_ID`, all in the HMAC body (older receipts keep their original body), and `--list` shows them.
