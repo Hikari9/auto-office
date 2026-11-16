@@ -72,6 +72,24 @@ def test_each_fallback_is_recorded_with_its_source(tmp_path, monkeypatch, setup,
     assert calls == [source]
 
 
+@pytest.mark.parametrize("setup,source", [("file", "reply_file"), ("last", "last_message"), ("log", "stdout_log")])
+def test_whitespace_only_fallback_is_still_recorded(tmp_path, monkeypatch, setup, source):
+    out = tmp_path / "reply.txt"
+    target = {"file": out, "last": tmp_path / "last-message.txt", "log": tmp_path / "output.log"}[setup]
+    target.write_text("  \n\t\n")
+    calls = []
+    monkeypatch.setattr(review_submit, "record_fallback", lambda d, s: calls.append(s))
+    assert gates._reply_text({"launcher": "process", "id": "D1"}, tmp_path, out) == "  \n\t\n"
+    assert calls == [source]
+
+
+def test_empty_stdout_log_records_nothing(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(review_submit, "record_fallback", lambda d, s: calls.append(s))
+    assert gates._reply_text({"launcher": "process", "id": "D1"}, tmp_path, tmp_path / "reply.txt") == ""
+    assert calls == []
+
+
 def test_no_reply_records_nothing(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(review_submit, "record_fallback", lambda d, s: calls.append(s))

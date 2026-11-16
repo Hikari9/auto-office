@@ -1312,7 +1312,7 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
             source, text = "last_message", last_message.read_text(encoding="utf-8", errors="replace")
         else:
             source, text = "stdout_log", _log_text(d, ddir)
-    if text.strip():
+    if text:
         review_submit.record_fallback(d, source)
     return text
 def log_path(d: dict, ddir: Path) -> Path:
