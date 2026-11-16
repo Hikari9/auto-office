@@ -809,6 +809,14 @@ def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | N
     return (routing.candidate_id(cand), until) if until else None
 
 
+def _reserve_blocked_pin(run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, why) when the user-pinned reviewer's route would cross the run's protected quota reserve, else None."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    why = candidates.reserve_block(cand, state.pinned_config(run), role)
+    return (routing.candidate_id(cand), why) if why else None
+
+
 def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
                      dispatch_id: str | None = None, producer_route: str | None = None,
                      env_failures: int | None = None) -> dict:
@@ -874,6 +882,10 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
     if cooled_pin:
         pinned = None
+    # The protected quota reserve binds a pinned route as it binds a routed one, for every reviewer role.
+    reserved_pin = _reserve_blocked_pin(run, pinned, role) if pinned else None
+    if reserved_pin:
+        pinned = None
     profile_kind = kind or ("vision" if visual else "reviewer")
     resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
                           else (None, None))
@@ -887,6 +899,8 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
                                            if started_away and not pinned else None)
     if cooled_pin:
         last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
+    elif reserved_pin:
+        last_failed = (reserved_pin[0], f"the pinned route {reserved_pin[0]}: {reserved_pin[1]}")
     retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
     retried: set[str] = set()
     for attempt in range(limit + 1):
