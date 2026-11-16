@@ -831,6 +831,14 @@ def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | N
     return (routing.candidate_id(cand), until) if until else None
 
 
+def _reserve_blocked_pin(run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, why) when the user-pinned reviewer's route would cross the run's protected quota reserve, else None."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    why = candidates.reserve_block(cand, state.pinned_config(run), role)
+    return (routing.candidate_id(cand), why) if why else None
+
+
 def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
                      dispatch_id: str | None = None, producer_route: str | None = None,
                      env_failures: int | None = None) -> dict:
@@ -871,13 +879,14 @@ def redispatch_max(run: dict) -> int:
 
 
 def _fallback_state(job: dict | None) -> dict | None:
-    """The fallback state a reviewing job carries: epoch (which attempt round this is), chain_epoch (the epoch the
-    current chain of routes started at: only a redispatch starts a new chain), redispatches and commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
+    """The fallback state a reviewing job carries: epoch (which round of attempts this is), chain_epoch (the first
+    epoch of the current chain: a redispatch starts a fresh chain, a REVIEWED_COMMIT re-run continues it), redispatches
+    and commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
     no job: it drives its own attempts."""
     if job is None:
         return None
-    return {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None, "correction": None,
-            **(job["payload"].get("review_fallback") or {})}
+    return {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None,
+            "correction": None, **(job["payload"].get("review_fallback") or {})}
 
 
 def review_attempts(con, gate_id: str) -> list[dict]:
@@ -957,10 +966,17 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     route qualifies."""
     fb = _fallback_state(job)
     settling = ((job or {}).get("payload") or {}).get(SETTLE_KEY)
-    # A job carries its chain's epoch. A caller outside the job flow starts a fresh chain on each call, so what an
-    # earlier call of the same gate failed on is preferred against but no longer excluded.
-    epoch = fb["epoch"] if fb else max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
-    chain_epoch = fb["chain_epoch"] if fb else 0
+    # A job carries its chain's epochs. A caller outside the job flow starts a fresh chain on each call, so what an
+    # earlier call of the same gate failed on is preferred against but eligible again.
+    if fb:
+        epoch, chain_epoch = fb["epoch"], fb["chain_epoch"]
+        if epoch > 0:
+            # Past the first round the job's own `resume_from` (a plan-defect redirect) belongs to a chain that is over:
+            # only a REVIEWED_COMMIT re-run resumes a reviewer, and it carries that in the fallback state.
+            resume_from = fb["resume_from"]
+    else:
+        epoch = max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
+        chain_epoch = epoch
     while True:
         if settling:
             outcome, step = settle_review(con, run, gate, settling["dispatch_id"])
@@ -1020,7 +1036,8 @@ def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *,
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
     with db.transaction(con):
         job_id = state.enqueue(con, run, "review_fallback",
-                               {"gate_id": gate["id"], "origin": {"kind": job["kind"], "payload": origin_payload},
+                               {"gate_id": job["payload"].get("gate_id") or gate["id"],
+                                "origin": {"kind": job["kind"], "payload": origin_payload},
                                 "fallback": nxt, "reason": reason[:300]},
                                dedup_key=f"review_fallback:{gate['id']}:{dispatch_id or uuid.uuid4().hex[:8]}:{how}",
                                max_attempts=2)
@@ -1151,6 +1168,10 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
     if cooled_pin:
         pinned = None
+    # The protected quota reserve binds a pinned route as it binds a routed one, for every reviewer role.
+    reserved_pin = _reserve_blocked_pin(run, pinned, role) if pinned else None
+    if reserved_pin:
+        pinned = None
     profile_kind = kind or ("vision" if visual else "reviewer")
     if first and resume_from:
         resume, same_route = _reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"])
@@ -1166,6 +1187,8 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                                            if started_away and not pinned else None)
     if cooled_pin:
         last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
+    elif reserved_pin:
+        last_failed = (reserved_pin[0], f"the pinned route {reserved_pin[0]}: {reserved_pin[1]}")
     if recorded:
         last_failed = (recorded[-1]["triple"], recorded[-1]["failure"]["reason"])
     # A route whose launch pointer never landed (#790) runs once more, in a fresh session, before any fallback.
@@ -1240,7 +1263,6 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                     "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
     ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text(brief, encoding="utf-8")
     output = ddir / "reply.txt"
     from office import dispatch as dispatch_mod
     d = state.get_dispatch(con, dispatch_id)
@@ -1256,7 +1278,14 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # A guarded reviewer reviews a detached snapshot of the reviewed commit, so an edit another process makes
     # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is removed once the review is
     # settled.
-    snapshot = _review_snapshot(cwd, ddir / "snapshot") if guard else None
+    snapshot = (_review_snapshot(cwd, ddir / "snapshot") or _evidence_copy(cwd, ddir / "snapshot")) if guard else None
+    if snapshot:
+        # The reviewer reads only the snapshot: a path in its brief, its include dirs or its images that names the
+        # shared checkout would let a concurrent edit there reach the review.
+        brief = _retarget_text(brief, cwd, snapshot)
+        include_dirs = [_retarget_path(p, cwd, snapshot) for p in include_dirs] if include_dirs else include_dirs
+        images = [_retarget_path(p, cwd, snapshot) for p in images] if images else images
+    (ddir / "brief.md").write_text(brief, encoding="utf-8")  # what the reviewer is shown, after any retargeting
     if guard and not snapshot:
         # This harness has no read-only sandbox: the snapshot is its only isolation, so it never runs in the shared
         # checkout (an edit another process makes there would pass for the reviewer's write). The attempt fails and
@@ -1290,7 +1319,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
                             external=bool(launch_form.get("external")), resume=resume)
         launched = True
     finally:
-        if snapshot and not (detach and launched):
+        if snapshot and not launched:  # once launched, its settle fingerprints the snapshot and then removes it
             _drop_review_snapshot(cwd, snapshot)
     if detach:
         return None, {"launched": dispatch_id}
@@ -1534,21 +1563,51 @@ def pointer_retried_on(attempts: list[dict], triple: str) -> bool:
 
 
 def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
-    """A detached worktree of `cwd`'s HEAD at `dest` (a plain copy when `cwd` is no checkout), or None when it cannot be made (a guarded reviewer's attempt
+    """A detached worktree of `cwd`'s HEAD at `dest`, or None when it cannot be made (a guarded reviewer's attempt
     then fails: it never runs in `cwd` itself)."""
     try:
         if dest.exists():
             _drop_review_snapshot(cwd, dest)
-        inside = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
-        if inside.returncode != 0:  # a directory of evidence, not a checkout: its isolated copy is a plain copy
-            shutil.copytree(cwd, dest)
-            return dest
         proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
                               capture_output=True, text=True)
     except OSError:
-        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
         return None
     return dest if proc.returncode == 0 else None
+
+
+def _evidence_copy(cwd: Path, dest: Path) -> Path | None:
+    """A plain copy of `cwd` at `dest` when it is a directory of evidence (a visual review's captures) and no checkout,
+    else None: a checkout whose snapshot could not be made is never copied around the failure."""
+    try:
+        if not Path(cwd).is_dir() or subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
+                                                     capture_output=True, text=True).returncode == 0:
+            return None
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(cwd, dest)
+        return dest
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
+        return None
+
+
+def _retarget_path(path: Path, cwd: Path, snapshot: Path) -> Path:
+    """`path` as it sits in `snapshot` when it is `cwd` or lies under it, else unchanged."""
+    try:
+        return snapshot / Path(path).relative_to(cwd)
+    except ValueError:
+        return Path(path)
+
+
+def _retarget_text(text: str, cwd: Path, snapshot: Path) -> str:
+    """`text` with every path of the checkout `cwd` (and of anything under it) naming `snapshot` instead."""
+    return re.sub(re.escape(str(cwd)) + r"(?![\w\-]|\.\w)", lambda _m: str(snapshot), text)
+
+
+def _snapshot_paths(brief: str, include_dirs: list[Path] | None, cwd: Path, snapshot: Path) -> tuple[str, list[Path] | None]:
+    """A guarded review's brief and include dirs pointed at its snapshot: paths of the shared checkout `cwd` move to
+    `snapshot`, so the reviewer cannot read the concurrently mutable checkout. Directories outside it are kept."""
+    return (_retarget_text(brief, cwd, snapshot),
+            None if include_dirs is None else [_retarget_path(i, cwd, snapshot) for i in include_dirs])
 
 
 def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
@@ -1699,7 +1758,7 @@ def _reply_text(d: dict, ddir: Path, output: Path) -> str:
             source, text = "last_message", last_message.read_text(encoding="utf-8", errors="replace")
         else:
             source, text = "stdout_log", _log_text(d, ddir)
-    if text.strip():
+    if text:
         review_submit.record_fallback(d, source)
     return text
 def log_path(d: dict, ddir: Path) -> Path:
@@ -2937,6 +2996,10 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
         rows = [r for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='convergence_review' "
                                        "AND status IN ('queued','claimed')", (run["id"],)).fetchall()
                 if (json.loads(r["payload_json"] or "{}") or {}).get("scope") in lanes]
+        # The supervise job of its launched reviewer and a queued re-run name the gate.
+        rows += con.execute("SELECT * FROM outbox WHERE run_id=? AND kind IN ('review_supervise','review_fallback') "
+                            "AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                            (run["id"], f'%"{gate["id"]}"%')).fetchall()
     else:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()

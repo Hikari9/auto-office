@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from test_convergence_contract import APPROVED, _gates, _q, _start
-from test_issue809_self_review_subagents import _s_run
+from test_issue809_self_review_subagents import _s_run, _subagent_gates
 from test_review_reroute import EXECUTOR
 
 from office import contract, dispatch, gates, jobs, paths, review_parse, review_submit, self_review_subagents as srs, state
@@ -78,20 +78,137 @@ def test_a_lane_review_calls_run_reviewer_once_and_the_settling_job_does_not_reb
     assert _lane(env)["verdict"] == "APPROVED" and calls == ["code_reviewer"]
 
 
-def test_a_reviewer_run_without_a_job_is_still_waited_on(env, monkeypatch):
+def test_a_reviewer_run_without_a_job_is_still_waited_on(scratch, monkeypatch):
     """A caller outside the job flow (a manual review, an injected reviewer) gets its outcome from the call."""
-    waits = []
+    con, run, tmp = scratch
+    seen = _chain_spy(monkeypatch)
+    gates.run_reviewer(con, run, {"id": "G1"}, "code_reviewer", "b", cwd=tmp)
+    gates.run_reviewer(con, run, {"id": "G2"}, "code_reviewer", "b", cwd=tmp, job={"kind": "convergence_review", "payload": {}})
+    assert [kw["supervise"] for kw in seen] == [False, True]
+def test_the_funded_subagent_launches_through_the_convergence_job_and_is_not_waited_on(env, monkeypatch):
+    """F11: a self-review subagent is a job-supervised reviewer like the lane's: launched, not waited on, settled by its own
+    supervise job (which enters the convergence job for it), then composed by one more convergence job."""
+    waits = {}
     real = dispatch.launch
-
     def spy(run, d, kind, ddir, **kw):
-        waits.append(kw.get("wait"))
+        waits[d["id"]] = kw.get("wait")
         return real(run, d, kind, ddir, **kw)
-
     monkeypatch.setattr(dispatch, "launch", spy)
-    _s_run(env)  # the funded subagent runs through audit_scope: no job, so it is waited on
-    assert True in waits and False in waits
-
-
+    _s_run(env)
+    (sub,) = _subagent_gates(env)
+    assert sub["review_status"] == "COMPLETED" and waits[sub["reviewer_dispatch_id"]] is False
+    (sup,) = [j for j in _supervise_jobs(env) if j["payload"]["gate_id"] == sub["id"]]
+    assert sup["payload"]["origin"]["kind"] == "convergence_review"
+    assert sup["payload"]["origin"]["payload"]["subagent"]["key"] == sub["input_key"]
+    jobs_ = [json.loads(r["result_json"] or "{}") for r in _q(env, "SELECT result_json FROM outbox WHERE kind='convergence_review'")]
+    assert {"subagents": "launched"} in jobs_, "the launching job did not wait for the subagent"
+    assert _lane(env)["verdict"] == "APPROVED"
+def test_independent_subagents_launch_in_one_job_and_one_compose_job_follows_the_last_settle(env, monkeypatch):
+    waits = {}
+    real = dispatch.launch
+    def spy(run, d, kind, ddir, **kw):
+        waits[d["id"]] = kw.get("wait")
+        return real(run, d, kind, ddir, **kw)
+    monkeypatch.setattr(dispatch, "launch", spy)
+    monkeypatch.setattr(srs, "rubrics", lambda run, task: ("edge-cases", "test-strength"))
+    _s_run(env, gear="L")
+    subs = _subagent_gates(env)
+    assert len(subs) == 2 and {g["review_status"] for g in subs} == {"COMPLETED"}
+    assert [waits[g["reviewer_dispatch_id"]] for g in subs] == [False, False], "neither holds the launching job"
+    assert len([j for j in _supervise_jobs(env) if j["payload"]["gate_id"] in {g["id"] for g in subs}]) == 2
+    launching = [r for r in _q(env, "SELECT payload_json, result_json FROM outbox WHERE kind='convergence_review'")
+                 if json.loads(r["result_json"] or "{}") == {"subagents": "launched"}]
+    assert len(launching) == 1, "one convergence job launched both"
+    composes = _q(env, "SELECT * FROM outbox WHERE dedup_key LIKE 'self_review_compose:%'")
+    assert len(composes) == 1 and json.loads(composes[0]["payload_json"])[srs.COLLECT_KEY]["gates"] == [g["id"] for g in subs]
+    con = env.con()
+    try:
+        run = state.get_run(con, subs[0]["run_id"])
+        sa = next(j for j in _supervise_jobs(env) if j["payload"]["gate_id"] == subs[0]["id"])["payload"]["origin"]["payload"]["subagent"]
+        srs._queue_compose(con, run, sa)
+        assert _q(env, "SELECT COUNT(*) n FROM outbox WHERE dedup_key LIKE 'self_review_compose:%'")[0]["n"] == 1, "deduped"
+    finally:
+        con.close()
+    brief = (paths.run_dir(subs[0]["run_id"]) / "dispatches" / _lane(env)["reviewer_dispatch_id"] / "brief.md").read_text()
+    assert "edge-cases" in brief and "test-strength" in brief and brief.index("edge-cases") < brief.index("test-strength")
+def test_a_subagent_that_never_launched_is_retried_through_the_job_flow_and_launches(env, monkeypatch):
+    """F9 end to end: the first call finds no route, the bounded retry reopens the gate on a fresh chain, launches the
+    subagent under supervise and its settle composes (the compose job carries nothing of the first chain)."""
+    real = gates.run_reviewer
+    calls = []
+    def flaky(con, run, gate, role, brief, **kw):
+        if "runtime self-review subagent" in brief:
+            calls.append((gate["id"], kw.get("job") is not None))
+            if len(calls) == 1:
+                return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "summary": "no route"}
+        return real(con, run, gate, role, brief, **kw)
+    monkeypatch.setattr(gates, "run_reviewer", flaky)
+    _s_run(env)
+    (sub,) = _subagent_gates(env)
+    assert [g for g, _ in calls] == [sub["id"]] * 2 and all(job for _, job in calls), "the same gate, both through the job"
+    assert sub["review_status"] == "COMPLETED"
+    assert _lane(env)["verdict"] == "APPROVED"
+def test_a_subagent_whose_chain_is_exhausted_after_it_launched_is_launched_again_on_a_fresh_chain(env, monkeypatch):
+    """The compose job's payload names the gates of the chain that failed: the bounded retry must not compose from them
+    again but launch the subagent anew."""
+    real = gates.settle_reviewer
+    settled = []
+    def settle(con, run, gate, job):
+        if gate["kind"] != "self_review_subagent":
+            return real(con, run, gate, job)
+        settled.append(gate["id"])
+        if len(settled) == 1:  # every route of the first chain failed: no dispatch to stand behind
+            return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "summary": "every eligible route failed"}
+        return real(con, run, gate, job)
+    monkeypatch.setattr(gates, "settle_reviewer", settle)
+    _s_run(env)
+    (sub,) = _subagent_gates(env)
+    assert len(settled) == 2 and set(settled) == {sub["id"]}, "the same gate was launched and settled twice"
+    assert sub["review_status"] == "COMPLETED" and _lane(env)["verdict"] == "APPROVED"
+    assert len(_q(env, "SELECT id FROM dispatches WHERE gate_id=? AND kind='reviewer'", (sub["id"],))) == 2
+def test_revoking_a_lane_review_ends_its_launched_subagents_and_frees_what_they_held(env, monkeypatch):
+    from office import convergence
+    real = dispatch.launch
+    monkeypatch.setattr(dispatch, "launch", lambda run, d, kind, ddir, **kw: real(run, d, kind, ddir, **kw) if kind == "worker"
+                        else {"launcher": "parked"})
+    monkeypatch.setattr(dispatch, "_wait_terminal", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parked")))
+    _start(env, gear="S", executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=None)
+    (sub,) = _subagent_gates(env)
+    lane = _lane(env)
+    (d,) = _q(env, "SELECT * FROM dispatches WHERE gate_id=? AND kind='reviewer'", (sub["id"],))
+    checkout = paths.run_dir(lane["run_id"]) / "checkouts" / f"converge-{lane['id']}"
+    assert sub["status"] == "running" and checkout.is_dir()
+    (job,) = [j for j in _supervise_jobs(env) if j["payload"]["gate_id"] == sub["id"]]
+    con = env.con()
+    try:
+        convergence.revoke_lane_gate(con, state.get_run(con, d["run_id"]), "L-T1:convergence", "test")
+    finally:
+        con.close()
+    assert _q(env, "SELECT status FROM outbox WHERE id=?", (job["id"],))[0]["status"] == "failed"
+    assert _q(env, "SELECT status, review_status FROM gates WHERE id=?", (sub["id"],))[0]["status"] == "done"
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id=?", (d["id"],))[0]["ended_at"], "the subagent's reviewer ended"
+    assert _q(env, "SELECT revoked_at FROM leases WHERE id=?", (d["lease_id"],))[0]["revoked_at"]
+    assert not checkout.exists()
+def test_a_subagent_retry_starts_on_a_fresh_chain_of_routes(scratch, monkeypatch):
+    """F9 through the job flow: a gate whose earlier attempt failed is retried on a chain the failed routes are eligible in."""
+    con, run, tmp = scratch
+    monkeypatch.setattr(gates, "review_attempts", lambda con_, gid: [])
+    assert srs._fresh_chain(con, "G1") == {}
+    monkeypatch.setattr(gates, "review_attempts", lambda con_, gid: [{"epoch": 0}, {"epoch": 1}])
+    assert srs._fresh_chain(con, "G1") == {"review_fallback": {"epoch": 2, "chain_epoch": 2}}
+def test_a_subagent_job_whose_lane_review_closed_blocks_its_gate_and_frees_the_checkout(scratch):
+    con, run, tmp = scratch
+    _gate_row(con, "Glane", status="stale")
+    _gate_row(con, "Gsub", subject="T1", kind="self_review_subagent")
+    checkout = paths.run_dir("R1") / "checkouts" / "converge-Glane"
+    checkout.mkdir(parents=True)
+    job = {"kind": "convergence_review", "payload": {"gate_id": "Gsub", "subagent": {
+        "parent": {"payload": {"gate_id": "Glane"}}, "key": "R1:c:combined:v", "commit": "c", "retry": False}}}
+    assert srs.job_subagent_review(con, run, job) == {"skipped": "stale"}
+    assert not checkout.exists()
+    row = con.execute("SELECT status, review_status FROM gates WHERE id='Gsub'").fetchone()
+    assert (row["status"], row["review_status"]) == ("done", "EVIDENCE_BLOCKED")
 def test_the_review_checkout_outlives_the_launching_job(env, monkeypatch):
     """The reviewer reads the checkout the brief names until its supervise job settles it."""
     seen = []
@@ -515,7 +632,8 @@ def test_an_integration_review_launches_once_then_settles_and_accepts_without_a_
                             {"supervise_queued": "Jsup", "fallback_queued": "Jsup", "dispatch_id": "Dint"})[1])
         monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"status": contract.COMPLETED, "verdict": "PASS",
                                                                        "summary": "ok", "parsed": None})
-        monkeypatch.setattr(integration, "_accept_composed", lambda con_, run_, c: (accepted.append(c), {"accepted": True})[1])
+        monkeypatch.setattr(integration, "_accept_composed", lambda con_, run_, c, review=None: (
+        accepted.append(c), integration._finish_review_gate(con_, *review), {"accepted": True})[2])
         monkeypatch.setattr(integration.paths, "git", lambda *a, **k: "")
         first = integration._review_composed(con, run, {"id": "J1", "kind": "integration_review",
                                                         "payload": {"gate_id": "Ginteg9"}}, "Ginteg9", ctx)
@@ -635,7 +753,8 @@ def test_an_integration_review_launches_once_and_its_settling_run_accepts_withou
                         {"supervise_queued": "Jsup", "fallback_queued": "Jsup", "dispatch_id": "Dint"})[1])
     monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"status": contract.COMPLETED, "verdict": "PASS",
                                                                    "summary": "ok", "parsed": None})
-    monkeypatch.setattr(integration, "_accept_composed", lambda con_, run_, c: (accepted.append(c), {"accepted": True})[1])
+    monkeypatch.setattr(integration, "_accept_composed", lambda con_, run_, c, review=None: (
+        accepted.append(c), integration._finish_review_gate(con_, *review), {"accepted": True})[2])
     monkeypatch.setattr(integration, "_set_integration", lambda *a, **k: None)
     monkeypatch.setattr(integration.briefs, "code_review_brief", lambda *a, **k: "brief")
     monkeypatch.setattr(integration.paths, "git", lambda *a, **k: "")
@@ -912,7 +1031,8 @@ def test_a_directory_that_is_no_checkout_is_isolated_by_a_plain_copy(tmp_path):
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     (evidence / "shot.png").write_bytes(b"png")
-    snap = gates._review_snapshot(evidence, tmp_path / "dispatch" / "snapshot")
+    assert gates._review_snapshot(evidence, tmp_path / "dispatch" / "snapshot") is None, "no checkout, no worktree"
+    snap = gates._evidence_copy(evidence, tmp_path / "dispatch" / "snapshot")
     assert snap is not None and (snap / "shot.png").read_bytes() == b"png" and snap != evidence
     (evidence / "late.png").write_bytes(b"x")
     assert not (snap / "late.png").exists(), "an edit to the source after the copy never reaches the snapshot"
@@ -923,6 +1043,8 @@ def test_a_checkout_whose_snapshot_git_refuses_has_no_snapshot(tmp_path, monkeyp
     repo.mkdir()
     subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)  # a work tree with no commit: worktree add of HEAD fails
     assert gates._review_snapshot(repo, tmp_path / "dispatch" / "snapshot") is None
+    assert gates._evidence_copy(repo, tmp_path / "dispatch" / "copy") is None, "a checkout is never copied around the failure"
+    assert not (tmp_path / "dispatch" / "copy").exists()
 
 
 # ------------------------------------------------------------------ the integration reviewer's pin (F-4)
@@ -955,3 +1077,238 @@ def test_storing_an_integration_pin_keeps_the_rest_of_the_integration_record(scr
     gates.set_integration_pin(con, run, gates.review_pin("claude/claude-opus-5-5@high"))
     assert stored["landing"]["integration"]["status"] == "verifying" and stored["landing"]["integration"]["pr"] == 7
     assert stored["landing"]["other"] == 1
+
+
+# ------------------------------------------------------------------ round 2: chains, snapshots and acceptance
+
+def _chain_spy(monkeypatch):
+    seen = []
+    monkeypatch.setattr(gates, "_review_attempt", lambda con, run, gate, role, brief, **kw: (
+        seen.append(kw), ({"verdict": "PASS", "summary": "ok"}, None))[1])
+    return seen
+
+
+def _fb(epoch, chain_epoch, redispatches):
+    return {"epoch": epoch, "chain_epoch": chain_epoch, "redispatches": redispatches, "commit_retries": 0,
+            "resume_from": None, "correction": None}
+
+
+def test_a_redispatched_chain_never_resumes_the_old_chains_reviewer(scratch, monkeypatch):
+    """F8: a plan job carries `resume_from` in its payload on every re-entry; a redispatch's fresh chain must not use it."""
+    con, run, tmp = scratch
+    seen = _chain_spy(monkeypatch)
+
+    def call(fb):
+        job = {"kind": "plan_review", "payload": {"review_fallback": fb}}
+        gates.run_reviewer(con, run, {"id": "G1"}, "plan_reviewer", "b", cwd=tmp, plan_review=True, resume_from="Dold", job=job)
+        return seen[-1]["resume_from"]
+
+    assert call(_fb(0, 0, 0)) == "Dold", "a first review still resumes the reviewer it was asked to"
+    assert call(_fb(1, 1, 1)) is None, "the first attempt of a redispatched chain starts fresh"
+    assert call({**_fb(2, 1, 1), "resume_from": "Dnew", "correction": "c"}) == "Dnew", \
+        "a correction in that chain carries its own resume, not the job's"
+    assert call(_fb(2, 1, 1)) is None, "past the first round the job's own resume_from is never used"
+
+
+def test_a_call_outside_the_job_flow_starts_a_fresh_chain(scratch, monkeypatch):
+    """F9: the bounded no-job retry (a self-review subagent) must not stay excluded from the routes an earlier call failed on."""
+    con, run, tmp = scratch
+    seen = _chain_spy(monkeypatch)
+    prior = [{"id": "D0", "triple": "t0", "harness": "h0", "epoch": 0, "failure": {"class": "launch", "reason": "x"}}]
+    monkeypatch.setattr(gates, "review_attempts", lambda con_, gid: prior)
+    gates.run_reviewer(con, run, {"id": "G1"}, "code_reviewer", "b", cwd=tmp)
+    assert seen[0]["epoch"] == 1 and seen[0]["chain_epoch"] == 1
+
+
+def test_a_no_job_retry_runs_on_a_route_the_exhausted_earlier_call_failed_on(scratch, monkeypatch):
+    from office import candidates
+    con, run, tmp = scratch
+    prior = [{"id": "D0", "triple": "t0", "harness": "h0", "epoch": 0,
+              "failure": {"class": "silent", "reason": "x", "harness_wide": True}}]
+    asked = []
+    monkeypatch.setattr(gates, "review_attempts", lambda con_, gid: prior)
+    monkeypatch.setattr(candidates, "route_role", lambda *a, **k: (asked.append(set(k.get("exclude") or ())),
+                                                                   {"status": "no_route"})[1])
+    monkeypatch.setattr(gates, "reviewer_pin", lambda *a, **k: None)
+    monkeypatch.setattr(gates, "_producer_route", lambda *a, **k: None)
+    monkeypatch.setattr(state, "get_run", lambda con_, run_id: run)
+    gates.run_reviewer(con, run, {"id": "G1", "task_id": "T1"}, "code_reviewer", "b", cwd=tmp)
+    assert asked and not (asked[0] & {"t0", "harness:h0"}), "the exhausted earlier call's routes are eligible again"
+
+
+def _launch_kwargs(monkeypatch):
+    captured = {}
+    real = dispatch.launch
+
+    def spy(run, d, kind, ddir, **kw):
+        captured.setdefault(d["id"], {"ddir": ddir, **kw})
+        return real(run, d, kind, ddir, **kw)
+
+    monkeypatch.setattr(dispatch, "launch", spy)
+    return captured
+
+
+def test_a_guarded_reviewer_is_pointed_only_at_its_snapshot(env, monkeypatch):
+    """F15: cwd is the snapshot, so its include dirs and the path its brief names must be the snapshot too."""
+    first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=False)
+    captured = _launch_kwargs(monkeypatch)
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    gate = _lane(env)
+    kw = captured[first["dispatch"]]
+    snapshot = Path(kw["cwd"])
+    shared = paths.run_dir(gate["run_id"]) / "checkouts" / f"converge-{gate['id']}"
+    assert snapshot.name == "snapshot" and snapshot != shared
+    assert kw["include_dirs"] and all(Path(p) == snapshot or snapshot in Path(p).parents for p in kw["include_dirs"]), kw["include_dirs"]
+    brief = (kw["ddir"] / "brief.md").read_text()
+    assert str(shared) not in brief and str(snapshot) in brief, "the brief names the snapshot, not the shared checkout"
+    assert [a["failure"] for a in gates_attempts(env, gate["id"])][0] is None
+
+
+def test_retargeting_rewrites_only_paths_of_the_checkout():
+    cwd, snap = Path("/r/checkouts/c-1"), Path("/r/dispatches/D1/snapshot")
+    text = "read /r/checkouts/c-1/src and /r/checkouts/c-1. not /r/checkouts/c-10 or /r/checkouts/c-1-x"
+    assert gates._retarget_text(text, cwd, snap) == ("read /r/dispatches/D1/snapshot/src and /r/dispatches/D1/snapshot. "
+                                                     "not /r/checkouts/c-10 or /r/checkouts/c-1-x")
+    assert gates._retarget_path(Path("/r/checkouts/c-1/a/b"), cwd, snap) == snap / "a" / "b"
+    assert gates._retarget_path(cwd, cwd, snap) == snap
+    assert gates._retarget_path(Path("/elsewhere/evidence"), cwd, snap) == Path("/elsewhere/evidence")
+
+
+def test_a_guarded_synchronous_reviewer_keeps_its_snapshot_until_it_is_checked(env, monkeypatch):
+    """F10: a guarded reviewer run without a job (a self-review subagent) is judged on its snapshot, not on a removed one."""
+    from test_issue809_self_review_subagents import _subagent_gates
+    first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=False)
+    _s_run(env)
+    (sub,) = _subagent_gates(env)
+    attempts = gates_attempts(env, sub["id"])
+    assert attempts[0]["id"] == first["dispatch"] and attempts[0]["failure"] is None, attempts[0]
+    assert sub["review_status"] == contract.COMPLETED and len(attempts) == 1
+    assert not (paths.run_dir(sub["run_id"]) / "dispatches" / first["dispatch"] / "snapshot").exists(), "settling removed it"
+
+
+def test_a_crash_between_an_integration_verdict_and_its_acceptance_leaves_the_gate_open(scratch, monkeypatch):
+    """F12: the gate finishes in the acceptance's own transition, so a reclaimed job still finds it open."""
+    from office import integration
+    con, run, tmp = scratch
+    _gate_row(con, "Gint", subject="integration", kind="integration_review")
+    crashed = []
+
+    def set_integration(con_, run_, **fields):
+        if fields.get("status") == "accepted" and not crashed:
+            crashed.append(1)
+            raise RuntimeError("the supervisor died here")
+
+    monkeypatch.setattr(integration, "_set_integration", set_integration)
+    monkeypatch.setattr(integration, "compose_base", lambda run_: "b" * 40)
+    monkeypatch.setattr(integration.verification_coverage, "audit", lambda *a, **k: None)
+    monkeypatch.setattr(integration.state, "get_run", lambda con_, run_id: run)
+    monkeypatch.setattr(integration.state, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"verdict": "PASS", "summary": "ok", "parsed": None})
+    monkeypatch.setattr(gates, "remove_checkout", lambda *a, **k: None)
+    ctx = {"key": "k", "commit": "c" * 40, "base": "b" * 40, "branch": "b", "integ_rev": {"id": "I1"}, "results": {},
+           "run_checks": [], "executed": [], "checks_gate_id": "Gc"}
+    job = {"id": "J", "kind": "integration_review", "payload": {"gate_id": "Gint", gates.SETTLE_KEY: {"dispatch_id": "Dint"}}}
+    with pytest.raises(RuntimeError):
+        integration._review_composed(con, run, job, "Gint", ctx)
+    assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gint'").fetchone()) == ("running", None)
+    assert integration._review_composed(con, run, job, "Gint", ctx) == {"integration_review": "PASS"}  # the reclaimed run
+    assert tuple(con.execute("SELECT status, verdict FROM gates WHERE id='Gint'").fetchone()) == ("done", "PASS")
+
+# ------------------------------------------------------------------ F11 on the unit tier: the job reaches every reviewer
+def _plan_gate(con):
+    row = _gate_row(con, "Glead", subject="plan", kind="plan_review")
+    return {**row, "plan_version": 1, "round": 1}
+def _launch_result(job_id="Jsup", dispatch="Dgf"):
+    return {"supervise_queued": job_id, "fallback_queued": job_id, "dispatch_id": dispatch}
+def test_the_first_goldfish_launches_with_the_job_and_its_launch_ends_the_call(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (seen.append((gate, kw)), _launch_result())[1])
+    job = {"kind": "plan_review", "payload": {"gate_id": "Glead", "resume_from": "Dold"}}
+    out = xl_review.audit_plan_job(con, {**run, "risk": {}}, _plan_gate(con), {"tasks": []}, "ROLE r\nbody", tmp, job)
+    assert out["supervise_queued"] == "Jsup", "the call ends at the launch: nothing waits for the Goldfish"
+    ((gate, kw),) = seen
+    stage = kw["job"]["payload"]["xl"]["current"]
+    assert gate["id"] == stage["gate"] != "Glead" and stage["name"] == "requirements"
+    assert kw["job"]["payload"]["gate_id"] == gate["id"] and kw["job"]["payload"]["xl"]["lead_gate"] == "Glead"
+    assert con.execute("SELECT subject FROM gates WHERE id=?", (gate["id"],)).fetchone()["subject"] == "goldfish:requirements"
+def test_a_settling_goldfish_job_settles_its_stage_and_launches_the_next_without_rerunning_it(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    lead = _plan_gate(con)
+    stage_gate = _gate_row(con, "Gfish1", subject="goldfish:requirements", kind=xl_review.GOLDFISH_KIND)
+    launched, settled = [], []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (launched.append((gate["id"], kw["job"])), _launch_result("Jnext", "Dnext"))[1])
+    monkeypatch.setattr(gates, "settle_reviewer", lambda con_, run_, gate, job: (settled.append(gate["id"]), {"status": "COMPLETED"})[1])
+    monkeypatch.setattr(xl_review, "_record_goldfish", lambda con_, run_, g, name, outcome, dispatches, sessions, *, live: {"rubric": name})
+    xl = {"lead_gate": "Glead", "reports": [], "dispatches": [], "sessions": [], "current": {"name": "requirements", "gate": "Gfish1"}}
+    job = {"kind": "plan_review", "payload": {"gate_id": "Gfish1", gates.SETTLE_KEY: {"dispatch_id": "Dgf"}, "xl": xl}}
+    out = xl_review.audit_plan_job(con, {**run, "risk": {}}, lead, {"tasks": []}, "ROLE r\nbody", tmp, job)
+    assert settled == ["Gfish1"] and out["supervise_queued"] == "Jnext"
+    ((next_gate, next_job),) = launched
+    assert next_gate != "Gfish1" and gates.SETTLE_KEY not in next_job["payload"], "the next stage launches afresh"
+    assert next_job["payload"]["xl"]["reports"] == [{"rubric": "requirements"}] and next_job["payload"]["xl"]["current"]["name"] == "architecture"
+def test_a_goldfish_fallback_job_reruns_the_same_stage_on_its_own_gate(scratch, monkeypatch):
+    from office import xl_review
+    con, run, tmp = scratch
+    _gate_row(con, "Gfish1", subject="goldfish:requirements", kind=xl_review.GOLDFISH_KIND)
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate, role, brief, **kw: (seen.append((gate["id"], kw["job"])), _launch_result())[1])
+    xl = {"lead_gate": "Glead", "reports": [], "dispatches": [], "sessions": [], "current": {"name": "requirements", "gate": "Gfish1"}}
+    fb = {"epoch": 0, "chain_epoch": 0}
+    job = {"kind": "plan_review", "payload": {"gate_id": "Gfish1", "review_fallback": fb, "xl": xl}}
+    xl_review.audit_plan_job(con, {**run, "risk": {}}, _plan_gate(con), {"tasks": []}, "ROLE r\nbody", tmp, job)
+    ((gid, rerun),) = seen
+    assert gid == "Gfish1" and rerun["payload"]["review_fallback"] == fb, "the next route of the same chain"
+    assert con.execute("SELECT COUNT(*) n FROM gates WHERE kind='goldfish_audit'").fetchone()["n"] == 1
+def test_a_compose_job_belongs_to_the_chain_it_was_queued_for():
+    mark = {"gates": ["G1", "G2"], "epoch": 1}
+    job = lambda fb: {"payload": {srs.COLLECT_KEY: mark, **({"review_fallback": fb} if fb else {})}}
+    assert srs.collected_gates(job({"epoch": 1})) == ["G1", "G2"]
+    assert srs.collected_gates(job({"epoch": 2})) is None, "a redispatch launches the subagents anew"
+    assert srs.collected_gates({"payload": {}}) is None
+    assert srs.collected_gates({"payload": {srs.COLLECT_KEY: {"gates": ["G1"], "epoch": 0}}}) == ["G1"]
+def test_only_the_supervise_jobs_of_subagents_name_subagent_gates():
+    row = lambda kind, **p: {"kind": kind, "payload_json": json.dumps(p)}
+    sub = {"origin": {"kind": "convergence_review", "payload": {"subagent": {"key": "k"}}}}
+    lane = {"origin": {"kind": "convergence_review", "payload": {"scope": "L-T1"}}}
+    assert srs.supervised_gates([row("review_supervise", gate_id="Gs", **sub), row("review_supervise", gate_id="Gl", **lane),
+                                 row("convergence_review", gate_id="Gx", **sub)]) == ["Gs"]
+
+def _subagent_scope(con, tmp, monkeypatch, rubrics=("edge-cases", "test-strength")):
+    """A funded run with one task whose accepted revision awaits `rubrics` subagent reviews, on a scratch database."""
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, base_commit, commit_sha, tree_sha, requirements_version, "
+                "plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                "VALUES('R1v','R1','T1',1,'b','c','t',1,1,1,'e','op','accepted','2026-01-01')")
+    monkeypatch.setattr(srs, "rubrics", lambda run, task: rubrics)
+    monkeypatch.setattr(srs.paths, "git", lambda *a, **k: "")
+    run = {"id": "R1", "repo_root": str(tmp), "office_version": "3.1", "gear": "S", "plan_version": 1, "risk": {},
+           "gates": {"gear_model_version": "run-gear-1"}}
+    return run, [{"id": "T1", "title": "t", "scope": [], "accepted_revision_id": "R1v"}]
+def test_every_subagent_launches_with_the_job_and_the_call_returns_waiting(scratch, monkeypatch):
+    """F11: independent subagents each launch through run_reviewer with the convergence job (none is waited on) and the
+    call returns at once; their supervise jobs settle them."""
+    con, run_, tmp = scratch
+    run, tasks = _subagent_scope(con, tmp, monkeypatch)
+    seen = []
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run__, gate, role, brief, **kw: (seen.append((gate, kw)), _launch_result("J" + gate["id"], "D" + gate["id"]))[1])
+    job = {"kind": "convergence_review", "payload": {"gate_id": "Glane", "scope": "L-T1"}}
+    out = srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=True)
+    assert out["status"] == srs.WAITING
+    assert [kw["job"]["payload"]["subagent"]["key"].split(":")[2] for _, kw in seen] == ["edge-cases", "test-strength"]
+    for gate, kw in seen:
+        assert kw["job"]["payload"]["gate_id"] == gate["id"] and kw["job"]["payload"]["scope"] == "L-T1"
+        assert kw["job"]["payload"]["subagent"]["parent"]["payload"]["gate_id"] == "Glane"
+        assert kw["job"]["payload"]["subagent"]["keys"] == [k["job"]["payload"]["subagent"]["key"] for _, k in seen], "each knows its siblings"
+    assert {r["status"] for r in con.execute("SELECT status FROM gates WHERE kind='self_review_subagent'")} == {"queued"}
+    assert con.execute("SELECT COUNT(*) n FROM outbox WHERE dedup_key LIKE 'self_review_compose:%'").fetchone()["n"] == 0, \
+        "the last settle queues the compose job, not the launching call while one is still open"
+def test_subagents_that_find_no_route_are_composed_in_the_launching_call(scratch, monkeypatch):
+    con, run_, tmp = scratch
+    run, tasks = _subagent_scope(con, tmp, monkeypatch, rubrics=("combined",))
+    monkeypatch.setattr(gates, "run_reviewer", lambda *a, **k: {"status": contract.UNAVAILABLE, "summary": "no route"})
+    job = {"kind": "convergence_review", "payload": {"gate_id": "Glane", "scope": "L-T1"}}
+    assert srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=True)["status"] == srs.RETRY
+    assert srs.audit_scope(con, run, tasks, tmp, "c", job=job, retry=False)["status"] == contract.EVIDENCE_BLOCKED

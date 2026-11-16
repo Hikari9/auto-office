@@ -502,24 +502,29 @@ def _review_composed(con, run: dict, job: dict, gid: str, ctx: dict) -> dict:
             _set_integration(con, run, status="verifying",
                              detail="integration review: no reviewer returned a verdict; re-running it on the next route")
         return {"fallback": outcome["fallback_queued"]}
-    with db.transaction(con):
-        con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
-                    (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
     results["integration_review"] = outcome["verdict"]
     if outcome["verdict"] != "PASS":
         findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
         detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
         with db.transaction(con):
+            _finish_review_gate(con, gid, outcome)
             _set_integration(con, run, status="unavailable" if outcome["verdict"] in ("UNAVAILABLE", "REVOKED") else "blocked",
                              detail=f"integration review {outcome['verdict']}: {detail[:200]}", review_ctx=None)
             state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
         return results
-    return _accept_composed(con, run, {**ctx, "results": results})
+    return _accept_composed(con, run, {**ctx, "results": results}, review=(gid, outcome))
 
 
-def _accept_composed(con, run: dict, ctx: dict) -> dict:
+def _finish_review_gate(con, gid: str, outcome: dict) -> None:
+    con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
+                (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
+
+
+def _accept_composed(con, run: dict, ctx: dict, review: tuple[str, dict] | None = None) -> dict:
     """Accept the composed integration once its checks and any review passed. The proof must come from the original
-    passing check gate, not the last reviewer."""
+    passing check gate, not the last reviewer. The review's gate (`review` = its id and outcome) finishes in the same
+    transaction as the acceptance: a process that dies between them would leave a done gate that no reclaimed job
+    revisits and an integration that stays verifying despite its recorded pass."""
     repo = Path(run["repo_root"])
     commit, base, branch, run_checks, executed = ctx["commit"], ctx["base"], ctx["branch"], ctx["run_checks"], ctx["executed"]
     coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
@@ -530,6 +535,8 @@ def _accept_composed(con, run: dict, ctx: dict) -> dict:
               if coverage and coverage[0] == verification_coverage.SCOPED
               else "composed result verified")
     with db.transaction(con):
+        if review:
+            _finish_review_gate(con, *review)
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
         direct = next((c for c in executed

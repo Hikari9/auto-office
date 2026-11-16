@@ -505,15 +505,13 @@ def test_a_lane_review_only_on_the_named_route_never_resumes_the_earlier_reviewe
     assert _triples(env)[-1] == other, _triples(env)
 
 
-def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin(env, monkeypatch, tmp_path):
+def test_a_visual_review_only_takes_the_next_fallback_route_without_a_user_pin(env, monkeypatch, tmp_path):
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
            visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
     env.office("dispatch", "T1", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer'")}
-    code, out = env.office("review", "L-T1:visual", "--as", _reviewer(env))
-    assert code == 4 and "no-visual-override" in out and _pin(env) is None, out
     env.script(visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}])
     code, out = env.office("review", "L-T1:visual", env=MANUAL)
     assert code == 0 and "visual review re-run" in out and "next fallback reviewer route" in out, out
@@ -526,6 +524,18 @@ def test_a_visual_review_only_takes_the_next_fallback_route_and_never_a_user_pin
     # Since #912 every eligible vision route qualifies, not just the first four, so the re-run starts away
     # from every route the failed round tried and takes the next fallback instead.
     assert _last_triple(env, "visual_reviewer") not in tried, _triples(env, "visual_reviewer")
+
+
+def test_a_declared_visual_reviewer_is_the_users_own_allow_and_runs_the_rerun(env, monkeypatch, tmp_path):
+    """A declared visual route needs only a vision launch profile (no routed capability proof): `--as` re-runs on it."""
+    _fake_capture(monkeypatch, tmp_path)
+    _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
+           visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
+    env.office("dispatch", "T1", check=0)
+    assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
+    code, out = env.office("review", "L-T1:visual", "--as", _reviewer(env))
+    assert code == 0 and f"reviewer {_reviewer(env)}" in out, out
+    assert _pin(env)["as"] == _reviewer(env)
 
 
 BUILDER_ONLY = "kilo/some-model@high"  # a harness with no reviewer launch profile
@@ -892,8 +902,10 @@ def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing
     code, out = env.office("review", "L-T1:convergence", check=0)
     assert code == 0, out
     assert [g["review_status"] for g in _gates(env, "convergence_review")] == ["UNAVAILABLE", "COMPLETED"], out
+    # the failed round re-dispatched once on a fresh chain, where the one route is eligible again (A7), then the re-run
     assert [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer' ORDER BY started_at")] \
-        == [tried, tried], "the re-run starts on the route the failed round used"
+        == [tried, tried, tried], ("the failed round ran its one route twice (the spent chain, then the redispatch's fresh "
+                                   "chain), and the re-run starts on the route that round used")
     assert _executor_calls(env) == executors
     assert _scope(env, "L-T1")["status"] == "approved"
     assert _pin(env) is None

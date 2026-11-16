@@ -139,8 +139,7 @@ def audit_plan(con, run: dict, gate: dict, plan: dict, lead_brief: str, cwd: Pat
     if reviewer is None:
         from office import gates
         reviewer = gates.run_reviewer
-    specs = [(name, rubric, "mandatory XL review") for name, rubric in MANDATORY]
-    specs += hazard_audits(run, plan)
+    specs = _specs(run, plan)
     summaries, dispatches, sessions = [], [], []
     for name, rubric, reason in specs:
         with db.transaction(con):
@@ -150,27 +149,48 @@ def audit_plan(con, run: dict, gate: dict, plan: dict, lead_brief: str, cwd: Pat
                                cwd=cwd, plan_review=True, kind="reviewer")
         except Exception as exc:
             outcome = {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
-        did = outcome.get("dispatch_id")
-        session = _session_of(con, did)
-        # One reviewer session per Goldfish: a reused dispatch or session is not independent evidence.
-        good = _genuine(con, run, outcome, live=live) and did not in dispatches and (not session or session not in sessions)
-        dispatches.append(did)
-        if session:
-            sessions.append(session)
-        with db.transaction(con):
-            con.execute("UPDATE gates SET status='done', review_status=?, summary=?, route=?, finished_at=?, "
-                        "reviewer_dispatch_id=? WHERE id=?",
-                        (contract.COMPLETED if good else contract.EVIDENCE_BLOCKED,
-                         (outcome.get("summary") or "missing or invalid Goldfish report")[:500],
-                         outcome.get("route"), now_iso(), did, audit_gate["id"]))
-            state.emit(con, run, "plan.goldfish.report" if good else "plan.goldfish.blocked",
-                       f"XL Goldfish {name}: {'report captured' if good else 'report missing or invalid'}",
-                       payload={"gate_id": audit_gate["id"], "rubric": name, "success": bool(good),
-                                "dispatch_id": did, "report": _summary(name, outcome["parsed"]) if good else None})
-        if not good:
-            return _blocked(f"XL Goldfish {name}: genuine independent report unavailable/invalid; "
-                            "one lead verdict is not permitted without all required evidence")
-        summaries.append(_summary(name, outcome["parsed"]))
+        report = _record_goldfish(con, run, audit_gate, name, outcome, dispatches, sessions, live=live)
+        if report is None:
+            return _blocked(_MISSING.format(name))
+        summaries.append(report)
+    lead_brief = _lead_brief(lead_brief, summaries)
+    outcome = reviewer(con, run, gate, "plan_reviewer", lead_brief, cwd=cwd, plan_review=True, exclude=exclude)
+    return _lead_outcome(con, outcome, specs, summaries, dispatches, sessions)
+
+
+def _specs(run: dict, plan: dict) -> list[tuple[str, str, str]]:
+    return [(name, rubric, "mandatory XL review") for name, rubric in MANDATORY] + hazard_audits(run, plan)
+
+
+_MISSING = ("XL Goldfish {}: genuine independent report unavailable/invalid; "
+            "one lead verdict is not permitted without all required evidence")
+
+
+def _record_goldfish(con, run: dict, audit_gate: dict, name: str, outcome: dict, dispatches: list, sessions: list,
+                     *, live: bool) -> dict | None:
+    """Close one Goldfish's gate on its outcome and note its dispatch and session. Its report summary, or None when
+    it is not genuine independent evidence."""
+    did = outcome.get("dispatch_id")
+    session = _session_of(con, did)
+    # One reviewer session per Goldfish: a reused dispatch or session is not independent evidence.
+    good = _genuine(con, run, outcome, live=live) and did not in dispatches and (not session or session not in sessions)
+    dispatches.append(did)
+    if session:
+        sessions.append(session)
+    with db.transaction(con):
+        con.execute("UPDATE gates SET status='done', review_status=?, summary=?, route=?, finished_at=?, "
+                    "reviewer_dispatch_id=? WHERE id=?",
+                    (contract.COMPLETED if good else contract.EVIDENCE_BLOCKED,
+                     (outcome.get("summary") or "missing or invalid Goldfish report")[:500],
+                     outcome.get("route"), now_iso(), did, audit_gate["id"]))
+        state.emit(con, run, "plan.goldfish.report" if good else "plan.goldfish.blocked",
+                   f"XL Goldfish {name}: {'report captured' if good else 'report missing or invalid'}",
+                   payload={"gate_id": audit_gate["id"], "rubric": name, "success": bool(good),
+                            "dispatch_id": did, "report": _summary(name, outcome["parsed"]) if good else None})
+    return _summary(name, outcome["parsed"]) if good else None
+
+
+def _lead_brief(lead_brief: str, summaries: list[dict]) -> str:
     lead_append = ["\nXL LEAD PLAN REVIEW: synthesize the independently sourced advisory audits below into ONE "
                    "authoritative verdict under the original plan-review contract. Deduplicate findings, "
                    "verify every claimed repo fact, and resolve contradictions by evidence. "
@@ -179,11 +199,69 @@ def audit_plan(con, run: dict, gate: dict, plan: dict, lead_brief: str, cwd: Pat
         lead_append.append(f"AUDIT {report['rubric']}: advisory={report['advisory_verdict']}; "
                            f"findings={report['findings']}; decision={report['decision']}; "
                            f"next={report['next_action']}")
-    outcome = reviewer(con, run, gate, "plan_reviewer", lead_brief + "\n" + "\n".join(lead_append),
-                       cwd=cwd, plan_review=True, exclude=exclude)
+    return lead_brief + "\n" + "\n".join(lead_append)
+
+
+def _lead_outcome(con, outcome: dict, specs: list, summaries: list, dispatches: list, sessions: list) -> dict:
     lead = outcome.get("dispatch_id")
     if lead and (lead in dispatches or (_session_of(con, lead) or object()) in sessions):
         return _blocked("XL lead plan review reused a Goldfish session; the Elephant must be a distinct session")
     outcome["goldfish"] = {"completed": len(summaries), "required": len(specs), "mandatory": len(MANDATORY),
                            "hazards": [s[0] for s in specs[len(MANDATORY):]], "dispatches": dispatches}
     return outcome
+
+
+def audit_plan_job(con, run: dict, gate: dict, plan: dict, lead_brief: str, cwd: Path, job: dict,
+                   *, exclude: list[str] | None = None) -> dict:
+    """`audit_plan` for the plan review job: every Goldfish and then the lead launch through `run_reviewer` with the
+    job, so each is supervised (not waited on) and settled by a `review_supervise` job. A reviewer that is launched, or
+    whose next route is queued, ends this call with that run_reviewer result (`supervise_queued` / `fallback_queued`)
+    and the job returns. The job is entered again for the same stage when it settles or its fallback runs; what the
+    stages before it concluded rides in the job payload's `xl`. Otherwise this returns the lead's outcome, or a
+    blocked one when a Goldfish left no genuine report."""
+    from office import gates
+    specs = _specs(run, plan)
+    xl = {"lead_gate": gate["id"], "reports": [], "dispatches": [], "sessions": [], "current": None,
+          **(job["payload"].get("xl") or {})}
+    fresh = {k: v for k, v in job["payload"].items() if k not in ("review_fallback", gates.SETTLE_KEY)}
+    entered = xl["current"] is not None  # supervise or a fallback re-enters the stage it launched, with its own state
+    settling = entered and gates.SETTLE_KEY in job["payload"]  # only the result of the reviewer it launched is left
+    while True:
+        cur = xl["current"]
+        if cur is None:
+            if len(xl["reports"]) < len(specs):
+                name, _, reason = specs[len(xl["reports"])]
+                with db.transaction(con):
+                    stage_gate = _make_gate(con, run, gate, name, reason)
+                cur = {"name": name, "gate": stage_gate["id"]}
+            else:
+                cur = {"name": None, "gate": gate["id"]}
+            xl = {**xl, "current": cur}
+        stage_job = {**job, "payload": {**(job["payload"] if entered else fresh), "xl": xl, "gate_id": cur["gate"]}}
+        entered = False
+        if cur["name"] is None:
+            if settling:
+                outcome = gates.settle_reviewer(con, run, gate, stage_job)
+            else:
+                outcome = gates.run_reviewer(con, run, gate, "plan_reviewer", _lead_brief(lead_brief, xl["reports"]),
+                                             cwd=cwd, plan_review=True, exclude=exclude, job=stage_job)
+            if outcome.get("supervise_queued") or outcome.get("fallback_queued"):
+                return outcome
+            return _lead_outcome(con, outcome, specs, xl["reports"], xl["dispatches"], xl["sessions"])
+        name, rubric = next((n, r) for n, r, _ in specs if n == cur["name"])
+        stage_gate = {"id": cur["gate"], "task_id": None, "plan_version": gate["plan_version"], "round": gate["round"]}
+        try:
+            if settling:
+                outcome = gates.settle_reviewer(con, run, stage_gate, stage_job)
+            else:
+                outcome = gates.run_reviewer(con, run, stage_gate, "plan_reviewer", _audit_brief(lead_brief, name, rubric),
+                                             cwd=cwd, plan_review=True, kind="reviewer", job=stage_job)
+        except Exception as exc:
+            outcome = {"status": contract.UNAVAILABLE, "summary": f"{type(exc).__name__}: {exc}"}
+        settling = False
+        if outcome.get("supervise_queued") or outcome.get("fallback_queued"):
+            return outcome
+        report = _record_goldfish(con, run, stage_gate, name, outcome, xl["dispatches"], xl["sessions"], live=True)
+        if report is None:
+            return _blocked(_MISSING.format(name))
+        xl = {**xl, "reports": [*xl["reports"], report], "current": None}
