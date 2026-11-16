@@ -1,8 +1,12 @@
 """Authenticated one-off user override of a role deny (#837).
 
-A `--quote` is text an orchestrator can write, so it never overrides a policy
-deny. A receipt is issued only by a person at a terminal (`office route
-override`): it is bound to one run, one role and one exact route, is consumed by the
+A dispatch `--quote` is text an orchestrator can write, so it never overrides a
+policy deny. A receipt is issued only by a person at a terminal (`office route
+override`, typing 'authorize'), or by a non-worker caller relaying the user's
+verbatim words with `--rico-quote` and `--quoted-at` (the user's standing
+permission of 2026-11-15, "Any non-worker, quoted"). A worker never issues one.
+The issuer kind, quote, quote time and caller pane are recorded in the receipt and
+its HMAC. A receipt is bound to one run, one role and one exact route, is consumed by the
 first dispatch that records it, expires quickly, is HMAC-signed with a per-user key, and every use is appended to an
 audit table. A receipt overrides policy only. It never widens capability,
 sandbox, reviewer-independence or landing checks, which run after it.
@@ -16,7 +20,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -32,7 +38,7 @@ _DDL = (
     "CREATE TABLE IF NOT EXISTS route_override_receipts("
     "id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL, role TEXT NOT NULL, "
     "route TEXT NOT NULL, reason TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, "
-    "mac TEXT NOT NULL, revoked_at TEXT)",
+    "mac TEXT NOT NULL, revoked_at TEXT, quote TEXT, quoted_at TEXT, issuer TEXT, pane TEXT)",
     "CREATE TABLE IF NOT EXISTS route_override_claims("
     "receipt_id TEXT PRIMARY KEY, scope TEXT NOT NULL, claimed_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS route_override_uses("
@@ -40,9 +46,30 @@ _DDL = (
 )
 
 
+# Nullable columns added after #837 shipped; a receipt without `issuer` keeps its original MAC body.
+_ISSUER_COLUMNS = ("quote", "quoted_at", "issuer", "pane")
+MANILA = timezone(timedelta(hours=8))
+QUOTED_AT_FORMAT = "%Y-%m-%d %H:%M"
+MAX_QUOTE_AGE = timedelta(hours=24)
+MIN_QUOTE_CHARS = 12
+MIN_QUOTE_WORDS = 3
+# Obvious stand-ins an orchestrator might pass instead of the user's words. This is a guard against
+# mistakes, not authentication: the receipt records the quote so Rico can audit it.
+_PLACEHOLDER = re.compile(r"<[^>]*>|\[[^\]]*\]|\b(?:placeholder|quote here|words here|insert\b.*\bhere|"
+                          r"user'?s (?:quote|words)|rico'?s (?:quote|words)|verbatim (?:quote|words)|"
+                          r"your (?:quote|words)|tbd|lorem ipsum)\b", re.IGNORECASE)
+
+
 def ensure_schema(con: sqlite3.Connection) -> None:
     for ddl in _DDL:
         con.execute(ddl)
+    have = {row[1] for row in con.execute("PRAGMA table_info(route_override_receipts)")}
+    for column in _ISSUER_COLUMNS:
+        if column not in have:
+            try:
+                con.execute(f"ALTER TABLE route_override_receipts ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                pass  # another process added it first
 
 
 def _key() -> bytes:
@@ -61,6 +88,8 @@ def _key() -> bytes:
 
 def _mac(receipt: dict) -> str:
     body = "|".join(str(receipt[k]) for k in ("id", "nonce", "run_id", "role", "route", "issued_at", "expires_at"))
+    if receipt.get("issuer") is not None:
+        body += "|" + json.dumps([receipt.get(k) or "" for k in _ISSUER_COLUMNS], ensure_ascii=True)
     return hmac.new(_key(), body.encode(), hashlib.sha256).hexdigest()
 
 
@@ -77,16 +106,22 @@ def parse_ttl(text: str | None) -> int:
     return seconds
 
 
-def require_user_terminal() -> None:
-    """Only a person at a terminal issues a receipt: a worker, a pipe or a script cannot."""
+def _refuse_worker() -> None:
     if os.environ.get("OFFICE_DISPATCH_ID"):
         raise Refused("worker-cannot-override", "a worker cannot issue a user override")
+
+
+def require_user_terminal() -> None:
+    """A person at a terminal issues a receipt without a quote: a worker, a pipe or a script cannot."""
+    _refuse_worker()
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise Refused("user-terminal-required",
-                      "a policy override must be issued by the user at an interactive terminal; a quote or "
-                      "an orchestrator command cannot create one",
-                      next_step="the user runs: office route override <harness/model@effort> --role <role> --run <run> "
-                                "--reason \"<why>\" in their own terminal")
+                      "without an interactive terminal a policy override needs the user's verbatim words: a "
+                      "non-worker caller passes --rico-quote \"<their words>\" --quoted-at \"<YYYY-MM-DD HH:MM Manila>\"; "
+                      "a bare --quote, a worker or invented words cannot create one",
+                      next_step="relay the user's real words: office route override <harness/model@effort> --role <role> "
+                                "--run <run> --reason \"<why>\" --rico-quote \"<verbatim>\" --quoted-at \"<YYYY-MM-DD HH:MM>\" "
+                                "(Manila time), or the user runs it in their own terminal")
 
 
 def _confirm(summary: str) -> bool:
@@ -94,10 +129,38 @@ def _confirm(summary: str) -> bool:
     return input("type 'authorize' to issue this override: ").strip().lower() == "authorize"
 
 
+def validate_quote(quote: str | None, quoted_at: str | None, *, now: datetime | None = None) -> tuple[str, str]:
+    """The user's real words and when they said them (Manila): non-trivial, not future, not older than 24h."""
+    now = now or datetime.now(timezone.utc)
+    text = " ".join((quote or "").split())
+    if not quote or not quoted_at:
+        raise Usage("quote-required", "--rico-quote and --quoted-at go together: the user's verbatim words and the "
+                    "Manila time they said them (YYYY-MM-DD HH:MM)")
+    if (len(text) < MIN_QUOTE_CHARS or len(text.split()) < MIN_QUOTE_WORDS or _PLACEHOLDER.search(text)):
+        raise Usage("quote-too-short", "--rico-quote must be the user's own verbatim words authorizing this override, "
+                    f"not a placeholder (at least {MIN_QUOTE_WORDS} words)")
+    try:
+        said = datetime.strptime(quoted_at.strip(), QUOTED_AT_FORMAT).replace(tzinfo=MANILA)
+    except ValueError:
+        raise Usage("invalid-quoted-at", f"--quoted-at {quoted_at!r}: expected 'YYYY-MM-DD HH:MM' in Manila time") from None
+    if said > now:
+        raise Usage("quoted-at-future", "--quoted-at is in the future: pass when the user actually said it (Manila time)")
+    if now - said > MAX_QUOTE_AGE:
+        raise Refused("quote-stale", "the user's quote is older than 24h: ask them again and pass the new words",
+                      next_step="ask the user to confirm the override, then pass their new words with --quoted-at")
+    return text, said.strftime(QUOTED_AT_FORMAT)
+
+
 def issue(con: sqlite3.Connection, *, run_id: str, role: str, route: str, reason: str, ttl_s: int,
-          confirm=_confirm, terminal_check=require_user_terminal) -> dict:
+          confirm=_confirm, terminal_check=require_user_terminal,
+          quote: str | None = None, quoted_at: str | None = None) -> dict:
     from office import candidates, state
-    terminal_check()
+    quoted = quote is not None or quoted_at is not None
+    if quoted:
+        _refuse_worker()
+        quote, quoted_at = validate_quote(quote, quoted_at)
+    else:
+        terminal_check()
     if role not in route_policy.POLICY_ROLES:
         raise Usage("unknown-role", f"unknown routing role {role!r}")
     if not reason or len(reason.strip()) < 3:
@@ -112,16 +175,20 @@ def issue(con: sqlite3.Connection, *, run_id: str, role: str, route: str, reason
     receipt = {"id": "O" + secrets.token_hex(4), "nonce": secrets.token_hex(16), "run_id": run["id"], "role": role,
                "route": f"{want['harness']}/{want['model_id']}@{want['effort']}", "reason": reason.strip(),
                "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "expires_at": (now + timedelta(seconds=ttl_s)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+               "expires_at": (now + timedelta(seconds=ttl_s)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "quote": quote if quoted else "", "quoted_at": quoted_at if quoted else "",
+               "issuer": "quoted" if quoted else "terminal", "pane": os.environ.get("HERDR_PANE_ID", "")}
     summary = (f"override a role deny: {receipt['route']} as {role} in run {run['id'][:8]} for "
                f"{ttl_s // 60} min. Capability, sandbox, reviewer independence and landing checks still apply.")
-    if not confirm(summary):
+    if not quoted and not confirm(summary):
         raise Refused("override-declined", "the override was not confirmed")
     receipt["mac"] = _mac(receipt)
     with db.transaction(con):
         ensure_schema(con)
-        con.execute("INSERT INTO route_override_receipts(id, nonce, run_id, role, route, reason, issued_at, expires_at, mac) "
-                    "VALUES(:id,:nonce,:run_id,:role,:route,:reason,:issued_at,:expires_at,:mac)", receipt)
+        con.execute("INSERT INTO route_override_receipts(id, nonce, run_id, role, route, reason, issued_at, expires_at, mac, "
+                    "quote, quoted_at, issuer, pane) "
+                    "VALUES(:id,:nonce,:run_id,:role,:route,:reason,:issued_at,:expires_at,:mac,"
+                    ":quote,:quoted_at,:issuer,:pane)", receipt)
     return receipt
 
 

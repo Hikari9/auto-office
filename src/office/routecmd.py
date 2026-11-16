@@ -307,16 +307,28 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
                         "path": str(path)})
 
 
+def _issuer_note(r: dict) -> str:
+    issuer = r.get("issuer")
+    if not issuer:
+        return ""  # issued before the issuer was recorded: a terminal receipt
+    note = f" [{issuer}" + (f" pane {r['pane']}" if r.get("pane") else "")
+    if issuer == "quoted":
+        note += f" quoted {r.get('quoted_at')}: {r.get('quote')!r}"
+    return note + "]"
+
+
 def override(*, route: str | None, role: str | None, run: str | None, reason: str | None, ttl: str | None,
-             revoke: str | None = None, list_receipts: bool = False) -> Result:
-    """The user's one-off override of a role deny. Only a person at a terminal can issue one."""
+             revoke: str | None = None, list_receipts: bool = False,
+             rico_quote: str | None = None, quoted_at: str | None = None) -> Result:
+    """The user's one-off override of a role deny. A person at a terminal issues one, or a non-worker caller
+    relaying the user's verbatim words (--rico-quote with --quoted-at). A worker never can."""
     from office import db, route_override
     con = db.connect()
     try:
         if list_receipts:
             rows = route_override.list_receipts(con, run)
             lines = [f"{r['id']} run {r['run_id'][:8]} {r['role']} {r['route']} until {r['expires_at']}"
-                     + (" (revoked)" if r["revoked_at"] else "") for r in rows] or ["no override receipts"]
+                     + (" (revoked)" if r["revoked_at"] else "") + _issuer_note(r) for r in rows] or ["no override receipts"]
             return Result(lines=lines, data={"receipts": [{k: v for k, v in r.items() if k != "mac"} for r in rows]})
         if revoke:
             ok = route_override.revoke(con, revoke)
@@ -324,12 +336,15 @@ def override(*, route: str | None, role: str | None, run: str | None, reason: st
         if not (route and role and run):
             raise configcmd._usage("override needs <route>, --role and --run")
         receipt = route_override.issue(con, run_id=run, role=role, route=route, reason=reason or "",
-                                       ttl_s=route_override.parse_ttl(ttl))
+                                       ttl_s=route_override.parse_ttl(ttl), quote=rico_quote, quoted_at=quoted_at)
     finally:
         con.close()
-    return Result(lines=[f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
-                         f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
-                         "landing checks still apply."],
+    lines = [f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
+             f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
+             "landing checks still apply."]
+    if receipt["issuer"] == "quoted":
+        lines.append("issued on the user's quoted words: report this override to the user")
+    return Result(lines=lines,
                   next=f"the orchestrator re-dispatches with --as/--review-as {receipt['route']}",
                   data={"receipt": {k: v for k, v in receipt.items() if k != "mac"}})
 
