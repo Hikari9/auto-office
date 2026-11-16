@@ -170,8 +170,16 @@ def test_a_review_no_route_answered_is_redispatched_up_to_the_bound_then_status_
     gate = _lane(env)
     assert gate["review_status"] == "UNAVAILABLE" and gate["verdict"] is None, gate
     assert len(_redispatches(env)) == 1, "the default bound is one re-dispatch per gate"
-    epochs = {a["epoch"] for a in _attempts(env, gate["id"])}
-    assert epochs == {0}, "the re-dispatch never retries a route this gate already failed on"
+    attempts = _attempts(env, gate["id"])
+    assert {a["epoch"] for a in attempts} == {0, 1}, "the re-dispatch launched a reviewer on a new chain"
+    # the new chain starts afresh: routes the exhausted chain failed on run again, but within the chain a harness
+    # walled by a failure stays excluded
+    assert {a["triple"] for a in attempts if a["epoch"] == 1} & {a["triple"] for a in attempts if a["epoch"] == 0}
+    walled = set()
+    for a in (a for a in attempts if a["epoch"] == 1):
+        assert a["harness"] not in walled
+        if a["failure"] and a["failure"].get("harness_wide"):
+            walled.add(a["harness"])
     assert json.loads(_redispatches(env)[0]["payload_json"])["epoch"] == 1
     assert int(gate["round"]) == 1, "no substantive round was spent"
     assert _run_row(env)["gates"].get("review_redispatch_max") is None

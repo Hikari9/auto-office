@@ -649,3 +649,309 @@ def test_an_integration_review_launches_once_and_its_settling_run_accepts_withou
     assert len(launched) == 1, "settling does not launch the review again"
     assert removed == [checkout] and len(accepted) == 1 and second == {"accepted": True}
     assert con.execute("SELECT verdict FROM gates WHERE id='Gint'").fetchone()[0] == "PASS"
+
+
+# ------------------------------------------------------------------ the v3.1 visual review runs as a job (F-2)
+
+def _visual_scratch(scratch, monkeypatch, *, payload=None):
+    """A visual gate whose capture receipt binds to it, with the review's collaborators recorded."""
+    from office import conformance, visual
+    con, run, tmp = scratch
+    run = {**run, "plan_version": 1, "gates": {}}
+    gate = _gate_row(con, "Gv", subject="task", kind="visual")
+    con.execute("UPDATE gates SET task_id='T1', revision_id='Rev1' WHERE id='Gv'")
+    receipt = tmp / "evidence" / "capture.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"office_version": run["office_version"], "revision": "Rev1", "reference": None,
+                                   "frames": []}))
+    seen = {"run_reviewer": [], "settle": [], "ingest": [], "route": []}
+    monkeypatch.setattr(state, "get_task", lambda con_, run_id, tid: {"id": "T1", "title": "t", "accept": ["a"], "visual": {}})
+    monkeypatch.setattr(state, "get_run", lambda con_, run_id: run)
+    monkeypatch.setattr(state, "pinned_config", lambda run_: {})
+    monkeypatch.setattr(conformance, "ensure_vision_route", lambda *a, **k: seen["route"].append(1))
+    monkeypatch.setattr(gates, "ingest_task_gate", lambda con_, run_, gid, outcome: seen["ingest"].append(outcome))
+    job = {"id": "Jv", "kind": "visual_review", "payload": {"gate_id": "Gv", "capture": str(receipt), **(payload or {})}}
+    return visual, con, run, gate, job, seen
+
+
+def test_the_visual_review_launches_through_its_job_and_leaves_the_gate_open(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch)
+    monkeypatch.setattr(gates, "run_reviewer", lambda con_, run_, gate_, role, brief, **kw: (
+        seen["run_reviewer"].append((role, kw)),
+        {"supervise_queued": "Jsup", "fallback_queued": "Jsup", "dispatch_id": "Dvis"})[1])
+    result = visual.job_visual_review(con, run, job)
+    assert result == {"supervise": "Jsup", "dispatch_id": "Dvis"}
+    ((role, kw),) = seen["run_reviewer"]
+    assert role == "visual_reviewer" and kw["job"] is job and kw["visual"] is True and kw["kind"] == "vision"
+    assert seen["ingest"] == [], "a launched visual reviewer's verdict is recorded by its supervise job, not here"
+
+
+def test_a_visual_review_no_route_answered_queues_a_review_fallback_for_the_visual_job(scratch, monkeypatch):
+    """No verdict from the attempt: the real run_reviewer queues the one fallback job, and the visual job ingests nothing."""
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch)
+    attempts = []
+
+    def failing_attempt(*a, **k):
+        attempts.append(1)
+        assert len(attempts) == 1, "the next route ran in this call: the visual job was not handed to run_reviewer"
+        return None, {"reason": "no reply", "dispatch_id": "Dv1"}
+
+    monkeypatch.setattr(gates, "_review_attempt", failing_attempt)
+    result = visual.job_visual_review(con, run, job)
+    fallback = con.execute("SELECT id FROM outbox WHERE kind='review_fallback'").fetchone()[0]
+    assert result == {"fallback": fallback}
+    assert seen["ingest"] == [], "the gate stays open for the queued re-run"
+    queued = json.loads(con.execute("SELECT payload_json FROM outbox WHERE id=?", (fallback,)).fetchone()[0])
+    assert queued["origin"]["kind"] == "visual_review" and queued["origin"]["payload"]["gate_id"] == "Gv"
+    assert queued["fallback"]["epoch"] == 0
+
+
+def test_a_review_fallback_reenters_the_visual_job_with_its_chain(scratch, monkeypatch):
+    from office import jobs, visual
+    visual_, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch)
+    seen["entered"] = []
+    monkeypatch.setattr(visual, "job_visual_review", lambda con_, run_, inner: (seen["entered"].append(inner), {"ok": 1})[1])
+    monkeypatch.setattr(jobs, "handler", lambda kind: visual.job_visual_review)
+    fb = {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None, "correction": None}
+    fallback_job = {"id": "Jfb", "kind": "review_fallback", "payload": {
+        "gate_id": "Gv", "origin": {"kind": "visual_review", "payload": job["payload"]}, "fallback": fb}}
+    assert gates.job_review_fallback(con, run, fallback_job) == {"ok": 1}
+    (inner,) = seen["entered"]
+    assert inner["kind"] == "visual_review" and inner["payload"]["review_fallback"] == fb
+
+
+def test_a_settling_visual_job_records_the_verdict_without_launching_or_rebuilding(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
+                                                        payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})
+    monkeypatch.setattr(gates, "run_reviewer", lambda *a, **k: seen["run_reviewer"].append(1))
+    outcome = {"verdict": "PASS", "summary": "ok", "route": "r", "parsed": None}
+    monkeypatch.setattr(gates, "settle_reviewer", lambda con_, run_, gate_, job_: (seen["settle"].append(job_), outcome)[1])
+    result = visual.job_visual_review(con, run, job)
+    assert result == {"verdict": "PASS"}
+    assert seen["run_reviewer"] == [] and seen["route"] == [], "settling launches nothing and rebuilds no brief"
+    assert seen["settle"] == [job] and [o["verdict"] for o in seen["ingest"]] == ["PASS"]
+    assert seen["ingest"][0]["evidence_status"] == "COMPARABLE"
+
+
+def test_a_settling_visual_job_whose_attempt_failed_queues_the_next_route_and_ingests_nothing(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
+                                                        payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"fallback_queued": "Jnext"})
+    assert visual.job_visual_review(con, run, job) == {"fallback": "Jnext"}
+    assert seen["ingest"] == []
+
+
+def test_a_settling_visual_job_whose_capture_is_gone_frees_the_launched_reviewer(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
+                                                        payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})
+    Path(job["payload"]["capture"]).unlink()
+    released = []
+    monkeypatch.setattr(gates, "release_launched_review", lambda con_, run_, gid, did: released.append((gid, did)))
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: pytest.fail("nothing to settle against"))
+    result = visual.job_visual_review(con, run, job)
+    assert result["verdict"] == "UNAVAILABLE" and released == [("Gv", "Dvis")]
+    assert [o["evidence_status"] for o in seen["ingest"]] == ["CAPTURE_BLOCKED"]
+
+
+def test_a_settled_visual_verdict_of_invalid_comparison_still_recaptures(scratch, monkeypatch):
+    visual, con, run, gate, job, seen = _visual_scratch(scratch, monkeypatch,
+                                                        payload={gates.SETTLE_KEY: {"dispatch_id": "Dvis"}})
+    parsed = type("P", (), {"evidence_status": "INVALID_COMPARISON", "verdict": None})()
+    monkeypatch.setattr(gates, "settle_reviewer", lambda *a, **k: {"verdict": "PASS", "parsed": parsed, "route": "r"})
+    monkeypatch.setattr(state, "enqueue", lambda con_, run_, kind, payload, **k: seen["route"].append(kind))
+    assert visual.job_visual_review(con, run, job) == {"recapture": True}
+    assert seen["ingest"] == [] and seen["route"] == ["visual_capture"]
+
+
+# ------------------------------------------------------------------ a redispatch starts a new chain (F-1)
+
+def test_a_redispatch_launches_a_second_reviewer_on_routes_the_exhausted_chain_failed_on(env):
+    """Every route of the first chain answers nothing. The automatic redispatch then runs on a new chain whose attempts
+    actually launch (the first chain's failures no longer exclude every route), while a harness a failure in the
+    current chain walled stays excluded for the rest of that chain."""
+    from test_review_fallback_job import EMPTY, _attempts, _redispatches
+    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY])
+    env.office("dispatch", "T1", check=0)
+    gate = _lane(env)
+    attempts = _attempts(env, gate["id"])
+    first_chain = [a for a in attempts if a["epoch"] == 0]
+    second_chain = [a for a in attempts if a["epoch"] == 1]
+    assert len(_redispatches(env)) == 1 and first_chain, "the first chain ran and was exhausted"
+    assert second_chain, "the redispatch launched a reviewer instead of finding every route excluded"
+    assert {a["triple"] for a in second_chain} & {a["triple"] for a in first_chain}, "a route of the first chain ran again"
+    walled = set()
+    for a in second_chain:
+        assert a["harness"] not in walled, "a harness walled in the current chain stays excluded"
+        if a["failure"] and a["failure"].get("harness_wide"):
+            walled.add(a["harness"])
+    assert gate["review_status"] == "UNAVAILABLE"
+
+
+def test_route_exclusions_read_only_the_current_chain_of_a_redispatch():
+    walled = lambda i, epoch, harness_wide: {"id": f"D{i}", "triple": f"h{i}/m@low", "harness": f"h{i}", "epoch": epoch,
+                                              "failure": {"class": "silent", "reason": "x", **({"harness_wide": True} if harness_wide else {})}}
+    history = [walled(0, 0, True), walled(1, 1, True), walled(2, 1, False)]
+    chain = lambda start, epoch: gates.route_exclusions([a for a in history if start <= a["epoch"] <= epoch])
+    assert chain(0, 1) == {"h0/m@low", "harness:h0", "h1/m@low", "harness:h1", "h2/m@low"}, "one chain: every failure"
+    assert chain(1, 1) == {"h1/m@low", "harness:h1", "h2/m@low"}, "a redispatch's chain: the old chain is eligible again"
+    assert gates._fallback_state({"payload": {}})["chain_epoch"] == 0
+
+
+def test_only_a_redispatch_starts_a_new_chain():
+    run = {"gates": {"review_redispatch_max": 3}}
+    job = {"kind": "convergence_review", "payload": {"review_fallback": {"epoch": 2, "chain_epoch": 1, "redispatches": 1}}}
+    gate = {"id": "G1", "task_id": "T1"}
+    queued = []
+
+    class Con:
+        def execute(self, *a, **k):
+            raise AssertionError("not reached")
+    import contextlib
+    from unittest import mock
+    with mock.patch.object(gates.db, "transaction", lambda con: contextlib.nullcontext()), \
+         mock.patch.object(gates.state, "enqueue", lambda con, run_, kind, payload, **k: (queued.append(payload["fallback"]), "J")[1]), \
+         mock.patch.object(gates.state, "emit", lambda *a, **k: None):
+        gates.queue_review_fallback(Con(), {**run, "id": "R1"}, gate, job, "no verdict", redispatch=True)
+        gates.queue_review_fallback(Con(), {**run, "id": "R1"}, gate, job, "bad commit", commit_retry={"resume_from": "D1", "correction": "c"})
+        gates.queue_review_fallback(Con(), {**run, "id": "R1"}, gate, job, "next route")
+    redispatch, commit_retry, nxt = queued
+    assert (redispatch["epoch"], redispatch["chain_epoch"]) == (3, 3), "a redispatch starts its own chain"
+    assert (commit_retry["epoch"], commit_retry["chain_epoch"]) == (3, 1), "a commit retry stays in the chain"
+    assert (nxt["epoch"], nxt["chain_epoch"]) == (2, 1)
+
+
+# ------------------------------------------------------------------ a guarded reviewer never runs in the shared worktree (F-3)
+
+def _guard_first_attempt(monkeypatch, *, snapshot_fails):
+    """Mark only the first reviewer dispatch's harness as one with no read-only sandbox, so it takes a snapshot and a
+    worktree guard. Returns the first attempt's identity and the (dispatch id, cwd) of every launch."""
+    from office import adapters
+    first = {}
+    launched = []
+    real_profile, real_guard, real_snapshot, real_launch = adapters.profile, gates._worktree_guard, gates._review_snapshot, dispatch.launch
+
+    def profile(adapter, kind):
+        prof = real_profile(adapter, kind)
+        if kind == "reviewer" and first.get("harness") and (adapter or {}).get("id") == first["harness"]:
+            return {**(prof or {}), "verify_worktree_unchanged": True}
+        return prof
+
+    def guard_for(d, profile_kind, cwd):
+        if profile_kind != "reviewer":
+            return None
+        first.setdefault("dispatch", d["id"])
+        first.setdefault("harness", d.get("adapter_id") or d.get("harness"))
+        return real_guard(d, profile_kind, cwd) if d["id"] == first["dispatch"] else None
+
+    def snapshot(cwd, dest):
+        return None if snapshot_fails and dest.parent.name == first.get("dispatch") else real_snapshot(cwd, dest)
+
+    def launch(run, d, kind, ddir, **kw):
+        launched.append((d["id"], kw.get("cwd")))
+        return real_launch(run, d, kind, ddir, **kw)
+
+    monkeypatch.setattr(adapters, "profile", profile)
+    monkeypatch.setattr(gates, "_worktree_guard", guard_for)
+    monkeypatch.setattr(gates, "_review_snapshot", snapshot)
+    monkeypatch.setattr(dispatch, "launch", launch)
+    return first, launched
+
+
+def test_a_guarded_reviewer_whose_snapshot_cannot_be_made_fails_its_attempt_and_never_runs_in_the_shared_checkout(env, monkeypatch):
+    first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=True)
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    gate = _lane(env)
+    attempts = gates_attempts(env, gate["id"])
+    assert attempts[0]["id"] == first["dispatch"] and attempts[0]["failure"]["class"] == "snapshot"
+    assert first["dispatch"] not in [d for d, _ in launched], "the reviewer was never launched"
+    (row,) = _q(env, "SELECT status, terminal_classification, ended_at FROM dispatches WHERE id=?", (first["dispatch"],))
+    assert row["status"] == "failed" and row["terminal_classification"] == "launch_failed" and row["ended_at"]
+    (lease,) = _q(env, "SELECT released_at FROM leases WHERE dispatch_id=?", (first["dispatch"],))
+    assert lease["released_at"], "the failed attempt released its lease"
+    assert gate["review_status"] == "COMPLETED" and gate["verdict"] == "APPROVED", "the next route settled the review"
+    assert attempts[1]["triple"] != attempts[0]["triple"]
+
+
+def test_an_edit_to_the_shared_checkout_while_a_guarded_reviewer_runs_is_not_the_reviewers_write(env, monkeypatch):
+    """The guard fingerprints the reviewer's own snapshot, so another process editing the shared worktree meanwhile
+    neither degrades the review nor reaches the reviewer."""
+    first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=False)
+    real_launch = dispatch.launch
+    edited = []
+
+    def launch(run, d, kind, ddir, **kw):
+        if d["id"] == first.get("dispatch"):
+            for name in ("converge", "review", "integration"):
+                shared = paths.run_dir(run["id"]) / "checkouts" / f"{name}-{d['gate_id']}"
+                if shared.is_dir():
+                    (shared / "STRAY_EDIT.txt").write_text("another process")
+                    edited.append(shared)
+            assert Path(kw["cwd"]) != edited[-1], "the reviewer runs in its snapshot, not the shared checkout"
+        return real_launch(run, d, kind, ddir, **kw)
+
+    monkeypatch.setattr(dispatch, "launch", launch)
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    gate = _lane(env)
+    assert edited, "the shared checkout was edited while the guarded reviewer ran"
+    attempts = gates_attempts(env, gate["id"])
+    assert attempts[0]["failure"] is None and len(attempts) == 1, attempts
+    assert gate["review_status"] == "COMPLETED" and gate["verdict"] == "APPROVED"
+
+
+def gates_attempts(env, gate_id):
+    con = env.con()
+    try:
+        return gates.review_attempts(con, gate_id)
+    finally:
+        con.close()
+
+
+def test_a_directory_that_is_no_checkout_is_isolated_by_a_plain_copy(tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "shot.png").write_bytes(b"png")
+    snap = gates._review_snapshot(evidence, tmp_path / "dispatch" / "snapshot")
+    assert snap is not None and (snap / "shot.png").read_bytes() == b"png" and snap != evidence
+    (evidence / "late.png").write_bytes(b"x")
+    assert not (snap / "late.png").exists(), "an edit to the source after the copy never reaches the snapshot"
+
+
+def test_a_checkout_whose_snapshot_git_refuses_has_no_snapshot(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)  # a work tree with no commit: worktree add of HEAD fails
+    assert gates._review_snapshot(repo, tmp_path / "dispatch" / "snapshot") is None
+
+
+# ------------------------------------------------------------------ the integration reviewer's pin (F-4)
+
+def test_the_integration_reviewer_reads_a_pin_stored_on_the_integration_record(scratch, monkeypatch):
+    from office import candidates
+    con, run, tmp = scratch
+    stored = {"landing": {}}
+    monkeypatch.setattr(state, "get_run", lambda con_, run_id: {**run, "landing": stored["landing"]})
+    monkeypatch.setattr(state, "update_run", lambda con_, run_id, **kw: stored.update(kw))
+    seen = []
+    monkeypatch.setattr(candidates, "declared_decision", lambda text, *, role=None, **kw: (seen.append(role), {"status": "selected"})[1])
+    integration_gate = {"id": "Gi", "subject": "integration"}  # no task_id, no scope
+    assert gates.reviewer_pin(con, run, "integration_reviewer", integration_gate) is None, "nothing stored: not pinned"
+    pin = gates.review_pin("codex/gpt-6-luna@xhigh")
+    gates.set_integration_pin(con, run, pin)
+    assert stored["landing"]["integration"]["review_override"] == pin
+    assert gates.reviewer_pin(con, run, "integration_reviewer", integration_gate) == pin
+    assert seen == ["integration_reviewer"], "validated against the integration role's own capability"
+    assert gates.reviewer_pin(con, run, "code_reviewer", integration_gate) is None, "other roles do not read it"
+    gates.set_integration_pin(con, run, None)
+    assert gates.reviewer_pin(con, run, "integration_reviewer", integration_gate) is None
+
+
+def test_storing_an_integration_pin_keeps_the_rest_of_the_integration_record(scratch, monkeypatch):
+    con, run, tmp = scratch
+    stored = {"landing": {"integration": {"status": "verifying", "pr": 7}, "other": 1}}
+    monkeypatch.setattr(state, "get_run", lambda con_, run_id: {**run, "landing": stored["landing"]})
+    monkeypatch.setattr(state, "update_run", lambda con_, run_id, **kw: stored.update(kw))
+    gates.set_integration_pin(con, run, gates.review_pin("claude/claude-opus-5-5@high"))
+    assert stored["landing"]["integration"]["status"] == "verifying" and stored["landing"]["integration"]["pr"] == 7
+    assert stored["landing"]["other"] == 1
