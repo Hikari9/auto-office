@@ -450,7 +450,7 @@ def test_review_as_pins_the_code_reviewer_for_the_task(env):
     code, out = env.office("rerun", "T1", "--fresh", "--review-as", "codex/gpt-6-astra@low", env=_quota(env))
     assert code == 0, out
     review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
-    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": False, "by": "user"}
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": False, "by": "orchestrator"}
 
 
 def test_review_cli_needs_review_as(env):
@@ -494,7 +494,7 @@ def test_review_cli_records_the_reviewer_argv(env):
                            "--review-cli", "agent --flag", env=_quota(env))
     assert code == 0, out
     review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
-    assert review == {"as": "codex/gpt-6-astra@low", "cli": "agent --flag", "external": False, "by": "user"}
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": "agent --flag", "external": False, "by": "orchestrator"}
 
 
 def test_review_external_records_that_the_user_starts_the_reviewer(env):
@@ -503,7 +503,7 @@ def test_review_external_records_that_the_user_starts_the_reviewer(env):
                            env=_quota(env))
     assert code == 0, out
     review = json.loads(env.con().execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
-    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": True, "by": "user"}
+    assert review == {"as": "codex/gpt-6-astra@low", "cli": None, "external": True, "by": "orchestrator"}
 
 
 # #456: a contract amendment relaunches the executor on the route the task records. The relaunch

@@ -932,10 +932,11 @@ def test_lane_review_only_re_runs_a_lane_blocked_by_a_failed_subagent(env, monke
     (conv,) = _gates(env, "convergence_review")
     assert conv["review_status"] == "EVIDENCE_BLOCKED", "the subagent failure blocked the lane"
     broken["on"] = False
-    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    env.script(code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
     code, out = env.office("review", "L-T1")
     assert code == 0 and "review re-run" in out and "no round spent" in out, out
-    assert _gates(env, "convergence_review")[-1]["review_status"] == "COMPLETED"
+    last = _gates(env, "convergence_review")[-1]
+    assert last["review_status"] == "COMPLETED", (last["summary"], [g["review_status"] for g in _subagent_gates(env)])
     assert _scope(env, "L-T1")["status"] == "approved"
     assert {g["review_status"] for g in _subagent_gates(env)} >= {"COMPLETED"}
 
