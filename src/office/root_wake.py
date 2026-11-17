@@ -263,8 +263,18 @@ def _agent_in_pane(pane: str) -> tuple[str, str] | None:
     return name, agent.get("status") or agent.get("agent_status") or "unknown"
 
 
+def _session_live(con, binding: dict) -> bool:
+    """The wake target's session is still bound to its run as the orchestrator (#1237). `discovery.bind` moves a
+    pane to the run it last resumed or started, so a pane that left is no wake target: delivery already reports
+    it detached; status and guidance must not call it armed."""
+    return con.execute("SELECT 1 FROM session_bindings WHERE run_id=? AND harness=? AND session_id=? "
+                       "AND ended_at IS NULL", (binding["run_id"], binding["harness"],
+                                                binding["session_id"])).fetchone() is not None
+
+
 def armed(con, run: dict) -> bool:
-    return _binding(con, run["id"]) is not None
+    binding = _binding(con, run["id"])
+    return binding is not None and _session_live(con, binding)
 
 
 def _off_marker(run_id: str) -> Path:
@@ -795,6 +805,11 @@ def lines(con, run: dict) -> list[str]:
     waiting = counts.get("pending", 0) + counts.get("retry", 0) + counts.get("claimed", 0)
     failed = counts.get("awaiting_attachment", 0)
     delivered = counts.get("delivered", 0)
+    if not _session_live(con, binding):
+        where = (f"Claude agent {binding['agent_name']} in Herdr pane {binding['pane_id']}"
+                 if binding["harness"] != "proc" else "the native Claude session")
+        return [f"wake: detached ({where} is no longer bound to this run); awaiting attachment {failed}; "
+                "office resume from this run's orchestrator re-arms wake; until then use office wait"]
     if binding["harness"] == "proc":
         pid = binding["supervisor_pid"]
         phase = "listener active" if pid and pid_alive(pid) else "arms on next Claude Stop"
