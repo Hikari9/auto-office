@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.8
+
+Bug cluster C2: convergence verdicts no longer lost or misrecorded (#1220 #1135 #1036 #1202 #1227 #1035 #360).
+
 ## 3.28.7
 
 Claude reviewers no longer stall on "Adding a new directory" (#1239). Current Claude Code asks once per untrusted `--add-dir`. Reviewer and vision launches added their dispatch dir and all of Office's state and data homes, so a reviewer pane stopped at a prompt Office did not recognise, then at a second one for the whole state home. Reviewer read roots are now the run's own state dir plus the guidance dirs. Office answers the prompt ("Yes, add it", session only) only for a directory it owns for the run, and several in a row. It never answers for the state home or any other directory.
