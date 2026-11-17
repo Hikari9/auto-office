@@ -168,3 +168,26 @@ def test_a_handoff_that_is_not_a_pull_request_cannot_stand_in_for_the_integratio
     _blocked_integration(env)
     code, out = env.office("close", "--handoff", "my-branch")
     assert code == 4 and "integration blocked" in out and "--handoff <pr-url>" in out, out
+
+
+def test_handoff_close_keeps_convergence_and_integration_in_stored_landing(env):
+    """#1227: close --handoff merged into runs.landing instead of replacing it."""
+    import json
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+
+    def stored():
+        raw = env.con().execute("SELECT landing_json FROM runs").fetchone()[0]
+        return json.loads(raw or "{}")
+
+    before = stored()
+    assert before.get("convergence") and before.get("integration"), before
+    code, out = env.office("close", "--handoff", "https://example.test/pr/1")
+    assert code == 0 and "handed off" in out, out
+    after = stored()
+    assert after["handoff"] == "https://example.test/pr/1"
+    assert after["convergence"] == before["convergence"]
+    assert after["integration"] == before["integration"]
+    code, out = env.office("land")
+    assert "nothing verified to land" not in out, out
