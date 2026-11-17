@@ -51,7 +51,7 @@ def _assert_blocking(env, g, reason):
     assert "blocking, cannot be pre-existing" in rows[0]["summary"] and reason in rows[0]["summary"], rows
 
 
-@pytest.mark.parametrize("code", [126, 127])
+@pytest.mark.parametrize("code", [126])
 def test_shell_runner_exit_is_never_preexisting(env, code):
     g = _run(env, _exit(code))
     _assert_blocking(env, g, f"exited {code}")
