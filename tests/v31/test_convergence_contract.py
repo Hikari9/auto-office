@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from office import state
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_ONE, PLAN_TWO, start_inline, task_row
 
 APPROVED = "VERDICT: APPROVED\nNEXT proceed"
@@ -438,6 +439,33 @@ def test_approved_findings_advance_and_cleanup_is_not_rereviewed(env):
     assert integ["status"] == "accepted"
     code, out = env.office("close", "--handoff", "https://example.test/pr/1")
     assert code == 0, out
+
+
+def test_approved_records_the_versions_the_review_was_queued_with(env):
+    """#1036: an amendment landing between queueing the lane review and its APPROVED verdict must not be
+    stamped onto the approval; the re-accepted lane is reviewed again, not cleaned up as current."""
+    from office import convergence, db
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    queued = _scope(env, "L-T1")["reviewed_versions"]
+    con = env.con()
+    with db.transaction(con):
+        # the state after queueing round 1, before its verdict
+        run = state.get_run(con, _run_row(env)["id"])
+        convergence._set_scope(con, run, "L-T1", status="reviewing", approved=None)
+        # the amendment (--add-accept) lands before the verdict
+        con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+        run = state.get_run(con, run["id"])
+        scope = next(s for s in convergence.lanes(con, run) if s["id"] == "L-T1")
+        convergence._converge_scope(con, run, scope, basis="approved")
+        current = convergence._contract_versions(con, run, scope)
+    approved = _scope(env, "L-T1")["approved"]["versions"]
+    assert approved == queued and approved != current, "the approval names the reviewed contract"
+    gates_before = len(_gates(env, "convergence_review"))
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.cleanup"), "a pre-amendment approval is not current"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the re-accepted lane is reviewed again"
 
 
 def test_hard_seam_change_after_approval_is_reviewed_again(env):

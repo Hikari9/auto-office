@@ -553,7 +553,8 @@ def job_converge(con, run: dict, job: dict) -> dict:
             covering = _covered_by(con, run, scope, composed)
             if covering:
                 _set_scope(con, run, scope["id"], commit=composed["commit"], tree=composed["tree"],
-                           branch=composed["branch"], covered_by=covering)
+                           branch=composed["branch"], covered_by=covering,
+                           reviewed_versions=_contract_versions(con, run, scope))
                 state.emit(con, run, "convergence.covered", f"{scope['id']} integrated review skipped: {covering}'s "
                            f"independent review already covered tree {composed['tree'][:10]} for these tasks",
                            audience="runtime")
@@ -567,7 +568,9 @@ def job_converge(con, run: dict, job: dict) -> dict:
         rev = _rev(scope["id"], composed["commit"])
         _set_scope(con, run, scope["id"], status="reviewing", commit=composed["commit"], tree=composed["tree"],
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
-                   hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
+                   hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None,
+                   # #1036: the contract the reviewer is shown, not whatever it is when the verdict lands.
+                   reviewed_versions=_contract_versions(con, run, scope))
         made = []
         if review_required(run) or sensitive_lane(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
@@ -1460,7 +1463,7 @@ def _converge_scope(con, run: dict, scope: dict, *, basis: str) -> None:
     _set_scope(con, run, scope["id"], status=status, basis=basis, detail=basis, escalation=None, intake_gap=None,
                fallback_available=False,
                approved={"key": st.get("key"), "commit": st.get("commit"), "tasks": scope["tasks"],
-                         "versions": _contract_versions(con, run, scope)})
+                         "versions": st.get("reviewed_versions") or _contract_versions(con, run, scope)})
     open_nb = con.execute("SELECT COUNT(DISTINCT code) FROM findings WHERE run_id=? AND scope=? AND state='nonblocking' "
                           "AND disposition IS NULL", (run["id"], scope["id"])).fetchone()[0]
     state.emit(con, run, "convergence.approved" if status == "approved" else f"convergence.{status}",
