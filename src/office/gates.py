@@ -477,6 +477,29 @@ def _roots(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((str(path.resolve()), str(path))))
 
 
+_RUNNER_PYTEST_CODES = frozenset({2, 3, 4, 5})  # interrupted, internal error, usage error, nothing collected
+_RUNNER_SHELL_CODES = frozenset({126, 127})     # not executable, command not found
+
+
+def unrunnable_reason(r: dict, checkout: Path) -> str | None:
+    """Why a failing check never ran its tests, so its failure says nothing about
+    the base: the revision run exited with a runner usage/environment code, or a
+    test path the check names exists in the task's checkout but not on base (#1175)."""
+    cmd = r["command"]
+    if r["exit"] in _RUNNER_SHELL_CODES or (r["exit"] in _RUNNER_PYTEST_CODES and "pytest" in cmd):
+        return f"exited {r['exit']}, a runner usage/environment code: the check did not run its tests"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for tok in tokens:
+        path = tok.split("::", 1)[0]
+        if path.endswith(".py") and not path.startswith("-") and (Path(r["cwd"]) / path).exists() \
+                and not (checkout / path).exists():
+            return f"test path {path} does not exist on the base commit"
+    return None
+
+
 def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *,
                          allow_unchanged: bool = False, exclude_commands: frozenset[str] = frozenset()) -> list[dict]:
     """Which failing checks of this revision fail the same way on its base
@@ -509,6 +532,10 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 # failing on base does not excuse it (#802).
                 if r["command"] in exclude_commands:
                     continue
+                reason = unrunnable_reason(r, checkout)
+                if reason:
+                    _mark_unrunnable(outcome, code_id, reason)
+                    continue
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
@@ -530,6 +557,13 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
         finally:
             remove_checkout(run, checkout)
     return found
+
+
+def _mark_unrunnable(outcome: dict, code_id: str, reason: str) -> None:
+    """Name the check as blocking in the gate output: it could not run, so it is never pre-existing."""
+    for f in (outcome.get("parsed").findings if outcome.get("parsed") else []):
+        if f["code"] == code_id:
+            f["summary"] = f"blocking, cannot be pre-existing ({reason}): {f['summary']}"
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
