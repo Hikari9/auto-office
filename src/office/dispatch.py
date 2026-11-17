@@ -3018,7 +3018,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
     if proc.returncode != 0 and _office_owned(run, cwd) and "agent_not_ready" in (proc.stdout or "") + (proc.stderr or "") \
-            and _answer_startup_trust(pane, name, _land_timeout()):
+            and _answer_startup_trust(pane, name, _land_timeout(), owned=lambda p: _office_owned(run, p)):
         # The harness opened Office's own worktree on its folder-trust dialog and Herdr
         # stopped waiting; the dialog is answered and the agent is up (330605a8).
         proc = subprocess.CompletedProcess(proc.args, 0, "", "")
@@ -3111,6 +3111,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not mismatch:
         try:
             landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
+                                     owned=lambda p: _office_owned(run, p),
                                      guard=guard, max_enter_tries=1 if codex_reviewer else None,
                                      enter_budget=enter_budget)
         except PaneMismatch as exc:
@@ -3372,6 +3373,10 @@ def herdr_agent_name(dispatch_id: str) -> str:
 # dialog. Until it is answered the composer is empty, so a prompt sent then is
 # lost while `agent prompt` succeeds and `agent get` can read `working`.
 TRUST_DIALOG_MARKERS = ("trust this folder", "quick safety check", "is this a project you created or one you trust")
+# Claude Code's per-directory prompt for an `--add-dir` it has not trusted (#1239): "Adding a new directory:
+# <path> ... Is this a directory you created or one you trust?" with "No, exit" / "Yes, add it". Its answer
+# holds for the session only. Office answers it only for a directory it owns for this run.
+ADD_DIR_MARKER = "adding a new directory"
 # The ctx figure in a Claude status line ("ctx: 12k · $0.03"): it rises from
 # 0k once a prompt reaches the model, which is a landed signal in a pane too
 # narrow to show the busy footer.
@@ -3380,7 +3385,24 @@ _CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
 
 def _trust_dialog(text: str | None) -> bool:
     low = _strip_ansi(text).lower()
-    return any(m in low for m in TRUST_DIALOG_MARKERS)
+    return any(m in low for m in (*TRUST_DIALOG_MARKERS, ADD_DIR_MARKER))
+
+
+def _add_dir_target(text: str | None) -> str | None:
+    """The directory an "Adding a new directory" prompt names, rejoined across the pane's line wraps, or None
+    when the screen is not that prompt or the path cannot be read whole."""
+    lines = [ln.strip() for ln in _strip_ansi(text).splitlines()]
+    starts = [i for i, ln in enumerate(lines) if ln.lower().startswith("adding a new directory")]
+    if not starts:
+        return None
+    head = lines[starts[-1]].split(":", 1)
+    parts = [head[1].strip()] if len(head) == 2 and head[1].strip() else []
+    for ln in lines[starts[-1] + 1:]:
+        if not ln or ln.lower().startswith(("this session", "is this a directory")):
+            break
+        parts.append(ln)
+    path = "".join(parts)
+    return path if path.startswith("/") else None
 
 
 def _ctx_k(text: str | None) -> float | None:
@@ -3453,25 +3475,30 @@ def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = No
         time.sleep(1)
 
 
-def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool, herdr) -> str:
+# Trust dialogs Office answers in a row at one launch: the workspace one, then one per added directory (#1239).
+MAX_TRUST_ANSWERS = 4
+
+
+def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool, herdr, owned=None) -> str:
     """Wait for the agent's UI before anything is sent. 'ready' once herdr sees
     the agent in the pane; 'trust' when a folder-trust dialog is up that Office
     may not answer; 'down' when no agent appeared by the deadline. A dialog on
-    an Office-owned directory is answered with option 1 (Trust and continue)."""
+    an Office-owned directory is answered with option 1 (Trust and continue);
+    an added-directory prompt only when `owned` accepts the directory it names."""
     deadline = time.time() + timeout
-    answered = False
+    answered = 0
     while True:
         text = _pane_view(name)
         if _startup_screen(text) and not _trust_dialog(text):
             return "trust"  # hook trust and updates always need a user decision
         if _trust_dialog(text):
-            if not answer_trust or answered:
+            if not answer_trust or answered >= MAX_TRUST_ANSWERS:
                 if time.time() >= deadline:
                     return "trust"
             else:
-                if not _confirm_trust(pane, lambda: _pane_view(name), herdr, text):
+                if not _confirm_trust(pane, lambda: _pane_view(name), herdr, text, owned=owned):
                     return "trust"  # no trust option could be selected
-                answered = True
+                answered += 1
         elif _agent_up(pane, name):
             return "ready"
         if time.time() >= deadline:
@@ -3491,32 +3518,40 @@ def _selected_option(text: str | None) -> str | None:
     return picked[-1] if picked else None
 
 
-def _trust_selected(option: str | None) -> bool:
+def _trust_selected(option: str | None, *, add_dir: bool = False) -> bool:
     low = (option or "").strip().lower()
     # The trust option itself, or a plain "Yes, proceed/continue"; never any other "Yes, ..."
-    # a startup screen offers (an MCP server, terms).
-    ok = "trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+    # a startup screen offers (an MCP server, terms). "Yes, add it" only on an added-directory prompt.
+    ok = ("trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+          or (add_dir and re.match(r"yes,?\s+add it\b", low)))
     return bool(low) and bool(ok) and not _DECLINE.search(low)
 
 
-def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
+def _confirm_trust(pane: str, read, herdr, text: str | None = None, *, owned=None) -> bool:
     """Move a folder-trust dialog's selection onto its trust option and confirm it.
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
-    `text` is a screen the caller already read."""
+    `text` is a screen the caller already read. An added-directory prompt (#1239)
+    is answered only when `owned(<the directory it names>)` is true: never for a
+    directory Office does not own for this run, such as its state home."""
     if text is None or _selected_option(text) is None or not _trust_dialog(text):
         # The first frame may be blank, unreadable or half-drawn too (R3-11).
         text = _settled(read, None)
+    target = _add_dir_target(text)
+    add_dir = ADD_DIR_MARKER in _strip_ansi(text).lower()
+    if add_dir and (target is None or owned is None or not owned(target)):
+        return False
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
-        if not _trust_dialog(text):
+        if not _trust_dialog(text) or (add_dir and _add_dir_target(text) != target):
             return False
         option = _selected_option(text)
-        if _trust_selected(option):
+        if _trust_selected(option, add_dir=add_dir):
             # A frame read right after a key can predate the redraw: confirm only when a
             # fresh, complete frame still shows the trust option selected.
             again = _settled(read, None)
-            if _trust_dialog(again) and _trust_selected(_selected_option(again)):
+            if (_trust_dialog(again) and _trust_selected(_selected_option(again), add_dir=add_dir)
+                    and (not add_dir or _add_dir_target(again) == target)):
                 herdr("pane", "send-keys", pane, "Enter")
                 return True
             text = again
@@ -3548,15 +3583,24 @@ def _settled(read, before: str | None) -> str:
         time.sleep(0.2)
 
 
-def _answer_startup_trust(pane: str, name: str, timeout: float) -> bool:
+def _answer_startup_trust(pane: str, name: str, timeout: float, owned=None) -> bool:
     """`herdr agent start` gave up on an agent held by a folder-trust dialog
-    (`agent_not_ready`): answer it, then wait until Herdr reports the agent
-    ready. True when the agent is up past the dialog."""
+    (`agent_not_ready`): answer it, and each further trust dialog up to
+    MAX_TRUST_ANSWERS (an added-directory prompt only for a directory `owned`
+    accepts, #1239), then wait until Herdr reports the agent ready. True when
+    the agent is up past the dialogs."""
     read = lambda: _pane_visible(pane)  # noqa: E731  the screen now, not scrollback (review F4)
-    if not _confirm_trust(pane, read, _herdr_quiet):
+    if not _confirm_trust(pane, read, _herdr_quiet, owned=owned):
         return False
+    answered = 1
     deadline = time.time() + timeout
     while True:
+        text = read()
+        if _trust_dialog(text) and _selected_option(text) is not None:
+            if answered >= MAX_TRUST_ANSWERS or not _confirm_trust(pane, read, _herdr_quiet, text, owned=owned):
+                return False
+            answered += 1
+            continue
         res = _herdr_json(["agent", "get", name])
         agent = res.get("agent") or res  # flat or nested, as _agent_up reads it (review F5)
         status = (agent.get("status") or agent.get("agent_status")) if isinstance(agent, dict) else None
@@ -3791,7 +3835,7 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None,
 
 
 def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None,
-                    max_enter_tries: int | None = None, enter_budget: list[int] | None = None) -> bool:
+                    max_enter_tries: int | None = None, enter_budget: list[int] | None = None, owned=None) -> bool:
     """Wait for the agent UI, send the one-line pointer and confirm it landed.
     A pointer left in the composer is submitted with Enter; a lost one is typed
     into the pane once and submitted (agy can drop a prompt sent right after
@@ -3800,7 +3844,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     send and may raise PaneMismatch."""
     timeout = _land_timeout()
     herdr = _guarded_herdr(guard)
-    ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
+    ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr, owned=owned)
     if ui == "trust":
         return False
     screen = _pane_view(name)
