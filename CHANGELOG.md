@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.11
+
+Claude reviewers hand back with `office review submit` (#1268). Their grant allows only the exact `office review submit --file <dispatch>/review-submit.txt` command, but the review brief offered stdin too. On 3.28.9, one reviewer piped its review in and was denied, and another had chained commands denied, decided Bash was off, and never tried the submit. Both fell back to the reply file. The brief and prompt now name only the submit file and the exact command, run on its own, and say a denial of any other command does not cover it.
+
 ## 3.28.10
 
 Routing pins and quota walls (#1243). A launched reviewer that fails (empty reply, model_not_found, 402, quota) is a no-answer that falls back instead of EVIDENCE_BLOCKED, a failing pinned reviewer is dropped with a notice, and `office review L-T1 --as` recovers a lane or visual gate blocked that way (#1139, #1218, #663). Review pins record who set them and emit a route-change notice (#1115). The live user routing policy wins over a run's pinned copy, so `office route clear` reaches running runs (#1120), and `office config quota.reserve_percent` shows the per-role reserves that apply (#1116). pi pins resolve a bare model alias to its provider/model slug or refuse (#1185). A quoted `amend route` qualifies like a quoted `--as` (#858), RECHECK `next:` no longer offers a `--resume` that requalification would refuse (#752), and an amend refused for its route names `office amend route` instead of `office dispatch` (#814). Regression test for pi's credit-balance wall (#771).
