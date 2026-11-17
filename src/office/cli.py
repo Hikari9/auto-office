@@ -565,7 +565,7 @@ def _parser() -> argparse.ArgumentParser:
                                   "for another plan review), or submit (a reviewer hands back its review: stdin or --file)")
     s.add_argument("--file", dest="review_file", help="submit: the review file (default: stdin)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
-    s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
+    s.add_argument("--quote", help="plan: the user's own words asking for another plan review; with --as: the user's words for the reviewer pin (without them the pin is the orchestrator's)")
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
@@ -1243,13 +1243,14 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if (args.review_cli or args.review_external) and not args.review_as:
             raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
         return plans.request_review(con, run, args.quote, args.rounds,
-                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external))
+                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external,
+                                                   quote=args.quote))
     if cmd == "review":
         from office import convergence, gates
         from office.state import Usage
         if not args.report:  # no report: re-run only the review on another reviewer route
             return gates.review_only(con, run, args.target, review_as=args.review_as, review_cli=args.review_cli,
-                                     review_external=args.review_external)
+                                     review_external=args.review_external, quote=args.quote)
         if args.review_as or args.review_cli or args.review_external:
             raise Usage("invalid-override", "--as/--cli/--external name a reviewer route; --report is your own review",
                         next_step="office review <task|lane> --as <route>   or   office review <task|lane> --report <file>")

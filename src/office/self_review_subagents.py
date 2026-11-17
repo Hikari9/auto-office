@@ -37,6 +37,7 @@ from office.util import now_iso
 REVIEW_VERSION = "runtime-self-review-1"
 # audit_scope status: a subagent that never launched, to be retried through the bounded review fallback.
 RETRY = "RETRY"
+SUBAGENT_FAILURE_MARK = "self-review subagent"  # in the reason of a gate a subagent failure blocked
 # audit_scope status in the job flow: the subagents are launched and supervised, and their last settle queues the
 # convergence job again to compose them.
 WAITING = "WAITING"
@@ -170,9 +171,9 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                 retry: bool = False, job: dict | None = None) -> dict:
     """Run every funded subagent review of `tasks` at `commit` (the checkout's HEAD, the commit convergence
     reviews). Returns {status, reports, reason}; any status but COMPLETED means convergence must not run.
-    With `retry`, a subagent that was never launched (no reviewer route could start it) returns status RETRY
-    instead of EVIDENCE_BLOCKED, for the caller to retry through the bounded review fallback. A subagent that ran
-    and left a bad report, and a revoked one, stay blocked.
+    With `retry`, a subagent whose outcome is not COMPLETED (never launched, or launched and failed with an
+    empty reply or model_not_found) returns status RETRY instead of EVIDENCE_BLOCKED, for the caller to retry through
+    the bounded review fallback. A subagent that completed and left a bad report, and a revoked one, stay blocked.
 
     The subagents of one scope share no mutable state (each owns its gate, dispatch, session and reply file, and reads
     the checkout without writing it), so those that still need a review launch together and are composed in task and
@@ -218,7 +219,7 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
         failure = failures[id(item)] if id(item) in failures else _record(con, run, item, outcome, commit, retry=retry)
         if failure:
             return {"status": RETRY if failure["retried"] else contract.EVIDENCE_BLOCKED, "reports": reports,
-                    "reason": f"{item['task']['id']} {item['rubric']} self-review subagent: {failure['reason']}; "
+                    "reason": f"{item['task']['id']} {item['rubric']} {SUBAGENT_FAILURE_MARK}: {failure['reason']}; "
                               "convergence review cannot proceed without it"}
         parsed = outcome["parsed"]
         reports.append(_report(item["task"]["id"], item["rubric"], item["rid"], dispatch_id=outcome["dispatch_id"],
@@ -322,7 +323,7 @@ def _record(con, run: dict, item: dict, outcome: dict, commit: str, *, retry: bo
     task, rubric, rid, audit_gate = item["task"], item["rubric"], item["rid"], item["gate"]
     good, reason = _valid(outcome, commit, run)
     parsed = outcome.get("parsed")
-    retried = bool(retry and not good and not outcome.get("dispatch_id") and outcome.get("status") != contract.COMPLETED)
+    retried = bool(retry and not good and outcome.get("status") != contract.COMPLETED)
     with db.transaction(con):
         con.execute("UPDATE gates SET status='done', review_status=?, verdict=?, summary=?, route=?, "
                     "reviewer_dispatch_id=?, finished_at=? WHERE id=?",
@@ -431,7 +432,7 @@ def _compose(con, run: dict, plan: list[dict], *, retry: bool, fresh: set[str], 
             unlaunched = gate is not None and gate["review_status"] == contract.UNAVAILABLE
             reason = gate["summary"] if gate is not None and gate["summary"] else "subagent was not launched and completed"
             return {"status": RETRY if unlaunched and retry else contract.EVIDENCE_BLOCKED, "reports": reports,
-                    "reason": f"{task_id} {rubric} self-review subagent: {reason}; convergence review cannot proceed without it"}
+                    "reason": f"{task_id} {rubric} {SUBAGENT_FAILURE_MARK}: {reason}; convergence review cannot proceed without it"}
         parsed = (ran or {}).get(gate["id"], {}).get("parsed")
         if parsed is None:
             reply = paths.run_dir(run["id"]) / "dispatches" / gate["reviewer_dispatch_id"] / "reply.txt"

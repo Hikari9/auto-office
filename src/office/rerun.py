@@ -622,7 +622,8 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
-        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external)
+        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external,
+                                quote=quote)
         ignored = [f"--{f}" for f, on in (("resume", resume), ("fresh", fresh), ("reroute", reroute), ("as", as_model),
                                           ("cli", cli), ("external", external)) if on]
         if ignored:
@@ -707,8 +708,15 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         if decision:
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
+        pin_lines: list[str] = []
         if review_as is not None:
-            state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+            pin = gates.review_pin(review_as, review_cli, review_external, quote=quote)
+            gates.store_review_pin(con, run, tid, [tid], pin)
+            from office import convergence
+            lane = next((sc for sc in convergence.all_scopes(con, run) if tid in sc["tasks"]), None) \
+                if contract.is_convergence(run) else None
+            if lane:  # the lane reviewer reads this pin: say which of its tasks it does not cover
+                pin_lines = gates.pin_notices(con, run, lane["tasks"], pin, [])
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=launch)
         if restack and (restack["merged"] or restack["conflict"]):
@@ -739,6 +747,7 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
                         f" on {route} ({note}) launching"]
                  + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
+    res.notices.extend(pin_lines)
     res.next = "exceptions only; office status"
     return res
 
