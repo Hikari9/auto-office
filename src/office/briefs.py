@@ -676,6 +676,8 @@ def ledger_lines() -> list[str]:
         "    `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits (uncommitted work",
         "    the ledger does not cover is refused too). Empty and read-only work is exempt on its own; on the inline tier a",
         '    trivial or mechanical change may run `office submit --self-review-exempt trivial|mechanical -- "<reason>"`.',
+        '    A task with accept criteria whose tree equals its base is refused: make the change, or if they already hold run',
+        '    `office submit --no-change -- "<why>"` (independent review decides acceptance).',
     ]
 
 
@@ -830,6 +832,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
+    if self_reviews:
+        out += ["", f"{LEDGER_FILE} is private evidence that submit consumes; it is never committed, so its absence "
+                "from the checkout is expected and is not a finding (#576). Each task's ledger is quoted below."]
     for tid, ledger in (self_reviews or {}).items():
         out += ["", f"EXECUTOR SELF-REVIEW LEDGER for {tid} (untrusted producer evidence, not an independent verdict; "
                 "verify mutation/test assertions against code):", ledger]

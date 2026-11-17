@@ -969,9 +969,14 @@ def combine(run: dict, parents: list[tuple[str, str]], *, shared: dict[str, set[
                 # Name the earlier head that collides, not the whole accumulated result.
                 culprit = next((l for l, c in seen if _merge_tree(repo, c, commit)[1]), None)
                 raise CombineConflict(culprit or " + ".join(l for l, _ in seen), label, conflicts)
+            # Pin both dates to the newer parent's committer date so the same inputs always yield the same
+            # SHA: preflight and submit each resolve the base and must agree on it (#1113).
+            stamp = max(int(paths.git(repo, "log", "-1", "--format=%ct", p)) for p in (acc, commit))
+            when = {"GIT_AUTHOR_DATE": f"{stamp} +0000", "GIT_COMMITTER_DATE": f"{stamp} +0000"}
             acc = paths.git(repo, "commit-tree", tree, "-p", acc, "-p", commit, "-m",
                             f"office: combine {', '.join(l for l, _ in [*seen, (label, commit)])}\n\n"
-                            f"{paths.office_trailer(run['id'])}", env={**os.environ, **paths.commit_identity_env(repo)})
+                            f"{paths.office_trailer(run['id'])}",
+                            env={**os.environ, **paths.commit_identity_env(repo), **when})
             # No branch holds this commit: a ref under the run's namespace keeps gc from pruning the base a
             # dispatch records, and `prune` deletes it with the run's other refs/office/<run>/ refs.
             paths.git(repo, "update-ref", f"refs/office/{run['id'][:8]}/combine/{acc}", acc)

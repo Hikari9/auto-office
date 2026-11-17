@@ -20,6 +20,7 @@ stale, or missing is ever treated as approved.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import json
 import os
@@ -53,17 +54,28 @@ def cap_diff(diff: str) -> str:
 
 # ------------------------------------------------------------------ planning
 
+def acknowledged_no_change(con, rev_id: str | None) -> bool:
+    """#1138: the revision was submitted with `--no-change` (its receipt records the reason). Checks alone never
+    accept it: an independent code review of it must PASS first."""
+    row = con.execute("SELECT self_review_json FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
+    try:
+        return bool(row and row["self_review_json"] and json.loads(row["self_review_json"]).get("no_change"))
+    except (ValueError, AttributeError):
+        return False
+
+
 def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str], d: dict) -> dict:
     """Create gate rows for a new revision and queue the first step. Caller holds tx."""
+    no_change = acknowledged_no_change(con, rev_id)
     if contract.is_convergence(run):
-        return _plan_for_revision_convergence(con, run, task, rev_id)
+        return _plan_for_revision_convergence(con, run, task, rev_id, no_change)
     from office import visual
     g = run.get("gates") or {}
     rows, summary = {}, []
     if task["checks"]:
         rows["checks"] = _new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
         summary.append("checks running")
-    if g.get("code_review"):
+    if g.get("code_review") or no_change:
         rows["code_review"] = _new_gate(con, run, task, rev_id, "code_review", f"code:{rev_id}",
                                         "waiting" if "checks" in rows else "queued")
         summary.append("code-review queued")
@@ -93,10 +105,16 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
     return {"gates": rows, "summary": summary}
 
 
-def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> dict:
+def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str, no_change: bool = False) -> dict:
     """#337: a task revision gets its deterministic checks only. Independent code
-    and visual review run once per lane on the composed result."""
+    and visual review run once per lane on the composed result. An acknowledged
+    no-change revision (#1138) also gets its own code review: it has no diff for
+    the lane review to find, so checks alone must not accept it."""
     rows, summary = {}, []
+    if no_change:
+        rows["code_review"] = _new_gate(con, run, task, rev_id, "code_review", f"code:{rev_id}",
+                                        "waiting" if task["checks"] else "queued")
+        summary.append("no change acknowledged: code-review queued")
     if task["checks"]:
         rows["checks"] = _new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
         state.enqueue(con, run, "run_checks", {"gate_id": rows["checks"], "task_id": task["id"], "revision_id": rev_id},
@@ -104,6 +122,8 @@ def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> d
         summary.append("checks running; lane convergence review follows")
     else:
         summary.append("no checks declared; lane convergence review follows")
+        if no_change:
+            start_waiting(con, run, task["id"], rev_id)
         if evaluate_acceptance(con, run, task["id"]):
             summary.append("task verified (lane convergence pending)")
     return {"gates": rows, "summary": summary}
@@ -477,6 +497,29 @@ def _roots(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((str(path.resolve()), str(path))))
 
 
+_RUNNER_PYTEST_CODES = frozenset({2, 3, 4, 5})  # interrupted, internal error, usage error, nothing collected
+_RUNNER_SHELL_CODES = frozenset({126, 127})     # not executable, command not found
+
+
+def unrunnable_reason(r: dict, checkout: Path) -> str | None:
+    """Why a failing check never ran its tests, so its failure says nothing about
+    the base: the revision run exited with a runner usage/environment code, or a
+    test path the check names exists in the task's checkout but not on base (#1175)."""
+    cmd = r["command"]
+    if r["exit"] in _RUNNER_SHELL_CODES or (r["exit"] in _RUNNER_PYTEST_CODES and "pytest" in cmd):
+        return f"exited {r['exit']}, a runner usage/environment code: the check did not run its tests"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for tok in tokens:
+        path = tok.split("::", 1)[0]
+        if path.endswith(".py") and not path.startswith("-") and (Path(r["cwd"]) / path).exists() \
+                and not (checkout / path).exists():
+            return f"test path {path} does not exist on the base commit"
+    return None
+
+
 def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *,
                          allow_unchanged: bool = False, exclude_commands: frozenset[str] = frozenset()) -> list[dict]:
     """Which failing checks of this revision fail the same way on its base
@@ -509,6 +552,10 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 # failing on base does not excuse it (#802).
                 if r["command"] in exclude_commands:
                     continue
+                reason = unrunnable_reason(r, checkout)
+                if reason:
+                    _mark_unrunnable(outcome, code_id, reason)
+                    continue
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
@@ -530,6 +577,13 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
         finally:
             remove_checkout(run, checkout)
     return found
+
+
+def _mark_unrunnable(outcome: dict, code_id: str, reason: str) -> None:
+    """Name the check as blocking in the gate output: it could not run, so it is never pre-existing."""
+    for f in (outcome.get("parsed").findings if outcome.get("parsed") else []):
+        if f["code"] == code_id:
+            f["summary"] = f"blocking, cannot be pre-existing ({reason}): {f['summary']}"
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
@@ -2352,6 +2406,22 @@ def _preexisting_summary(outcome: dict, old: list[dict]) -> str:
             f"({', '.join(f['code'] for f in old)}): pre-existing, not caused by this task")
 
 
+def _task_review_outcome(outcome: dict) -> dict:
+    """A convergence reviewer's result for a task-level code review (#1138 no-change revisions) in the v3.1 task-gate
+    terms `ingest_task_gate` reads: APPROVED is PASS, RECHECK is CHANGES_REQUIRED, and a result with no verdict
+    (the reviewer never answered, or its reply was invalid) is UNAVAILABLE."""
+    status, verdict = outcome.get("status"), outcome.get("verdict")
+    if verdict == "STALE":
+        return outcome
+    if status not in (None, contract.COMPLETED) or verdict not in ("APPROVED", "RECHECK", "PASS", "CHANGES_REQUIRED"):
+        return {**outcome, "verdict": "REVOKED" if status == contract.REVOKED else "UNAVAILABLE"}
+    parsed = outcome.get("parsed")
+    mapped = {"APPROVED": "PASS", "RECHECK": "CHANGES_REQUIRED"}.get(verdict, verdict)
+    if parsed is not None and parsed.verdict != mapped:
+        parsed = dataclasses.replace(parsed, verdict=mapped)
+    return {**outcome, "verdict": mapped, "parsed": parsed}
+
+
 def checks_outcome(outcome: dict) -> dict:
     """A run_commands result in convergence-contract terms: all checks passed is
     APPROVED, a failing check is RECHECK (a blocking finding), and a check that
@@ -2445,6 +2515,7 @@ def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: 
             _upsert_finding(con, run, task, gate, f, outcome)
         state.emit(con, run, "gate.approved", f"{task['id']} checks APPROVED on {gate['revision_id']}", audience="runtime",
                    task_id=task["id"])
+        start_waiting(con, run, task["id"], gate["revision_id"])
         evaluate_acceptance(con, run, task["id"])
         return
     for f in parsed.findings:
@@ -2464,6 +2535,8 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
     if contract.is_convergence(run) and gate["kind"] == "checks":
         _ingest_checks_convergence(con, run, gate, state.get_task(con, run["id"], gate["task_id"]), outcome)
         return
+    if contract.is_convergence(run) and gate["kind"] == "code_review":
+        outcome = _task_review_outcome(outcome)
     if _already_decided(con, run, gate, outcome):
         return
     task = state.get_task(con, run["id"], gate["task_id"])
@@ -2811,6 +2884,12 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     waived = authority.waived(con, run["id"], task_id) if not convergence else set()
     if "checks" in waived and _requeue_reviews_cancelled_by_checks(con, run, task_id, rev_id):
         return False
+    if acknowledged_no_change(con, rev_id):
+        # #1138: nothing changed, so checks prove nothing about the accept criteria. Only an independent code
+        # review PASS on this revision accepts it, whatever the contract, waiver or gate policy says.
+        review = next((g for g in required_gates(con, run, task, rev_id) if g["kind"] == "code_review"), None)
+        if review is None or review["status"] != "done" or review["verdict"] != "PASS":
+            return False
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
     if convergence:

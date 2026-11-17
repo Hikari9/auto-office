@@ -2,9 +2,13 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.28.9
+## 3.28.10
 
 Convergence verdicts no longer lost or stale (cluster C2, #1242). A lane RECHECK that also has a finding no task owns still sends the owned findings to their tasks (#1220). An ownership amendment assigns that unowned finding to the task that now owns its file (#1135). A lane APPROVED records the contract versions the reviewer saw, and a review still running is not carried over to a same-tree recompose after an amendment (#1036). Revoking a lane review also closes its self-review subagent gates that were not yet supervised, and `office close` names the open gates it waits on (#1202). `close --handoff` and `close --landed` keep the stored convergence and integration state, so a later `office land` still sees them (#1227). In a rebased run, a restack conflict with a dependency launches the executor with the conflict recorded instead of refusing every relaunch (#1035). The convergence brief lists each task's commit and message and marks `office:` commits as Office's own (#360).
+
+## 3.28.9
+
+Self-review proof and submit gates (bug cluster C4). The revert-and-fail proof keeps pytest option values, drops xdist distribution with `-n`, reverts every non-test source including templates like `.lava`, and names environment failures instead of calling them test failures (#1122, #1124, #1129, #1174, #1241). A check that could not run is never pre-existing (#1175). The combine commit for multi-dependency bases is deterministic (#1113). An unchanged-tree submit on a task with accept criteria needs `--no-change` and independent review (#1138). Blocked hints name the actual preflight refusal, and an open finding at the round cap is the orchestrator's decision (#1130). An ack-only rerun restacked with the same patch keeps its self-review ledger (#1127). The lane review brief says the consumed ledger is never in the tree, so its absence is not a finding (#576).
 
 ## 3.28.8
 
