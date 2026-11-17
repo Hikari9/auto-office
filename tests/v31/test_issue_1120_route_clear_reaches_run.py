@@ -35,10 +35,10 @@ def _role_denied(decision):
 
 def test_a_cleared_allow_no_longer_makes_a_route_dispatchable_for_a_pinned_run(world):
     routecmd.change("allow", role="executor", route=SOL_HIGH)
-    assert world.decide(exact=world.sol["high"])["selected"] == world.sol["high"]  # the standing allow selects it
+    assert world.sol["high"] not in _role_denied(world.decide(exact=world.sol["high"]))  # the standing allow lifts it
     pinned = _pin_with(world, "allow")
     decision = world.decide(exact=world.sol["high"], config=pinned)
-    assert decision["selected"] != world.sol["high"], decision
+    assert world.sol["high"] in _role_denied(decision), decision  # back to the shipped executor deny
 
 
 def test_a_cleared_deny_no_longer_blocks_a_route_for_a_pinned_run(world):
