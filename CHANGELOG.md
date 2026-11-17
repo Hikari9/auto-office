@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.12
+
+Route probe reads work under any row factory (#1160). The probe and trial counts (`allocation`, the rolling trial window) read rows by position, so `reserve()` failed with `KeyError: 0` on a connection whose row_factory returns dicts. Office's own connection uses `sqlite3.Row` and was not affected. They now read the first column whatever the row type. A reservation test now runs reserve, in-flight refusal and stale expiry under a dict row_factory.
+
 ## 3.28.11
 
 Claude reviewers hand back with `office review submit` (#1268). Their grant allows only the exact `office review submit --file <dispatch>/review-submit.txt` command, but the review brief offered stdin too. On 3.28.9, one reviewer piped its review in and was denied, and another had chained commands denied, decided Bash was off, and never tried the submit. Both fell back to the reply file. The brief and prompt now name only the submit file and the exact command, run on its own, and say a denial of any other command does not cover it.

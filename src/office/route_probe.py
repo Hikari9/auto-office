@@ -151,6 +151,11 @@ def _row_dict(cur, row) -> dict | None:
     return {col[0]: val for col, val in zip(cur.description or (), row)}
 
 
+def _first(row):
+    """A row's first column whether the connection returns tuples, sqlite3.Row or dicts (#1160)."""
+    return next(iter(row.values())) if isinstance(row, dict) else row[0]
+
+
 def _rows_dicts(cur) -> list[dict]:
     """Convert all fetched rows to dicts regardless of the connection's row_factory."""
     cols = [col[0] for col in (cur.description or ())]
@@ -223,13 +228,13 @@ def rolling(con, settings: dict) -> dict:
                            (ROLLING_WINDOW,)).fetchall()
     except sqlite3.OperationalError:
         rows = []
-    since = rows[-1][0] if rows else None
+    since = _first(rows[-1]) if rows else None
     query = "SELECT COUNT(*) FROM route_trials WHERE role IN ('executor','worker')"
     args: tuple = ()
     if since is not None:
         query += " AND created_at >= ?"
         args = (since,)
-    used = con.execute(query, args).fetchone()[0]
+    used = _first(con.execute(query, args).fetchone())
     window = min(ROLLING_WINDOW, len(rows) + 1)
     cap = int(math.floor(window * percent / 100.0 + 1e-9))
     return {"used": used, "max": cap, "window": window, "percent": percent,
@@ -238,9 +243,9 @@ def rolling(con, settings: dict) -> dict:
 
 def allocation(con, run_id: str | None, settings: dict) -> dict:
     """Probe, trial and rolling cap snapshot. Pure reads, so a router can use it as a request input."""
-    probes = con.execute("SELECT COUNT(*) FROM route_probe_reservations WHERE run_id=?", (run_id,)).fetchone()[0] \
+    probes = _first(con.execute("SELECT COUNT(*) FROM route_probe_reservations WHERE run_id=?", (run_id,)).fetchone()) \
         if run_id else 0
-    trials = con.execute("SELECT COUNT(*) FROM route_trials WHERE run_id=?", (run_id,)).fetchone()[0] \
+    trials = _first(con.execute("SELECT COUNT(*) FROM route_trials WHERE run_id=?", (run_id,)).fetchone()) \
         if run_id else 0
     return {"probes": {"used": probes, "max": int(settings["max_probes_per_run"])},
             "trials": {"used": trials, "max": int(settings["max_trials_per_run"])},
