@@ -612,10 +612,10 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
         # nothing to carry. Carrying it would leave the scope "reviewing" with no review running.
         return False
     approved = st.get("approved") or {}
-    if prior in CONVERGED and approved.get("versions") is not None \
-            and approved["versions"] != _contract_versions(con, run, scope):
-        # #768: the same bytes do not satisfy a changed contract or acceptance criteria. The
-        # earlier review judged the old ones, so the recomposition is reviewed again.
+    judged = approved.get("versions") if prior in CONVERGED else st.get("reviewed_versions")
+    if judged is not None and judged != _contract_versions(con, run, scope):
+        # #768, #1036: the same bytes do not satisfy a changed contract or acceptance criteria. The
+        # earlier (or still running) review judged the old ones, so the recomposition is reviewed again.
         return False
     if old != new:
         con.execute("UPDATE gates SET input_key=? WHERE run_id=? AND subject='lane' AND scope=? AND input_key=? "
