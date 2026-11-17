@@ -113,7 +113,7 @@ def _task(con, run, tid) -> Result:
     if t.get("review_override"):
         from office import gates
         inert = gates.review_pin_inert(run)
-        lines.append(f"review pinned by user: {t['review_override']['as']}"
+        lines.append(f"review pinned by {t['review_override'].get('by') or 'user'}: {t['review_override']['as']}"
                      + (" (external)" if t["review_override"].get("external") else "")
                      + (f"; no effect: {inert}" if inert else ""))
     for d in con.execute("SELECT id, role, triple, status, terminal_classification, exit_code, applied_plan_version, worktree, "
