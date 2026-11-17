@@ -1297,3 +1297,32 @@ def test_reserve_and_expire_stale_work_on_plain_sqlite_connection_without_row_fa
         assert route_probe.status(plain, c) is None
     finally:
         plain.close()
+
+
+def test_reserve_and_expire_stale_read_reservations_with_dict_row_factory(world):
+    """#1160: the reservation reads (_inflight, and expire_stale through _rows_dicts) under a dict row_factory."""
+    with world.con() as con:
+        pass  # ensure schema exists
+
+    c = cand()
+    run = world.run()
+    old_stamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    con = sqlite3.connect(world.db_path)
+    try:
+        con.row_factory = lambda cursor, row: dict(zip((col[0] for col in cursor.description), row))
+        first = route_probe.reserve(con, run, c, attempt_id="att-old", context=ctx(world))
+        assert isinstance(first, dict) and first.get("reserved") is True
+        second = route_probe.reserve(con, run, c, attempt_id="att-new", context=ctx(world))
+        assert isinstance(second, Refused) and second.reason == "probe-in-flight"
+
+        con.execute("UPDATE route_probe_reservations SET reserved_at=? WHERE id=?", (old_stamp, "att-old"))
+        con.commit()
+        route_probe._release("att-old")
+
+        assert route_probe.expire_stale(con) == ["att-old"]
+        row = con.execute("SELECT status FROM route_probe_reservations WHERE id='att-old'").fetchone()
+        assert isinstance(row, dict) and row["status"] != "reserved"
+        assert route_probe.status(con, c) is None
+    finally:
+        con.close()
