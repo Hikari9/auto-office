@@ -88,10 +88,11 @@ def test_every_visual_reviewer_harness_can_hand_back_with_submit(monkeypatch):
     assert "--dangerously-skip-permissions" in adapters.profile(A["agy"], "vision")["argv"]
 
 
-def test_pi_gets_no_submit_grant():
+def test_pi_gets_no_bash_only_its_submit_extension_grant():
+    """#1231: pi never gets bash; its pane form reaches `office review submit` through one extension tool."""
     a = adapters.load_all()["pi"]
     prof = adapters.profile(a, "reviewer")
-    assert "submit_grant" not in prof
+    assert prof["submit_grant"] == "pi-extension"
     for argv in (prof["argv"], prof["interactive"]["argv"]):
         assert "bash" not in argv[argv.index("--tools") + 1].split(",")
 

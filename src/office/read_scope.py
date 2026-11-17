@@ -2,7 +2,8 @@
 
 One definition feeds two consumers:
 - `add_dirs()` is appended to reviewer and vision launches for harnesses that
-  need a flag to read a directory (claude and agy `--add-dir`).
+  need a flag to read a directory (claude and agy `--add-dir`): the run's own
+  state dir and the guidance dirs (#1239).
 - `allow_rules()` are the `permissions.allow` entries `office install` writes to
   ~/.claude/settings.json. context-mode's ctx_execute_file refuses paths outside
   the project root unless a `Read(<glob>)` allow rule covers them, and no launch
@@ -52,22 +53,39 @@ def guidance_files() -> list[Path]:
     return [home / f for f in GUIDANCE_FILES]
 
 
-def add_dirs() -> list[Path]:
-    """Existing directories a reviewer's harness must be told it may read."""
+def run_state_dir(output: Path | None) -> Path | None:
+    """The run's own state dir (`<state>/runs/<run>`) a reply file sits under, else None."""
+    if not output:
+        return None
+    try:
+        runs = paths.runs_dir().resolve()
+        where = Path(output).resolve()
+    except OSError:
+        return None
+    if runs not in where.parents:
+        return None
+    return runs / where.relative_to(runs).parts[0]
+
+
+def add_dirs(output: Path | None = None) -> list[Path]:
+    """Existing directories a reviewer's harness must be told it may read: its own run's state dir and the
+    guidance dirs. Never the whole Office state or data home (#1239): Claude Code asks to trust every added
+    directory, and trusting one covers everything below it, so a reviewer is shown only its run."""
     seen: list[Path] = []
-    for d in state_dirs() + guidance_dirs():
+    run_dir = run_state_dir(output)
+    for d in ([run_dir] if run_dir else []) + guidance_dirs():
         if d.is_dir() and d not in seen:
             seen.append(d)
     return seen
 
 
-def with_read_dirs(kind: str, include_dirs: list[Path] | None) -> list[Path]:
+def with_read_dirs(kind: str, include_dirs: list[Path] | None, output: Path | None = None) -> list[Path]:
     """`include_dirs` plus the shared read roots, for reviewer kinds only. A
     worker's argv is never widened."""
     base = list(include_dirs or [])
     if kind not in READER_KINDS:
         return base
-    return base + [d for d in add_dirs() if d not in base]
+    return base + [d for d in add_dirs(output) if d not in base]
 
 
 def dispatch_dir(output: Path | None) -> Path | None:
@@ -117,7 +135,7 @@ def opencode_permissions(cwd: Path, output: Path | None, include_dirs: list[Path
 
     rules = [rule("*", "*", "deny")] + [rule(a, "*") for a in ("read", "glob", "grep")]
     rules += [rule("read", "*.env", "deny"), rule("read", "*.env.*", "deny")]
-    readable = list(dict.fromkeys(with_read_dirs("reviewer", [Path(cwd), *(include_dirs or [])])))
+    readable = list(dict.fromkeys(with_read_dirs("reviewer", [Path(cwd), *(include_dirs or [])], output)))
     out_dir = dispatch_dir(output)
     for directory in readable + ([out_dir] if out_dir else []):
         rules += [rule("external_directory", f"{form}/*") for form in _spellings(directory)]

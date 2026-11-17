@@ -89,10 +89,16 @@ def test_the_sandbox_denies_writes_everywhere_but_the_dispatch_dir(shell):
     (env.state / "runs" / "R1" / "dispatches" / "D0").mkdir(parents=True)
     (env.state / "runs" / "OTHER").mkdir(parents=True)
     (env.state / "worktrees").mkdir(parents=True, exist_ok=True)
-    deny = set(_sandbox(_argv(adapters, env, output=out))["filesystem"]["denyWrite"])
+    argv = _argv(adapters, env, output=out)
+    deny = set(_sandbox(argv)["filesystem"]["denyWrite"])
     for path in (env.repo, env.data, env.state / "worktrees", env.home / ".claude", env.home / "AGENTS.md",
-                 env.state / "runs" / "OTHER", env.state / "runs" / "R1" / "dispatches" / "D0"):
+                 env.state / "runs" / "R1" / "dispatches" / "D0"):
         assert str(path) in deny, path
+    # #1239: another run is not denied, it is never writable. The sandbox writes only cwd, temp and the
+    # --add-dir roots, and those are this run's state dir and the guidance dirs, not the whole state home.
+    added = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+    other = env.state / "runs" / "OTHER"
+    assert not any(other == Path(a) or Path(a) in other.parents for a in added), added
     # Deny beats every allow in the sandbox, so nothing on the path to the dispatch dir may be denied.
     for keep in (out.parent, *out.parent.parents):
         assert str(keep) not in deny, keep

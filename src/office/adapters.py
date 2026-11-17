@@ -530,7 +530,7 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                            f"not {model}@{effort}")
     exe = executable(adapter)
     mapped_effort = effort_value(adapter, effort)
-    include_dirs = read_scope.with_read_dirs(kind, include_dirs)
+    include_dirs = read_scope.with_read_dirs(kind, include_dirs, output)
     # The one directory a sandboxed reviewer may write: its dispatch dir, else cwd.
     sandbox_dir = Path(output).parent if output else Path(cwd)
     argv = [exe]
