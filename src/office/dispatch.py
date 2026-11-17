@@ -1130,7 +1130,7 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
         return "probe-stale"
     from office import candidates as candidate_builder
-    policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
+    policies = candidate_builder.required_user_policies(run.get("repo_root"))
     size = ((task or {}).get("descriptor") or {}).get("task_size")
     if route_policy.effective_role_state(cand, "executor", policies, size)["state"] == "deny":
         return "role-deny"
