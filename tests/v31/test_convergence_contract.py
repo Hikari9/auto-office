@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from office import state
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_ONE, PLAN_TWO, start_inline, task_row
 
 APPROVED = "VERDICT: APPROVED\nNEXT proceed"
@@ -440,6 +441,33 @@ def test_approved_findings_advance_and_cleanup_is_not_rereviewed(env):
     assert code == 0, out
 
 
+def test_approved_records_the_versions_the_review_was_queued_with(env):
+    """#1036: an amendment landing between queueing the lane review and its APPROVED verdict must not be
+    stamped onto the approval; the re-accepted lane is reviewed again, not cleaned up as current."""
+    from office import convergence, db
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    queued = _scope(env, "L-T1")["reviewed_versions"]
+    con = env.con()
+    with db.transaction(con):
+        # the state after queueing round 1, before its verdict
+        run = state.get_run(con, _run_row(env)["id"])
+        convergence._set_scope(con, run, "L-T1", status="reviewing", approved=None)
+        # the amendment (--add-accept) lands before the verdict
+        con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+        run = state.get_run(con, run["id"])
+        scope = next(s for s in convergence.lanes(con, run) if s["id"] == "L-T1")
+        convergence._converge_scope(con, run, scope, basis="approved")
+        current = convergence._contract_versions(con, run, scope)
+    approved = _scope(env, "L-T1")["approved"]["versions"]
+    assert approved == queued and approved != current, "the approval names the reviewed contract"
+    gates_before = len(_gates(env, "convergence_review"))
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.cleanup"), "a pre-amendment approval is not current"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the re-accepted lane is reviewed again"
+
+
 def test_hard_seam_change_after_approval_is_reviewed_again(env):
     """2: a repair that moves a hard seam (here the task's ownership envelope) is not
     APPROVED cleanup: the lane is reviewed again."""
@@ -742,6 +770,31 @@ def test_an_identical_tree_after_an_acceptance_change_is_reviewed_again(env):
     _resubmit(env, GOOD_ADD + "# r2\n")
     assert not _events(env, "convergence.carried"), "a changed acceptance contract is not carried"
     assert len(_gates(env, "convergence_review")) > gates_before, "the recomposition is reviewed again"
+
+
+def test_an_in_flight_review_of_an_amended_contract_is_not_carried(env):
+    """#1036: an amendment lands while the lane review runs; the same-tree re-acceptance must not retarget that
+    review (judged on the old contract) to the amended one. An unamended contract still carries."""
+    from office import convergence, db, state
+    _delegated_waiver(env)
+    run_id = _run_row(env)["id"]
+
+    def carry(amend):
+        con = env.con()
+        with db.transaction(con):
+            run = state.get_run(con, run_id)
+            scope = next(s for s in convergence.lanes(con, run) if s["id"] == "L-T1")
+            convergence._set_scope(con, run, "L-T1", status="reviewing", carry_from="reviewing",
+                                   reviewed_versions=convergence._contract_versions(con, run, scope))
+            if amend:
+                con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+            run = state.get_run(con, run_id)
+            st = convergence.scope_state(run, "L-T1")
+            composed = {"tree": st["tree"], "commit": st["commit"], "branch": st.get("branch")}
+            return convergence._carry_over(con, run, scope, st, composed)
+
+    assert carry(amend=False), "no amendment: the running review is carried"
+    assert not carry(amend=True), "an amendment during the review: a fresh lane review is queued instead"
 
 
 def test_a_waiver_without_a_tree_binds_its_commit_only(env):

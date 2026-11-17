@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.13
+
+Convergence verdicts no longer lost or stale (cluster C2, #1242). A lane RECHECK that also has a finding no task owns still sends the owned findings to their tasks (#1220). An ownership amendment assigns that unowned finding to the task that now owns its file (#1135). A lane APPROVED records the contract versions the reviewer saw, and a review still running is not carried over to a same-tree recompose after an amendment (#1036). Revoking a lane review also closes its self-review subagent gates that were not yet supervised, and `office close` names the open gates it waits on (#1202). `close --handoff` and `close --landed` keep the stored convergence and integration state, so a later `office land` still sees them (#1227). In a rebased run, a restack conflict with a dependency launches the executor with the conflict recorded instead of refusing every relaunch (#1035). The convergence brief lists each task's commit and message and marks `office:` commits as Office's own (#360). Also repairs the #1138 regression in the added-task review test (it now submits `--no-change` with a code review).
+
 ## 3.28.12
 
 Route probe reads work under any row factory (#1160). The probe and trial counts (`allocation`, the rolling trial window) read rows by position, so `reserve()` failed with `KeyError: 0` on a connection whose row_factory returns dicts. Office's own connection uses `sqlite3.Row` and was not affected. They now read the first column whatever the row type. A reservation test now runs reserve, in-flight refusal and stale expiry under a dict row_factory.

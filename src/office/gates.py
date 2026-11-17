@@ -3229,9 +3229,13 @@ def close_blockers(con, run: dict) -> list[str]:
     if pending:
         named = ", ".join(f"{r['amendment_id']} ({r['task_id']})" for r in pending[:4])
         out.append(f"{UNAPPLIED_PREFIX} not applied: {named}" + (f" and {len(pending) - 4} more" if len(pending) > 4 else ""))
-    if any(not superseded_integration_gate(con, run, g) for g in
-           con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],))):
+    open_gates = [g for g in
+                  con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting') ORDER BY created_at, id",
+                              (run["id"],)) if not superseded_integration_gate(con, run, g)]
+    if open_gates:
         out.append("reviews are still running")
+        out.append("open gates: " + ", ".join(f"{g['id']} ({g['kind']})" for g in open_gates[:4])
+                   + (f" and {len(open_gates) - 4} more" if len(open_gates) > 4 else ""))
     if contract.is_convergence(run):
         from office import convergence
         out.extend(convergence.close_blockers(con, run))

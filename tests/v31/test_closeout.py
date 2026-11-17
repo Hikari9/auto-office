@@ -168,3 +168,53 @@ def test_a_handoff_that_is_not_a_pull_request_cannot_stand_in_for_the_integratio
     _blocked_integration(env)
     code, out = env.office("close", "--handoff", "my-branch")
     assert code == 4 and "integration blocked" in out and "--handoff <pr-url>" in out, out
+
+
+def test_handoff_close_keeps_convergence_and_integration_in_stored_landing(env):
+    """#1227: close --handoff merged into runs.landing instead of replacing it."""
+    import json
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+
+    def stored():
+        raw = env.con().execute("SELECT landing_json FROM runs").fetchone()[0]
+        return json.loads(raw or "{}")
+
+    before = stored()
+    assert before.get("convergence") and before.get("integration"), before
+    code, out = env.office("close", "--handoff", "https://example.test/pr/1")
+    assert code == 0 and "handed off" in out, out
+    after = stored()
+    assert after["handoff"] == "https://example.test/pr/1"
+    assert after["convergence"] == before["convergence"]
+    assert after["integration"] == before["integration"]
+    code, out = env.office("land")
+    assert "nothing verified to land" not in out, out
+
+
+def test_landed_externally_close_keeps_convergence_and_integration_in_stored_landing(env):
+    """#1227: close --landed-externally merged into runs.landing instead of replacing it."""
+    import json
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+
+    def stored():
+        raw = env.con().execute("SELECT landing_json FROM runs").fetchone()[0]
+        return json.loads(raw or "{}")
+
+    before = stored()
+    assert before.get("convergence") and before.get("integration"), before
+    accepted = env.con().execute("SELECT r.commit_sha FROM tasks t JOIN revisions r ON r.id=t.accepted_revision_id"
+                                 ).fetchone()[0]
+    env.git("merge", "--no-ff", "-qm", "external PR", accepted)
+    merged = env.git("rev-parse", "HEAD").strip()
+    pr = {"state": "MERGED", "url": "https://github.com/o/r/pull/7", "number": 7, "mergeCommit": {"oid": merged}}
+    (env.bin / "gh").write_text(f"#!/bin/sh\necho '{json.dumps(pr)}'\n")
+    (env.bin / "gh").chmod(0o755)
+    code, out = env.office("close", "--landed-externally", "https://github.com/o/r/pull/7")
+    assert code == 0 and "landed externally" in out, out
+    after = stored()
+    assert after["convergence"] == before["convergence"]
+    assert after["integration"] == before["integration"]

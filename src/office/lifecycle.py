@@ -477,7 +477,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         receipt = _archive_receipt(con, current, landing, handoff)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
-                         archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
+                         archive_digest=receipt["digest"], landing={**(current.get("landing") or {}), **landing, "handoff": handoff})
         cancelled_jobs = jobs.cancel_run_jobs_in_transaction(con, run["id"])
         _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}"
@@ -627,7 +627,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
             current = state.get_run(con, run["id"])
             if current["phase"] != "closed":
                 raise Refused("run-terminal", "terminal run is not closed")
-            state.update_run(con, run["id"], landing={**landing, "handoff": None})
+            state.update_run(con, run["id"], landing={**(current.get("landing") or {}), **landing, "handoff": None})
         res = Result(lines=[f"{short(run['id'])} external landing verified: {pr['url']}"])
         _closeout(con, state.get_run(con, run["id"]), landing, res,
                   pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
@@ -654,7 +654,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(),
                          terminal_reason=f"landed externally via {pr['url']}", archive_digest=receipt["digest"],
-                         landing={**landing, "handoff": pr["url"]})
+                         landing={**(current.get("landing") or {}), **landing, "handoff": pr["url"]})
         _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed: landed externally via {pr['url']}, archive "
                    f"{receipt['digest'][7:19]}")
