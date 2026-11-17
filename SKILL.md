@@ -180,7 +180,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
 - Outside the cap, only landing authority waives a required review: the user (`office approve waive L-T1:convergence|visual --quote "<words>"
   --reason "<why>"`), or you (`--as orchestrator --reason "<why>"`) only when the end state is merge/e2e or a merge is authorized. If your
   host blocks `--as orchestrator` as self-approval (Claude Code auto mode), never work around it: ask the user.
-- A review that returned no verdict (UNAVAILABLE, REVOKED, ATTENTION, INVALID_RESULT) is re-run alone on the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <route>]`
+- A review that returned no verdict (UNAVAILABLE, REVOKED, ATTENTION, INVALID_RESULT, or a lane review that closed stale with none recorded) is re-run alone on the same revision: `office review <T1|L-T1[:convergence|visual]> [--as <route>]`
   (also `rerun --review-as`, `office resume`). No executor starts and no round is spent; the pinned reviewer is kept unless `--as` re-pins it, else the next fallback route runs.
 - When no specialist reviewer returns a verdict, you may review it yourself: `office review L-T1:convergence --report <file>` (visual: `--inspected <every screenshot>`; v3.1 runs: `office review T1 --report <file>`).
   Specialists come first. It counts as independent only when your session did not produce the work (that session is refused). Runs started before #423 record it as degraded and non-independent.

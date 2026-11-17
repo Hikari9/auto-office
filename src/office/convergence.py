@@ -350,7 +350,8 @@ def _consider(con, run: dict, scope: dict) -> None:
     if key is None:
         return
     st = scope_state(run, scope["id"])
-    if st.get("key") == key and st.get("status") not in (None, "pending"):
+    if st.get("key") == key and st.get("status") not in (None, "pending") \
+            and not dropped_gates(con, run, scope["id"]):
         return
     approved = st.get("approved") or {}
     if (st.get("status") == "approved" and approved and approved.get("tasks") == scope["tasks"]
@@ -603,7 +604,9 @@ def _carry_over(con, run: dict, scope: dict, st: dict, composed: dict) -> bool:
     if prior in CONVERGED and not all(_satisfied(con, run, scope["id"], g, new, tree=composed["tree"])
                                       for g in latest.values()):
         return False
-    if prior == "reviewing" and not latest:
+    if prior == "reviewing" and (not latest or any(g["status"] == "stale" for g in latest.values())):
+        # #1228: a gate closed stale while the lane was mid-recompose recorded no result, so there is
+        # nothing to carry. Carrying it would leave the scope "reviewing" with no review running.
         return False
     approved = st.get("approved") or {}
     if prior in CONVERGED and approved.get("versions") is not None \
@@ -660,6 +663,22 @@ def _latest(con, run: dict, scope_id: str, commit: str) -> dict[str, dict]:
         if g["status"] != "cancelled":
             out[g["kind"]] = g
     return out
+
+
+def dropped_gates(con, run: dict, scope_id: str) -> list[dict]:
+    """#1228: this cycle's latest gates of a reviewing scope's current composition that closed stale with no
+    result, while the scope's members still match the composition its review judged. Nothing will
+    record a verdict for them, so the review is run again; it is never carried or recovered from the
+    dropped reply, which may predate the members' current revisions."""
+    run = state.get_run(con, run["id"])
+    st = scope_state(run, scope_id)
+    scope = find_scope(con, run, scope_id)
+    if scope is None or st.get("status") != "reviewing" or not st.get("commit") \
+            or st.get("key") != _key(con, run, scope):
+        return []
+    cycle = int(st.get("cycle") or 1)
+    return [g for g in _latest(con, run, scope_id, st["commit"]).values()
+            if g["status"] == "stale" and int(g.get("cycle") or 1) == cycle]
 
 
 # ------------------------------------------------------------------ review jobs
@@ -1496,6 +1515,9 @@ def next_action(con, run: dict, *, dispositions: bool = False) -> str | None:
         if s["status"] == "stale_waiver":
             return (f"{sid} historical waiver is stale and cannot authorize the latest accepted revision; "
                     f"record a new review decision: office decide {sid} review --quote \"<user words>\"")
+        if s["status"] == "reviewing" and dropped_gates(con, run, sid):
+            return (f"{sid} review closed stale with no verdict recorded and nothing is reviewing it now; "
+                    f"run it again: office review {sid}")
         if s["status"] == "escalated":
             esc = s.get("escalation") or {}
             if contract.has_cap_waiver(run):
@@ -2119,7 +2141,9 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     scope = find_scope(con, run, m.group(1))
     if scope is None:
         raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
-    blocked = [g for g in _unreviewed_gates(con, run, scope["id"])
+    dropped_list = dropped_gates(con, run, scope["id"])  # stale gates: never in _unreviewed_gates (done only)
+    dropped = {g["id"] for g in dropped_list}
+    blocked = [g for g in [*_unreviewed_gates(con, run, scope["id"]), *dropped_list]
                if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT]
     if not blocked:
         raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
@@ -2137,7 +2161,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     for g in blocked:
         visual = g["kind"] == "visual"
         payload: dict = {"scope": scope["id"], "review_only": True}
-        if not pinned:
+        if not pinned and g["id"] not in dropped:  # a dropped review's route did not fail: it may run it again
             tried = gates.tried_reviewer_routes(con, "g.run_id=? AND g.scope=? AND g.kind=? AND g.input_key=?",
                                                 (run["id"], scope["id"], g["kind"], g["input_key"]))
             if tried:

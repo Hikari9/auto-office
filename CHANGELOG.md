@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.2
+
+Dropped lane review recovery (#1228). A lane review that closed stale with no verdict (a member changed while the reviewer was working) is no longer carried by a same-tree recomposition, which left the lane "reviewing" with nothing running: the recomposition starts a new review. When no recomposition is coming, `office status` names the recovery and `office review <lane>` re-runs the dropped review on the current composition. The dropped reply is never recorded.
+
 ## 3.28.0
 
 Reviewer dispatch rewrite (#1191). A reviewer that fails to settle is replaced on the next route by one `review_fallback` job and a whole failed chain is re-dispatched once; a revoked reviewer ends `REVOKED`, not as a failure; every reviewer role reads one pin helper; reviewers launch async with a packet, lease and session id and run on a detached snapshot; `office review submit` is the one completion transport. `scripts/review_no_verdict_rate.py` reports the no-verdict share of done review gates from `runs.db`.
