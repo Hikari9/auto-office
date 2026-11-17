@@ -758,8 +758,11 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
                              requirements: dict | None = None, evidence: dict | None = None,
                              max_rounds: int | None = None, used_codes: list[str] | None = None,
                              self_reviews: dict | None = None, plan: dict | None = None,
-                             dismissed: list[dict] | None = None, requirements_quote: str | None = None) -> str:
-    """One independent convergence review of a composed lane or shared scope (#337)."""
+                             dismissed: list[dict] | None = None, requirements_quote: str | None = None,
+                             task_commits: dict | None = None) -> str:
+    """One independent convergence review of a composed lane or shared scope (#337).
+
+    task_commits maps a task id to {"sha", "message"} of its accepted revision (#360)."""
     kind = "shared-scope" if scope.get("shared") else "lane"
     out = [
         "ROLE independent convergence reviewer. Change nothing except your reply file. You did not write this change.",
@@ -784,6 +787,16 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
         if t.get("accepted_revision_id"):
             out.append(f"  accepted revision: {t['accepted_revision_id']}; contract v{t.get('contract_version')}; "
                        f"acceptance v{t.get('acceptance_version')}")
+        commit = (task_commits or {}).get(t["id"])
+        if commit:
+            out.append(f"  task commit: {commit['sha']}")
+            out += [f"    | {line}" for line in (commit.get("message") or "").strip().splitlines()]
+    if task_commits is not None:
+        from office import prs
+        out.append("COMMITS: the composed commit and any commit whose message starts with `office:` are Office's "
+                   "composition commits; producers cannot edit them. Judge commit-message or PR-body criteria against "
+                   "the task commits listed above, not the composition commits."
+                   + ("" if prs.enabled(run) else " This run has no task PRs."))
     out += [f"REVISION {revision['id']} commit {revision['commit_sha'][:12]}; a read-only checkout is at {checkout}",
             f"REVIEWED_COMMIT {revision['commit_sha']} is the commit under review this round. State it on a "
             "`REVIEWED_COMMIT <sha>` line of your reply. Any checkout path named in an earlier round or reply is "
