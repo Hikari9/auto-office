@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.6
+
+Stale root wake shown as detached (#1237). A pane that resumed or started another run moves its orchestrator binding there, but the old run's wake row still named it, so `office status` printed `wake: armed` for an unrelated agent's pane and guidance dropped the `office wait` step. Delivery already refused that pane. Status now prints `wake: detached (...)` with the awaiting-attachment count, and guidance treats the run as unarmed until `office resume` from its orchestrator.
+
 ## 3.28.5
 
 Per-task self-review audits on XL only (#1233, Rico 2026-11-17: "Separate panes on XL only"). A new run funds Office's own per-task audit, a separately routed reviewer session before the convergence review, on XL only (`review.self_review_audit_gears`, pinned at start). S, M and L tasks go back to the executor's in-session fan-out: the focused self-review starts one subagent per lens in parallel, with the same ledger and one round. XL keeps its audits and the Goldfish plan review. Runs started earlier keep auditing S through XL.

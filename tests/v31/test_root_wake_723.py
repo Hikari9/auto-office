@@ -155,6 +155,29 @@ def test_detached_and_rebound_root_never_receives_a_wrong_pane_prompt(env, monke
     assert len(got) == 1
 
 
+@pytest.mark.parametrize("leave", ["rebound", "ended"])
+def test_a_root_pane_that_left_the_run_is_reported_detached_not_armed(env, monkeypatch, leave):
+    """#1237: a pane re-bound to another run (or whose binding ended) kept this run's wake row, and status called
+    the foreign pane armed and guidance dropped `office wait`. It is detached until the owner resumes."""
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    assert root_wake.armed(con, run)
+    with db.transaction(con):
+        if leave == "rebound":  # what discovery.bind does when the pane resumes or starts another run
+            con.execute("UPDATE session_bindings SET run_id=? WHERE harness='herdr' AND session_id=?",
+                        ("another-run", PANE))
+        else:
+            con.execute("UPDATE session_bindings SET ended_at=? WHERE harness='herdr' AND session_id=?",
+                        ("2026-01-01", PANE))
+    assert not root_wake.armed(con, run)
+    (line,) = root_wake.lines(con, run)
+    assert line.startswith("wake: detached (Claude agent root-claude in Herdr pane " + PANE)
+    assert "armed" not in line and "office wait" in line
+    with db.transaction(con):
+        discovery.bind(con, run, [("herdr", PANE)], "resume")
+    assert root_wake.armed(con, run) and root_wake.lines(con, run)[0].startswith("wake: armed")
+
+
 def test_unknown_prompt_delivery_requires_manual_inspection_not_duplicate_retries(env, monkeypatch):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
