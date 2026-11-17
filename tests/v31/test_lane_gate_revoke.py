@@ -431,3 +431,37 @@ def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, jo
     gate = _gate(env, gid)
     assert (gate["status"], gate["review_status"]) == ("done", "UNAVAILABLE"), gate
     assert _scope(env, "L-T1")["status"] == "unavailable"
+
+
+def _queue_subagent_gate(env, gid, commit, key_commit=None):
+    """A self-review subagent gate queued with a live dispatch but no supervise job yet (#1202)."""
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, created_at) "
+                "VALUES(?, ?, 'T1', 'T1', 'self_review_subagent', ?, 'queued', '2026-01-01')",
+                (gid, run_id, f"R1:{key_commit or commit}:combined:runtime-self-review-1"))
+    con.execute("INSERT INTO dispatches(id, run_id, role, started_at, kind, status, launcher, gate_id) "
+                "VALUES(?, ?, 'code_reviewer', '2026-01-01', 'reviewer', 'running', NULL, ?)", ("D" + gid, run_id, gid))
+    con.commit()
+
+
+def test_revoking_a_lane_review_closes_its_unsupervised_self_review_subagent_gate(env):
+    """#1202: a subagent gate queued but not yet supervised has no supervise job naming it. Revoke closes it, ends
+    its dispatch, and close is not blocked by it; a subagent gate of another composition is left alone."""
+    from office import gates
+    _unavailable_lane(env)
+    _rewind_to_running(env)
+    commit = _scope(env, "L-T1")["commit"]
+    _queue_subagent_gate(env, "Gsub", commit)
+    _queue_subagent_gate(env, "Gother", "0" * 40)
+    blockers = gates.close_blockers(env.con(), _run_row(env))
+    assert any("Gsub (self_review_subagent)" in b for b in blockers), blockers
+    code, out = env.office("revoke", "L-T1:convergence")
+    assert code == 0, out
+    sub = _gate(env, "Gsub")
+    assert sub["status"] == "done" and sub["finished_at"], sub
+    assert _q(env, "SELECT terminal_classification FROM dispatches WHERE id='DGsub'")[0]["terminal_classification"] == "revoked"
+    blockers = gates.close_blockers(env.con(), _run_row(env))
+    assert not any("Gsub" in b for b in blockers), blockers
+    assert _gate(env, "Gother")["status"] == "queued"
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id='DGother'")[0]["ended_at"] is None
