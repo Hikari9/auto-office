@@ -183,13 +183,38 @@ def test_waiver_needs_a_substantive_reason(env):
     assert _scope(env, "L-T1")["status"] == "escalated"
 
 
-def test_waiver_only_at_the_cap_and_never_by_a_worker(env):
+def test_waiver_never_by_a_worker(env):
     _spent(env)
-    code, out = env.office("waive", "L-T1", "--reason", REASON)
-    assert code == 4 and "round-cap-not-reached" in out, out
     _reach_cap(env)
     code, out = env.office("waive", "L-T1", "--reason", REASON, env={"OFFICE_DISPATCH_ID": "D1"})
     assert code == 4 and "worker-cannot-waive" in out, out
+
+
+def test_waiver_before_the_cap_recalls_the_routed_repair(env):
+    """#1228 (Rico, 2026-11-17): the orchestrator may waive at any RECHECK round, not only after the cap. The
+    repair that RECHECK routed is recalled, the verdict stays RECHECK and landing still needs the user."""
+    _spent(env)
+    assert _scope(env, "L-T1")["status"] == "recheck"
+    assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] == "changes_required"
+    code, out = env.office("waive", "L-T1", "--reason", REASON)
+    assert code == 0 and "after 1 of 3 rounds" in out and "repairs recalled from T1" in out, out
+    assert _scope(env, "L-T1")["status"] == "waived"
+    assert _q(env, "SELECT status, pause_reason FROM tasks WHERE id='T1'")[0] == {"status": "accepted", "pause_reason": None}
+    assert _gates(env, "convergence_review")[-1]["verdict"] == "RECHECK", "never rewritten to APPROVED"
+    w = json.loads(_q(env, "SELECT envelope_json FROM authorizations WHERE kind='waiver'")[0]["envelope_json"])
+    assert w["cap_waiver"] is True and w["round"] == 1 and w["unresolved_findings"][0]["code"] == "F1"
+
+
+def test_waiver_before_the_cap_refuses_a_repair_already_in_progress(env):
+    """A repair revision the waiver cannot see would void it, so the waiver waits for that repair."""
+    _spent(env)
+    con = env.con()
+    con.execute("UPDATE tasks SET current_revision_id='R-repair' WHERE id='T1'")
+    con.commit()
+    code, out = env.office("waive", "L-T1", "--reason", REASON)
+    assert code == 4 and "repair-in-progress" in out, out
+    assert _scope(env, "L-T1")["status"] == "recheck"
+    assert not _q(env, "SELECT 1 FROM authorizations WHERE kind='waiver'")
 
 
 def test_waiver_keeps_the_verdict_and_records_scope_findings_and_session(env):

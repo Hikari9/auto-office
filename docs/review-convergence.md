@@ -475,7 +475,7 @@ orchestrator exercises it without landing authority, and it never grants any.
 |---|---|---|
 | User | Always | `office approve waive L-T1:convergence\|visual --quote "<user's words>" --reason "<why>"` |
 | Orchestrator | Only when landing was delegated: intake end state `merge` or `e2e`, or a recorded `office approve merge` | `office approve waive L-T1:convergence --as orchestrator --reason "<why>"` |
-| Orchestrator, at the round cap only (#423) | Needs no landing authority; is not landing authority | `office waive L-T1 --reason "<why>"` |
+| Orchestrator, at the round cap (#423) or any earlier RECHECK round (#1228; routed repairs that have not started are recalled) | Needs no landing authority; is not landing authority | `office waive L-T1 --reason "<why>"` |
 | Planner, executor, reviewer dispatch | Never | refused |
 
 A waiver:
@@ -536,7 +536,7 @@ office amend plan --contract -- "<what changed>"  submit a plan revision after R
 office amend plan --no-review --reason "<why>" -- "<delta>"   while plan review is open: ordinary amendment, not reviewed
 office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
 office start "<goal>" --review-rounds N          the lane/shared/visual round cap (default 3; config review.max_rounds)
-office waive <scope> --reason "<why>"             at the round cap: the orchestrator accepts residual risk (not landing authority)
+office waive <scope> --reason "<why>"             at any RECHECK round: the orchestrator accepts residual risk (not landing authority)
 office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]   (lanes only)
 office review plan --quote "<user's words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"
