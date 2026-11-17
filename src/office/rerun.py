@@ -319,11 +319,12 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                                       capture_output=True, text=True, env=env)
                 if proc.returncode != 0:
                     subprocess.run(["git", "-C", str(scratch), "merge", "--abort"], capture_output=True)
-                    if rebased:
-                        raise Refused("rebase-conflict", f"{task['id']} cannot restack onto {dep} {sha[:12]} on "
-                                      "rebased default branch; executor not launched",
+                    if rebased and dep == "rebased default branch":
+                        raise Refused("rebase-conflict", f"{task['id']} cannot restack onto {dep} {sha[:12]}; "
+                                      "executor not launched",
                                       preserved="original task HEAD and worktree",
-                                      next_step=f"resolve dependency and rerun {task['id']} --fresh")
+                                      next_step=f"merge {sha[:12]} into the task branch by hand in its worktree, "
+                                                f"commit the resolution, then office rerun {task['id']} --fresh")
                     return {"base": None, "merged": [], "conflict": {"task": dep, "revision": rev_id,
                             "commit": sha}, "unmerged": [
                             {"task": t, "revision": r, "commit": c} for t, r, c in pending],
