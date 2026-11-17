@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.9
+
+Self-review proof and submit gates (bug cluster C4). The revert-and-fail proof keeps pytest option values, drops xdist distribution with `-n`, reverts every non-test source including templates like `.lava`, and names environment failures instead of calling them test failures (#1122, #1124, #1129, #1174, #1241). A check that could not run is never pre-existing (#1175). The combine commit for multi-dependency bases is deterministic (#1113). An unchanged-tree submit on a task with accept criteria needs `--no-change` and independent review (#1138). Blocked hints name the actual preflight refusal, and an open finding at the round cap is the orchestrator's decision (#1130). An ack-only rerun restacked with the same patch keeps its self-review ledger (#1127). The lane review brief says the consumed ledger is never in the tree, so its absence is not a finding (#576).
+
 ## 3.28.8
 
 The Claude reviewer add-dir prompt is answered on the live screen (#1260). 3.28.7 stopped passing the state home, but the live pane draws a blank line between "Adding a new directory:" and the path, so Office read no path and left the prompt for the run's own dispatch dir unanswered. The path reader now skips blank lines before the path.
