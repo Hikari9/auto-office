@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.8
+
+Convergence verdicts no longer lost or stale (cluster C2, #1242). A lane RECHECK that also has a finding no task owns still sends the owned findings to their tasks (#1220). An ownership amendment assigns that unowned finding to the task that now owns its file (#1135). A lane APPROVED records the contract versions the reviewer saw, and a review still running is not carried over to a same-tree recompose after an amendment (#1036). Revoking a lane review also closes its self-review subagent gates that were not yet supervised, and `office close` names the open gates it waits on (#1202). `close --handoff` and `close --landed` keep the stored convergence and integration state, so a later `office land` still sees them (#1227). In a rebased run, a restack conflict with a dependency launches the executor with the conflict recorded instead of refusing every relaunch (#1035). The convergence brief lists each task's commit and message and marks `office:` commits as Office's own (#360).
+
 ## 3.28.7
 
 Claude reviewers no longer stall on "Adding a new directory" (#1239). Current Claude Code asks once per untrusted `--add-dir`. Reviewer and vision launches added their dispatch dir and all of Office's state and data homes, so a reviewer pane stopped at a prompt Office did not recognise, then at a second one for the whole state home. Reviewer read roots are now the run's own state dir plus the guidance dirs. Office answers the prompt ("Yes, add it", session only) only for a directory it owns for the run, and several in a row. It never answers for the state home or any other directory.
