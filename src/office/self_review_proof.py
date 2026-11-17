@@ -21,14 +21,22 @@ from office.util import now_iso, sha256_obj
 _SOURCE_SUFFIXES = frozenset((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
                               ".c", ".cc", ".cpp", ".h", ".cs", ".rb", ".php", ".swift",
                               ".sh", ".bash", ".sql", ".vue", ".svelte", ".html", ".css", ".scss", ".sass",
-                              ".astro", ".dart", ".graphql", ".proto"))
+                              ".astro", ".dart", ".graphql", ".proto",
+                              ".lava", ".liquid", ".j2", ".jinja", ".jinja2", ".hbs", ".mustache", ".erb",
+                              ".twig", ".njk", ".ejs", ".tpl"))
 _PYTEST = re.compile(r"\bpytest\b")
-_DROP_WITH_VALUE = ("-k", "-m", "-n")  # selectors and workers: the named test runs alone
+_DROP_WITH_VALUE = frozenset(("-k", "-m", "-n", "--numprocesses"))  # selectors and workers: the named test runs alone
+_KEEP_WITH_VALUE = frozenset(("-p", "-c", "-o", "-W", "--rootdir", "--override-ini", "--confcutdir", "--import-mode",
+                              "--basetemp", "--ignore", "--ignore-glob", "--deselect", "--maxfail", "--durations",
+                              "--tb", "--color", "--log-level", "--junitxml"))  # options whose next word is theirs
+_ENVIRONMENT_EXITS = frozenset((126, 127))  # a command that cannot run or is not found
+_PYTEST_ENVIRONMENT_EXITS = frozenset((2, 3, 4))  # pytest's interrupted, internal and usage errors
+_TAIL_LINES = 20
 _SHELL_OPERATORS = frozenset(("&&", "||", ";", "|"))
 _MAX_SECONDS = 120
 _MAX_TESTS = 5
 _PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"
-_VERSION = "main-proof-6"
+_VERSION = "main-proof-7"
 def applicable(run: dict) -> bool:
     return contract.is_convergence(run)
 def _sources(changed: list[str]) -> list[str]:
@@ -65,24 +73,33 @@ def _runner(task: dict) -> list[str] | None:
             continue
         # The pytest *command* word, not the value of an option that names a package to install:
         # `uv run --with pytest pytest ...` names it twice (#1072). Boolean flags (`--frozen`) take no value.
-        commands = [i for i, w in enumerate(words) if w == "pytest"
+        commands = [i for i, w in enumerate(words) if (w == "pytest" or w.endswith("/pytest"))
                     and not (i > 0 and words[i - 1] in _PACKAGE_OPTIONS)]
         if not commands:
             continue
         start = commands[0]
         cmd_start = max([i + 1 for i, w in enumerate(words[:start]) if w in _SHELL_OPERATORS], default=0)
-        kept, skip = words[cmd_start:start + 1], False
+        kept, pending = words[cmd_start:start + 1], None
         for word in words[start + 1:]:
-            if word in _SHELL_OPERATORS:
+            if word in _SHELL_OPERATORS or word == "--":
                 break
             if not word:
                 continue
-            if skip:
-                skip = False
-            elif word in _DROP_WITH_VALUE:
-                skip = True
-            elif word.startswith("-") and not word.startswith(_DROP_WITH_VALUE):
-                kept.append(word)
+            if word.startswith("-") and word != "-":
+                pending = None
+                if word in _DROP_WITH_VALUE:
+                    pending = "drop"
+                elif (not word.startswith("--") and word[:2] in _DROP_WITH_VALUE) \
+                        or word.startswith("--numprocesses="):
+                    continue
+                else:
+                    kept.append(word)
+                    if word in _KEEP_WITH_VALUE:
+                        pending = "keep"
+            else:  # a value of the option before it, or a path / node id that selects tests
+                if pending == "keep":
+                    kept.append(word)
+                pending = None
         return kept
     return None
 def _safe_test(checkout: Path, test: str) -> bool:
@@ -95,7 +112,23 @@ def _safe_test(checkout: Path, test: str) -> bool:
         return False
     return (checkout / file).is_file()
 def _run(wt: Path, command: str, run: dict) -> tuple[int, str]:
-    return gates._run_check(command, wt, _MAX_SECONDS, gates._check_env(run))
+    env = gates._check_env(run)
+    env.pop("PYTEST_ADDOPTS", None)  # as gates._run_commands does for a pytest command: no ambient -k, -m or -n
+    env.pop("PYTEST_PLUGINS", None)
+    return gates._run_check(command, wt, _MAX_SECONDS, env)
+def _tail(output: str) -> str:
+    return "\n".join(str(output).strip().splitlines()[-_TAIL_LINES:])[-3000:]
+def _detail(command: str, checkout: Path, output: str) -> str:
+    return f"\ncommand: {command}\ncheckout: {checkout}\noutput tail:\n{_tail(output)}"
+def _environment_error(code: int) -> bool:
+    return code in _ENVIRONMENT_EXITS or code in _PYTEST_ENVIRONMENT_EXITS
+def _resolve_interpreter(runner: list[str], wt: Path, checkout: Path) -> list[str]:
+    """A repo-relative interpreter the task's commit does not track (`.venv/bin/python`) lives in the task
+    worktree only. A disposable checkout lacks it, so point the command at the worktree's copy (#1124)."""
+    first = runner[0]
+    if "/" in first and not os.path.isabs(first) and not (checkout / first).exists() and (wt / first).exists():
+        return [str((wt / first).absolute()), *runner[1:]]
+    return runner
 def _paths_with_status(checkout: Path, base: str, head: str, paths_: list[str], status: str) -> list[str]:
     """The paths in `paths_` the task changes with git diff status `status` (A added, M modified, D deleted)."""
     if not paths_:
@@ -136,21 +169,29 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
             if not _safe_test(green_checkout, test):
                 return {"ok": False, "status": "blocked",
                         "reason": f"named test {test} is not a file of the submitted commit"}
-            command = " ".join(shlex.quote(w) for w in [*runner, test])
-            red = _run(red_checkout, command, run)[0]
+            command = " ".join(shlex.quote(w) for w in [*_resolve_interpreter(runner, wt, green_checkout), test])
+            red, red_out = _run(red_checkout, command, run)
             if red != _PYTEST_TEST_FAILED:
                 if red == 0 and added:
                     exempt.append(test)  # the fix may live in a file the revert cannot touch
                 else:
-                    why = ("passes without the fix" if red == 0 else
-                           f"exited {red}, which is not a test failure (a collection error, a usage error, "
-                           f"timeout or missing command)")
+                    if red == 0:
+                        why = "passes without the fix"
+                    elif _environment_error(red):
+                        why = (f"exited {red}, an environment error that is not a test failure "
+                               "(a collection error, a usage error or a missing command)")
+                    else:
+                        why = f"exited {red}, which is not a test failure (a timeout or an unusual exit)"
                     return {"ok": False, "status": "blocked",
-                            "reason": f"revert-and-fail proof: {test} with the source reverted {why}"}
-            green = _run(green_checkout, command, run)[0]
+                            "reason": f"revert-and-fail proof: {test} with the source reverted {why}"
+                                      + _detail(command, red_checkout, red_out)}
+            green, green_out = _run(green_checkout, command, run)
             if green != 0:
+                what = (f"hit an environment error on the submitted commit (exited {green}, not a test result)"
+                        if _environment_error(green) else f"fails on the submitted commit (exit {green})")
                 return {"ok": False, "status": "blocked",
-                        "reason": f"revert-and-fail proof: {test} fails on the submitted commit (exit {green})"}
+                        "reason": f"revert-and-fail proof: {test} {what}"
+                                  + _detail(command, green_checkout, green_out)}
         if exempt:
             return {"ok": True, "status": "exempt",
                     "reason": "revert-and-fail proof exempt: fix may live in a file new in the task; "
