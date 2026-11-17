@@ -384,18 +384,26 @@ def test_a_denied_route_is_never_decided_for_discovery_and_names_its_source_tier
     assert world.cache() == [] and world.events() == []
 
 
-def test_the_probe_refuses_a_route_the_runs_pinned_policy_denies_without_reserving_or_launching(world):
+def test_the_probe_refuses_a_route_the_live_policy_denies_without_reserving_or_launching(world):
     pre = world.decide("high")
-    pinned = copy.deepcopy(world.config)
-    pinned["routing"]["user_policy"]["denied_models"] = [f"codex/{SOL}@high"]
-    pinned[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
-    attempt, refused = world.ensure(pre, route=world.sol["high"], run=world.make_run(pinned))
+    world.write_policy("user", denied=[f"codex/{SOL}@high"])
+    attempt, refused = world.ensure(pre, route=world.sol["high"], run=world.make_run(copy.deepcopy(world.config)))
     assert refused == route_probe.Refused("route-denied")
     assert refused.detail == f"denied by user routing.user_policy.denied_models: codex/{SOL}@high"
     (row,) = world.events(attempt)
     assert (row["kind"], row["outcome"]) == ("probe-refused", "refused")
     assert world.con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
     assert world.cache() == []
+
+
+def test_a_deny_only_the_run_pinned_no_longer_refuses_the_probe(world):
+    """#1120: routing reads the live user policy; a deny the user cleared after the run pinned it does not apply."""
+    pre = world.decide("high")
+    pinned = copy.deepcopy(world.config)
+    pinned["routing"]["user_policy"]["denied_models"] = [f"codex/{SOL}@high"]
+    pinned[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
+    _, outcome = world.ensure(pre, route=world.sol["high"], run=world.make_run(pinned))
+    assert outcome != route_probe.Refused("route-denied"), outcome
 
 
 @pytest.mark.parametrize("tier", ["user", "repo"])

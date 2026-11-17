@@ -462,10 +462,16 @@ def test_an_interrupted_probe_is_abandoned_and_still_counted(world, monkeypatch)
 
 # ------------------------------------------------------------------ refusals
 
+def _live_deny(world, *denied):
+    """The user's live routing policy: routing reads it, not the run's pinned copy, whenever it is readable (#1120)."""
+    (world.tmp / "user-config.yaml").write_text(
+        "routing:\n  user_policy:\n    denied_models: [" + ", ".join(f'"{d}"' for d in denied) + "]\n")
+
+
 def test_denied_routes_are_never_probed(world):
     con = world.con()
     run = world.run()
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["codex/gpt-6.1-sol@high"]
+    _live_deny(world, "codex/gpt-6.1-sol@high")
     refused = ensure(world, con, run)
     assert refused == Refused("route-denied") and "denied" in refused.detail
     assert world.launches() == []
@@ -476,7 +482,7 @@ def test_denied_routes_are_never_probed(world):
 def test_denying_a_harness_blocks_every_route_on_it(world):
     con = world.con()
     run = world.run()
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["harness:codex"]
+    _live_deny(world, "harness:codex")
     assert ensure(world, con, run) == Refused("route-denied")
 
 
@@ -655,7 +661,7 @@ def test_every_outcome_appends_its_event_under_the_callers_attempt(world):
     assert kinds(con, "A1") == ["probe-reserved", "probe-result"]
     ensure(world, con, run, attempt="A2")
     assert kinds(con, "A2") == ["probe-cache-hit"]
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["harness:codex"]
+    _live_deny(world, "harness:codex")
     ensure(world, con, run, attempt="A3")
     assert kinds(con, "A3") == ["probe-refused"]
     first = events(con, attempt_id="A1")

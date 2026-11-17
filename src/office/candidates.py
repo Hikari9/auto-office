@@ -848,6 +848,26 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     return result
 
 
+SLUG_HARNESSES = frozenset({"pi"})  # harnesses whose --model only accepts a provider/model slug
+
+
+def _provider_slug(harness: str, model: str, rows: list[dict]) -> str:
+    """The invocation slug a bare alias names on a slug-only harness (#1185). A model with a
+    catalog row of its own keeps that row; otherwise its lineage must reach exactly one slug."""
+    from office.state import Refused
+    if any(model == r.get("model_id") for r in rows):
+        return model
+    lineage = model_lineages.alias_lineages().get(model) or (model_lineages.identify(model) or {}).get("lineage_key")
+    slugs = sorted({r["invocation_model_id"] for r in rows if lineage and r.get("lineage_key") == lineage
+                    and "/" in (r.get("invocation_model_id") or "")})
+    if len(slugs) == 1:
+        return slugs[0]
+    found = f"matches {', '.join(slugs)}" if slugs else "matches no registered row"
+    raise Refused("model-needs-provider", f"{harness} needs a provider-qualified model, and {model!r} {found}",
+                  next_step=f"name the route as {harness}/<provider>/{model}@<effort>, "
+                            f"e.g. office model add {harness}/<provider>/{model} --effort medium")
+
+
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
                        run_id: str | None = None, scope: str | None = None, claim: bool = False) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
@@ -862,8 +882,10 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
                     next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
-    rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness
-            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    all_rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness]
+    if harness in SLUG_HARNESSES and "/" not in model:
+        model = _provider_slug(harness, model, all_rows)
+    rows = [r for r in all_rows if model in (r.get("model_id"), r.get("invocation_model_id"))]
     if effort:
         rows = [r for r in rows if r.get("effort") == effort] or rows
     # A row named exactly what the user typed beats an alias that invokes it.
@@ -1006,7 +1028,7 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             size = ((task or {}).get("descriptor") or {}).get("task_size") or ((pinned or {}).get("risk") or {}).get("size_class")
             # A manual --review-as is not the exact user allow a Hydrogen review needs (H4, #1178).
             allowed = (role in hydrogen_trials.REVIEW_ROLES and hydrogen_trials.user_allowed(
-                route_policy.effective_role_state(cand, role, [route_policy.user_policy(config or {})], size)))
+                route_policy.effective_role_state(cand, role, required_user_policies(repo_root), size)))
             denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size,
                                                         user_allowed=allowed)
             if denial:
@@ -1221,7 +1243,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                                                    executor_policy=executor_policy)
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
-                      route_policy.user_policy(config), *live]
+                      *live]
     manual_hydrogen = bool(manual and ("gemini-4-hydrogen" in (exact or "")
                                        or "gemini-4-hydrogen" in (override or "")))
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
@@ -1325,7 +1347,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None)
         if discovery_input:
             request["discovery_input"] = discovery_input
-    policies = [pol for pol in (route_policy.user_policy(config), *live)
+    policies = [pol for pol in live
                 if pol["denied"] or pol["overkill"] or pol["ceilings"] or pol["role_rules"] or pol["strict_roles"]]
     if policies:
         request["user_policies"] = policies

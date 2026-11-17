@@ -368,9 +368,18 @@ Reviewer dispatch (what runs between a gate opening and its verdict):
   no reply) queues one `review_fallback` job that re-runs the same review on the next eligible route. Which routes
   failed is read from the gate's recorded dispatches. When every eligible route has failed, a convergence review (and
   an integration review of any run) is re-dispatched on a fresh chain, once by default (`gates.review_redispatch_max`),
-  before `UNAVAILABLE` is recorded. A pinned reviewer never substitutes another route.
+  before `UNAVAILABLE` is recorded. A pinned reviewer never substitutes another route within an attempt, but a pinned
+  route that already failed the same gate with a route failure (quota or auth wall, `model_not_found`, 402, an empty
+  reply) is dropped for the next attempt: the next fallback runs and a route notice names the dropped pin. A
+  self-review subagent whose reviewer launched and did not complete is retryable through the same bounded fallback.
 - One pin. Every reviewer role (plan, code, visual, integration) reads its pin through the same helper, so
-  `--review-as`, `office review --as` and rerun pins behave alike.
+  `--review-as`, `office review --as` and rerun pins behave alike. A pin is `by: user` only when its command carried
+  the user's `--quote`; otherwise it is `by: orchestrator`. Storing a task or lane pin records a `route.changed` event
+  (kind `repin`) by that actor. A pin dropped by the role gate (its route cannot serve that role), or covering only some
+  tasks of a lane, prints a notice naming the uncovered tasks.
+- Lane review recovery. `office review <lane>` re-runs a lane gate that returned no verdict, one left `EVIDENCE_BLOCKED`
+  by a reviewer or self-review subagent failure, and a visual gate left `EVIDENCE_BLOCKED` unless its evidence is a plan
+  `SPEC_DEFECT`. `office review <lane> --report` still covers only gates that returned no verdict.
 - Async launch. The review job launches the reviewer with its packet, lease and session id and does not wait; a
   `review_supervise` job waits for the dispatch to end and settles it. A launched reviewer is released when its gate
   closes, goes stale or is revoked, and a revoked reviewer's late submit is refused.

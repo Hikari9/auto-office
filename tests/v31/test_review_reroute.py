@@ -78,7 +78,7 @@ def test_review_only_reruns_the_review_of_the_same_revision_for_every_unreviewed
     assert _executor_calls(env) == executors
     assert [g["verdict"] for g in _code_gates(env)] == [shown, "PASS"]
     assert {g["revision_id"] for g in _code_gates(env)} == {t["current_revision_id"]}
-    assert _pin(env)["as"] == reviewer and _pin(env)["by"] == "user"
+    assert _pin(env)["as"] == reviewer and _pin(env)["by"] == "orchestrator", "no --quote: the orchestrator chose it"
     assert _triples(env)[-1] == reviewer, _triples(env)  # the review ran on the route that was named
 
 
@@ -911,3 +911,42 @@ def test_a_lane_review_only_gives_way_to_the_one_route_it_tried_and_pins_nothing
     assert _pin(env) is None
     payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='convergence_review' ORDER BY rowid")[-1]["payload_json"])
     assert payload["exclude_routes"] == [tried] and "review_override" not in payload, payload
+
+
+# ------------------------------------------------------------------ #1139: EVIDENCE_BLOCKED by a reviewer or subagent failure
+
+def test_lane_review_only_re_runs_a_lane_blocked_by_a_failed_subagent(env, monkeypatch):
+    from office import contract, gates as gate_engine
+    from test_issue809_self_review_subagents import _s_run, _subagent_gates, fund_every_gear
+    fund_every_gear()
+    real = gate_engine.run_reviewer
+    broken = {"on": True}
+
+    def failing(con, run, gate, role, brief, **kw):
+        if broken["on"] and "runtime self-review subagent" in brief:
+            return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "summary": "no route"}
+        return real(con, run, gate, role, brief, **kw)
+
+    monkeypatch.setattr(gate_engine, "run_reviewer", failing)
+    _s_run(env)
+    (conv,) = _gates(env, "convergence_review")
+    assert conv["review_status"] == "EVIDENCE_BLOCKED", "the subagent failure blocked the lane"
+    broken["on"] = False
+    env.script(code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
+    code, out = env.office("review", "L-T1")
+    assert code == 0 and "review re-run" in out and "no round spent" in out, out
+    last = _gates(env, "convergence_review")[-1]
+    assert last["review_status"] == "COMPLETED", (last["summary"], [g["review_status"] for g in _subagent_gates(env)])
+    assert _scope(env, "L-T1")["status"] == "approved"
+    assert {g["review_status"] for g in _subagent_gates(env)} >= {"COMPLETED"}
+
+
+def test_lane_review_only_refuses_an_evidence_block_that_is_no_reviewer_failure(env):
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    con = env.con()
+    con.execute("UPDATE gates SET review_status='EVIDENCE_BLOCKED', verdict=NULL, summary='no accepted revision' "
+                "WHERE kind='convergence_review'")
+    con.commit()
+    code, out = env.office("review", "L-T1")
+    assert code == 4 and "nothing-to-review" in out, out

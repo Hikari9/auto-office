@@ -939,10 +939,12 @@ def test_route_role_rejects_a_denied_route_with_its_source_and_a_plan_route_choi
     start_inline(env)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
-    config = copy.deepcopy(run["policy"])
-    config["routing"]["user_policy"]["denied_models"] = ["claude/haiku@high", "claude/claude-opus-5-5@medium"]
-    config[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
-    result = candidates.route_role(con, config, run, "executor", task_id="T1", probe=False)
+    # The denial is the user's live config: a run's pinned copy of it is not routed from (#1120).
+    from office import paths
+    import yaml
+    paths.user_config_path().write_text(yaml.safe_dump({"routing": {"user_policy": {
+        "denied_models": ["claude/haiku@high", "claude/claude-opus-5-5@medium"]}}}))
+    result = candidates.route_role(con, copy.deepcopy(run["policy"]), run, "executor", task_id="T1", probe=False)
     denied = [x for x in result["rejected"] if x.get("category") == "denied"]
     assert denied and all(x["stage"] == 1 and "denied by user routing.user_policy.denied_models" in x["reason"]
                           for x in denied)

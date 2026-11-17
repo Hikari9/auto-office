@@ -274,7 +274,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
                 gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid),
-                                                     pin=gates.review_pin(review_as, review_cli, review_external))
+                                                     pin=gates.review_pin(review_as, review_cli, review_external, quote=quote))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
@@ -331,7 +331,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             _record_routing(con, run, decision)
             if review_as:
                 from office import gates
-                state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+                gates.store_review_pin(con, run, tid, [tid], gates.review_pin(review_as, review_cli, review_external, quote=quote))
                 inert = gates.review_pin_inert(run)
                 if inert:
                     res.notices.append(f"{tid} --review-as {review_as} recorded, but {inert}")
@@ -595,7 +595,7 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     origin = _route_origin(route)
     quote = _route_quote(route)
     authority = origin.get("route_authority") or {}
-    if quote and not route.get("route_change"):
+    if quote:
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
                                                 run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
@@ -682,6 +682,14 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     # A declared route is a manual one: overkill rules never remove it. Denial, quarantine,
     # capability, permission, archive and quota gates still apply to the fresh evidence.
     declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
+    if declared and not exclude and not discovery_input:
+        # A route the user quoted qualifies as their `--as` does (#858): by `declared_decision`, keeping the deny,
+        # quota and capability gates, not by a routing row that may carry no allow. A refusal falls through so the
+        # fresh routing below reports why it cannot run.
+        try:
+            return qualify_recorded_route(con, run, task, state.recorded_route(task), observe=observe)
+        except Refused:
+            pass
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind, manual=bool(declared), declared=declared,
                                   exclude=exclude, discovery_input=discovery_input,
@@ -1134,7 +1142,7 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
         return "probe-stale"
     from office import candidates as candidate_builder
-    policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
+    policies = candidate_builder.required_user_policies(run.get("repo_root"))
     size = ((task or {}).get("descriptor") or {}).get("task_size")
     if route_policy.effective_role_state(cand, "executor", policies, size)["state"] == "deny":
         return "role-deny"

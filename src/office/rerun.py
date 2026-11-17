@@ -89,6 +89,47 @@ def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
     return f"office rerun {tid} " + ("--fresh" if fresh else modes(con, run, tid))
 
 
+def _route_refusal(con, run: dict, task: dict, route: dict) -> tuple[str, str] | None:
+    """`(category, why)` when the next rerun would refuse `route` now, else None (#752).
+
+    The observed qualification reads policy and capability only, so the quota reserve is read here too:
+    a rerun that quota refuses must not be offered as ready. Reads evidence, launches nothing."""
+    try:
+        decision = dispatch.qualify_recorded_route(con, run, task, route, observe=True)
+    except (Refused, Usage) as exc:
+        return getattr(exc, "category", None) or "route-unavailable", exc.message
+    except sqlite3.Error as exc:
+        return "route-unavailable", f"route evidence could not be read: {exc}"
+    why = candidates.reserve_block(decision["candidate"], state.pinned_config(run), "executor")
+    return ("route-unavailable", why) if why else None
+
+
+def refused_route_next(con, run: dict, tid: str, *, amend_route: bool = False) -> str | None:
+    """What to name instead of `office rerun --resume|--fresh` when the next rerun would refuse the task's
+    recorded route for quota or availability, else None (#752).
+
+    The user names another route (`--fresh --as ... --quote`, or `office amend route` when `amend_route`) or the
+    orchestrator reroutes from evidence. On a user deny the rerun re-picks from the plan (#1106), so only `--fresh`
+    is named: the re-picked route cannot resume the denied route's session."""
+    task = state.get_task(con, run["id"], tid)
+    if not task:
+        return None
+    recorded = state.recorded_route(task)
+    route = recorded if recorded.get("declared") and dispatch._route_quote(recorded) \
+        else (_last_ended_executor(con, run, tid) or {}).get("route") or recorded
+    refusal = _route_refusal(con, run, task, route) if route.get("candidate") else None
+    if refusal is None:
+        return None
+    if refusal[0] == "route-denied":
+        # The rerun re-picks another route from the plan (#1106); a resume cannot switch routes, so only --fresh works.
+        return (f"route {routing.candidate_id(route['candidate'])} is now denied ({refusal[1]}); the rerun re-picks "
+                f"from the plan and cannot resume: {_fresh_cmd(tid)}")
+    named = f'{_fresh_cmd(tid)} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
+    other = f'office amend route {tid} --as <harness>/<model>[@effort] --quote "<user\'s words>"' if amend_route \
+        else f"office dispatch {tid} --reroute"
+    return f"route {routing.candidate_id(route['candidate'])} cannot run now ({refusal[1]}); {named} or {other}"
+
+
 def agent_alive(d: dict) -> bool | None:
     """True, False, or None when liveness cannot be known (herdr unreachable).
     A pane-hosted agent is asked through herdr; a headless one by its pid."""
@@ -623,7 +664,8 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
-        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external)
+        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external,
+                                quote=quote)
         ignored = [f"--{f}" for f, on in (("resume", resume), ("fresh", fresh), ("reroute", reroute), ("as", as_model),
                                           ("cli", cli), ("external", external)) if on]
         if ignored:
@@ -708,8 +750,15 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         if decision:
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
+        pin_lines: list[str] = []
         if review_as is not None:
-            state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+            pin = gates.review_pin(review_as, review_cli, review_external, quote=quote)
+            gates.store_review_pin(con, run, tid, [tid], pin)
+            from office import convergence
+            lane = next((sc for sc in convergence.all_scopes(con, run) if tid in sc["tasks"]), None) \
+                if contract.is_convergence(run) else None
+            if lane:  # the lane reviewer reads this pin: say which of its tasks it does not cover
+                pin_lines = gates.pin_notices(con, run, lane["tasks"], pin, [])
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=launch)
         if restack and (restack["merged"] or restack["conflict"]):
@@ -740,6 +789,7 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
                         f" on {route} ({note}) launching"]
                  + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
+    res.notices.extend(pin_lines)
     res.next = "exceptions only; office status"
     return res
 
