@@ -89,6 +89,42 @@ def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
     return f"office rerun {tid} " + ("--fresh" if fresh else modes(con, run, tid))
 
 
+def _route_refusal(con, run: dict, task: dict, route: dict) -> tuple[str, str] | None:
+    """`(category, why)` when the next rerun would refuse `route` now, else None (#752).
+
+    The observed qualification reads policy and capability only, so the quota reserve is read here too:
+    a rerun that quota refuses must not be offered as ready. Reads evidence, launches nothing."""
+    try:
+        decision = dispatch.qualify_recorded_route(con, run, task, route, observe=True)
+    except (Refused, Usage) as exc:
+        return getattr(exc, "category", None) or "route-unavailable", exc.message
+    except sqlite3.Error as exc:
+        return "route-unavailable", f"route evidence could not be read: {exc}"
+    why = candidates.reserve_block(decision["candidate"], state.pinned_config(run), "executor")
+    return ("route-unavailable", why) if why else None
+
+
+def refused_route_next(con, run: dict, tid: str, *, amend_route: bool = False) -> str | None:
+    """What to name instead of `office rerun --resume|--fresh` when the next rerun would refuse the task's
+    recorded route for quota or availability, else None (#752).
+
+    The user names another route (`--fresh --as ... --quote`, or `office amend route` when `amend_route`) or the
+    orchestrator reroutes from evidence. A user deny is not refused here: the rerun re-picks from the plan (#1106)."""
+    task = state.get_task(con, run["id"], tid)
+    if not task:
+        return None
+    recorded = state.recorded_route(task)
+    route = recorded if recorded.get("declared") and dispatch._route_quote(recorded) \
+        else (_last_ended_executor(con, run, tid) or {}).get("route") or recorded
+    refusal = _route_refusal(con, run, task, route) if route.get("candidate") else None
+    if refusal is None or refusal[0] == "route-denied":
+        return None
+    named = f'{_fresh_cmd(tid)} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
+    other = f'office amend route {tid} --as <harness>/<model>[@effort] --quote "<user\'s words>"' if amend_route \
+        else f"office dispatch {tid} --reroute"
+    return f"route {routing.candidate_id(route['candidate'])} cannot run now ({refusal[1]}); {named} or {other}"
+
+
 def agent_alive(d: dict) -> bool | None:
     """True, False, or None when liveness cannot be known (herdr unreachable).
     A pane-hosted agent is asked through herdr; a headless one by its pid."""

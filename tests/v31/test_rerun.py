@@ -601,3 +601,20 @@ def test_a_launch_whose_lease_was_revoked_during_setup_ends_itself(env, monkeypa
     out = dispatch.job_launch_agent(con, run, job)
     assert out.get("skipped") == "revoked" and not launched, out
     assert state.get_dispatch(con, did)["ended_at"]
+
+
+def test_resume_as_the_same_route_with_a_quote_reapplies_the_users_override_and_resumes(env):
+    _planned_executor_ended(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET session_id='S1' WHERE task_id='T1'")
+    con.commit()
+    code, out = env.office("rerun", "T1", "--resume", "--as", "claude/claude-opus-5-5@medium", "--quote",
+                           "keep claude for this fix", env=_quota(env))
+    assert code == 0 and "resuming" in out, out
+    did, _ = _latest(env)
+    override = json.loads(con.execute("SELECT override_json FROM dispatches WHERE id=?", (did,)).fetchone()[0])
+    assert override["quote"] == "keep claude for this fix", override
+    route = json.loads(con.execute("SELECT route_json FROM dispatches WHERE id=?", (did,)).fetchone()[0])
+    assert route["route_authority"]["actor"] == "user" and route["declared"] is True, route
+    payload = json.loads(con.execute("SELECT payload_json FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0])
+    assert "S1" in payload["resume"]["argv"], payload

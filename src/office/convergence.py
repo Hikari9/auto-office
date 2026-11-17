@@ -2461,7 +2461,8 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
             if is_live:
                 nxt_parts.append(f'office prompt {tid} -- "fix {", ".join(codes)}, then office submit"')
             else:
-                nxt_parts.append(f"office rerun {tid} --resume|--fresh")
+                from office import rerun
+                nxt_parts.append(rerun.refused_route_next(con, run, tid) or f"office rerun {tid} --resume|--fresh")
         nxt = " ; ".join(nxt_parts)
         if any("office prompt" in p for p in nxt_parts):
             deliv_note = "; finding delivered to the live worker"
