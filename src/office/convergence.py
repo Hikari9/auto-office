@@ -2102,7 +2102,9 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (why, now_iso(), j["id"]))
     # A self-review subagent has a gate of its own: its supervise job names it and, nested, the lane gate.
-    subagent_gates = self_review_subagents.supervised_gates(jobs_)
+    # A queued subagent gate not yet supervised has no job to name it: find it by the scope commit in its key.
+    subagent_gates = list(dict.fromkeys([*self_review_subagents.supervised_gates(jobs_),
+                                         *self_review_subagents.open_gates_at(con, run["id"], commit)]))
     unstopped = []
     for j in jobs_:
         if j["status"] != "claimed" or not jobs.claim_live(j):

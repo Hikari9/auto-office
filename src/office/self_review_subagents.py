@@ -397,6 +397,13 @@ def supervised_gates(jobs: list[dict]) -> list[str]:
         if ((p.get("origin") or {}).get("payload") or {}).get("subagent"):
             out.append(p["gate_id"])
     return out
+def open_gates_at(con, run_id: str, commit: str) -> list[str]:
+    """Open subagent gates reviewing the composition at `commit`, supervised or not (the key is rid:commit:rubric:version)."""
+    if not commit:
+        return []
+    return [r[0] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND kind='self_review_subagent' "
+                                      "AND status IN ('queued','running') AND instr(input_key, ?) > 0",
+                                      (run_id, f":{commit}:"))]
 def _fresh_chain(con, gate_id: str) -> dict:
     """The job payload that starts a subagent's review on a fresh chain of routes when an earlier attempt of its gate
     failed (a retry of a subagent that never launched): the routes that attempt failed on are eligible again."""
