@@ -676,6 +676,8 @@ def ledger_lines() -> list[str]:
         "    `office submit` refuses substantive in-scope work with no ledger naming the HEAD it submits (uncommitted work",
         "    the ledger does not cover is refused too). Empty and read-only work is exempt on its own; on the inline tier a",
         '    trivial or mechanical change may run `office submit --self-review-exempt trivial|mechanical -- "<reason>"`.',
+        '    A task with accept criteria whose tree equals its base is refused: make the change, or if they already hold run',
+        '    `office submit --no-change -- "<why>"` (independent review decides acceptance).',
     ]
 
 

@@ -92,13 +92,15 @@ def unblock_self(con, run: dict, task: dict) -> str | None:
 
 
 def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
-           request_scope: list[str] | None = None, reason: str = "", exempt: str | None = None) -> Result:
+           request_scope: list[str] | None = None, reason: str = "", exempt: str | None = None,
+           no_change: bool = False) -> Result:
     """A refusal inside a dispatch is recorded on it, so a worker that stopped
     after one can be told from one that is still working."""
     try:
         if request_scope:
             return request_scope_change(con, run, cwd=cwd, files=request_scope, reason=reason)
-        return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect, exempt=exempt, reason=reason)
+        return _submit(con, run, cwd=cwd, plan_path=plan_path, redirect=redirect, exempt=exempt, reason=reason,
+                       no_change=no_change)
     except Refused as exc:
         dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
         # outside-scope records its own events, which also block the task on exit.
@@ -109,7 +111,7 @@ def submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect:
                     state.emit(con, run, "submit.rejected", f"{exc.category}: {exc.message}", audience="runtime",
                                task_id=d.get("task_id"), dispatch_id=dispatch_id, payload={"code": exc.category})
                     if exc.category not in ("self-review-ledger-signaled", "self-review-missing", "self-review-stale",
-                                            "self-review-exemption"):
+                                            "self-review-exemption", "no-change-submit"):
                         signal_refused(con, run, d, f"{exc.category}: {exc.message}")
         raise
 
@@ -251,7 +253,7 @@ def request_scope_change(con, run: dict, *, cwd: Path, files: list[str], reason:
 
 
 def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect: dict | None = None,
-            exempt: str | None = None, reason: str = "") -> Result:
+            exempt: str | None = None, reason: str = "", no_change: bool = False) -> Result:
     """`redirect` ({defect, quote, root_cause, requirement, reviewer}) submits a plan
     revision that follows the user's redirect of a plan defect (office.redirect)."""
     dispatch_id = os.environ.get("OFFICE_DISPATCH_ID")
@@ -273,12 +275,12 @@ def _submit(con, run: dict, *, cwd: Path, plan_path: str | None = None, redirect
             base = top[0] if top else Path(d["worktree"])
             return plans.submit_plan(con, run, Path(plan_path) if plan_path else _draft(con, base, run),
                                      submitter=dispatch_id, dispatch_id=dispatch_id, redirect=redirect)
-        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason)
+        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason, no_change=no_change)
     d = None if plan_path else _worktree_dispatch(con, run, cwd)
     if d is not None:
         # A restarted executor session lost OFFICE_DISPATCH_ID; its task
         # worktree still names the dispatch, and the lease check still fences it.
-        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason)
+        return submit_revision(con, run, d, cwd, exempt=exempt, reason=reason, no_change=no_change)
     if not plan_path:
         _refuse_lost_executor(con, run, cwd)
     if run.get("planner_mode") == "dedicated" and not plan_path:
@@ -517,7 +519,8 @@ def make_commit(worktree: Path, tree: str, head: str, message: str) -> str:
     return paths.git(worktree, "commit-tree", tree, "-p", head, "-m", message, env=env)
 
 
-def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = None, reason: str = "") -> Result:
+def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = None, reason: str = "",
+                    no_change: bool = False) -> Result:
     task = state.get_task(con, run["id"], d["task_id"])
     if task["current_dispatch_id"] != d["id"]:
         raise Refused("superseded-dispatch", f"{task['id']} now belongs to a newer dispatch; this session's submit is rejected",
@@ -560,13 +563,14 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     # use the same ledger gate as preflight against committed and pending work.
     from office import preflight
     base, dep_bases = attribution(con, run, task, d, head)  # `commit` below is HEAD plus the worktree: same ancestry
+    reason = _one_line_reason(reason)
+    _check_no_change(task, wt, tree, base, no_change, reason)
     tier = briefs.run_self_review_tier(run)
     # #938 retires the inline review tier, not the trivial/mechanical exemption: a low-risk run still qualifies by
     # the gear and blast radius that used to make it inline (#309).
     exempt_tier = briefs.self_review_tier(run.get("gear"), run.get("risk_json"))
     enforced = contract.of(run) != contract.LEGACY  # runs pinned to v3.1 keep ledger-less submissions (#421)
     has_ledger = _read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS) is not None
-    reason = preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
     if exempt and not has_ledger and enforced and task["scope"] and any(preflight._in_scope_changes(
             wt, task, preflight.review_changes(con, task, wt, base, head, dep_bases))):
         _check_exemption(task, exempt, reason, exempt_tier)  # empty, read-only and v3.1 work needs no exemption
@@ -597,6 +601,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     receipt = _self_review_receipt(wt, task, run, head, tree, exempt_tier if exempt and not has_ledger else tier,
                                    enforced, exempt, reason,
                                    preflight.review_changes(con, task, wt, base, head, dep_bases), preflight)
+    if no_change:
+        receipt = {**(receipt or {"kind": "exempt", "type": "empty", "tree": tree, "tier": tier}), "no_change": reason}
     commit = make_commit(wt, tree, head, f"office: {task['id']} submission\n\nrun {run['id'][:8]} task {task['id']}\n\n"
                          f"{paths.office_trailer(run['id'])}")
     from office import planfile, prs
@@ -709,6 +715,8 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     res.add(" | ".join(parts))
     if receipt:
         res.add(describe_receipt(receipt))
+    if no_change:
+        res.add("no change acknowledged: independent review decides acceptance, and dependents wait for it")
     left_out = [f for f in left_out if f not in (briefs.EVIDENCE_FILE, briefs.LEDGER_FILE)]
     for label, names in (("untracked files outside", left_out), ("harness config edits outside", restored)):
         if names:
@@ -717,6 +725,34 @@ def submit_revision(con, run: dict, d: dict, cwd: Path, *, exempt: str | None = 
     res.next = "you may stop; results will be delivered"
     res.data = {"revision": rev_id, "commit": commit, "gates": planned["gates"]}
     return res
+
+
+def _one_line_reason(reason: str) -> str:
+    from office import preflight
+    return preflight._one_line(reason or "", 200)  # it reaches the reviewer's brief: one printable line
+
+
+def _check_no_change(task: dict, wt: Path, tree: str, base: str, no_change: bool, reason: str) -> None:
+    """#1138: a task with accept criteria that submits its own base tree has not done the work. It makes the change
+    or raises, or acknowledges with `--no-change -- "<why>"`. Read-only and external tasks (no scope) are exempt."""
+    if not task["scope"]:
+        return
+    empty = paths.git(wt, "rev-parse", f"{base}^{{tree}}").strip() == tree
+    why = next_step = None
+    if no_change and not empty:
+        why = "--no-change was given but the submitted tree differs from the task base"
+        next_step = "run office submit without --no-change"
+    elif no_change and not reason:
+        why = '--no-change needs a reason: office submit --no-change -- "<why the accept criteria already hold>"'
+        next_step = 'office submit --no-change -- "<why>"'
+    elif empty and not no_change and task.get("accept"):
+        why = ("the submitted tree equals the task base but the task has accept criteria; make the change, or run "
+               "office raise if they already hold, or acknowledge with: "
+               'office submit --no-change -- "<why the accept criteria already hold>"')
+        next_step = 'make the change, office raise, or office submit --no-change -- "<why>"'
+    if why:
+        raise Refused("no-change-submit", f"{task['id']} submission refused: {why}", scope=task["id"],
+                      preserved="your worktree (nothing was submitted)", next_step=next_step)
 
 
 EXEMPT_TYPES = ("trivial", "mechanical")  # declared by the executor; `empty` and `read-only` are derived
