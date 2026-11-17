@@ -848,6 +848,26 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     return result
 
 
+SLUG_HARNESSES = frozenset({"pi"})  # harnesses whose --model only accepts a provider/model slug
+
+
+def _provider_slug(harness: str, model: str, rows: list[dict]) -> str:
+    """The invocation slug a bare alias names on a slug-only harness (#1185). A model with a
+    catalog row of its own keeps that row; otherwise its lineage must reach exactly one slug."""
+    from office.state import Refused
+    if any(model == r.get("model_id") for r in rows):
+        return model
+    lineage = model_lineages.alias_lineages().get(model) or (model_lineages.identify(model) or {}).get("lineage_key")
+    slugs = sorted({r["invocation_model_id"] for r in rows if lineage and r.get("lineage_key") == lineage
+                    and "/" in (r.get("invocation_model_id") or "")})
+    if len(slugs) == 1:
+        return slugs[0]
+    found = f"matches {', '.join(slugs)}" if slugs else "matches no registered row"
+    raise Refused("model-needs-provider", f"{harness} needs a provider-qualified model, and {model!r} {found}",
+                  next_step=f"name the route as {harness}/<provider>/{model}@<effort>, "
+                            f"e.g. office model add {harness}/<provider>/{model} --effort medium")
+
+
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
                        run_id: str | None = None, scope: str | None = None, claim: bool = False) -> dict:
     """A candidate the user named with --as/--review-as. It bypasses the
@@ -862,8 +882,10 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
                     next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
-    rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness
-            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    all_rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness]
+    if harness in SLUG_HARNESSES and "/" not in model:
+        model = _provider_slug(harness, model, all_rows)
+    rows = [r for r in all_rows if model in (r.get("model_id"), r.get("invocation_model_id"))]
     if effort:
         rows = [r for r in rows if r.get("effort") == effort] or rows
     # A row named exactly what the user typed beats an alias that invokes it.

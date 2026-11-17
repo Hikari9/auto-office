@@ -292,3 +292,16 @@ def test_credit_balance_wall_text_matches_the_quota_signatures_1194():
     assert dispatch.route_failure("nonzero", wall)[0] == "quota"
     # A prompt echo below the wall means the agent went on.
     assert dispatch._usage_limit(wall + "\n> continue") is None
+
+
+PI_CREDIT_400 = ('400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too '
+                 'low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}')
+
+
+def test_pi_anthropic_credit_balance_400_is_quota_everywhere():
+    """#771: pi's exact Anthropic text is a quota wall in every classifier, not a model or auth fault."""
+    from office import gates
+    assert dispatch._usage_limit(PI_CREDIT_400)
+    assert gates._quota_signature(PI_CREDIT_400)
+    reason, _ = dispatch.route_failure("nonzero", PI_CREDIT_400)
+    assert reason == "quota"
