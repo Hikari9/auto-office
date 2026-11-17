@@ -455,6 +455,27 @@ def _record_user_reserves(kept: dict, into: dict) -> None:
                 into[f"reserve_percent_by_role.{family}"] = float(value)
 
 
+def reserve_origins(files: dict[str, str | None]) -> dict[str, str]:
+    """Which layer (user, repo or shipped) supplies each family's protected reserve, by the same
+    precedence `_resolve_quota_reserves` applies: a by-role value of any layer, then a scalar, then shipped."""
+    per_tier: dict[str, dict[str, float]] = {}
+    for tier in ("user", "repo"):
+        if files.get(tier) is not None:
+            per_tier[tier] = {}
+            data = yaml.safe_load(files[tier])
+            _record_user_reserves(data if isinstance(data, dict) else {}, per_tier[tier])
+    out = {}
+    for family in RESERVE_FAMILIES:
+        for key in (f"reserve_percent_by_role.{family}", "reserve_percent"):
+            tier = next((t for t in ("repo", "user") if key in per_tier.get(t, {})), None)
+            if tier:
+                out[family] = f"{tier} {'quota.' + key}"
+                break
+        else:
+            out[family] = "shipped default"
+    return out
+
+
 def _is_percent(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 

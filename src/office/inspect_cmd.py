@@ -237,7 +237,7 @@ def _route(con, run, role_or_task) -> Result:
     lines += _rejections(decision)
     categories = _categories(decision)
     config = state.pinned_config(run)
-    policies = [*candidates.current_user_policies(run.get("repo_root")), route_policy.user_policy(config)]
+    policies = candidates.current_user_policies(run.get("repo_root"))
     lines += _discovery_lines(decision, categories, config, policies)
     trials = _trial_rows(con, run, role=role)
     lines += _trial_lines(trials) + _attempt_lines(route_learning.attempt_history(con, run_id=run["id"], role=role, include_unbound=True))

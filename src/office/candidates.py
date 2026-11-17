@@ -1006,7 +1006,7 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             size = ((task or {}).get("descriptor") or {}).get("task_size") or ((pinned or {}).get("risk") or {}).get("size_class")
             # A manual --review-as is not the exact user allow a Hydrogen review needs (H4, #1178).
             allowed = (role in hydrogen_trials.REVIEW_ROLES and hydrogen_trials.user_allowed(
-                route_policy.effective_role_state(cand, role, [route_policy.user_policy(config or {})], size)))
+                route_policy.effective_role_state(cand, role, required_user_policies(repo_root), size)))
             denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size,
                                                         user_allowed=allowed)
             if denial:
@@ -1221,7 +1221,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
                                                    executor_policy=executor_policy)
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
-                      route_policy.user_policy(config), *live]
+                      *live]
     manual_hydrogen = bool(manual and ("gemini-4-hydrogen" in (exact or "")
                                        or "gemini-4-hydrogen" in (override or "")))
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
@@ -1325,7 +1325,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None)
         if discovery_input:
             request["discovery_input"] = discovery_input
-    policies = [pol for pol in (route_policy.user_policy(config), *live)
+    policies = [pol for pol in live
                 if pol["denied"] or pol["overkill"] or pol["ceilings"] or pol["role_rules"] or pol["strict_roles"]]
     if policies:
         request["user_policies"] = policies
