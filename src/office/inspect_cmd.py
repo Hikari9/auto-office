@@ -113,7 +113,7 @@ def _task(con, run, tid) -> Result:
     if t.get("review_override"):
         from office import gates
         inert = gates.review_pin_inert(run)
-        lines.append(f"review pinned by user: {t['review_override']['as']}"
+        lines.append(f"review pinned by {t['review_override'].get('by') or 'user'}: {t['review_override']['as']}"
                      + (" (external)" if t["review_override"].get("external") else "")
                      + (f"; no effect: {inert}" if inert else ""))
     for d in con.execute("SELECT id, role, triple, status, terminal_classification, exit_code, applied_plan_version, worktree, "
@@ -237,7 +237,7 @@ def _route(con, run, role_or_task) -> Result:
     lines += _rejections(decision)
     categories = _categories(decision)
     config = state.pinned_config(run)
-    policies = [*candidates.current_user_policies(run.get("repo_root")), route_policy.user_policy(config)]
+    policies = candidates.current_user_policies(run.get("repo_root"))
     lines += _discovery_lines(decision, categories, config, policies)
     trials = _trial_rows(con, run, role=role)
     lines += _trial_lines(trials) + _attempt_lines(route_learning.attempt_history(con, run_id=run["id"], role=role, include_unbound=True))

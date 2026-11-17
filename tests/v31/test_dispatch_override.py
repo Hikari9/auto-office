@@ -172,9 +172,10 @@ def test_review_as_is_pinned_on_the_task(env):
     assert code == 0, out
     con = env.con()
     pinned = json.loads(con.execute("SELECT review_override_json FROM tasks WHERE id='T1'").fetchone()[0])
-    assert pinned == {"as": "codex/gpt-6-luna@high", "cli": None, "external": True, "by": "user"}
+    # No --quote: the orchestrator chose the pin (#1115).
+    assert pinned == {"as": "codex/gpt-6-luna@high", "cli": None, "external": True, "by": "orchestrator"}
     code, out = env.office("inspect", "task", "T1")
-    assert "review pinned by user: codex/gpt-6-luna@high (external)" in out, out
+    assert "review pinned by orchestrator: codex/gpt-6-luna@high (external)" in out, out
 
 
 def test_a_review_pin_on_a_gear_without_code_review_warns_it_has_no_effect(env):
@@ -188,7 +189,7 @@ def test_a_review_pin_on_a_gear_without_code_review_warns_it_has_no_effect(env):
                            "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
     assert code == 0 and "--review-as codex/gpt-6-luna@high recorded, but gear direct runs no code review" in out, out
     code, out = env.office("inspect", "task", "T1")
-    assert "review pinned by user: codex/gpt-6-luna@high (external); no effect: gear direct runs no code review" in out, out
+    assert "review pinned by orchestrator: codex/gpt-6-luna@high (external); no effect: gear direct runs no code review" in out, out
 
 
 def test_a_review_pin_on_a_reviewed_gear_has_no_warning(env):

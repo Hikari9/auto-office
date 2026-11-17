@@ -31,6 +31,12 @@ def _config(*routes):
         {"role": "code_reviewer", "route": r, "state": "allow"} for r in routes]}}}
 
 
+def _live(monkeypatch, cfg: dict) -> dict:
+    """`cfg`'s user policy as the user's live policy: routing reads it, not a run's pinned copy (#1120)."""
+    monkeypatch.setattr(candidates, "required_user_policies", lambda *_: [route_policy.user_policy(cfg)])
+    return cfg
+
+
 def _agy():
     return adapters.load_all()["agy"]
 
@@ -89,8 +95,8 @@ def test_integration_reviewer_never_gets_hydrogen(env):
     assert not [c for c in built if hydrogen_trials.is_hydrogen(c)]
 
 
-def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env):
-    cfg = _config(ALLOW)
+def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env, monkeypatch):
+    cfg = _live(monkeypatch, _config(ALLOW))
     agy = _agy()
     with db.connect(env / "runs.db") as con:
         built, _ = candidates.build_candidates(con, "code_reviewer", probe=False,
@@ -133,7 +139,7 @@ def test_manual_review_bypass_is_refused_without_the_exact_allow():
                                                            user_allowed=True)
 
 
-def test_a_pinned_hydrogen_reviewer_needs_only_the_run_not_a_task(env):
+def test_a_pinned_hydrogen_reviewer_needs_only_the_run_not_a_task(env, monkeypatch):
     """dispatch --review-as, review --as and rerun check the pin with run_id and no scope (#1178)."""
     from office.state import Refused
     db.connect().close()
@@ -141,7 +147,7 @@ def test_a_pinned_hydrogen_reviewer_needs_only_the_run_not_a_task(env):
     with pytest.raises(Refused, match="exact allow"):
         candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config={}, run_id="r1")
     with pytest.raises(Refused, match="conformance receipt"):
-        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_config(ALLOW),
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_live(monkeypatch, _config(ALLOW)),
                                      run_id="r1")
     # An executor still needs the task that classifies its size.
     with pytest.raises(Refused, match="classified run/task"):

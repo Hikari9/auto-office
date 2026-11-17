@@ -388,7 +388,33 @@ def _effective_with_origin(key: str, tier: str | None, cwd: Path) -> tuple[bool,
     return ok, v, where
 
 
+RESERVE_KEY = "quota.reserve_percent"
+
+
+def _pct(value) -> str:
+    return f"{value:g}" if isinstance(value, (int, float)) else str(value)
+
+
+def _reserve_lines(by_role: dict, origins: dict[str, str]) -> list[str]:
+    """One line per reserve family: the protected percent and the layer it came from."""
+    roles = {fam: sorted(r for r, f in cfg.RESERVE_KEY_BY_ROLE.items() if f == fam) for fam in cfg.RESERVE_FAMILIES}
+    return [f"{fam}: {_pct(by_role.get(fam))}%  ({origins[fam]}; roles {', '.join(roles[fam])})" for fam in cfg.RESERVE_FAMILIES]
+
+
+def _get_reserves(cwd: Path) -> Result:
+    root = _repo_root(cwd)
+    files = cfg.read_files(root)
+    effective, _ = cfg.resolve(root, files=files)
+    by_role = (effective.get("quota") or {}).get("reserve_percent_by_role") or {}
+    origins = cfg.reserve_origins(files)
+    other = (effective.get("quota") or {}).get("reserve_percent")
+    lines = _reserve_lines(by_role, origins) + [f"other roles: {_pct(other)}%  (quota.reserve_percent)"]
+    return Result(lines=lines, data={"key": RESERVE_KEY, "value": other, "by_role": by_role, "origins": origins})
+
+
 def _get(key: str, tier: str | None, origin: bool, cwd: Path) -> Result:
+    if key == RESERVE_KEY and tier is None:
+        return _get_reserves(cwd)
     ok, value, where = _effective_with_origin(key, tier, cwd)
     if not ok:
         raise OfficeError("not-set", f"{key} is not set" + (f" in the {tier} file" if tier else ""), exit_code=1,
@@ -571,6 +597,32 @@ def apply_run_verification(con, run_arg: str | None, quote: str | None) -> Resul
                   data={"run": run["id"], "changed": changed})
 
 
+def _run_reserves(run: dict, short: str, cwd: Path) -> Result:
+    """The reserves a run pinned per family, and where the live config now differs."""
+    pinned = state.pinned_config(run)
+    quota = pinned.get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role") or {}
+    origins = {fam: f"run {short} pinned" for fam in cfg.RESERVE_FAMILIES}
+    lines = _reserve_lines(by_role, origins) + [f"other roles: {_pct(quota.get('reserve_percent'))}%  (run {short} pinned)"]
+    res = Result(lines=lines, data={"key": RESERVE_KEY, "value": quota.get("reserve_percent"), "by_role": by_role,
+                                    "origins": origins, "run": run["id"]})
+    try:
+        root = Path(run.get("repo_root") or cwd)
+        files = cfg.read_files(root)
+        live, _ = cfg.resolve(root, files=files)
+    except (OSError, ValueError, yaml.YAMLError):
+        return res
+    live_by_role = (live.get("quota") or {}).get("reserve_percent_by_role") or {}
+    live_origins = cfg.reserve_origins(files)
+    moved = [f"{fam} {_pct(by_role.get(fam))}% -> {_pct(live_by_role.get(fam))}% ({live_origins[fam]})"
+             for fam in cfg.RESERVE_FAMILIES if live_by_role.get(fam) != by_role.get(fam)]
+    if moved:
+        res.notices.append(f"note: the config files now say {'; '.join(moved)}; the run keeps its pinned value until "
+                           f"office config --run {short} --apply-routing --quote \"<user's words>\"")
+        res.data["live"] = {"by_role": live_by_role, "origins": live_origins}
+    return res
+
+
 def run_get(con, run_arg: str, key: str, origin: bool, cwd: Path) -> Result:
     """`office config --run <id> <key>`: the value the run pinned at start, which is what its gates use (#755).
     When the config files now say something else, a notice names the live value and how it would reach the run."""
@@ -578,6 +630,8 @@ def run_get(con, run_arg: str, key: str, origin: bool, cwd: Path) -> Result:
     if run is None:
         raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
     short = run["id"][:8]
+    if key == RESERVE_KEY:
+        return _run_reserves(run, short, cwd)
     ok, value = _get_path(state.pinned_config(run), key.split("."))
     if not ok:
         raise OfficeError("not-set", f"{key} is not pinned in run {short}", exit_code=1,
