@@ -492,6 +492,33 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
     return ledger_stop, ledger_fix, signaled
 
 
+_CAP_REPAIR = "self-review round cap spent with repairs outstanding: "
+
+
+def _repair_next(dispatch_id: str, item: str) -> str:
+    """The prompt that fixes the one repair a spent self-review round cap or a failed proof left outstanding.
+    The generic `fixed <test> mutation=failed` advice fits only a finding line (#1130)."""
+    def prompt(text: str) -> str:
+        return f'office prompt {dispatch_id} -- "{text}, run `office preflight`, then `office submit`"'
+    if "revert-and-fail proof" in item:
+        if "environment error" in item:
+            return prompt("the proof run hit an environment error, not a test failure: fix the environment the named "
+                          "test needs (or name a test that runs here)")
+        return prompt("the revert-and-fail proof failed: make the named test fail with the source reverted and pass "
+                      "restored")
+    if item.startswith("ledger: names commit"):
+        return prompt("the ledger COMMIT is stale: re-review what changed since, then update COMMIT to HEAD")
+    if item.startswith("ledger: lens"):
+        return prompt("review the lens the ledger names and write `LENS <name> reviewed`")
+    if item.startswith("ledger: no ") and briefs.LEDGER_FILE in item:
+        return prompt(f"write {briefs.LEDGER_FILE} in the worktree root after the last commit")
+    if item.startswith("ledger: "):
+        return prompt("repair the ledger as the reason says")
+    if _MUTATION in item:
+        return prompt(f"mark the line `fixed <test> {_MUTATION}` (or dispose it via `office prompt`)")
+    return prompt("repair the ledger line the reason names")
+
+
 def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     """The command the orchestrator runs for a stopped worker, by what stopped it."""
     if reason.startswith("contract-conflict"):
@@ -502,9 +529,12 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
                 f"then office rerun {task_id} --fresh once findings are recorded")
     if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
         return f"none: {task_id} has a newer session; office status shows it"
-    if "round cap" in reason:
-        return (f'office prompt {dispatch_id} -- "mark the line `fixed <test> mutation=failed` (or dispose it via '
-                '`office prompt`), run `office preflight`, then `office submit`"')
+    if reason.startswith(_CAP_REPAIR):
+        return _repair_next(dispatch_id, reason[len(_CAP_REPAIR):])
+    if reason.startswith("self-review: round"):  # an open medium or high finding at the round cap (#1130)
+        return _repair_next(dispatch_id, f"ledger line: {_MUTATION}")
+    if "revert-and-fail proof" in reason:
+        return _repair_next(dispatch_id, reason)
     if reason.startswith("self-review"):
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
