@@ -2100,9 +2100,9 @@ SPEC_DEFECT = "SPEC_DEFECT"  # a visual gate's evidence state: the plan's visual
 FALLBACK_SCOPE_STATUSES = ("reviewing", "unavailable", "attention", "evidence_blocked")
 
 
-def _unreviewed_gates(con, run: dict, scope_id: str) -> list[dict]:
-    """This cycle's done gates of the scope's current composition that no specialist reviewer
-    returned a verdict for and that no waiver covers."""
+def _open_gates(con, run: dict, scope_id: str, statuses: tuple[str, ...]) -> list[dict]:
+    """This cycle's done gates of the scope's current composition whose review_status is one of `statuses` and that
+    no waiver covers."""
     run = state.get_run(con, run["id"])
     st = scope_state(run, scope_id)
     commit = st.get("commit")
@@ -2110,8 +2110,24 @@ def _unreviewed_gates(con, run: dict, scope_id: str) -> list[dict]:
         return []
     cycle = int(st.get("cycle") or 1)
     return [g for g in _latest(con, run, scope_id, commit).values()
-            if g["status"] == "done" and g.get("review_status") in FALLBACK_STATUSES
+            if g["status"] == "done" and g.get("review_status") in statuses
             and int(g.get("cycle") or 1) == cycle and not _satisfied(con, run, scope_id, g, commit)]
+
+
+def _unreviewed_gates(con, run: dict, scope_id: str) -> list[dict]:
+    """This cycle's done gates of the scope's current composition that no specialist reviewer
+    returned a verdict for and that no waiver covers."""
+    return _open_gates(con, run, scope_id, FALLBACK_STATUSES)
+
+
+def _reviewer_blocked_gates(con, run: dict, scope_id: str) -> list[dict]:
+    """This cycle's EVIDENCE_BLOCKED gates a review-only re-run can recover: a lane gate closed by a reviewer or
+    self-review subagent failure, and a visual gate whose evidence is not a plan SPEC_DEFECT. Other evidence blocks
+    (a missing accepted revision, say) are not a reviewer's to retry."""
+    from office import self_review_subagents
+    return [g for g in _open_gates(con, run, scope_id, (contract.EVIDENCE_BLOCKED,))
+            if g.get("evidence_status") != SPEC_DEFECT
+            and (g["kind"] == "visual" or self_review_subagents.SUBAGENT_FAILURE_MARK in (g.get("summary") or ""))]
 
 
 def fallback_gate(con, run: dict, scope_id: str, kind: str | None = None) -> dict | None:
@@ -2171,7 +2187,8 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
         raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
     dropped_list = dropped_gates(con, run, scope["id"])  # stale gates: never in _unreviewed_gates (done only)
     dropped = {g["id"] for g in dropped_list}
-    blocked = [g for g in [*_unreviewed_gates(con, run, scope["id"]), *dropped_list]
+    blocked = [g for g in [*_unreviewed_gates(con, run, scope["id"]), *_reviewer_blocked_gates(con, run, scope["id"]),
+                           *dropped_list]
                if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT]
     if not blocked:
         raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
@@ -2180,8 +2197,7 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
         for role in sorted({"visual_reviewer" if g["kind"] == "visual" else "code_reviewer" for g in blocked}):
             candidates.declared_decision(pin["as"], flag="--as", role=role, config=state.pinned_config(run),
                                         run_id=run["id"])
-        for tid in scope["tasks"]:
-            state.update_task(con, run["id"], tid, review_override=pin)
+        gates.store_review_pin(con, run, scope["id"], scope["tasks"], pin)
     st = scope_state(run, scope["id"])
     pinned = pin or next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in scope["tasks"])
                           if t and t.get("review_override")), None)
@@ -2203,6 +2219,9 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
             else "next fallback reviewer route"
         lines.append(f"{scope['id']} {'visual' if visual else 'convergence'} review re-run on {st['commit'][:10]} "
                      f"(gate {gid}, {how}); no executor launched, no round spent")
+    if pinned and not pin:  # a stored pin the re-run keeps: say where it does not apply
+        lines += gates.pin_notices(con, run, scope["tasks"], pinned,
+                                   sorted({"visual_reviewer" if g["kind"] == "visual" else "code_reviewer" for g in blocked}))
     _set_scope(con, run, scope["id"], status="reviewing", detail="re-running the review on another reviewer route")
     state.emit(con, run, "convergence.review_only", f"{scope['id']}: review-only re-run of "
                f"{', '.join(g['kind'] for g in blocked)}" + (f" on {pin['as']}" if pin else ""))
@@ -2442,7 +2461,8 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
             if is_live:
                 nxt_parts.append(f'office prompt {tid} -- "fix {", ".join(codes)}, then office submit"')
             else:
-                nxt_parts.append(f"office rerun {tid} --resume|--fresh")
+                from office import rerun
+                nxt_parts.append(rerun.refused_route_next(con, run, tid) or f"office rerun {tid} --resume|--fresh")
         nxt = " ; ".join(nxt_parts)
         if any("office prompt" in p for p in nxt_parts):
             deliv_note = "; finding delivered to the live worker"

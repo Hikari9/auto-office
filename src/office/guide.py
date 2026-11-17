@@ -139,7 +139,8 @@ def next_action(con, run: dict) -> str:
         from office import rerun
         a = stranded[0]
         return (f"{a['task_id']} awaits amendment {a['amendment_id']} ack, but its executor {a['dispatch_id']} "
-                f"has ended; {rerun.recovery_hint(con, run, a['task_id'], fresh=True)} to deliver/ack it")
+                f"has ended; {rerun.refused_route_next(con, run, a['task_id'], amend_route=True) or rerun.recovery_hint(con, run, a['task_id'], fresh=True)} "
+                "to deliver/ack it")
     for status in ("blocked", "paused"):
         if c.get(status):
             tid = c[status][0]
@@ -194,7 +195,8 @@ def next_action(con, run: dict) -> str:
                 (run["id"], t["id"])).fetchone()
             if awaiting_ack:
                 return (f"{t['id']} awaits amendment {awaiting_ack['amendment_id']} ack; "
-                        f"{rerun.recovery_hint(con, run, t['id'])} to deliver/ack it")
+                        f"{rerun.refused_route_next(con, run, t['id'], amend_route=True) or rerun.recovery_hint(con, run, t['id'])} "
+                        "to deliver/ack it")
             outstanding = con.execute("SELECT 1 FROM findings WHERE run_id=? AND task_id=? AND "
                                       + contract.TASK_WORK_FINDINGS + " LIMIT 1",
                                       (run["id"], t["id"])).fetchone()
@@ -762,7 +764,7 @@ def _idle_executors(con, run: dict, acts: dict | None = None) -> list[str]:
             continue
         who = f"{d['task_id']} executor {d['id']}"
         tid = d["task_id"]
-        actions = f"office rerun {tid} --resume|--fresh or office revoke {tid}"
+        actions = f"{rerun.refused_route_next(con, run, tid) or f'office rerun {tid} --resume|--fresh'} or office revoke {tid}"
         refused = con.execute("SELECT summary FROM events WHERE run_id=? AND dispatch_id=? "
                               "AND kind IN ('submit.refused','submit.rejected') ORDER BY seq DESC LIMIT 1",
                               (run["id"], d["id"])).fetchone()

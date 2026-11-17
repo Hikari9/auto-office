@@ -175,9 +175,48 @@ def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
     return code
 
 
-def review_pin(review_as: str | None, cli: str | None = None, external: bool = False) -> dict | None:
-    """The user's pin of a reviewer route (`--review-as` / `office review --as`), or None."""
-    return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
+def review_pin(review_as: str | None, cli: str | None = None, external: bool = False, *,
+               quote: str | None = None) -> dict | None:
+    """The pin of a reviewer route (`--review-as` / `office review --as`), or None. It is the user's (`by: user`) only
+    when the command carried their `--quote`; otherwise the orchestrator chose it."""
+    return {"as": review_as, "cli": cli, "external": bool(external), "by": "user" if (quote or "").strip() else "orchestrator"} \
+        if review_as else None
+
+
+def store_review_pin(con, run: dict, scope_id: str, tids: list[str], pin: dict, *, role: str = "code_reviewer") -> None:
+    """Store `pin` as the reviewer pin of each task in `tids` (a task, or the tasks of lane `scope_id`) and record a
+    `route.changed` (kind repin) event by the pin's actor, as a plan re-pin does. Caller holds the tx."""
+    before = next((t["review_override"].get("as") for t in (state.get_task(con, run["id"], tid) for tid in tids)
+                   if t and t.get("review_override")), None)
+    for tid in tids:
+        state.update_task(con, run["id"], tid, review_override=pin)
+    state.record_route_change(con, run, scope_id, before, pin["as"], kind="repin", actor=pin.get("by") or "orchestrator",
+                              stage=role, reason=f"the {role} was re-pinned on {', '.join(tids)} (--review-as / --as)",
+                              extra={"notice": "review"})
+
+
+def uncovered_pin_tasks(con, run: dict, tids: list[str], pin: dict) -> list[str]:
+    """The tasks of `tids` the pinned reviewer route does not cover: the lane reviewer reads the first pin among them."""
+    return [tid for tid in tids if ((state.get_task(con, run["id"], tid) or {}).get("review_override") or {}).get("as")
+            != pin["as"]]
+
+
+def pin_notices(con, run: dict, tids: list[str], pin: dict, roles: list[str]) -> list[str]:
+    """What a stored reviewer pin does not do: it is dropped for a role its route cannot serve, or it covers only some
+    tasks of a lane (the lane reviewer still reads it). One line each, naming the tasks left uncovered."""
+    lines = []
+    for role in roles:
+        try:
+            candidates.declared_decision(pin["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                         run_id=run["id"])
+        except Refused as exc:
+            lines.append(f"pinned reviewer {pin['as']} is dropped for the {role} (its route cannot serve that role: "
+                         f"{exc}); that review routes normally")
+    uncovered = uncovered_pin_tasks(con, run, tids, pin) if len(tids) > 1 else []
+    if uncovered:
+        lines.append(f"pinned reviewer {pin['as']} covers only some tasks of this lane; no pin on "
+                     f"{', '.join(uncovered)} (office review <lane> --as {pin['as']} pins them all)")
+    return lines
 
 
 def set_integration_pin(con, run: dict, pin: dict | None) -> None:
@@ -190,6 +229,28 @@ def set_integration_pin(con, run: dict, pin: dict | None) -> None:
     state.update_run(con, run["id"], landing=landing)
 
 
+def stored_review_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
+    """The pin stored for this review, before the role check `reviewer_pin` applies."""
+    if role == "plan_reviewer":
+        return (run.get("plan_review") or {}).get("review_override")
+    tids = _gate_task_ids(con, run, gate)
+    pin = next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in tids)
+                if t and t.get("review_override")), None)
+    if not tids and role == "integration_reviewer":
+        # The composed integration names no task or scope: its pin is the one on the run's integration record.
+        pin = ((run.get("landing") or {}).get("integration") or {}).get("review_override")
+    return pin
+
+
+def _gate_task_ids(con, run: dict, gate: dict | None) -> list[str]:
+    """The tasks a task-scoped or lane review gate covers."""
+    tids = [gate["task_id"]] if gate and gate.get("task_id") else []
+    if not tids and gate and gate.get("scope"):
+        from office import convergence
+        tids = list((convergence.find_scope(con, run, gate["scope"]) or {}).get("tasks") or [])
+    return tids
+
+
 def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
     """The one place a user's reviewer pin is read, for any role (code, convergence, visual, integration, plan).
 
@@ -200,18 +261,7 @@ def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | 
     stored on a running run keep working. A pin whose route lacks what `role` requires (a code reviewer's route
     cannot judge screenshots, say) does not apply to that role: it returns None and the role routes normally."""
     run = state.get_run(con, run["id"]) or run
-    if role == "plan_reviewer":
-        pin = (run.get("plan_review") or {}).get("review_override")
-    else:
-        tids = [gate["task_id"]] if gate and gate.get("task_id") else []
-        if not tids and gate and gate.get("scope"):
-            from office import convergence
-            tids = list((convergence.find_scope(con, run, gate["scope"]) or {}).get("tasks") or [])
-        pin = next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in tids)
-                    if t and t.get("review_override")), None)
-        if not tids and role == "integration_reviewer":
-            # The composed integration names no task or scope: its pin is the one on the run's integration record.
-            pin = ((run.get("landing") or {}).get("integration") or {}).get("review_override")
+    pin = stored_review_pin(con, run, role, gate)
     if not pin:
         return None
     try:
@@ -256,7 +306,7 @@ def rerun_unavailable_review(con, run: dict, task: dict, *, pin: dict | None = N
         return None
     rev_id = code["revision_id"]
     if pin:
-        state.update_task(con, run["id"], task["id"], review_override=pin)
+        store_review_pin(con, run, task["id"], [task["id"]], pin)
     payload = {"task_id": task["id"]}
     if next_route and not (pin or task.get("review_override")):
         tried = tried_reviewer_routes(con, "g.run_id=? AND g.task_id=? AND g.revision_id=? AND g.kind='code_review'",
@@ -326,7 +376,7 @@ def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
 
 
 def review_only(con, run: dict, target: str, *, review_as: str | None = None, review_cli: str | None = None,
-                review_external: bool = False) -> Result:
+                review_external: bool = False, quote: str | None = None) -> Result:
     """`office review <task|lane> [--as <route>]`: re-dispatch only the review of the same immutable
     revision on the named route, or the next fallback one. It never launches an executor and keeps a
     pinned reviewer unless `--as` re-pins it. v3.1 task reviews and convergence-v1 lane reviews."""
@@ -341,7 +391,7 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
     if review_as and not re.match(r"[LS]-", target, re.I):  # a lane checks the role of each gate it re-runs
         candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run),
                                     run_id=run["id"])
-    pin = review_pin(review_as, review_cli, review_external)
+    pin = review_pin(review_as, review_cli, review_external, quote=quote)
     if ":" in target and not re.match(r"[LS]-", target, re.I):
         raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
                     next_step="office review T1 | office review L-T1[:convergence|visual]")
@@ -839,6 +889,18 @@ def _reserve_blocked_pin(run: dict, pinned: dict, role: str) -> tuple[str, str] 
     return (routing.candidate_id(cand), why) if why else None
 
 
+ROUTE_FAILURE_CLASSES = ("wall", "launch", "silent")
+
+
+def _failed_pin(run: dict, pinned: dict, role: str, history: list[dict]) -> tuple[str, str] | None:
+    """(route, reason) when the pinned reviewer's route already failed an attempt of this gate with a route failure."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    triple = routing.candidate_id(cand)
+    return next(((triple, a["failure"]["reason"]) for a in reversed(history)
+                 if a["triple"] == triple and a["failure"] and a["failure"]["class"] in ROUTE_FAILURE_CLASSES), None)
+
+
 def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
                      dispatch_id: str | None = None, producer_route: str | None = None,
                      env_failures: int | None = None) -> dict:
@@ -1163,6 +1225,7 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     # Independence is per agent: every reviewer is a fresh dispatch and session,
     # never the producer's, so the producer's model or family is not excluded.
     pinned = reviewer_pin(con, run, role, gate)
+    role_dropped = None if pinned else stored_review_pin(con, run, role, gate)  # a pin this role's gate dropped
     # #958: a pinned route still in a quota or usage-limit cooldown is not launched into the same wall. The review moves
     # to the next eligible route with a notice. The pin stays on the task, so a later review checks it again.
     cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
@@ -1172,6 +1235,12 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     reserved_pin = _reserve_blocked_pin(run, pinned, role) if pinned else None
     if reserved_pin:
         pinned = None
+    # A pinned route that already failed this gate with a route failure (a quota or auth wall, model_not_found, a 402,
+    # an empty reply) is not launched into the same failure again: the review moves to the next fallback with a notice.
+    dropped_pin = _failed_pin(run, pinned, role, history) if pinned else None
+    if dropped_pin:
+        pinned = None
+        excluded.add(dropped_pin[0])
     profile_kind = kind or ("vision" if visual else "reviewer")
     if first and resume_from:
         resume, same_route = _reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"])
@@ -1189,8 +1258,13 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
         last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
     elif reserved_pin:
         last_failed = (reserved_pin[0], f"the pinned route {reserved_pin[0]}: {reserved_pin[1]}")
+    if role_dropped and not (cooled_pin or reserved_pin):
+        last_failed = (role_dropped["as"], f"the pinned route {role_dropped['as']} cannot serve the {role}; routed normally")
     if recorded:
         last_failed = (recorded[-1]["triple"], recorded[-1]["failure"]["reason"])
+    if dropped_pin:
+        last_failed = (dropped_pin[0], f"the pinned route {dropped_pin[0]} failed on an earlier attempt of this review "
+                                       f"({dropped_pin[1]}); the pin is dropped for this review")
     # A route whose launch pointer never landed (#790) runs once more, in a fresh session, before any fallback.
     last = attempts[-1] if attempts else None
     retry = last["triple"] if last and last["failure"] and last["failure"]["class"] == "pointer" else None
@@ -1259,6 +1333,11 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
         elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
             review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id,
                                 skip_class=skipped[2])
+        if pinned and not gate.get("task_id") and len(tids := _gate_task_ids(con, run, gate)) > 1 \
+                and (uncovered := uncovered_pin_tasks(con, run, tids, pinned)):
+            review_route_notice(con, run, gate, role, pinned["as"], triple,
+                                f"the pin covers only some tasks of {gate.get('scope')}; no pin on {', '.join(uncovered)}",
+                                dispatch_id=dispatch_id, kind="pin-partial")
         con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
                     "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
     ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id

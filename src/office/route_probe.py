@@ -342,7 +342,7 @@ def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | Non
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return "policy-unreadable", f"the live user or repo policy cannot be read ({exc}), so a denial cannot be ruled out"
     # A probe serves the executor role (#837): a role allow supersedes a legacy global deny, a role deny holds.
-    policies = [route_policy.user_policy(config), *live]
+    policies = list(live)
     if route_policy.is_fable(cand):
         # --probe-route observes an unqualified *planner* route. The Office
         # doctor is historically executor-scoped; its normal role verdict would
