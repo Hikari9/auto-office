@@ -69,8 +69,11 @@ def test_recomposed_lane_brief_has_current_requirements_plan_tasks_and_dismissal
 
 
 def test_an_added_task_requires_a_fresh_review_even_when_the_composed_tree_is_unchanged(env):
-    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}] * 2,
-           convergence_reviewer=[{"reply": APPROVED}])
+    # T2 changes nothing, so it acknowledges the empty tree with --no-change (#1138).
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
+                          {"write": {"calc.py": GOOD_ADD},
+                           "office": [["submit", "--no-change", "--", "calc.add already handles 0 + 0"]]}],
+           code_reviewer=[{"reply": APPROVED}], convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     before = _scope(env, "L-T1")
     env.write_plan(PLAN_ONE + """
