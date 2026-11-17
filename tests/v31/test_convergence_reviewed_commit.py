@@ -63,6 +63,28 @@ def test_the_brief_names_the_commit_and_retires_earlier_checkouts():
     assert "Office's record for this composition" in brief and "NEXT line instead" in brief
 
 
+def _commit_brief(run, task_commits):
+    revision = {"id": "L-T1@0123456789", "commit_sha": SHA, "base_commit": None, "dispatch_id": None}
+    return briefs.convergence_review_brief({"id": "r", "requirements_version": 1, **run}, {"id": "L-T1", "tasks": ["T1"]},
+                                           [{"id": "T1", "title": "add"}], revision, "diff", "T1 PASS", [],
+                                           "/tmp/checkout-now", 1, task_commits=task_commits)
+
+
+def test_the_brief_lists_task_commits_and_names_office_compose_commits():
+    brief = _commit_brief({}, {"T1": {"sha": "a" * 40, "message": "Fix the adder (#360)\n\nBody line"}})
+    assert f"task commit: {'a' * 40}" in brief
+    assert "| Fix the adder (#360)" in brief and "| Body line" in brief
+    assert "start with `office:`" not in brief and "starts with `office:`" in brief
+    assert "producers cannot edit them" in brief
+    assert "judge commit-message or PR-body criteria against the task commits".lower() in brief.lower()
+    assert "this run has no task prs" in brief.lower()
+
+
+def test_the_no_task_prs_line_is_absent_when_prs_are_on():
+    brief = _commit_brief({"landing": {"prs": {"enabled": True}}}, {"T1": {"sha": "b" * 40, "message": "m"}})
+    assert "no task PRs" not in brief and f"task commit: {'b' * 40}" in brief
+
+
 # ------------------------------------------------------------------ through the gate
 
 def test_a_matching_commit_is_ingested_as_before(env):

@@ -859,6 +859,12 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                 rev = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()
                 ev = briefs.evidence_path(run, rev["dispatch_id"], t["accepted_revision_id"]) if rev else None
                 evidence[t["id"]] = ev.read_text(encoding="utf-8", errors="replace") if ev and ev.is_file() else None
+        task_commits = {}
+        for t in tasks:
+            row = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()
+            if row:
+                task_commits[t["id"]] = {"sha": row[0], "message": paths.git(
+                    Path(run["repo_root"]), "log", "-1", "--format=%B", row[0], check=False)}
         requirements = state.current_requirements(con, run["id"])
         brief = briefs.convergence_review_brief(
             {**run, "requirements_version": requirements["version"]}, scope, tasks, _rev(scope["id"], commit), diff,
@@ -866,7 +872,7 @@ def job_convergence_review(con, run: dict, job: dict) -> dict:
                                                                                          "convergence_review"),
             str(checkout), int(gate["round"] or 1), requirements["frozen"],
             evidence=evidence, self_reviews=self_reviews, max_rounds=contract.round_cap(run),
-            plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
+            task_commits=task_commits, plan=state.current_plan(con, run["id"]), requirements_quote=requirements.get("quote"),
             dismissed=_dismissed(con, run, scope["id"], "convergence_review"),
             used_codes=gates.finding_codes(con, "run_id=? AND scope=?", (run["id"], scope["id"])))
         if sensitive_lane(con, run, scope):
