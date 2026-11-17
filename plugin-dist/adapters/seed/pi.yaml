@@ -108,13 +108,18 @@ office_profiles:
   # `write` (Q22): reply.txt sits in the dispatch dir outside the checkout. pi has no sandbox, so Office
   # fingerprints the worktree (HEAD, tracked diff, untracked files) before and after each review and fails
   # the route as degraded when it changed (verify_worktree_unchanged).
+  # #1231: the pane form also loads Office's per-dispatch extension (`-e`, which still loads under
+  # --no-extensions) and allows its one tool, office_review_submit. The tool runs exactly
+  # `office review submit --file <dispatch>/review-submit.txt` with no shell, the narrow grant codex and claude
+  # reviewers get. The headless form keeps the vetted read-only argv and its stdout reply.
   reviewer:
-    submit: file
+    submit: shell
+    submit_grant: pi-extension
     argv: [--tools, "read,grep,find,ls", --print, --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}", --no-session]
     prompt: stdin
     output: stdout
     herdr_kind: pi
     verify_worktree_unchanged: true
     interactive:
-      argv: [--tools, "read,grep,find,ls,write", --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}"]
+      argv: [--tools, "read,grep,find,ls,write{submit_tool}", --extension, "{submit_extension}", --no-approve, --no-extensions, --no-mcp, --model, "{model}", --thinking, "{effort}"]
     max_minutes: 60

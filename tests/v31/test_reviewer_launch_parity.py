@@ -3,6 +3,8 @@ gets a Herdr pane exactly when its harness's worker profile does; the headless C
 reviewer that took it is announced where office status reads launch notices."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from office import adapters, gates
@@ -58,5 +60,28 @@ def test_the_pi_reviewer_pane_form_renders_with_the_reply_write_grant(tmp_path):
     """Herdr by default: the rendered pane argv pins the model and effort and may write only its reply (Q22)."""
     args, kind = adapters.interactive_argv(adapters.load_all()["pi"], "reviewer", model="openai/gpt-6-luna",
                                            effort="high", cwd=tmp_path, output=tmp_path / "reply.txt")
-    assert kind == "pi" and args[args.index("--tools") + 1] == "read,grep,find,ls,write"
+    assert kind == "pi" and args[args.index("--tools") + 1] == "read,grep,find,ls,write,office_review_submit"
     assert args[args.index("--model") + 1] == "openai/gpt-6-luna" and "--print" not in args
+
+
+def test_the_pi_reviewer_pane_form_loads_only_its_submit_extension_and_never_bash(tmp_path):
+    """#1231: the one submit tool comes from Office's per-dispatch extension; bash stays off."""
+    from office import review_submit
+    pi = adapters.load_all()["pi"]
+    out = tmp_path / "D1" / "reply.txt"
+    args, _ = adapters.interactive_argv(pi, "reviewer", model="openai/gpt-6-luna", effort="high", cwd=tmp_path,
+                                        output=out)
+    tools = args[args.index("--tools") + 1].split(",")
+    assert "bash" not in tools and tools.count(review_submit.PI_SUBMIT_TOOL) == 1
+    assert args[args.index("--extension") + 1] == str(review_submit.pi_extension_path(out))
+    assert "--no-extensions" in args and args.count("--extension") == 1
+    assert adapters.reviewer_env(pi, "reviewer", cwd=tmp_path, output=out) == {}
+    src = review_submit.pi_extension_path(out).read_text()
+    assert json.dumps(review_submit.submit_argv(out)) in src and "execFile(ARGV[0], ARGV.slice(1)" in src
+    assert "exec(" not in src.replace("execFile(", "") and "shell" not in src
+
+
+def test_a_pi_pane_without_a_reply_file_gets_no_submit_grant(tmp_path):
+    args, _ = adapters.interactive_argv(adapters.load_all()["pi"], "reviewer", model="openai/gpt-6-luna",
+                                        effort="high", cwd=tmp_path, output=None)
+    assert "--extension" not in args and args[args.index("--tools") + 1] == "read,grep,find,ls,write"

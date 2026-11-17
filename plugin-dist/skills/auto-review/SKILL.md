@@ -36,7 +36,7 @@ APPROVED is permitted only when no blocking finding remains on that same revisio
 
 ## Completion transport
 
-A reviewer that can run a shell hands its review back with `office review submit` (the exact command its prompt names); Office detects completion from that submit first. The reply file, then the harness's last message or stdout log, are fallbacks, and each use is recorded on the dispatch as a `review.reply_fallback` event. Harnesses without a shell (their adapter reviewer profile says `submit: file`: agy, opencode, pi) keep the reply file as their completion step. This is the one completion transport: Office launches the reviewer without waiting, a revoked reviewer ends `REVOKED` (not a failure, no fallback), and a reviewer that fails to launch or leaves no reply is replaced by the next route automatically.
+A reviewer that can run a shell hands its review back with `office review submit` (the exact command its prompt names); Office detects completion from that submit first. The reply file, then the harness's last message or stdout log, are fallbacks, and each use is recorded on the dispatch as a `review.reply_fallback` event. A pi reviewer pane has no shell but gets one `office_review_submit` tool that runs the same command (#1231). Harnesses that cannot run it (their adapter reviewer profile says `submit: file`: agy, opencode) keep the reply file as their completion step. This is the one completion transport: Office launches the reviewer without waiting, a revoked reviewer ends `REVOKED` (not a failure, no fallback), and a reviewer that fails to launch or leaves no reply is replaced by the next route automatically.
 
 ## Invoker-controlled remediation; at most three substantive rounds
 

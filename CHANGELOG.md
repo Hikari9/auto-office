@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.4
+
+pi reviewers hand back with `office review submit` (#1231). The pi reviewer pane form never gets bash, so every pi review fell back to the reply file. Office now writes a per-dispatch pi extension that registers one tool, `office_review_submit`, which runs exactly `office review submit --file <dispatch>/review-submit.txt` with no shell, the same narrow grant codex and claude reviewers get. bash stays off and the headless pi reviewer keeps its vetted read-only argv. opencode and agy reviewers still hand back by reply file.
+
 ## 3.28.3
 
 Orchestrator waiver at any RECHECK round (#1228, Rico 2026-11-17). `office waive <lane> --reason` is accepted at any round whose review returned RECHECK, not only at the round cap, with the same substantive-reason rule; the verdict stays RECHECK and landing still needs the user. Repairs that RECHECK routed and that have not started are recalled to their accepted revisions; a repair already running or submitted is refused (`repair-in-progress`).
