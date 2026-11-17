@@ -50,6 +50,12 @@ def _repo(tmp_path: Path, files_base: dict, files_head: dict) -> tuple[Path, str
     ("pytest -kfoo -mbar -q tests/a.py", ["pytest", "-q"]),
     ("pytest -p no:cacheprovider -pno:randomly -q tests", ["pytest", "-p", "no:cacheprovider", "-pno:randomly", "-q"]),
     (".venv/bin/pytest -q tests", [".venv/bin/pytest", "-q"]),
+    # Luna review F1: xdist distribution goes with -n; other value options keep their value.
+    ("pytest -n 2 --dist loadscope --dist=load tests", ["pytest"]),
+    ("pytest --timeout 60 -r a --capture no tests/a.py", ["pytest", "--timeout", "60", "-r", "a", "--capture", "no"]),
+    ("pytest --some-plugin-opt value tests/a.py", ["pytest", "--some-plugin-opt", "value"]),
+    ("pytest --lf tests", ["pytest", "--lf"]),
+    ("pytest --some-plugin-flag tests/a.py::t", ["pytest", "--some-plugin-flag"]),
 ])
 def test_runner_keeps_option_values_and_drops_selection(check, expected):
     assert self_review_proof._runner({"checks": [check]}) == expected

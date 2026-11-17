@@ -25,10 +25,19 @@ _SOURCE_SUFFIXES = frozenset((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
                               ".lava", ".liquid", ".j2", ".jinja", ".jinja2", ".hbs", ".mustache", ".erb",
                               ".twig", ".njk", ".ejs", ".tpl"))
 _PYTEST = re.compile(r"\bpytest\b")
-_DROP_WITH_VALUE = frozenset(("-k", "-m", "-n", "--numprocesses"))  # selectors and workers: the named test runs alone
-_KEEP_WITH_VALUE = frozenset(("-p", "-c", "-o", "-W", "--rootdir", "--override-ini", "--confcutdir", "--import-mode",
-                              "--basetemp", "--ignore", "--ignore-glob", "--deselect", "--maxfail", "--durations",
-                              "--tb", "--color", "--log-level", "--junitxml"))  # options whose next word is theirs
+# Selectors and workers: the named test runs alone, in-process. xdist's distribution options go with -n.
+_DROP_WITH_VALUE = frozenset(("-k", "-m", "-n", "--numprocesses", "--dist", "--maxprocesses", "--tx"))
+_KEEP_WITH_VALUE = frozenset(("-p", "-c", "-o", "-W", "-r", "--rootdir", "--override-ini", "--confcutdir",
+                              "--import-mode", "--basetemp", "--ignore", "--ignore-glob", "--deselect", "--maxfail",
+                              "--durations", "--tb", "--color", "--log-level", "--log-cli-level", "--log-file",
+                              "--log-format", "--junitxml", "--capture", "--timeout", "--cov-report", "--cov-config",
+                              "--reruns", "--randomly-seed", "--html", "--hypothesis-profile",
+                              "--hypothesis-seed"))  # options whose next word is theirs
+_FLAGS = frozenset(("--lf", "--last-failed", "--ff", "--failed-first", "--nf", "--new-first", "--sw", "--stepwise",
+                    "--exitfirst", "--strict-markers", "--strict-config", "--strict", "--no-header", "--no-summary",
+                    "--showlocals", "--runxfail", "--verbose", "--quiet", "--all", "--disable-warnings",
+                    "--cache-clear", "--setup-show", "--fulltrace", "--no-cov", "--doctest-modules",
+                    "--integration", "--slow", "--legacy"))  # long options known to take no value
 _ENVIRONMENT_EXITS = frozenset((126, 127))  # a command that cannot run or is not found
 _PYTEST_ENVIRONMENT_EXITS = frozenset((2, 3, 4))  # pytest's interrupted, internal and usage errors
 _TAIL_LINES = 20
@@ -62,6 +71,10 @@ def _words(check: str) -> list[str]:
     lex = shlex.shlex(check, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     return list(lex)
+def _looks_like_selection(word: str) -> bool:
+    """A path or node id that selects tests, as opposed to an unknown option's value (`--dist loadscope`)."""
+    return ("/" in word or "::" in word or "." in word or "*" in word
+            or word in ("tests", "test", "testing", "spec", "src"))
 def _runner(task: dict) -> list[str] | None:
     """The pytest invocation the task's own checks use, minus test selection, or None."""
     for check in task.get("checks") or []:
@@ -90,14 +103,16 @@ def _runner(task: dict) -> list[str] | None:
                 if word in _DROP_WITH_VALUE:
                     pending = "drop"
                 elif (not word.startswith("--") and word[:2] in _DROP_WITH_VALUE) \
-                        or word.startswith("--numprocesses="):
+                        or word.split("=", 1)[0] in _DROP_WITH_VALUE:
                     continue
                 else:
                     kept.append(word)
                     if word in _KEEP_WITH_VALUE:
                         pending = "keep"
+                    elif word.startswith("--") and "=" not in word and word not in _FLAGS:
+                        pending = "maybe"  # an option this list does not know may take a value
             else:  # a value of the option before it, or a path / node id that selects tests
-                if pending == "keep":
+                if pending == "keep" or (pending == "maybe" and not _looks_like_selection(word)):
                     kept.append(word)
                 pending = None
         return kept

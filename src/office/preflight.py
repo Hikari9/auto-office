@@ -517,6 +517,11 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
 _CAP_REPAIR = "self-review round cap spent with repairs outstanding: "
 
 
+def _quoted(text: str) -> str:
+    """Reason text made safe to embed in a double-quoted `office prompt` argument."""
+    return _one_line(text, 160).replace('"', "'")
+
+
 def _repair_next(dispatch_id: str, item: str) -> str:
     """The prompt that fixes the one repair a spent self-review round cap or a failed proof left outstanding.
     The generic `fixed <test> mutation=failed` advice fits only a finding line (#1130)."""
@@ -534,8 +539,10 @@ def _repair_next(dispatch_id: str, item: str) -> str:
         return prompt("review the lens the ledger names and write `LENS <name> reviewed`")
     if item.startswith("ledger: no ") and briefs.LEDGER_FILE in item:
         return prompt(f"write {briefs.LEDGER_FILE} in the worktree root after the last commit")
-    if item.startswith("ledger: "):
-        return prompt("repair the ledger as the reason says")
+    if item.startswith("ledger: uncommitted"):
+        return prompt(f"commit the in-scope changes first ({_quoted(item[len('ledger: '):])})")
+    if item.startswith("ledger: "):  # name the refusal itself, never a generic placeholder (#1130)
+        return prompt(f"repair the ledger: {_quoted(item[len('ledger: '):])}")
     if _MUTATION in item:
         return prompt(f"mark the line `fixed <test> {_MUTATION}` (or dispose it via `office prompt`)")
     return prompt("repair the ledger line the reason names")
@@ -554,7 +561,12 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     if reason.startswith(_CAP_REPAIR):
         return _repair_next(dispatch_id, reason[len(_CAP_REPAIR):])
     if reason.startswith("self-review: round"):  # an open medium or high finding at the round cap (#1130)
-        return _repair_next(dispatch_id, f"ledger line: {_MUTATION}")
+        # The worker reported it as told; the orchestrator decides, so the hint names the finding and the choices.
+        found = re.search(r"\((line \d+:.*)\); the round cap", reason)
+        what = _quoted(found.group(1)) if found else "the open finding"
+        return (f'office prompt {dispatch_id} -- "<your decision on {what}: fix it with a test and mark it '
+                f'`fixed <test> {_MUTATION}`, or mark it `dismissed <reason>`>, run `office preflight`, '
+                f'then `office submit`", or office revoke {task_id} then office rerun {task_id} --fresh')
     if "revert-and-fail proof" in reason:
         return _repair_next(dispatch_id, reason)
     if reason.startswith("self-review"):
