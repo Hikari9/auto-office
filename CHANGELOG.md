@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.3
+
+Orchestrator waiver at any RECHECK round (#1228, Rico 2026-11-17). `office waive <lane> --reason` is accepted at any round whose review returned RECHECK, not only at the round cap, with the same substantive-reason rule; the verdict stays RECHECK and landing still needs the user. Repairs that RECHECK routed and that have not started are recalled to their accepted revisions; a repair already running or submitted is refused (`repair-in-progress`).
+
 ## 3.28.2
 
 Dropped lane review recovery (#1228). A lane review that closed stale with no verdict (a member changed while the reviewer was working) is no longer carried by a same-tree recomposition, which left the lane "reviewing" with nothing running: the recomposition starts a new review. When no recomposition is coming, `office status` names the recovery and `office review <lane>` re-runs the dropped review on the current composition. The dropped reply is never recorded.

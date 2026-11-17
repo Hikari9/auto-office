@@ -49,7 +49,9 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 
 | Legacy module | Disposition |
 |---|---|
+| `tests/test_aa_v5_research.py` | keep |
 | `tests/test_adapters.py` | keep |
+| `tests/test_agy_credit_cooldown.py` | keep |
 | `tests/test_agy_usage.py` | keep |
 | `tests/test_alias_resolution.py` | keep |
 | `tests/test_amend_checks_only.py` | keep |
@@ -64,9 +66,17 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_derived_routing.py` | historical-diagnostic |
 | `tests/test_dogfood.py` | keep |
 | `tests/test_families.py` | historical-diagnostic |
+| `tests/test_h3_hydrogen_reviewer_seed.py` | keep |
+| `tests/test_h4_agy_hydrogen_reviewer.py` | keep |
+| `tests/test_h5_hydrogen_plan_reviewer.py` | keep |
 | `tests/test_hooks.py` | keep |
+| `tests/test_hydrogen_shadow_scorecard.py` | keep |
 | `tests/test_instruction_conformance.py` | keep |
 | `tests/test_integration.py` | keep |
+| `tests/test_issue_1156_hydrogen_rerun.py` | keep |
+| `tests/test_issue_1163_hydrogen_user_allow.py` | keep |
+| `tests/test_issue_1166_hydrogen_user_allow_candidates.py` | keep |
+| `tests/test_issue_1168_hydrogen_canary.py` | keep |
 | `tests/test_issue_927_onboarding_wording.py` | keep |
 | `tests/test_landings.py` | historical-diagnostic |
 | `tests/test_monitor.py` | historical-diagnostic |
@@ -80,8 +90,11 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_release_identity.py` | keep |
 | `tests/test_reuse_compact.py` | keep |
 | `tests/test_review.py` | historical-diagnostic |
+| `tests/test_review_no_verdict_rate.py` | keep |
 | `tests/test_route_policy.py` | consolidate |
 | `tests/test_route_probe.py` | keep |
+| `tests/test_route_probe_agy.py` | keep |
+| `tests/test_routecmd_hydrogen.py` | keep |
 | `tests/test_runtime.py` | historical-diagnostic |
 | `tests/test_schemas.py` | keep |
 | `tests/test_scoring.py` | historical-diagnostic |
@@ -146,6 +159,8 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_executor_binding_config_drift.py` | keep |
 | `tests/v31/test_executor_context.py` | keep |
 | `tests/v31/test_external_visual.py` | keep |
+| `tests/v31/test_fable_5_2_registration.py` | keep |
+| `tests/v31/test_fable_5_2_role_boundary.py` | keep |
 | `tests/v31/test_finding_identity.py` | keep |
 | `tests/v31/test_fixture_source_path.py` | keep |
 | `tests/v31/test_gates.py` | keep |
@@ -160,6 +175,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_herdr_review_capture.py` | keep |
 | `tests/v31/test_hook_ledger.py` | keep |
 | `tests/v31/test_hostmetrics.py` | keep |
+| `tests/v31/test_hydrogen_executor_seed.py` | keep |
 | `tests/v31/test_idle_final_status.py` | keep |
 | `tests/v31/test_inprocess_launch.py` | keep |
 | `tests/v31/test_inspect_route_discovery.py` | keep |
@@ -185,6 +201,19 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_1030_review_submit.py` | keep |
 | `tests/v31/test_issue_1030_submit_grant.py` | keep |
 | `tests/v31/test_issue_1031_executor_subagents.py` | keep |
+| `tests/v31/test_issue_1068_ready_needs_passing_check.py` | keep |
+| `tests/v31/test_issue_1081_answer_not_truncated.py` | keep |
+| `tests/v31/test_issue_1082_prose_source.py` | keep |
+| `tests/v31/test_issue_1083_qualified_route_policy.py` | keep |
+| `tests/v31/test_issue_1084_1086_revert_proof.py` | keep |
+| `tests/v31/test_issue_1085_amend_after_revoke.py` | keep |
+| `tests/v31/test_issue_1087_land_push_refused.py` | keep |
+| `tests/v31/test_issue_1099_policy_view_sizes.py` | keep |
+| `tests/v31/test_issue_1100_live_role_rules.py` | keep |
+| `tests/v31/test_issue_1106_denied_route_repick.py` | keep |
+| `tests/v31/test_issue_1106_reprompt_submitted.py` | keep |
+| `tests/v31/test_issue_1143_hydrogen_trials.py` | keep |
+| `tests/v31/test_issue_1186_reviewer_shell.py` | keep |
 | `tests/v31/test_issue_267.py` | keep |
 | `tests/v31/test_issue_268.py` | keep |
 | `tests/v31/test_issue_399_dispatch_recovery.py` | keep |
@@ -228,6 +257,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_740_review_correctness.py` | keep |
 | `tests/v31/test_issue_753_reused_pane_text.py` | keep |
 | `tests/v31/test_issue_755_apply_verification.py` | keep |
+| `tests/v31/test_issue_758_deploy_amend_applied.py` | keep |
 | `tests/v31/test_issue_773_stacked_inplace_edit.py` | keep |
 | `tests/v31/test_issue_783_cleanup.py` | keep |
 | `tests/v31/test_issue_783_herdr_smoke.py` | keep |
@@ -261,6 +291,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_942_visual_disclosure.py` | keep |
 | `tests/v31/test_issue_944_usage.py` | keep |
 | `tests/v31/test_issue_945_verification_kind.py` | keep |
+| `tests/v31/test_issue_958_pinned_review_quota.py` | keep |
 | `tests/v31/test_job_ownership.py` | keep |
 | `tests/v31/test_kilo_registration.py` | keep |
 | `tests/v31/test_land.py` | keep |
@@ -295,19 +326,26 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_prompt_landed_baseline.py` | keep |
 | `tests/v31/test_prune.py` | keep |
 | `tests/v31/test_quota_probe.py` | keep |
+| `tests/v31/test_quota_reserve_by_role.py` | keep |
 | `tests/v31/test_quota_routing.py` | keep |
 | `tests/v31/test_raise.py` | keep |
 | `tests/v31/test_refused_submit_scope.py` | keep |
 | `tests/v31/test_request_scope_paths.py` | keep |
 | `tests/v31/test_rerun.py` | keep |
 | `tests/v31/test_retired_mimo_catalog.py` | keep |
+| `tests/v31/test_review_fallback_job.py` | keep |
 | `tests/v31/test_review_reroute.py` | keep |
 | `tests/v31/test_review_stopping_rule.py` | keep |
+| `tests/v31/test_review_submit_transport.py` | keep |
+| `tests/v31/test_reviewer_async_launch.py` | keep |
 | `tests/v31/test_reviewer_files.py` | keep |
 | `tests/v31/test_reviewer_launch_parity.py` | keep |
+| `tests/v31/test_reviewer_outcome.py` | keep |
 | `tests/v31/test_reviewer_pane_quota_wall.py` | keep |
+| `tests/v31/test_reviewer_pin.py` | keep |
 | `tests/v31/test_reviewer_read_scope.py` | keep |
 | `tests/v31/test_reviewer_routes_from_current_pin.py` | keep |
+| `tests/v31/test_reviewer_worktree_guard.py` | keep |
 | `tests/v31/test_revoke_accepted.py` | keep |
 | `tests/v31/test_revoke_stops.py` | keep |
 | `tests/v31/test_risk_floor_lightweight.py` | keep |
@@ -323,6 +361,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_route_discovery_consumer_contract.py` | keep |
 | `tests/v31/test_route_discovery_routing.py` | keep |
 | `tests/v31/test_route_learning_discovery.py` | keep |
+| `tests/v31/test_route_override_quoted.py` | keep |
 | `tests/v31/test_route_policy_config.py` | keep |
 | `tests/v31/test_route_probe_live_shape.py` | keep |
 | `tests/v31/test_routing_evidence_convergence.py` | keep |

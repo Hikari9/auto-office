@@ -1819,8 +1819,10 @@ def waive_kinds(con, run: dict, scope_id: str, kinds: list[str] | None, *, actor
 
 
 def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
-    """The orchestrator's choice at the round cap (#423): accept the residual
-    risk of every unmet gate of the scope, with a substantive recorded reason.
+    """The orchestrator's choice at the round cap (#423), or at any earlier RECHECK round (#1228): accept the
+    residual risk of every unmet gate of the scope, with a substantive recorded reason. Before the cap the
+    repairs that RECHECK routed are recalled; one already running or submitted is refused, since its
+    revision would void the waiver.
     It is not landing authority and needs none: the reviewer's verdict stays
     RECHECK, each waiver is bound to the composed commit and lists the findings
     left open, and landing still needs the user's authorization."""
@@ -1840,16 +1842,19 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
         if scope is None:
             raise Usage("unknown-scope", f"no lane or shared scope {scope_id}", next_step="office inspect convergence")
         st = scope_state(run, scope["id"])
-        if st.get("status") != "escalated":
-            raise Refused("round-cap-not-reached", f"{scope['id']} is {st.get('status') or 'waiting'}: the orchestrator "
-                          f"waives only a review that spent its {contract.round_cap(run)} substantive rounds still on "
-                          "RECHECK", scope=scope["id"], next_step="office status")
+        if st.get("status") not in ("escalated", "recheck"):
+            raise Refused("not-on-recheck", f"{scope['id']} is {st.get('status') or 'waiting'}: the orchestrator "
+                          "waives only a review whose latest round returned RECHECK", scope=scope["id"],
+                          next_step="office status")
+        # The routed repairs reopened their owners, so the acceptance key is checked once they are recalled.
+        recalled = _recall_repairs(con, run, scope) if st.get("status") == "recheck" else []
         _require_current_waiver_target(con, run, scope, st)
         commit = st.get("commit") or ""
         unmet = {k: g for k, g in _latest(con, run, scope["id"], commit).items() if not _satisfied(con, run, scope["id"], g, commit)}
         if not unmet:
             raise Refused("nothing-to-waive", f"{scope['id']} has no unmet gate on its current composition",
                           scope=scope["id"], next_step="office status")
+        rounds = max(int(g.get("round") or 1) for g in unmet.values())
         open_findings = [{"code": f["code"], "level": f["level"], "location": f["location"], "summary": f["summary"],
                           "owners": json.loads(f["owners"] or "[]")}
                          for f in con.execute("SELECT code, MIN(level) AS level, MIN(location) AS location, "
@@ -1859,18 +1864,41 @@ def cap_waive(con, run: dict, scope_id: str, *, reason: str | None) -> Result:
         for kind, g in unmet.items():
             _record_waiver(con, run, scope, kind, g, commit, actor="orchestrator", basis="round cap reached; not landing "
                            "authority", why=why, quote=None, underlying=g["verdict"] or g.get("review_status"),
-                           extra={"cap_waiver": True, "round": int(st.get("round") or 1), "cap": contract.round_cap(run),
+                           extra={"cap_waiver": True, "round": rounds, "cap": contract.round_cap(run),
                                   "cycle": int(st.get("cycle") or 1), "unresolved_findings": open_findings})
-        state.emit(con, run, "authority.waiver", f"orchestrator waived {scope['id']} after {contract.round_cap(run)} "
-                   f"substantive rounds on {commit[:10]} (verdict RECHECK stands; {len(open_findings)} finding(s) unresolved; "
-                   f"reason: {why[:120]}); landing authority is separate", audience="runtime")
+        state.emit(con, run, "authority.waiver", f"orchestrator waived {scope['id']} after {rounds} of "
+                   f"{contract.round_cap(run)} substantive rounds on {commit[:10]} (verdict RECHECK stands; {len(open_findings)} finding(s) unresolved; "
+                   f"reason: {why[:120]}); landing authority is separate"
+                   + (f"; repairs recalled from {', '.join(recalled)}" if recalled else ""), audience="runtime")
         _set_scope(con, run, scope["id"], status="reviewing")
         settle(con, state.get_run(con, run["id"]), scope)
     from office import jobs
     jobs.kick(con, run["id"])
-    return Result(lines=[f"{scope['id']} waived on {commit[:10]} after {contract.round_cap(run)} rounds: the RECHECK verdict "
+    return Result(lines=[f"{scope['id']} waived on {commit[:10]} after {rounds} of {contract.round_cap(run)} rounds"
+                         + (f" (repairs recalled from {', '.join(recalled)})" if recalled else "") + ": the RECHECK verdict "
                          f"and {len(open_findings)} unresolved finding(s) are kept and shown on the landing receipt; "
                          "this is not landing authority"], next="exceptions only; office status")
+
+
+def _recall_repairs(con, run: dict, scope: dict) -> list[str]:
+    """#1228: an orchestrator waiver before the round cap takes back the repairs its RECHECK routed (route_repairs),
+    returning each untouched owner to its accepted revision. A repair that is running or has submitted a new
+    revision is refused: it would change the composition the waiver binds. Caller holds tx."""
+    from office import gates as gates_mod
+    recalled = []
+    for tid in scope["tasks"]:
+        t = state.get_task(con, run["id"], tid)
+        if not t or t["status"] != "changes_required" \
+                or not (t.get("pause_reason") or "").startswith(f"{scope['id']} RECHECK"):
+            continue
+        if gates_mod.worker_live(con, t.get("current_dispatch_id")) or gates_mod.live_task_session(con, run["id"], tid) \
+                or t.get("current_revision_id") != t.get("accepted_revision_id"):
+            raise Refused("repair-in-progress", f"{tid} is already repairing {scope['id']}'s findings; a waiver now "
+                          "would be voided by its next revision", scope=scope["id"],
+                          next_step=f"let {tid}'s repair finish and its review return, then office waive {scope['id']} again")
+        state.update_task(con, run["id"], tid, status="accepted", pause_reason=None)
+        recalled.append(tid)
+    return recalled
 
 
 def producer_sessions(con, run: dict, scope: dict) -> tuple[set[str], bool]:
