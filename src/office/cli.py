@@ -166,6 +166,9 @@ a trivial or mechanical change may submit without a ledger:
   office submit --self-review-exempt trivial|mechanical -- "<reason>"
 The exemption is recorded on the revision. Independent review applies either way.
 
+A task with accept criteria is refused when the tree equals its base (make the change, or `office raise` if the
+criteria already hold). To acknowledge that they already hold: office submit --no-change -- "<why>"
+
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
@@ -328,6 +331,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--self-review-exempt", choices=["trivial", "mechanical"], metavar="TYPE",
                    help="executor: submit with no self-review ledger because the change is trivial or mechanical "
                         "(low-risk tasks only; reason after --)")
+    s.add_argument("--no-change", action="store_true", dest="no_change",
+                   help="executor: acknowledge that the accept criteria already hold with no change (reason after --); "
+                        "goes to independent review")
     s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
     s = sp.add_parser("raise", parents=[common], add_help=False)
@@ -720,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
                          f"office --run {run_like[0]} {args.cmd} ...)")
         parser.parse_args(argv)  # raises the usage error
-    if args.cmd == "submit" and args.reason and not (args.request_scope or args.self_review_exempt):
+    if args.cmd == "submit" and args.reason and not (args.request_scope or args.self_review_exempt or args.no_change):
         # The reason text belongs to --request-scope or --self-review-exempt; a stray argument is still a usage error.
         parser.error(f"unrecognized arguments: {' '.join(args.reason)}")
     if args.version:
@@ -1127,7 +1133,7 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope, exempt=args.self_review_exempt,
-                             reason=" ".join(args.reason or []).strip())
+                             no_change=args.no_change, reason=" ".join(args.reason or []).strip())
     if cmd == "amend" and args.scope == "options":
         from office import run_options
         unsupported = [*(args.delta or []), *[u for u in unknown if u != "--"]]
