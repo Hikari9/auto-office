@@ -402,7 +402,9 @@ def test_pi_reviewer_profile_is_a_read_only_allowlist_for_code_and_plan_review_o
     assert prof["herdr_kind"] == "pi"
     pane = prof["interactive"]["argv"]
     tools = set(pane[pane.index("--tools") + 1].split(","))
-    assert tools == {"read", "grep", "find", "ls", "write"} and not {"edit", "bash"} & tools
+    # #1231: plus Office's one submit tool from its per-dispatch extension, filled in only for a reviewer.
+    assert tools == {"read", "grep", "find", "ls", "write{submit_tool}"} and not {"edit", "bash"} & tools
+    assert pane[pane.index("--extension") + 1] == "{submit_extension}"
     for flag in ("--no-approve", "--no-extensions", "--no-mcp"):
         assert flag in pane, flag
     assert pane[pane.index("--model") + 1] == "{model}" and pane[pane.index("--thinking") + 1] == "{effort}"

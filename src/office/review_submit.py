@@ -70,11 +70,62 @@ def codex_rules(output: str | Path) -> str:
     return ("# Written by Auto Office for this reviewer dispatch only (#1030): one exact command, nothing else.\n"
             f"prefix_rule(pattern={tokens!r}, decision=\"allow\",\n"
             "            justification=\"hand this review back to Auto Office; it writes only Office state\")\n")
+
+
+# #1231: pi cannot limit bash to one command, so a pi reviewer never gets bash. Its pane form instead loads a
+# per-dispatch extension (explicit `-e` paths load even under --no-extensions) that registers one tool. The
+# tool writes the review to the submit file and runs the exact submit argv with no shell: the same narrow grant
+# codex's prefix rule and claude's Bash allow give.
+PI_SUBMIT_TOOL = "office_review_submit"
+
+
+def pi_extension_path(output: str | Path) -> Path:
+    return Path(output).parent / ".pi" / "office-review-submit.ts"
+
+
+def pi_extension(output: str | Path) -> str:
+    """The pi extension source for one reviewer dispatch: one tool, one exact command."""
+    argv = submit_argv(output)
+    return f"""// Written by Auto Office for this reviewer dispatch only (#1231): one tool, one exact command.
+// @ts-nocheck
+import {{ execFile }} from "node:child_process";
+import {{ writeFileSync }} from "node:fs";
+import {{ Type }} from "@earendil-works/pi-ai";
+
+const ARGV = {json.dumps(argv)};
+const SUBMIT_FILE = {json.dumps(argv[-1])};
+
+export default function (pi) {{
+  pi.registerTool({{
+    name: {json.dumps(PI_SUBMIT_TOOL)},
+    label: "Office review submit",
+    description: "Hand your complete review back to Auto Office (this runs `office review submit`). Pass the "
+      + "complete review, only the lines your brief specifies. Office checks them and records your review at once. "
+      + "On an error, fix the lines and call this tool again.",
+    parameters: Type.Object({{
+      review: Type.String({{ description: "The complete review, only the lines your brief specifies" }}),
+    }}),
+    async execute(_toolCallId, params, signal) {{
+      writeFileSync(SUBMIT_FILE, params.review, "utf8");
+      const result = await new Promise((resolve) => {{
+        execFile(ARGV[0], ARGV.slice(1), {{ signal, timeout: 120000, maxBuffer: 1 << 20 }}, (err, stdout, stderr) => {{
+          resolve({{ ok: !err, text: `${{stdout || ""}}${{stderr || ""}}`.trim() || (err ? String(err.message) : "") }});
+        }});
+      }});
+      if (!result.ok) throw new Error(result.text || "office review submit failed");
+      return {{ content: [{{ type: "text", text: result.text || "review recorded" }}], details: undefined }};
+    }},
+  }});
+}}
+"""
+
+
 MAX_CHARS = 200_000
 FALLBACK_EVENT = "review.reply_fallback"
-# Reviewer harnesses that cannot run a shell command, so they keep the reply file as their completion step
-# (their adapter reviewer profile says `submit: file`). Every other reviewer profile says `submit: shell`.
-NO_SHELL_HARNESSES = ("agy", "opencode", "pi")
+# Reviewer harnesses that cannot run the submit command, so they keep the reply file as their completion step
+# (their adapter reviewer profile says `submit: file`). Every other reviewer profile says `submit: shell`
+# (pi's pane form reaches it through its extension tool, #1231).
+NO_SHELL_HARNESSES = ("agy", "opencode")
 
 
 def pointer(output: str | Path, *, prompt_file: str | Path, images: str = "") -> str:
@@ -83,6 +134,7 @@ def pointer(output: str | Path, *, prompt_file: str | Path, images: str = "") ->
     return (f"Read and carry out the review brief at {prompt_file} exactly.{images} "
             f"Finish with `office review submit`: write the complete review to "
             f"{Path(output).parent / SUBMIT_FILE} and run exactly: {submit_command(output)} . "
+            f"If you have an `{PI_SUBMIT_TOOL}` tool, call it with the complete review instead. "
             f"If your tools cannot run that command, write the complete review to {output} instead "
             "(Office reads only that file, never your terminal), or if they cannot write files, end your reply with the "
             "complete review. Do not edit anything else.")

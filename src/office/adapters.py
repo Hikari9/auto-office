@@ -575,6 +575,17 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             # Appended as is: the JSON holds paths, which must not go through the placeholder substitution below.
             argv.append(arg.replace("{sandbox_settings}", read_scope.claude_sandbox_settings(cwd, output, include_dirs)))
             continue
+        if "{submit_extension}" in arg:  # pi: the per-dispatch extension holding the one submit tool (#1231)
+            if not granted:
+                if argv and argv[-1].startswith("-"):
+                    argv.pop()
+                continue
+            from office import review_submit
+            argv.append(str(review_submit.pi_extension_path(output)))
+            continue
+        if "{submit_tool}" in arg:
+            from office import review_submit
+            arg = arg.replace("{submit_tool}", f",{review_submit.PI_SUBMIT_TOOL}" if granted else "")
         if "{submit_allow}" in arg:  # exactly one command, no wildcard (#1030 narrow grant)
             from office import review_submit
             arg = arg.replace("{submit_allow}", f",Bash({review_submit.submit_command(output)})" if granted else "")
@@ -613,6 +624,8 @@ def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
     prof = profile(adapter, kind) or {}
     if prof.get("submit_grant") == "codex-rules" and output and kind in read_scope.READER_KINDS:
         _write_codex_submit_rules(adapter, kind, Path(output))
+    if prof.get("submit_grant") == "pi-extension" and output and kind in read_scope.READER_KINDS:
+        _write_pi_submit_extension(adapter, kind, Path(output))
     spec = prof.get("agent_file") or {}
     if not spec or not output or kind not in read_scope.READER_KINDS:
         return {}
@@ -636,6 +649,18 @@ def _write_codex_submit_rules(adapter: dict, kind: str, output: Path) -> None:
     except OSError as exc:
         raise AdapterError(f"the {adapter.get('id')} {kind} submit rule could not be written under {output.parent}: "
                            f"{exc}") from exc
+
+
+def _write_pi_submit_extension(adapter: dict, kind: str, output: Path) -> None:
+    """The pi reviewer's dispatch dir carries one extension: the tool that runs the exact submit command (#1231)."""
+    from office import review_submit
+    path = review_submit.pi_extension_path(output)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(review_submit.pi_extension(output), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"the {adapter.get('id')} {kind} submit extension could not be written under "
+                           f"{output.parent}: {exc}") from exc
 
 
 def headless_resume_args(adapter: dict, kind: str, session_id: str) -> list[str] | None:
