@@ -453,7 +453,8 @@ def executor_brief(con, run: dict, packet: dict, setup: dict | None = None, carr
             "your contract: a scope-request needs a contract amendment. Do not guess past a scope or requirement "
             "doubt, and do not poll for the answer."]
     base = packet.get("base_commit") or "HEAD"
-    out += simplify_lines(base) + self_review_lines(base, run_self_review_tier(run), subagents=subagents)
+    out += simplify_lines(base) + self_review_lines(base, run_self_review_tier(run), subagents=subagents,
+                                                    fan_out=in_session_fan_out(run))
     out += runtime_review_lines(run)
     out += ["WHEN DONE run: office preflight   (from this worktree; read-only). It prints one verdict:",
             "    ready: run the submit line it prints (with `. <agent.env> &&` when shown: env does not persist",
@@ -535,12 +536,26 @@ def run_self_review_tier(run: dict) -> str:
     return self_review_tier(run.get("gear"), run.get("risk_json"))
 
 
+def in_session_fan_out(run: dict) -> bool:
+    """#1233: an S, M or L convergence run whose gear funds no Office per-task audit fans its focused self-review
+    out to one in-session subagent per lens, as executors did before #809."""
+    from office import self_review_subagents
+    return (contract.is_convergence(run) and run.get("gear") in ("S", "M", "L")
+            and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+            and not self_review_subagents.funded(run))
+
+
 def runtime_review_lines(run: dict) -> list[str]:
     """What Office itself funds after the executor submits (#809), so the executor never claims it. The
     executor's own self-review above stays required; the runtime subagents are independent of it."""
+    from office import self_review_subagents
     gear = run.get("gear")
     if (run.get("gates") or {}).get("gear_model_version") != "run-gear-1" or gear not in ("S", "M", "L", "XL"):
         return []
+    if not self_review_subagents.funded(run):
+        return [f"OFFICE RUNTIME REVIEW (gear {gear}): Office launches no per-task self-review audit for this gear. "
+                "Your in-session self-review above is this task's self-check, then the single convergence review "
+                "(which also covers security) decides."]
     if contract.is_convergence(run):
         return [f"OFFICE RUNTIME REVIEW (gear {gear}): after deterministic checks Office launches one independent "
                 "self-review subagent (edge cases and test strength) on the immutable accepted revision, then the "
@@ -553,12 +568,12 @@ def runtime_review_lines(run: dict) -> list[str]:
             "claim them because your harness lacks nested agents. A missing or invalid report blocks acceptance."]
 
 
-def self_review_lines(base: str, tier: str = "deep", *, subagents: bool = True) -> list[str]:
+def self_review_lines(base: str, tier: str = "deep", *, subagents: bool = True, fan_out: bool = False) -> list[str]:
     """The adversarial pass a producer runs on its own diff before it submits. The tier sets how much
     review that is. It is a pass, never an approval: independent (v3.1: per-task; convergence: per-lane) review
     still decides."""
     if tier == FOCUSED:
-        return focused_review_lines(base, subagents=subagents)
+        return focused_review_lines(base, subagents=subagents, fan_out=fan_out)
     if tier not in SELF_REVIEW_TIERS:
         tier = "deep"
     head = f"SELF-REVIEW before submitting (tier: {tier}), review your whole change adversarially: `git diff {base}` (committed and"
@@ -593,12 +608,17 @@ def self_review_lines(base: str, tier: str = "deep", *, subagents: bool = True) 
     return [head] + intro + lenses + skip + [tail] + ledger_lines()
 
 
-def focused_review_lines(base: str, *, subagents: bool = True) -> list[str]:
+def focused_review_lines(base: str, *, subagents: bool = True, fan_out: bool = False) -> list[str]:
     """The one-round producer pass of a new run: edge cases and test strength, platform only when the diff needs it.
-    Security is not an executor lens: the convergence reviewer covers it."""
+    Security is not an executor lens: the convergence reviewer covers it. With `fan_out` (#1233: no Office per-task
+    audit for this gear) each lens gets its own in-session subagent, started together."""
     return [
         f"SELF-REVIEW before submitting (tier: {FOCUSED}), review your whole change adversarially: `git diff {base}`",
-        *(["    (committed and uncommitted). Start exactly one subagent if your harness has one, given only the diff and",
+        *(["    (committed and uncommitted). Start one subagent per lens below that applies, all in one message, in",
+           "    parallel, each given only the diff and its one lens and told to read only (no edits); otherwise make one",
+           "    fresh pass per lens yourself. One round only: no re-review of your fixes."]
+          if subagents and fan_out else
+          ["    (committed and uncommitted). Start exactly one subagent if your harness has one, given only the diff and",
            "    the lenses below; otherwise make one fresh pass yourself. One round only: no re-review of your fixes."]
           if subagents else
           ["    (committed and uncommitted). Make one fresh pass yourself, in this session (no subagent on this",

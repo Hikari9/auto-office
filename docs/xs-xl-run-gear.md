@@ -9,9 +9,9 @@ For a **new or near-empty repo** that benefits from one continuous strong builde
 | Run gear | Planner | Producer mode | Producer self-review | Independent plan review | Independent convergence | Verification |
 | --- | --- | --- | --- | --- | --- | --- |
 | XS | Minimal inline plan | Orchestrator-inline, bounded low-risk by default | Four-lens inline ledger | Only if risk requires | Only if risk requires | Deterministic and applicable acceptance checks |
-| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Four-lens ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| L | Deeper coordinated plan | Dedicated executor(s) | Ledger plus **up to 4 runtime specialist subagents** per task | One independent reviewer | Yes | Deterministic and applicable integration checks |
+| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Ledger with an in-session subagent per lens (no Office audit, #1233) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Ledger with an in-session subagent per lens (no Office audit, #1233) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| L | Deeper coordinated plan | Dedicated executor(s) | Ledger with an in-session subagent per lens (no Office audit, #1233) | One independent reviewer | Yes | Deterministic and applicable integration checks |
 | XL | Dedicated architecture/decomposition | Multiple coordinated waves, independent task sizing | Ledger plus **up to 4 runtime specialist subagents** per task | Independent **lead + 3 mandatory Goldfish**; up to 2 evidence-triggered hazard audits | Yes | Full applicable integration/visual/recovery verification |
 
 A new run's **complexity** gear is pinned by the orchestrator at intake (or explicit authorized creation) from scope, coupling, uncertainty and multiwave coordination; the **risk** classification and floor remain independent. The planner may recommend size but cannot silently weaken the run's effective gates. Risk amendments need the existing authorization path; any change to accepted user scope needs its existing approval. The plan reviewer is **not** a gear-policy reviewer and has no L-to-XL reviewer-triggered escalation or reviewer-managed swarm.
@@ -20,7 +20,9 @@ Historical gear aliases are still accepted only when explicitly selected for com
 
 ### Self-review subagents (`self_review_subagents.py`)
 
-For new runs (convergence-v1) each funded gear (S, M, L, XL) gets exactly **one** `combined` subagent per task: edge cases and test strength in one read-only pass, with platform/build only when the scope touches it. Security is covered by the convergence reviewer. The paragraph below describes the funding a run pinned to v3.1 keeps.
+#1233 (Rico, 2026-11-17): a run started after #1233 funds Office's per-task audit on **XL only** (`review.self_review_audit_gears`, pinned at start). S, M and L tasks get no separate audit session: the executor's focused self-review fans out one in-session subagent per lens, as before #809. A run started earlier keeps auditing S, M, L and XL.
+
+For convergence-v1 runs each funded gear gets exactly **one** `combined` subagent per task: edge cases and test strength in one read-only pass, with platform/build only when the scope touches it. Security is covered by the convergence reviewer. The paragraph below describes the funding a run pinned to v3.1 keeps.
 
 Only pinned `run-gear-1` runs fund them, and each is an independently launched reviewer session on the task's accepted revision, advisory only and never a convergence verdict or round. XS funds none (the executor's inline four-lens ledger is all of it). S and M fund one `four-lens` subagent per task. L and XL fund **up to four specialists per task**: `edge-cases` and `test-strength` always, `security` when the run risk is elevated or irreversible, the blast radius is production, or the task scope names auth, security, permission, secret, token, crypt or credential paths, and `platform` when the scope touches scripts, CI, packaging or manifests or the descriptor domain is infrastructure. A missing, invalid or wrong-commit report blocks convergence review (fail closed) and spends no round. A report for the same revision, commit and rubric is reused.
 

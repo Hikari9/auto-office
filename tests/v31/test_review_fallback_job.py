@@ -13,7 +13,16 @@ from pathlib import Path
 import pytest
 
 from test_convergence_contract import APPROVED, _gates, _q, _run_row, _start
+from test_issue809_self_review_subagents import fund_every_gear
 from test_review_reroute import EXECUTOR
+
+@pytest.fixture(autouse=True)
+def _fund_task_audits(request):
+    """#1233: the subagent cases here exercise the per-task audit machinery on S, M and L runs."""
+    if "env" in request.fixturenames:
+        request.getfixturevalue("env")
+        fund_every_gear()
+
 
 EMPTY = {"reply": ""}
 SCOPE = "L-T1"

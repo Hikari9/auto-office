@@ -242,6 +242,11 @@ review:
   # the orchestrator must waive with a recorded reason or escalate to the user
   # (#423). Pinned per run at `office start` (or --review-rounds N).
   max_rounds: 3
+  # Gears whose tasks get Office's own per-task self-review audit, a separate
+  # routed reviewer session before the convergence review (#1233). S, M and L
+  # tasks rely on the executor's in-session subagent fan-out instead. Pinned
+  # per run at `office start`.
+  self_review_audit_gears: [XL]
 # Gear presets. Under convergence-v1, `independent_code_review` funds the lane
 # convergence review (a hard landing gate) and `plan_review` funds the initial
 # plan review. The round ceiling defaults to 3 and the *_max_rounds keys below

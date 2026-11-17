@@ -10,7 +10,11 @@ New (convergence-v1) runs fund one subagent per task for every funded gear: edge
 one read-only pass, plus platform/build only when the task's scope touches it. Security is not a task
 self-review: the single convergence reviewer covers it when a lane changes a sensitive path (#938).
 
-Funding by run gear (pinned `run-gear-1` runs; legacy-pinned runs keep the funding below):
+#1233 (Rico, 2026-11-17: "Separate panes on XL only"): a run started after #1233 records the gears it funds
+(`gates.self_review_audit_gears`, XL only). S, M and L tasks get no Office audit: the executor's in-session
+subagent fan-out is their per-task check. A run without the key (started earlier) keeps the gears below.
+
+Funding by run gear before #1233 (pinned `run-gear-1` runs; legacy-pinned runs fund nothing):
   XS      none: the executor's inline four-lens self-check is the whole of it
   S, M    one four-lens subagent per task
   L, XL   up to four specialists per task (security, edge-cases, platform, test-strength),
@@ -37,7 +41,11 @@ RETRY = "RETRY"
 # convergence job again to compose them.
 WAITING = "WAITING"
 COLLECT_KEY = "subagents_collected"  # the convergence job payload key naming the subagent gates it composes
+# The gears a run started before #1233 funds (no `self_review_audit_gears` in its gates).
 FUNDED_GEARS = ("S", "M", "L", "XL")
+# The gears a new run funds, recorded on the run at start so a later default never changes a run in flight.
+AUDIT_GEARS = ("XL",)
+AUDIT_GEARS_KEY = "self_review_audit_gears"
 RUBRICS = {
     "combined": "Review edge cases and test strength in ONE pass: empty or null input, parser ambiguity, retries, restart "
                 "states, weak assertions, tests that still pass with the fix reverted, missing negative paths. Review "
@@ -93,8 +101,21 @@ def security_relevant(files) -> bool:
     return False
 
 
+def audit_gears(value) -> list[str]:
+    """The configured audit gears (`review.self_review_audit_gears`), XL when unset. Each must be S, M, L or XL."""
+    if value is None:
+        return list(AUDIT_GEARS)
+    if not isinstance(value, list) or any(g not in FUNDED_GEARS for g in value):
+        raise ValueError(f"review.{AUDIT_GEARS_KEY} must be a list of gears from {list(FUNDED_GEARS)}, got {value!r}")
+    return [g for g in FUNDED_GEARS if g in value]
+
+
 def funded(run: dict) -> bool:
-    return run.get("gear") in FUNDED_GEARS and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1"
+    """Whether Office launches its own per-task audits for this run's gear (the gears pinned at start, #1233)."""
+    gates = run.get("gates") or {}
+    gears = gates.get(AUDIT_GEARS_KEY)
+    return (run.get("gear") in (FUNDED_GEARS if gears is None else gears)
+            and gates.get("gear_model_version") == "run-gear-1")
 
 
 def rubrics(run: dict, task: dict) -> tuple[str, ...]:

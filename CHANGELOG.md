@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.5
+
+Per-task self-review audits on XL only (#1233, Rico 2026-11-17: "Separate panes on XL only"). A new run funds Office's own per-task audit, a separately routed reviewer session before the convergence review, on XL only (`review.self_review_audit_gears`, pinned at start). S, M and L tasks go back to the executor's in-session fan-out: the focused self-review starts one subagent per lens in parallel, with the same ledger and one round. XL keeps its audits and the Goldfish plan review. Runs started earlier keep auditing S through XL.
+
 ## 3.28.4
 
 pi reviewers hand back with `office review submit` (#1231). The pi reviewer pane form never gets bash, so every pi review fell back to the reply file. Office now writes a per-dispatch pi extension that registers one tool, `office_review_submit`, which runs exactly `office review submit --file <dispatch>/review-submit.txt` with no shell, the same narrow grant codex and claude reviewers get. bash stays off and the headless pi reviewer keeps its vetted read-only argv. opencode and agy reviewers still hand back by reply file.
