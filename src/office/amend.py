@@ -897,14 +897,11 @@ def _deliver(con, run: dict, amendment_id: str, task_ids: list[str], text: str, 
             except Refused as exc:
                 if exc.category not in ("route-unavailable", "no-route"):
                     raise
-                # The recorded route cannot run now (quota, availability). The amendment is already the contract:
-                # hold the task for the user's route choice instead of rolling the amendment back (#814).
-                state.update_task(con, run["id"], tid, status="changes_required",
-                                  pause_reason=f"amended by {amendment_id}; relaunch held: {exc.message}")
-                state.emit(con, run, "delivery.waiting", f"{amendment_id} waits for a route: {tid} {exc.message}",
-                           task_id=tid, dispatch_id=d["id"])
-                targets.append(tid)
-                continue
+                # The refusal rolls the amendment back (#721). Name the user's route choice, never dispatch (#814).
+                raise Refused(exc.category, exc.message, scope=tid, preserved=exc.preserved,
+                              next_step=f'office amend route {tid} --as <harness>/<model>[@effort] --quote "<user\'s words>" '
+                                        f'or office rerun {tid} --fresh --as <harness>/<model>[@effort] --quote '
+                                        '"<user\'s words>", then amend again') from exc
             con.execute("UPDATE deliveries SET dispatch_id=?, status='queued', superseded_by=NULL WHERE id=?",
                         (new_did, did))
         targets.append(tid)
