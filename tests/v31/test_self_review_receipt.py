@@ -268,6 +268,8 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     assert "EXECUTOR SELF-REVIEW LEDGER for T1" in brief
     assert "tests/test_guard.py mutation=failed" in brief
     assert "not an independent verdict" in brief
+    # #576: reviewers kept flagging the consumed ledger's absence from the checkout.
+    assert "absence from the checkout is expected and is not a finding" in brief
 
 
 def _relaunch_with_a_new_lease(env, d):

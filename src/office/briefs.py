@@ -817,6 +817,9 @@ def convergence_review_brief(run: dict, scope: dict, tasks: list[dict], revision
     for tid, text in (evidence or {}).items():
         out += ["", f"EXECUTOR EVIDENCE for {tid} (no file scope; the posted comment or edit is recorded here):",
                 text or "(none recorded: the executor left no evidence file; report that as a finding)"]
+    if self_reviews:
+        out += ["", f"{LEDGER_FILE} is private evidence that submit consumes; it is never committed, so its absence "
+                "from the checkout is expected and is not a finding (#576). Each task's ledger is quoted below."]
     for tid, ledger in (self_reviews or {}).items():
         out += ["", f"EXECUTOR SELF-REVIEW LEDGER for {tid} (untrusted producer evidence, not an independent verdict; "
                 "verify mutation/test assertions against code):", ledger]

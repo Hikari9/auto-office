@@ -462,10 +462,32 @@ def review_changes(con, task: dict, wt: Path, base: str, head: str, dep_bases: l
     the tree of the task's accepted revision. Resubmitting the accepted work unchanged (say, after an amendment
     demoted the task) is empty work, which owes no ledger (#781). Uncommitted edits still count as pending."""
     rid = task.get("accepted_revision_id")
-    row = con.execute("SELECT tree_sha FROM revisions WHERE id=?", (rid,)).fetchone() if rid else None
+    row = (con.execute("SELECT tree_sha, commit_sha, base_commit FROM revisions WHERE id=?", (rid,)).fetchone()
+           if rid else None)
     if row and row["tree_sha"] and _git(wt, "rev-parse", f"{head}^{{tree}}").strip() == row["tree_sha"]:
         return []
+    if row and row["base_commit"] and _same_patch(wt, row["base_commit"], row["commit_sha"], base, head):
+        # A restack moved the base under the accepted work but the task's own change is the same patch: the
+        # accepted self-review still covers it, so the ack-only rerun owes no new ledger (#1127).
+        return []
     return committed_changes(wt, base, head, dep_bases)
+
+
+def _patch_id(wt: Path, base: str, head: str) -> str:
+    """git's stable patch id for base..head, or "" when there is no diff or git cannot compute it."""
+    diff = paths.git(wt, "diff", "--no-renames", "--binary", base, head, check=False)
+    if not diff:
+        return ""
+    # --verbatim: whitespace is part of the change (Python indentation); an older git without it fails closed.
+    out = paths.git(wt, "patch-id", "--verbatim", check=False, input_text=diff + "\n")
+    return out.split()[0] if out else ""
+
+
+def _same_patch(wt: Path, old_base: str, old_head: str, base: str, head: str) -> bool:
+    if (old_base, old_head) == (base, head):
+        return False  # the tree comparison above already decided this one
+    old = _patch_id(wt, old_base, old_head)
+    return bool(old) and old == _patch_id(wt, base, head)
 
 
 def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
