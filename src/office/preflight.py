@@ -462,10 +462,32 @@ def review_changes(con, task: dict, wt: Path, base: str, head: str, dep_bases: l
     the tree of the task's accepted revision. Resubmitting the accepted work unchanged (say, after an amendment
     demoted the task) is empty work, which owes no ledger (#781). Uncommitted edits still count as pending."""
     rid = task.get("accepted_revision_id")
-    row = con.execute("SELECT tree_sha FROM revisions WHERE id=?", (rid,)).fetchone() if rid else None
+    row = (con.execute("SELECT tree_sha, commit_sha, base_commit FROM revisions WHERE id=?", (rid,)).fetchone()
+           if rid else None)
     if row and row["tree_sha"] and _git(wt, "rev-parse", f"{head}^{{tree}}").strip() == row["tree_sha"]:
         return []
+    if row and row["base_commit"] and _same_patch(wt, row["base_commit"], row["commit_sha"], base, head):
+        # A restack moved the base under the accepted work but the task's own change is the same patch: the
+        # accepted self-review still covers it, so the ack-only rerun owes no new ledger (#1127).
+        return []
     return committed_changes(wt, base, head, dep_bases)
+
+
+def _patch_id(wt: Path, base: str, head: str) -> str:
+    """git's stable patch id for base..head, or "" when there is no diff or git cannot compute it."""
+    diff = paths.git(wt, "diff", "--no-renames", "--binary", base, head, check=False)
+    if not diff:
+        return ""
+    # --verbatim: whitespace is part of the change (Python indentation); an older git without it fails closed.
+    out = paths.git(wt, "patch-id", "--verbatim", check=False, input_text=diff + "\n")
+    return out.split()[0] if out else ""
+
+
+def _same_patch(wt: Path, old_base: str, old_head: str, base: str, head: str) -> bool:
+    if (old_base, old_head) == (base, head):
+        return False  # the tree comparison above already decided this one
+    old = _patch_id(wt, old_base, old_head)
+    return bool(old) and old == _patch_id(wt, base, head)
 
 
 def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
@@ -492,6 +514,40 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
     return ledger_stop, ledger_fix, signaled
 
 
+_CAP_REPAIR = "self-review round cap spent with repairs outstanding: "
+
+
+def _quoted(text: str) -> str:
+    """Reason text made safe to embed in a double-quoted `office prompt` argument."""
+    return _one_line(text, 160).replace('"', "'")
+
+
+def _repair_next(dispatch_id: str, item: str) -> str:
+    """The prompt that fixes the one repair a spent self-review round cap or a failed proof left outstanding.
+    The generic `fixed <test> mutation=failed` advice fits only a finding line (#1130)."""
+    def prompt(text: str) -> str:
+        return f'office prompt {dispatch_id} -- "{text}, run `office preflight`, then `office submit`"'
+    if "revert-and-fail proof" in item:
+        if "environment error" in item:
+            return prompt("the proof run hit an environment error, not a test failure: fix the environment the named "
+                          "test needs (or name a test that runs here)")
+        return prompt("the revert-and-fail proof failed: make the named test fail with the source reverted and pass "
+                      "restored")
+    if item.startswith("ledger: names commit"):
+        return prompt("the ledger COMMIT is stale: re-review what changed since, then update COMMIT to HEAD")
+    if item.startswith("ledger: lens"):
+        return prompt("review the lens the ledger names and write `LENS <name> reviewed`")
+    if item.startswith("ledger: no ") and briefs.LEDGER_FILE in item:
+        return prompt(f"write {briefs.LEDGER_FILE} in the worktree root after the last commit")
+    if item.startswith("ledger: uncommitted"):
+        return prompt(f"commit the in-scope changes first ({_quoted(item[len('ledger: '):])})")
+    if item.startswith("ledger: "):  # name the refusal itself, never a generic placeholder (#1130)
+        return prompt(f"repair the ledger: {_quoted(item[len('ledger: '):])}")
+    if _MUTATION in item:
+        return prompt(f"mark the line `fixed <test> {_MUTATION}` (or dispose it via `office prompt`)")
+    return prompt("repair the ledger line the reason names")
+
+
 def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
     """The command the orchestrator runs for a stopped worker, by what stopped it."""
     if reason.startswith("contract-conflict"):
@@ -502,9 +558,17 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
                 f"then office rerun {task_id} --fresh once findings are recorded")
     if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
         return f"none: {task_id} has a newer session; office status shows it"
-    if "round cap" in reason:
-        return (f'office prompt {dispatch_id} -- "mark the line `fixed <test> mutation=failed` (or dispose it via '
-                '`office prompt`), run `office preflight`, then `office submit`"')
+    if reason.startswith(_CAP_REPAIR):
+        return _repair_next(dispatch_id, reason[len(_CAP_REPAIR):])
+    if reason.startswith("self-review: round"):  # an open medium or high finding at the round cap (#1130)
+        # The worker reported it as told; the orchestrator decides, so the hint names the finding and the choices.
+        found = re.search(r"\((line \d+:.*)\); the round cap", reason)
+        what = _quoted(found.group(1)) if found else "the open finding"
+        return (f'office prompt {dispatch_id} -- "<your decision on {what}: fix it with a test and mark it '
+                f'`fixed <test> {_MUTATION}`, or mark it `dismissed <reason>`>, run `office preflight`, '
+                f'then `office submit`", or office revoke {task_id} then office rerun {task_id} --fresh')
+    if "revert-and-fail proof" in reason:
+        return _repair_next(dispatch_id, reason)
     if reason.startswith("self-review"):
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"

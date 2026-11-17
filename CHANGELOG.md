@@ -2,9 +2,13 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
-## 3.28.9
+## 3.28.10
 
 Routing pins and quota walls (#1243). A launched reviewer that fails (empty reply, model_not_found, 402, quota) is a no-answer that falls back instead of EVIDENCE_BLOCKED, a failing pinned reviewer is dropped with a notice, and `office review L-T1 --as` recovers a lane or visual gate blocked that way (#1139, #1218, #663). Review pins record who set them and emit a route-change notice (#1115). The live user routing policy wins over a run's pinned copy, so `office route clear` reaches running runs (#1120), and `office config quota.reserve_percent` shows the per-role reserves that apply (#1116). pi pins resolve a bare model alias to its provider/model slug or refuse (#1185). A quoted `amend route` qualifies like a quoted `--as` (#858), RECHECK `next:` no longer offers a `--resume` that requalification would refuse (#752), and an amend refused for its route names `office amend route` instead of `office dispatch` (#814). Regression test for pi's credit-balance wall (#771).
+
+## 3.28.9
+
+Self-review proof and submit gates (bug cluster C4). The revert-and-fail proof keeps pytest option values, drops xdist distribution with `-n`, reverts every non-test source including templates like `.lava`, and names environment failures instead of calling them test failures (#1122, #1124, #1129, #1174, #1241). A check that could not run is never pre-existing (#1175). The combine commit for multi-dependency bases is deterministic (#1113). An unchanged-tree submit on a task with accept criteria needs `--no-change` and independent review (#1138). Blocked hints name the actual preflight refusal, and an open finding at the round cap is the orchestrator's decision (#1130). An ack-only rerun restacked with the same patch keeps its self-review ledger (#1127). The lane review brief says the consumed ledger is never in the tree, so its absence is not a finding (#576).
 
 ## 3.28.8
 

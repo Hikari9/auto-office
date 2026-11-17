@@ -7,6 +7,7 @@ gates are covered by test_convergence_contract.py.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,13 @@ def _worker(env, tid="T1"):
     t = task_row(env, tid)
     d = dict(con.execute("SELECT * FROM dispatches WHERE id=?", (t["current_dispatch_id"],)).fetchone())
     return {"OFFICE_RUN_ID": d["run_id"], "OFFICE_DISPATCH_ID": d["id"], "OFFICE_TASK_ID": tid, "OFFICE_ROLE": "executor"}, Path(d["worktree"])
+
+
+def _change(wt):
+    """#1138: a submit of an unchanged tree on a task with accept criteria is refused: give it a real change."""
+    (wt / "calc.py").write_text(GOOD_ADD)
+    for args in (("add", "calc.py"), ("-c", "user.email=t@e.test", "-c", "user.name=t", "commit", "-qm", "calc")):
+        subprocess.run(["git", *args], cwd=wt, check=True, capture_output=True)
 
 
 @pytest.mark.approved
@@ -79,6 +87,7 @@ def test_stale_pass_is_audit_only(env):
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
     wenv, wt = _worker(env)
+    _change(wt)
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     (wt / "calc.py").write_text(GOOD_ADD + "\n# v2\n")
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
@@ -327,6 +336,7 @@ def test_revision_ids_are_unique_across_runs(env):
                 "applied_version, env_fingerprint, operation_id, status, created_at) VALUES('R1','other-run','T1',1,'x','x',1,1,1,'x','op-foreign','current','t')")
     con.commit()
     wenv, wt = _worker(env)
+    _change(wt)
     code, out = env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
     assert f"rev R1-{run_id[:8]} captured" in out, out
 
@@ -340,6 +350,7 @@ def test_no_gate_revision_is_accepted_on_submit(env):
     approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
+    _change(wt)
     code, out = env.office("submit", cwd=wt, env=wenv, check=0)
     assert code == 0 and "accepted (no gate required by policy)" in out, out
     assert task_row(env)["status"] == "accepted"
@@ -349,6 +360,7 @@ def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
     approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
+    _change(wt)
     env.office("submit", cwd=wt, env=wenv, check=0)
     # Put it back the way an older runtime left it: submitted, no gates, never evaluated.
     con = env.con()
@@ -364,8 +376,15 @@ def test_revision_with_checks_is_not_accepted_without_them(env):
     approved_run(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
+    _change(wt)
     env.office("submit", cwd=wt, env={**wenv, "OFFICE_JOBS": "manual"}, check=0)
-    env.office("status", check=0)
+    # jobs are manual: the declared checks are queued and never ran, so evaluating acceptance must refuse
+    from office import db, gates, state
+    con = env.con()
+    assert con.execute("SELECT status FROM gates WHERE kind='checks'").fetchone()[0] == "queued"
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    with db.transaction(con):
+        assert gates.evaluate_acceptance(con, run, "T1") is False
     assert task_row(env)["status"] != "accepted"
 
 

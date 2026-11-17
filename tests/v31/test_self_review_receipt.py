@@ -111,7 +111,7 @@ def test_resubmitting_the_same_tree_reports_the_existing_revision(env):
 def test_empty_work_is_exempt_without_a_ledger_and_recorded(env):
     wenv, wt, d = _dispatch(env)
     _git(wt, "reset", "-q", "--hard", d["base_commit"])
-    code, out = env.office("submit", cwd=wt, env=wenv)
+    code, out = env.office("submit", "--no-change", "--", "criteria already hold", cwd=wt, env=wenv)  # #1138
     assert code == 0 and "self-review exempt (empty" in out, out
     assert json.loads(_rev(env)["self_review_json"])["type"] == "empty"
 
@@ -223,7 +223,7 @@ def test_an_exemption_flag_on_empty_work_is_not_refused(env):
     wenv, wt, d = _dispatch(env)
     _set(env, gear="full")
     _git(wt, "reset", "-q", "--hard", d["base_commit"])
-    code, out = env.office("submit", "--self-review-exempt", "mechanical", "--", "x", cwd=wt, env=wenv)
+    code, out = env.office("submit", "--self-review-exempt", "mechanical", "--no-change", "--", "x", cwd=wt, env=wenv)
     assert code == 0 and "self-review exempt (empty" in out, out
 
 
@@ -268,6 +268,8 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     assert "EXECUTOR SELF-REVIEW LEDGER for T1" in brief
     assert "tests/test_guard.py mutation=failed" in brief
     assert "not an independent verdict" in brief
+    # #576: reviewers kept flagging the consumed ledger's absence from the checkout.
+    assert "absence from the checkout is expected and is not a finding" in brief
 
 
 def _relaunch_with_a_new_lease(env, d):
