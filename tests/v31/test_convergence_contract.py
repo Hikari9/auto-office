@@ -688,6 +688,50 @@ def test_an_identical_tree_recomposition_keeps_the_waiver_and_starts_no_review(e
     assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
 
 
+def _drop_review(env):
+    """#1228: the lane's latest convergence review closed stale with no result while the lane was reviewing
+    (a member changed mid-review, so the job dropped the reviewer's reply)."""
+    con = env.con()
+    gid = con.execute("SELECT id FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    con.execute("UPDATE gates SET status='stale', verdict=NULL, review_status=NULL, stale_reason='scope recomposed' "
+                "WHERE id=?", (gid,))
+    run_id, landing = con.execute("SELECT id, landing_json FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    landing = json.loads(landing)
+    landing["convergence"]["L-T1"]["status"] = "reviewing"
+    con.execute("UPDATE runs SET landing_json=? WHERE id=?", (json.dumps(landing), run_id))
+    con.commit()
+    return gid
+
+
+def test_an_identical_tree_does_not_carry_a_dropped_review(env):
+    """#1228: a same-tree recomposition after the lane's review closed stale with no verdict starts a new
+    review; carrying it left the lane "reviewing" with nothing running and the verdict lost."""
+    _delegated_waiver(env)
+    before = _scope(env, "L-T1")
+    dropped = _drop_review(env)
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    after = _scope(env, "L-T1")
+    assert after["tree"] == before["tree"] and after["commit"] != before["commit"], "same tree, new composed commit"
+    assert not _events(env, "convergence.carried"), "a dropped review has nothing to carry"
+    latest = _gates(env, "convergence_review")[-1]
+    assert latest["id"] != dropped and latest["input_key"] == f"L-T1:{after['commit']}"
+    assert latest["status"] == "done" and latest["verdict"] == "RECHECK", "the new review's verdict is recorded"
+
+
+def test_a_dropped_review_on_the_current_composition_can_be_run_again(env):
+    """#1228: with no recomposition coming, status names the recovery and office review re-runs the dropped
+    review on the same composition instead of refusing nothing-to-review."""
+    _delegated_waiver(env)
+    dropped = _drop_review(env)
+    assert "office review L-T1" in _status(env)["next"]
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    code, out = env.office("review", "L-T1:convergence")
+    assert code == 0, out
+    latest = _gates(env, "convergence_review")[-1]
+    assert latest["id"] != dropped and latest["input_key"] == f"L-T1:{_scope(env, 'L-T1')['commit']}"
+    assert latest["verdict"] == "APPROVED"
+
+
 def test_an_identical_tree_after_an_acceptance_change_is_reviewed_again(env):
     """#768: an amendment changed T1's acceptance criteria; the resubmitted same tree is no proof of the new ones."""
     _delegated_waiver(env)
