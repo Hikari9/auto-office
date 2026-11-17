@@ -417,6 +417,11 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         "review_reprompt_max": int(verification.get("review_reprompt_max", 3)),
         "dedicated_planner": planner is True,
     }
+    # #1233: the gears whose tasks get Office's own per-task audit (`review.self_review_audit_gears`, XL by
+    # default), pinned for this run's life like the round cap.
+    from office import self_review_subagents
+    gates[self_review_subagents.AUDIT_GEARS_KEY] = self_review_subagents.audit_gears(
+        (config.get("review") or {}).get(self_review_subagents.AUDIT_GEARS_KEY))
     if review_contract == contract.CONVERGENCE:
         # #423: the configurable substantive-round cap for lane and shared-scope
         # reviews, pinned at start so resume and recovery keep it.

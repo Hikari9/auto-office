@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from test_convergence_contract import APPROVED, _gates, _q, _start
-from test_issue809_self_review_subagents import _s_run, _subagent_gates
+from test_issue809_self_review_subagents import _s_run, _subagent_gates, fund_every_gear
 from test_review_reroute import EXECUTOR
 
 from office import contract, dispatch, gates, jobs, paths, review_parse, review_submit, self_review_subagents as srs, state
@@ -28,6 +28,7 @@ def _in_process_routing(request):
     """These tests patch code that only reaches work running in this process."""
     if "env" in request.fixturenames:
         request.getfixturevalue("env").hide_agy = True
+        fund_every_gear()  # #1233: these runs exercise the per-task audit machinery on S, M and L
 
 
 def _lane(env):

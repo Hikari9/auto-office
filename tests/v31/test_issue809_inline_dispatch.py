@@ -348,7 +348,8 @@ def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
                                                   "OFFICE_DISPATCH_ID": d["id"]})
     assert code == 0, out
     roles = _roles(env)
-    assert roles.count("code_reviewer") == 1, "the M gear's self-review subagent runs for an inline task too"
+    # #1233: an M run funds no Office per-task audit; the executor's in-session self-review is its per-task check.
+    assert roles.count("code_reviewer") == 0, "an M run launches no separate per-task audit, inline or not"
     assert roles.count("convergence_reviewer") == 1 and "executor" not in roles
     (conv,) = _gates(env, "convergence_review")
     assert conv["verdict"] == "APPROVED"

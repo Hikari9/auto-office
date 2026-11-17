@@ -3,19 +3,36 @@
 XS none (the executor's inline four-lens self-check); S and M one four-lens subagent; L and XL up to four
 specialists. Each is a separate reviewer session on the accepted revision. A report is reused for the same
 revision, commit and rubric. A missing, invalid or wrong-commit report blocks convergence and spends no round.
+
+#1233: a new run funds these audits on XL only (`review.self_review_audit_gears`). These tests exercise the audit
+machinery on S, M and L runs, so their config funds every gear, as a run started before #1233 does.
 """
+import os
+from pathlib import Path
+
 import pytest
+import yaml
 
 from conftest import GOOD_ADD
 from test_convergence_contract import APPROVED, _gates, _q, _roles, _start
 
 from office import contract, gates, paths, self_review_subagents as srs, state
 
+
+def fund_every_gear() -> None:
+    """Fund the per-task audit on S, M, L and XL in the test env's user config (merged with what is there)."""
+    path = Path(os.environ["OFFICE_USER_CONFIG"])
+    cfg = (yaml.safe_load(path.read_text()) if path.exists() else None) or {}
+    cfg.setdefault("review", {})[srs.AUDIT_GEARS_KEY] = list(srs.FUNDED_GEARS)
+    path.write_text(yaml.safe_dump(cfg))
+
+
 @pytest.fixture(autouse=True)
 def _in_process_routing(request):
     """These tests patch `gates.run_reviewer`, which only reaches work that runs in this process (#841)."""
     if "env" in request.fixturenames:
         request.getfixturevalue("env").hide_agy = True
+        fund_every_gear()
 
 
 EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "submit": True}]
