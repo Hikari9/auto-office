@@ -3406,6 +3406,8 @@ def _add_dir_target(text: str | None) -> str | None:
     head = lines[starts[-1]].split(":", 1)
     parts = [head[1].strip()] if len(head) == 2 and head[1].strip() else []
     for ln in lines[starts[-1] + 1:]:
+        if not ln and not parts:
+            continue  # the live pane draws a blank line between the heading and the path (#1260)
         if not ln or ln.lower().startswith(("this session", "is this a directory")):
             break
         parts.append(ln)
