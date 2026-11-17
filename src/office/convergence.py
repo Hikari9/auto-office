@@ -1153,6 +1153,45 @@ def _owners(con, run: dict, scope: dict, f: dict) -> list[str]:
     return list(scope["tasks"])  # nobody can tell: every producer in the scope repairs it
 
 
+def reattribute_gaps(con, run: dict, task_ids) -> list[str]:
+    """#1135: after an amendment changes these tasks' scope, give open blocking findings that no task owned
+    (a scope gap) the owners the new envelopes resolve, then settle so the owner is reopened. Caller holds tx."""
+    run = state.get_run(con, run["id"])
+    touched = []
+    for scope in all_scopes(con, run):
+        if not set(scope["tasks"]) & set(task_ids):
+            continue
+        gaps = [dict(r) for r in con.execute(
+            "SELECT * FROM findings WHERE run_id=? AND scope=? AND state='open' AND task_id IS NULL "
+            "AND clone_of IS NULL ORDER BY created_at", (run["id"], scope["id"])).fetchall()]
+        moved = False
+        for f in gaps:
+            owners = _owners(con, run, scope, {"location": f.get("location"), "summary": f.get("summary"),
+                                               "owners": json.loads(f.get("owners") or "[]")})
+            if not owners:
+                continue
+            moved = True
+            first = None
+            for tid in owners:
+                t = state.get_task(con, run["id"], tid) or {}
+                producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?",
+                                       (t.get("accepted_revision_id"),)).fetchone()
+                dispatch_id = producer["dispatch_id"] if producer else None
+                if first is None:
+                    con.execute("UPDATE findings SET task_id=?, owners=?, dispatch_id=?, updated_at=? WHERE id=?",
+                                (tid, dumps(owners), dispatch_id, now_iso(), f["id"]))
+                    first = f["id"]
+                    continue
+                clone = dict(f, id="F" + uuid.uuid4().hex[:10], task_id=tid, owners=dumps(owners), clone_of=first,
+                             dispatch_id=dispatch_id, updated_at=now_iso())
+                con.execute(f"INSERT INTO findings({', '.join(clone)}) VALUES({', '.join('?' * len(clone))})",
+                            tuple(clone.values()))
+        if moved:
+            settle(con, run, scope)
+            touched.append(scope["id"])
+    return touched
+
+
 UNASSIGNED = "unassigned"
 
 
@@ -1323,7 +1362,9 @@ def settle(con, run: dict, scope: dict) -> None:
             owning_tasks = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"
                             and planfile.path_in_scope(path, t.get("scope") or [])]
             descriptions.append(f"{f['code']} {path} (owning tasks: {', '.join(owning_tasks) or 'none'})")
+        routed = route_repairs(con, run, scope, [f for f in blocking if f.get("task_id")])  # #1220
         detail = ("scope gap: " + "; ".join(descriptions)
+                  + (f"; repairs routed to {', '.join(routed)}" if routed else "")
                   + "; coordinate the owning lane's repair or amend the ownership contract before another review")
         _set_scope(con, run, scope["id"], status="attention", fallback_available=False, detail=detail)
         state.emit(con, run, "convergence.scope_gap", f"{scope['id']} {detail}",
@@ -2363,6 +2404,14 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
                           next_step=f"{repair_cmd} after its repair, or "
                                     f'office disposition {spec} dismissed --quote "<user\'s words>" '
                                     "only if the user chooses to waive it")
+        if blocking and how == "fix":
+            names = ", ".join(sorted({r["code"] for r in blocking}))
+            owners = sorted({r["task_id"] for r in blocking if r["task_id"]}, key=_tid_key)
+            repair = " | ".join(f"office rerun {o} --resume|--fresh" for o in owners) or "office amend (no owner yet)"
+            raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: `fix` is for non-blocking "
+                        "findings. A blocking finding is repaired by its owner and verified by the lane recheck; "
+                        "only the user may dismiss it, with their words in --quote",
+                        next_step=f'{repair}, or office disposition {spec} dismissed --quote "<user\'s words>"')
         if blocking and how != "fixed" and (how != "dismissed" or not quote):
             names = ", ".join(sorted({r["code"] for r in blocking}))
             raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: only the user may dismiss a "

@@ -399,6 +399,8 @@ def _ordinary(con, run: dict, scope: str, scope_ids: list[str], delta: str, plan
         plans.apply_run_checks(con, run, parsed.run_checks)
         run = state.get_run(con, run["id"])
         rechecked = [tid for tid in sync["checks_only"] if plans.rerun_accepted_checks(con, run, tid, amendment_id)]
+        from office import convergence
+        convergence.reattribute_gaps(con, run, set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
         recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         delivered = _deliver(con, run, amendment_id, affected, delta.strip(), version)
         rereview = None
@@ -534,6 +536,8 @@ def _apply_contract_text(con, run, scope_ids, delta, text, author, redirect: dic
         affected = (set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"])) - set(sync["capture_only"])
         ripple = _ripple(con, run, prior_graph, sync)
         affected -= set(ripple)
+        from office import convergence
+        convergence.reattribute_gaps(con, run, set(scope_ids) | set(sync["contract"]) | set(sync["acceptance"]))
         recaptured = _recapture(con, run, sync["capture_only"], amendment_id)
         affected = sorted(affected)
         _deliver(con, run, amendment_id, affected, delta.strip(), version,
