@@ -63,6 +63,18 @@ def test_an_empty_reply_reviewer_runs_the_fallback_chain_through_compose(scratch
     assert out["status"] == contract.EVIDENCE_BLOCKED, "the bounded fallback is spent: the lane blocks"
 
 
+@pytest.mark.parametrize("status", [contract.REVOKED, contract.INVALID_RESULT])
+def test_a_launched_subagent_that_was_revoked_or_returned_an_invalid_result_stays_blocked(scratch, monkeypatch, status):
+    """Review finding F1: only a no-answer route failure retries; a revoke or an invalid result is never retried."""
+    con, run_, tmp = scratch
+    run, tasks = _subagent_scope(con, tmp, monkeypatch, rubrics=("combined",))
+    item = _item(con, run, tasks, tmp, monkeypatch)
+    failure = srs._record(con, run, item, {"status": status, "dispatch_id": "D1"}, "c", retry=True)
+    assert failure["retried"] is False
+    assert con.execute("SELECT review_status FROM gates WHERE id=?", (item["gate"]["id"],)).fetchone()[0] \
+        == contract.EVIDENCE_BLOCKED
+
+
 # ------------------------------------------------------------------ a pinned route that already failed the gate
 
 def _attempt(con, gid, did, triple, failure, epoch=0):
@@ -119,6 +131,7 @@ def test_review_attempt_launches_the_next_fallback_with_a_notice_naming_the_drop
                                       visual=False, images=None, include_dirs=None, exclude=None, kind=None,
                                       resume_from=None, prefer_not=None, epoch=1, chain_epoch=1)
     assert TRIPLE in seen["exclude"], "the dropped pin is routed away from, not launched again"
+    assert "harness:codex" in seen["exclude"], "a harness-wide wall on the dropped pin rules out its whole harness"
     assert outcome == {"unavailable": True}
 
 

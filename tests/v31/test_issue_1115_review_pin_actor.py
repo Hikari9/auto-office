@@ -40,6 +40,19 @@ def test_a_lane_review_pin_records_its_actor_and_a_repin_event(env, flags, by):
     assert event["actor"] == by and event["after"] == reviewer and event["task_id"] == "L-T1"
 
 
+@pytest.mark.parametrize("flags, by", [([], "orchestrator")])
+def test_a_dispatch_review_pin_records_its_actor_and_a_repin_event(env, flags, by):
+    """Review finding F3: `office dispatch --review-as` stores the pin through the shared helper, so it records a
+    route.changed repin like the review-only and rerun paths."""
+    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+    reviewer = "codex/gpt-6-astra@low"
+    code, out = env.office("dispatch", "T1", "--review-as", reviewer, *flags, env=MANUAL)
+    assert code == 0, out
+    assert _pin(env)["as"] == reviewer and _pin(env)["by"] == by
+    (event,) = _repins(env)
+    assert event["actor"] == by and event["after"] == reviewer and event["task_id"] == "T1"
+
+
 def test_a_pin_covering_only_some_tasks_of_a_lane_names_the_uncovered_ones(monkeypatch):
     tasks = {"T1": {"review_override": {"as": "codex/gpt-6-luna@xhigh"}}, "T2": {}, "T3": {"review_override": {"as": "x/y"}}}
     monkeypatch.setattr(gates.state, "get_task", lambda con, rid, tid: tasks[tid])

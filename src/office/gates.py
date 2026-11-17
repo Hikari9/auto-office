@@ -1240,7 +1240,8 @@ def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: P
     dropped_pin = _failed_pin(run, pinned, role, history) if pinned else None
     if dropped_pin:
         pinned = None
-        excluded.add(dropped_pin[0])
+        # The failed attempt's full exclusions, so a harness-wide wall also rules out the rest of that harness.
+        excluded |= {dropped_pin[0]} | route_exclusions([a for a in history if a["triple"] == dropped_pin[0]])
     profile_kind = kind or ("vision" if visual else "reviewer")
     if first and resume_from:
         resume, same_route = _reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"])

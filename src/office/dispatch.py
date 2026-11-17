@@ -273,7 +273,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
                 gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid),
-                                                     pin=gates.review_pin(review_as, review_cli, review_external))
+                                                     pin=gates.review_pin(review_as, review_cli, review_external, quote=quote))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
@@ -329,7 +329,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             _record_routing(con, run, decision)
             if review_as:
                 from office import gates
-                state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+                gates.store_review_pin(con, run, tid, [tid], gates.review_pin(review_as, review_cli, review_external, quote=quote))
                 inert = gates.review_pin_inert(run)
                 if inert:
                     res.notices.append(f"{tid} --review-as {review_as} recorded, but {inert}")

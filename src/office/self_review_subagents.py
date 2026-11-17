@@ -171,9 +171,9 @@ def audit_scope(con, run: dict, tasks: list[dict], checkout: Path, commit: str, 
                 retry: bool = False, job: dict | None = None) -> dict:
     """Run every funded subagent review of `tasks` at `commit` (the checkout's HEAD, the commit convergence
     reviews). Returns {status, reports, reason}; any status but COMPLETED means convergence must not run.
-    With `retry`, a subagent whose outcome is not COMPLETED (never launched, or launched and failed with an
-    empty reply or model_not_found) returns status RETRY instead of EVIDENCE_BLOCKED, for the caller to retry through
-    the bounded review fallback. A subagent that completed and left a bad report, and a revoked one, stay blocked.
+    With `retry`, a subagent that never launched, or launched and came back UNAVAILABLE (empty reply,
+    model_not_found, quota), returns status RETRY instead of EVIDENCE_BLOCKED, for the caller to retry through
+    the bounded review fallback. A subagent that left a bad report (INVALID_RESULT or COMPLETED but invalid), and a revoked one, stay blocked.
 
     The subagents of one scope share no mutable state (each owns its gate, dispatch, session and reply file, and reads
     the checkout without writing it), so those that still need a review launch together and are composed in task and
@@ -323,7 +323,12 @@ def _record(con, run: dict, item: dict, outcome: dict, commit: str, *, retry: bo
     task, rubric, rid, audit_gate = item["task"], item["rubric"], item["rid"], item["gate"]
     good, reason = _valid(outcome, commit, run)
     parsed = outcome.get("parsed")
-    retried = bool(retry and not good and outcome.get("status") != contract.COMPLETED)
+    # Retry only a no-answer route failure: never launched, or launched and UNAVAILABLE (empty reply,
+    # model_not_found, 402, quota). A revoked subagent or an invalid/malformed result stays blocked.
+    status = outcome.get("status")
+    retried = bool(retry and not good and (status == contract.UNAVAILABLE or
+                                           (not outcome.get("dispatch_id") and status not in (
+                                               contract.COMPLETED, contract.REVOKED, contract.INVALID_RESULT))))
     with db.transaction(con):
         con.execute("UPDATE gates SET status='done', review_status=?, verdict=?, summary=?, route=?, "
                     "reviewer_dispatch_id=?, finished_at=? WHERE id=?",

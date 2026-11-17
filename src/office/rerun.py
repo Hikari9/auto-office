@@ -109,7 +109,8 @@ def refused_route_next(con, run: dict, tid: str, *, amend_route: bool = False) -
     recorded route for quota or availability, else None (#752).
 
     The user names another route (`--fresh --as ... --quote`, or `office amend route` when `amend_route`) or the
-    orchestrator reroutes from evidence. A user deny is not refused here: the rerun re-picks from the plan (#1106)."""
+    orchestrator reroutes from evidence. On a user deny the rerun re-picks from the plan (#1106), so only `--fresh`
+    is named: the re-picked route cannot resume the denied route's session."""
     task = state.get_task(con, run["id"], tid)
     if not task:
         return None
@@ -117,8 +118,12 @@ def refused_route_next(con, run: dict, tid: str, *, amend_route: bool = False) -
     route = recorded if recorded.get("declared") and dispatch._route_quote(recorded) \
         else (_last_ended_executor(con, run, tid) or {}).get("route") or recorded
     refusal = _route_refusal(con, run, task, route) if route.get("candidate") else None
-    if refusal is None or refusal[0] == "route-denied":
+    if refusal is None:
         return None
+    if refusal[0] == "route-denied":
+        # The rerun re-picks another route from the plan (#1106); a resume cannot switch routes, so only --fresh works.
+        return (f"route {routing.candidate_id(route['candidate'])} is now denied ({refusal[1]}); the rerun re-picks "
+                f"from the plan and cannot resume: {_fresh_cmd(tid)}")
     named = f'{_fresh_cmd(tid)} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
     other = f'office amend route {tid} --as <harness>/<model>[@effort] --quote "<user\'s words>"' if amend_route \
         else f"office dispatch {tid} --reroute"
