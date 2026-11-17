@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.8
+
+The Claude reviewer add-dir prompt is answered on the live screen (#1260). 3.28.7 stopped passing the state home, but the live pane draws a blank line between "Adding a new directory:" and the path, so Office read no path and left the prompt for the run's own dispatch dir unanswered. The path reader now skips blank lines before the path.
+
 ## 3.28.7
 
 Claude reviewers no longer stall on "Adding a new directory" (#1239). Current Claude Code asks once per untrusted `--add-dir`. Reviewer and vision launches added their dispatch dir and all of Office's state and data homes, so a reviewer pane stopped at a prompt Office did not recognise, then at a second one for the whole state home. Reviewer read roots are now the run's own state dir plus the guidance dirs. Office answers the prompt ("Yes, add it", session only) only for a directory it owns for the run, and several in a row. It never answers for the state home or any other directory.
