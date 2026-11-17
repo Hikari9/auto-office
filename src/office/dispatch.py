@@ -259,6 +259,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                        f"shadow proposal {shadow['proposal']} vs actual {shadow['actual']}; no policy effect",
                        audience="runtime", payload=shadow)
         previous = None
+        no_launch: set[str] = set()
         if run.get("gear"):
             gates = run.get("gates") or {}
             for line in plan_view.run_dispatch_lines(run["gear"], gates.get("run_gear_rationale"), gates,
@@ -308,6 +309,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             if task["status"] == "accepted":
                 res.add(f"{tid} already accepted")
+                no_launch.add(tid)
                 previous = tid
                 continue
             plans.require_scope_clear(con, run, tid)
@@ -378,8 +380,10 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             previous = tid
         if run["phase"] == "planning":
             state.update_run(con, run["id"], phase="executing")
-        state.emit(con, run, "dispatch", f"dispatched {' '.join(task_ids)}{' in parallel' if parallel else ''}",
-                   payload={"tasks": task_ids, "parallel": parallel})
+        started = [tid for tid in task_ids if tid not in no_launch]
+        if started:  # an already-accepted task launched nothing: no "dispatched" claim for it (#1220)
+            state.emit(con, run, "dispatch", f"dispatched {' '.join(started)}{' in parallel' if parallel else ''}",
+                       payload={"tasks": started, "parallel": parallel})
     jobs.kick(con, run["id"])
     res.next = "exceptions only; office status"
     return res

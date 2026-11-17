@@ -97,6 +97,12 @@ scope gap for the orchestrator. The lane identifies any owning tasks elsewhere a
 a non-owning producer. Coordinate the owning lane's repair or amend the ownership contract before
 requesting another review; the recorded finding still blocks convergence.
 
+A scope gap does not hold back the findings that do have an owner: in the same RECHECK those owners
+are reopened (`changes_required`) and the lane detail names them beside the gap (#1220). After an
+amendment changes a lane task's scope, open blocking gap findings are re-attributed to the owners the new
+envelopes resolve and the lane settles again, reopening them (#1135). `office disposition ... fix` on a
+blocking finding is refused and points at `office rerun <owner>`.
+
 Severity (`high | medium | low`) says how serious a finding is. Blocking (`blocking | non-blocking`)
 says whether progression must wait for another independent review. They are decided separately: a
 high finding can be non-blocking and a low one blocking.

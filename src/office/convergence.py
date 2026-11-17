@@ -553,7 +553,8 @@ def job_converge(con, run: dict, job: dict) -> dict:
             covering = _covered_by(con, run, scope, composed)
             if covering:
                 _set_scope(con, run, scope["id"], commit=composed["commit"], tree=composed["tree"],
-                           branch=composed["branch"], covered_by=covering)
+                           branch=composed["branch"], covered_by=covering,
+                           reviewed_versions=_contract_versions(con, run, scope))
                 state.emit(con, run, "convergence.covered", f"{scope['id']} integrated review skipped: {covering}'s "
                            f"independent review already covered tree {composed['tree'][:10]} for these tasks",
                            audience="runtime")
@@ -567,7 +568,9 @@ def job_converge(con, run: dict, job: dict) -> dict:
         rev = _rev(scope["id"], composed["commit"])
         _set_scope(con, run, scope["id"], status="reviewing", commit=composed["commit"], tree=composed["tree"],
                    branch=composed["branch"], cycle=cycle, round=round_no, detail=f"round {round_no} review queued",
-                   hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None)
+                   hold_key=None, carry_from=None, fallback_available=False, fallback_kind=None,
+                   # #1036: the contract the reviewer is shown, not whatever it is when the verdict lands.
+                   reviewed_versions=_contract_versions(con, run, scope))
         made = []
         if review_required(run) or sensitive_lane(con, run, scope):
             made.append(_new_gate(con, run, scope, rev, "convergence_review", round_no, cycle))
@@ -1159,6 +1162,45 @@ def _owners(con, run: dict, scope: dict, f: dict) -> list[str]:
     return list(scope["tasks"])  # nobody can tell: every producer in the scope repairs it
 
 
+def reattribute_gaps(con, run: dict, task_ids) -> list[str]:
+    """#1135: after an amendment changes these tasks' scope, give open blocking findings that no task owned
+    (a scope gap) the owners the new envelopes resolve, then settle so the owner is reopened. Caller holds tx."""
+    run = state.get_run(con, run["id"])
+    touched = []
+    for scope in all_scopes(con, run):
+        if not set(scope["tasks"]) & set(task_ids):
+            continue
+        gaps = [dict(r) for r in con.execute(
+            "SELECT * FROM findings WHERE run_id=? AND scope=? AND state='open' AND task_id IS NULL "
+            "AND clone_of IS NULL ORDER BY created_at", (run["id"], scope["id"])).fetchall()]
+        moved = False
+        for f in gaps:
+            owners = _owners(con, run, scope, {"location": f.get("location"), "summary": f.get("summary"),
+                                               "owners": json.loads(f.get("owners") or "[]")})
+            if not owners:
+                continue
+            moved = True
+            first = None
+            for tid in owners:
+                t = state.get_task(con, run["id"], tid) or {}
+                producer = con.execute("SELECT dispatch_id FROM revisions WHERE id=?",
+                                       (t.get("accepted_revision_id"),)).fetchone()
+                dispatch_id = producer["dispatch_id"] if producer else None
+                if first is None:
+                    con.execute("UPDATE findings SET task_id=?, owners=?, dispatch_id=?, updated_at=? WHERE id=?",
+                                (tid, dumps(owners), dispatch_id, now_iso(), f["id"]))
+                    first = f["id"]
+                    continue
+                clone = dict(f, id="F" + uuid.uuid4().hex[:10], task_id=tid, owners=dumps(owners), clone_of=first,
+                             dispatch_id=dispatch_id, updated_at=now_iso())
+                con.execute(f"INSERT INTO findings({', '.join(clone)}) VALUES({', '.join('?' * len(clone))})",
+                            tuple(clone.values()))
+        if moved:
+            settle(con, run, scope)
+            touched.append(scope["id"])
+    return touched
+
+
 UNASSIGNED = "unassigned"
 
 
@@ -1329,7 +1371,9 @@ def settle(con, run: dict, scope: dict) -> None:
             owning_tasks = [t["id"] for t in state.tasks(con, run["id"]) if t["status"] != "cancelled"
                             and planfile.path_in_scope(path, t.get("scope") or [])]
             descriptions.append(f"{f['code']} {path} (owning tasks: {', '.join(owning_tasks) or 'none'})")
+        routed = route_repairs(con, run, scope, [f for f in blocking if f.get("task_id")])  # #1220
         detail = ("scope gap: " + "; ".join(descriptions)
+                  + (f"; repairs routed to {', '.join(routed)}" if routed else "")
                   + "; coordinate the owning lane's repair or amend the ownership contract before another review")
         _set_scope(con, run, scope["id"], status="attention", fallback_available=False, detail=detail)
         state.emit(con, run, "convergence.scope_gap", f"{scope['id']} {detail}",
@@ -1425,7 +1469,7 @@ def _converge_scope(con, run: dict, scope: dict, *, basis: str) -> None:
     _set_scope(con, run, scope["id"], status=status, basis=basis, detail=basis, escalation=None, intake_gap=None,
                fallback_available=False,
                approved={"key": st.get("key"), "commit": st.get("commit"), "tasks": scope["tasks"],
-                         "versions": _contract_versions(con, run, scope)})
+                         "versions": st.get("reviewed_versions") or _contract_versions(con, run, scope)})
     open_nb = con.execute("SELECT COUNT(DISTINCT code) FROM findings WHERE run_id=? AND scope=? AND state='nonblocking' "
                           "AND disposition IS NULL", (run["id"], scope["id"])).fetchone()[0]
     state.emit(con, run, "convergence.approved" if status == "approved" else f"convergence.{status}",
@@ -2064,7 +2108,9 @@ def revoke_lane_gate(con, run: dict, spec: str, reason: str) -> Result:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (why, now_iso(), j["id"]))
     # A self-review subagent has a gate of its own: its supervise job names it and, nested, the lane gate.
-    subagent_gates = self_review_subagents.supervised_gates(jobs_)
+    # A queued subagent gate not yet supervised has no job to name it: find it by the scope commit in its key.
+    subagent_gates = list(dict.fromkeys([*self_review_subagents.supervised_gates(jobs_),
+                                         *self_review_subagents.open_gates_at(con, run["id"], commit)]))
     unstopped = []
     for j in jobs_:
         if j["status"] != "claimed" or not jobs.claim_live(j):
@@ -2369,6 +2415,14 @@ def disposition(con, run: dict, spec: str, how: str, note: str, *, quote: str | 
                           next_step=f"{repair_cmd} after its repair, or "
                                     f'office disposition {spec} dismissed --quote "<user\'s words>" '
                                     "only if the user chooses to waive it")
+        if blocking and how == "fix":
+            names = ", ".join(sorted({r["code"] for r in blocking}))
+            owners = sorted({r["task_id"] for r in blocking if r["task_id"]}, key=_tid_key)
+            repair = " | ".join(f"office rerun {o} --resume|--fresh" for o in owners) or "office amend (no owner yet)"
+            raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: `fix` is for non-blocking "
+                        "findings. A blocking finding is repaired by its owner and verified by the lane recheck; "
+                        "only the user may dismiss it, with their words in --quote",
+                        next_step=f'{repair}, or office disposition {spec} dismissed --quote "<user\'s words>"')
         if blocking and how != "fixed" and (how != "dismissed" or not quote):
             names = ", ".join(sorted({r["code"] for r in blocking}))
             raise Usage("user-quote-required", f"{spec} names blocking finding(s) {names}: only the user may dismiss a "
