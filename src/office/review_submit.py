@@ -133,10 +133,11 @@ def pointer(output: str | Path, *, prompt_file: str | Path, images: str = "") ->
     reply file and the final reply are what a harness without a shell falls back to."""
     return (f"Read and carry out the review brief at {prompt_file} exactly.{images} "
             f"Finish with `office review submit`: write the complete review to "
-            f"{Path(output).parent / SUBMIT_FILE} and run exactly: {submit_command(output)} . "
+            f"{Path(output).parent / SUBMIT_FILE} and run exactly: {submit_command(output)} , as one command on its own "
+            "(no pipe, `cd`, `&&` or `;`). That exact command is allowed even when other shell commands are denied. "
             f"If you have an `{PI_SUBMIT_TOOL}` tool, call it with the complete review instead. "
-            f"If your tools cannot run that command, write the complete review to {output} instead "
-            "(Office reads only that file, never your terminal), or if they cannot write files, end your reply with the "
+            f"Only if you have no shell tool, or that exact command itself fails, write the complete review to {output} "
+            "instead (Office reads only that file, never your terminal), or if you cannot write files, end your reply with the "
             "complete review. Do not edit anything else.")
 
 
