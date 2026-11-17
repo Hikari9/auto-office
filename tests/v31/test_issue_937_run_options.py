@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GOOD_ADD, start_inline
+from conftest import GOOD_ADD, self_reviewed, start_inline
 from test_task_prs import github, gh
 
 
@@ -107,6 +107,9 @@ def test_submit_uses_current_pr_setting_with_stale_run(env, monkeypatch):
         assert _enable(env)[0] == 0
         calls = []
         monkeypatch.setattr(prs, 'advance_branch', lambda *args: calls.append(args))
+        # A real change: an empty tree with accept criteria is refused without --no-change (#1138).
+        (Path(d['worktree']) / 'calc.py').write_text(GOOD_ADD)
+        self_reviewed(d['worktree'], 'calc.py')
         submit.submit_revision(con, stale, d, Path(d['worktree']))
         assert calls
         assert con.execute("SELECT count(*) FROM outbox WHERE kind='pr_sync'").fetchone()[0] >= 1

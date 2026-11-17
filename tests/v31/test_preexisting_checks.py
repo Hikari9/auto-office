@@ -20,7 +20,11 @@ V31 = pytest.mark.review_contract("v3.1")
 
 
 @pytest.fixture(autouse=True)
-def _quiet_host(monkeypatch):
+def _quiet_host(request, monkeypatch):
+    # The `env` fixture drops every OFFICE_* variable, so build it first or this setting is lost
+    # and a busy host turns the check's failure into UNAVAILABLE (#1273).
+    if "env" in request.fixturenames:
+        request.getfixturevalue("env")
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "100000")
 
 
@@ -159,14 +163,17 @@ def test_v31_a_test_runner_timeout_is_never_preexisting(env):
     plan = OLD_PLAN.replace("FAILED legacy::test_old", "Test timed out in 5000ms")
     _start(env, plan, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
-    assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
+    gate = _checks_gate(env)
+    assert gate["verdict"] == "CHANGES_REQUIRED", gate["summary"]
     assert not _preexisting_events(env) and not _base_evidence(env)
 
 
 @V31
 def test_v31_a_revision_that_changes_no_file_is_never_preexisting(env):
-    # The failing check is the work this task owes; an empty revision did none of it.
-    approved_run(env, gear="direct+review", executor=[{"write": {}, "submit": True}],
+    # The failing check is the work this task owes; an empty revision did none of it. An empty tree with
+    # accept criteria is submitted only as an acknowledged no-change (#1138).
+    approved_run(env, gear="direct+review",
+                 executor=[{"write": {}, "office": [["submit", "--no-change", "--", "calc.add already holds"]]}],
                  code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"

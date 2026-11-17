@@ -1136,13 +1136,14 @@ def _repin_open_review(con, run: dict, pin: dict) -> Result:
                           scope="plan", next_step="office status")
         gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
         from office import gates as gate_engine
+        actor = pin.get("by") or "orchestrator"  # an unquoted --as is the orchestrator's pin (#1115)
         gate_engine.review_route_notice(con, run, gate, "plan_reviewer", before, pin["as"],
-                                        "the user re-pinned the plan reviewer (office review plan --as)",
-                                        kind="repin", actor="user")
+                                        f"the {actor} re-pinned the plan reviewer (office review plan --as)",
+                                        kind="repin", actor=actor)
         last = gates[-1] if gates else None
         voided = last is None or last.get("review_status") != contract.COMPLETED
     jobs.kick(con, run["id"])
-    return Result(lines=[f"plan review re-run on {pin['as']} (gate {gid}, pinned by the user); "
+    return Result(lines=[f"plan review re-run on {pin['as']} (gate {gid}, pinned by the {actor}); "
                          + ("the previous attempt had no verdict, so no round is spent" if voided
                             else f"the next completed review is round {spent + 1}/{round_cap(run)}")],
                   next="no action; the verdict returns here (office status)")

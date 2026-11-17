@@ -387,13 +387,15 @@ def test_review_plan_as_re_pins_and_re_runs_only_the_plan_review_without_spendin
     (gate,) = _queued(env)
     assert gate["round"] == 1 and gate["cycle"] == 1, "an attempt that had no verdict spent no round"
     pr = _run(env)["plan_review"]
-    assert pr["review_override"]["as"] == REPIN and pr["review_override"]["by"] == "user" and not pr["ended"]
+    assert pr["review_override"]["as"] == REPIN and not pr["ended"]
+    # An unquoted --as is the orchestrator's pin, not the user's (#1115).
+    assert pr["review_override"]["by"] == "orchestrator"
     payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='plan_review' ORDER BY created_at DESC")[0]["payload_json"])
     # One pin mechanism (#1191 R8): the job carries only its gate; the pin is read from the plan-review record.
     assert payload["gate_id"] == gate["id"] and "review_override" not in payload
     assert not _q(env, "SELECT 1 FROM authorizations WHERE target='plan:review'"), "re-pinning is not another review"
     (notice,) = _route_notices(env)
-    assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "user"
+    assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "orchestrator"
     assert notice["stage"] == "plan_reviewer" and "re-pinned" in notice["reason"]
     code, status = _o(env, "status")
     assert REPIN in status and "review route change" in status, status

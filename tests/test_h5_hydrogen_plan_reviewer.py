@@ -41,8 +41,14 @@ def _probe_pass(con, cand):
     con.commit()
 
 
+def _live(monkeypatch, cfg):
+    """`cfg`'s user policy as the user's live policy: routing reads it, not a run's pinned copy (#1120)."""
+    monkeypatch.setattr(candidates, "required_user_policies", lambda *_: [route_policy.user_policy(cfg)])
+
+
 def _route(env, cfg, *, probe=True):
-    with db.connect(env / "runs.db") as con:
+    with pytest.MonkeyPatch.context() as mp, db.connect(env / "runs.db") as con:
+        _live(mp, cfg)
         built, _ = candidates.build_candidates(con, "plan_reviewer", probe=False,
                                                allow_policies=[route_policy.user_policy(cfg)])
         cand = next((c for c in built if hydrogen_trials.is_hydrogen(c)), None)
@@ -94,11 +100,12 @@ def test_visual_reviewer_never_builds_hydrogen_even_with_the_exact_allow(env):
     assert not [c for c in built if hydrogen_trials.is_hydrogen(c)]
 
 
-def test_a_pinned_hydrogen_plan_reviewer_needs_only_the_run(env):
+def test_a_pinned_hydrogen_plan_reviewer_needs_only_the_run(env, monkeypatch):
     from office.state import Refused
     db.connect().close()
     with pytest.raises(Refused, match="exact allow"):
         candidates.declared_decision(HYDROGEN, flag="--as", role="plan_reviewer", config={}, run_id="r1")
+    _live(monkeypatch, _config())
     with pytest.raises(Refused, match="conformance receipt"):
         candidates.declared_decision(HYDROGEN, flag="--as", role="plan_reviewer", config=_config(), run_id="r1")
 

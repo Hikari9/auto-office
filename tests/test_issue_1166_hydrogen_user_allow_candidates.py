@@ -32,9 +32,11 @@ def config(route=SPEC, role="executor", sizes=None, **extra):
     return {"routing": {"user_policy": {"role_rules": [rule]}}}
 
 
-def test_route_role_selects_exact_sized_user_allow(setup_route, tmp_path):
+def test_route_role_selects_exact_sized_user_allow(setup_route, tmp_path, monkeypatch):
     _, adapter = setup_route
     cfg = config(sizes=["S"])
+    # Routing reads the user's live policy, not the run's pinned copy (#1120).
+    monkeypatch.setattr(candidates, "required_user_policies", lambda *_: [route_policy.user_policy(cfg)])
     with db.connect(tmp_path / "runs.db") as con:
         built, _ = candidates.build_candidates(con, "executor", probe=False,
                                                 allow_policies=[route_policy.user_policy(cfg)], task_size="S")

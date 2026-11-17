@@ -339,15 +339,23 @@ def test_real_claude_install_exposes_exactly_the_public_skills(tmp_path):
 def _assert_host_exposes_namespaced_skills(env, cwd: Path) -> None:
     """The host's own session-init metadata names every invocable skill/command.
 
-    Reads only the first stream-json event (emitted before any model turn) and
-    closes the pipe, so no model response is awaited.
+    Reads stream-json events only up to the init event (emitted before any model
+    turn) and closes the pipe, so no model response is awaited. Newer hosts may
+    emit other system events (e.g. `ui_invalidate`, Claude Code 2.1.326) first.
     """
     proc = subprocess.Popen(
         ["claude", "-p", "x", "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
         env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     try:
-        init = json.loads(proc.stdout.readline())
+        init = {}
+        for _ in range(20):
+            line = proc.stdout.readline()
+            if not line:
+                break
+            init = json.loads(line)
+            if init.get("type") != "system" or init.get("subtype") == "init":
+                break
     finally:
         proc.kill()
         proc.wait()

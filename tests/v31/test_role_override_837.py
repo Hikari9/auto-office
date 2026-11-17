@@ -212,16 +212,24 @@ def test_migrate_dry_run_writes_nothing_then_apply_and_rollback(home):
 
 def test_probe_denial_is_role_aware(monkeypatch, tmp_path):
     """A role allow supersedes a legacy global deny for the probe's executor role; a role deny holds."""
+    import yaml
     from office import route_probe
-    monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "none.yaml"))
+    user_config = tmp_path / "user-config.yaml"
+    monkeypatch.setenv("OFFICE_USER_CONFIG", str(user_config))
+
+    def live(cfg):
+        # The probe reads the user's live policy, not the run's pinned copy (#1120).
+        user_config.write_text(yaml.safe_dump(cfg))
+        return cfg
+
     row = cand("gpt-6-astra", "low", "codex", version="0.157.1")
-    legacy = {"routing": {"user_policy": {"denied_models": ["harness:codex"]}}}
+    legacy = live({"routing": {"user_policy": {"denied_models": ["harness:codex"]}}})
     assert route_probe._denial(row, None, legacy)[0] == "route-denied"
-    allowed = {"routing": {"user_policy": {"denied_models": ["harness:codex"], "role_rules": [
-        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "allow"}]}}}
+    allowed = live({"routing": {"user_policy": {"denied_models": ["harness:codex"], "role_rules": [
+        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "allow"}]}}})
     assert route_probe._denial(row, None, allowed) is None
-    denied = {"routing": {"user_policy": {"role_rules": [
-        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "deny"}]}}}
+    denied = live({"routing": {"user_policy": {"role_rules": [
+        {"role": "executor", "route": "codex/gpt-6-astra@low", "state": "deny"}]}}})
     assert route_probe._denial(row, None, denied)[0] == "route-denied"
 
 
