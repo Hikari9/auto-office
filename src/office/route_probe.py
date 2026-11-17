@@ -338,9 +338,9 @@ def row_state(row: dict) -> dict:
 
 
 def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | None:
-    """A denial in the pinned config or in the live user and repo policy (the path
-    `route_role` and `declared_candidate` read), so a denial written after `office start`
-    stops a probe too. A live policy that cannot be read refuses: it might deny this route."""
+    """A denial in the live user and repo policy (the path `route_role` and `declared_candidate`
+    read), so a denial written after `office start` stops a probe too. `config` (a run's pinned
+    copy) is not consulted since #1120. A live policy that cannot be read refuses: it might deny this route."""
     from office import candidates
     try:
         live = candidates.live_user_policies((run or {}).get("repo_root"))

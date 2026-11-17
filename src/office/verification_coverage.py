@@ -133,7 +133,7 @@ _SCOPED_GATE_SHA256 = {
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "656dcd742468dcfeb08713244cd34f3bbbe7d9c696575cd9f943c847842fc0e1",
-    "tests/contracts/test_plugin_distribution.py": "3e0aaed703085532a871325c068473a2fc38537a309d5ed15611818960fcead7",
+    "tests/contracts/test_plugin_distribution.py": "afdf9f3df90550970c9a48d1ea432ea85e74625a2b45bfa44439d5a12a6d9dff",
     "tests/contracts/test_route_parity.py": "2d78e393f4abae9f3b862bd64b273819edfae097e06eb767238fb933cfcad440",
     "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",

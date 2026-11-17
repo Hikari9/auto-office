@@ -71,9 +71,11 @@ def test_discovery_does_not_turn_fable_into_a_worker(monkeypatch):
 # turns into role authorization.
 def _probe_denial(monkeypatch, user_policy=None, live=()):
     from office import route_probe
-    monkeypatch.setattr(candidates, "live_user_policies", lambda repo_root=None: list(live))
-    cand = {"harness": "claude", "model_id": FABLE, "invocation_model_id": FABLE, "effort": "high"}
     config = {"routing": {"user_policy": user_policy or {}}}
+    # The probe reads only the user's live policy, never the run's pinned copy (#1120).
+    policies = [route_policy.user_policy(config), *live] if user_policy else list(live)
+    monkeypatch.setattr(candidates, "live_user_policies", lambda repo_root=None: policies)
+    cand = {"harness": "claude", "model_id": FABLE, "invocation_model_id": FABLE, "effort": "high"}
     return cand, route_probe._denial(cand, None, config)
 
 

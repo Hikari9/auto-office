@@ -14,7 +14,11 @@ CHECK_LINE = 'checks: python3 -c "import calc; assert calc.add(2, 3) == 5"'
 
 
 @pytest.fixture(autouse=True)
-def _quiet_host(monkeypatch):
+def _quiet_host(request, monkeypatch):
+    # The `env` fixture drops every OFFICE_* variable, so build it first or this setting is lost
+    # and a busy host turns the check's failure into UNAVAILABLE (#1273).
+    if "env" in request.fixturenames:
+        request.getfixturevalue("env")
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "100000")
 
 

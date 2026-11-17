@@ -41,6 +41,10 @@ def test_probe_does_not_stop_at_persistent_502(monkeypatch):
         calls.append(1)
         raise urllib.error.HTTPError(url, 502, "booting", {}, None)
     monkeypatch.setattr(visual.urllib.request, "urlopen", urlopen)
+    # A fake clock: on a loaded host a real 0.3s window can fit only one probe (#1273).
+    now = [0.0]
+    monkeypatch.setattr(visual.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(visual.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
     error = visual._wait_url("http://127.0.0.1:5555/", 0.3, require_success=True)
     assert "HTTP 502" in error and len(calls) >= 2
 
