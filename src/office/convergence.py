@@ -2141,8 +2141,9 @@ def review_only(con, run: dict, spec: str, *, pin: dict | None = None) -> list[s
     scope = find_scope(con, run, m.group(1))
     if scope is None:
         raise Usage("unknown-scope", f"no lane or shared scope {m.group(1)}", next_step="office inspect convergence")
-    dropped = {g["id"] for g in dropped_gates(con, run, scope["id"])}
-    blocked = [g for g in [*_unreviewed_gates(con, run, scope["id"]), *dropped_gates(con, run, scope["id"])]
+    dropped_list = dropped_gates(con, run, scope["id"])  # stale gates: never in _unreviewed_gates (done only)
+    dropped = {g["id"] for g in dropped_list}
+    blocked = [g for g in [*_unreviewed_gates(con, run, scope["id"]), *dropped_list]
                if (kind is None or g["kind"] == kind) and g.get("evidence_status") != SPEC_DEFECT]
     if not blocked:
         raise Refused("nothing-to-review", f"{scope['id']} has no review that returned no verdict on its current composition; "
