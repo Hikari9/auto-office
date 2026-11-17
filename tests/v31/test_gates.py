@@ -274,6 +274,13 @@ def test_dispatch_after_an_accepted_task_launches_instead_of_stacking_forever(en
     env.office("dispatch", "T1", check=0)
     code, out = env.office("dispatch", "T1", "T2")
     assert code == 0 and "T1 already accepted" in out and "stacked after" not in out, out
+    claims = [json.loads(r[0] or "{}").get("tasks") for r in
+              env.con().execute("SELECT payload_json FROM events WHERE kind='dispatch' ORDER BY seq")]
+    assert claims[-1] == ["T2"], claims  # #1135: the accepted T1 launched nothing, so no dispatch claim names it
+    before = len(claims)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0 and "T1 already accepted" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='dispatch'").fetchone()[0] == before
     code, data = env.ojson("status")
     assert data["data"]["tasks"] == {"T1": "accepted", "T2": "accepted"}, data
     con = env.con()

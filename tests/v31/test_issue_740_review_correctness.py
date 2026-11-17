@@ -236,3 +236,21 @@ def test_fix_disposition_on_a_blocking_finding_names_the_owner_rerun(env):
     env.office("dispatch", "T1", check=0)
     code, output = env.office("disposition", "L-T1:F1", "fix", "--", "will fix")
     assert code != 0 and "office rerun T1" in output
+
+
+def test_recheck_at_the_round_cap_with_a_scope_gap_still_routes_the_owned_finding(env):
+    """#1220: the scope-gap hold runs before the round-cap escalation, so an owned finding in a capped
+    RECHECK that also has a gap still reaches its owner, and the gap is still reported."""
+    from test_convergence_contract import PLAN_LANE
+    _start(env, plan=PLAN_LANE, extra=("--review-rounds", "1"),
+           executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True},
+                     {"write": {"mul.py": GOOD_MUL}, "submit": True}],
+           convergence_reviewer=[{"reply": recheck(finding("F1", "T1", where="calc.py:1", what="owned defect"),
+                                                    finding("F2", "T1", where="other.py:1", what="unowned defect"))}])
+    env.office("dispatch", "T1", "T2", check=0)
+    rows = {r["code"]: r for r in _q(env, "SELECT * FROM findings WHERE scope='L-core' AND state='open'")}
+    assert rows["F1"]["task_id"] == "T1" and rows["F2"]["task_id"] is None
+    assert task_row(env, "T1")["status"] == "changes_required"
+    scope = _scope(env, "L-core")
+    assert scope["status"] == "attention"
+    assert "scope gap" in scope["detail"] and "other.py" in scope["detail"] and "routed to T1" in scope["detail"]
