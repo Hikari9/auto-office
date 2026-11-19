@@ -116,7 +116,10 @@ def test_hydrogen_never_qualifies_from_generic_allow_or_unverified_effort():
     assert h.route_refusal(c, role="visual_reviewer", size="S", manual=True)
     assert h.route_refusal(c, role="executor", size="XS", manual=False)
     assert h.route_refusal(c, role="executor", size="M", manual=True)
-    assert h.route_refusal(c, role="executor", size="S", manual=True) is None
+    # Rico 2026-11-19: Hydrogen executes @high at every size XS-L, so medium at S is now refused.
+    assert h.route_refusal(c, role="executor", size="S", manual=True)
+    assert h.route_refusal({**c, "effort": "high"}, role="executor", size="S", manual=True) is None
+    assert h.route_refusal({**c, "effort": "high"}, role="executor", size="XS", manual=True) is None
     assert h.manual_conformance(None, c, role="executor", size="XL")
 
 

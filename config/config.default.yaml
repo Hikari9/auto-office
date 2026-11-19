@@ -204,8 +204,8 @@ roles:
       min_effort: low
       allowed_sources: ["local-evidence:"]
   # Visual judgment is a separate specialist from code review (charter 8B).
-  # Preference order Gemini Flash -> Terra (a user seed may put the exact user-allowed
-  # agy Hydrogen@high first; a seed entry alone is not an allow); a route qualifies only after an
+  # Preference order Hydrogen@high -> Terra low -> Opus low -> Sonnet medium (Hydrogen needs the user's exact
+  # allow; a seed entry alone is not one); a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
   # Reviewer independence is per agent, not per model family: a reviewer is
   # always a fresh dispatch, so it may share the producer's model.
@@ -214,10 +214,11 @@ roles:
       # Independent visual reviewer chain: primary then ordered fallbacks (#910).
       # DeepSeek requires an eligible catalog route and vision-capable adapter;
       # when absent, routing reports the real rejection and proceeds to Sonnet.
-      - {model_id: gemini-3.8-flash, harness: agy, effort: low}
+      # Rico 2026-11-19: Gemini 3.8 Flash retired; Hydrogen@high first (it still needs the user's exact allow).
+      - {model_id: gemini-4-hydrogen, harness: agy, effort: high}
       - {model_id: gpt-6.1-terra, harness: codex, effort: low}
-      - {model_id: deepseek-v4.1-flash-free, harness: opencode, effort: max}
-      - {model_id: claude-sonnet-5-5, harness: agy, effort: medium}
+      - {model_id: claude-opus-5-5, harness: claude, effort: low}
+      - {model_id: claude-sonnet-5-5, harness: claude, effort: medium}
     required_capabilities: [review, vision]
     floor:
       min_effort: low

@@ -15,9 +15,9 @@ executor:
   claude@2/claude-haiku-5-5:
     allow: {medium: [XS], high: [S]}
     deny: {high: [XS], xhigh: all, max: all}
-  agy@1/gemini-3.8-flash:
-    allow: {low: [XS], medium: [S]}
-    deny: {high: [XS, S], xhigh: all, max: all}
+  # Rico 2026-11-19: Gemini 3.8 Flash is retired in every role (superseded by Gemini 4 Hydrogen).
+  agy@1/gemini-3.8-flash: &retired
+    deny: {"*": all}
   codex@0/gpt-6.1-terra:
     allow: {low: [XS], medium: [S, M], high: [M, L]}
     deny: {high: [XS, S], xhigh: all, max: all}
@@ -63,12 +63,27 @@ code_reviewer: &reviewers
     deny: {medium: all, high: all, xhigh: all, max: all}
   claude@2|agy@1/claude-sonnet-5-5:
     deny: {medium: all, high: all}
+  agy@1/gemini-3.8-flash: *retired
 plan_reviewer: *reviewers
 
 visual_reviewer:
-  agy@1/gemini-3.8-flash:
-    allow: {low: all, medium: all}
+  agy@1/gemini-3.8-flash: *retired
   codex@0/gpt-6.1-terra:
     allow: {low: all}
   codex@0/gpt-5.6-terra:
     deny: {low: all}
+
+worker:
+  agy@1/gemini-3.8-flash: *retired
+
+planner:
+  agy@1/gemini-3.8-flash: *retired
+
+integration_reviewer:
+  agy@1/gemini-3.8-flash: *retired
+
+browser_verifier:
+  agy@1/gemini-3.8-flash: *retired
+
+closeout_verifier:
+  agy@1/gemini-3.8-flash: *retired

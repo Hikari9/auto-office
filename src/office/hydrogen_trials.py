@@ -54,7 +54,8 @@ def validate(config: dict) -> list[str]:
 
 
 def exact_effort(size: str) -> str | None:
-    return {"XS": "low", "S": "medium", "M": "high", "L": "high"}.get(size)
+    # Rico 2026-11-19: Hydrogen@high takes retired Gemini 3.8 Flash's XS and S executor slots.
+    return {"XS": "high", "S": "high", "M": "high", "L": "high"}.get(size)
 
 
 def user_allowed(rule: dict | None) -> bool:

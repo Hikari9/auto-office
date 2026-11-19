@@ -128,12 +128,12 @@ def test_conditional_route_becomes_selectable_when_added_by_user_overlay(
 
 def test_temporary_policy_changes_actual_seed_and_runtime_selection(policy_root):
     source = yaml.safe_load((policy_root / "catalog" / "executor-policy.yaml").read_text())
-    source["executor_preferred"]["XS"] = [{"model_id": "gemini-3.8-flash", "effort": "medium"}]
+    source["executor_preferred"]["XS"] = [{"model_id": "claude-sonnet-5-5", "effort": "medium"}]
     updated = _write_policy(policy_root, source)
     seed = candidates._preferred_seed({}, {"gear": "XS"}, "XS", executor_policy=updated)
-    assert seed == [{"model_id": "gemini-3.8-flash", "effort": "medium"}]
+    assert seed == [{"model_id": "claude-sonnet-5-5", "effort": "medium"}]
     pool = [_candidate("gpt-6.1-terra", "low", "codex", 55),
-            _candidate("gemini-3.8-flash", "medium", "agy", 40)]
+            _candidate("claude-sonnet-5-5", "medium", "agy", 40)]
 
     def select(policy, preference):
         with routing._using_executor_policy(policy):
@@ -150,7 +150,7 @@ def test_temporary_policy_changes_actual_seed_and_runtime_selection(policy_root)
     assert (original["candidate"]["harness"], original["candidate"]["model_id"], original["candidate"]["effort"]) == (
         "codex", "gpt-6.1-terra", "low")
     assert (changed["candidate"]["harness"], changed["candidate"]["model_id"], changed["candidate"]["effort"]) == (
-        "agy", "gemini-3.8-flash", "medium")
+        "agy", "claude-sonnet-5-5", "medium")
 
 
 def test_temporary_floor_policy_changes_runtime_eligibility(policy_root):

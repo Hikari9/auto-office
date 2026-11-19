@@ -11,10 +11,10 @@ executor_preferred:
   XS:
     - {rung: 1, model_id: claude-haiku-5-5, effort: medium, harness: claude}
     - {rung: 2, model_id: gpt-6.1-terra, effort: low, harness: codex}
-    - {rung: 2, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
+    - {rung: 2, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
   S:
     - {rung: 1, model_id: gpt-6.1-terra, effort: medium, harness: codex}
-    - {rung: 1, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
+    - {rung: 1, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
     - {rung: 2, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
   M:
     - {rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
