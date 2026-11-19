@@ -126,7 +126,9 @@ def test_conditional_hydrogen_m_and_planner_routes_remain_unqualified():
     assert planner[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
     assert slates.POLICY["executor_preferred"]["M"][1]["_resolved_routes"]
     assert slates.POLICY["executor_preferred"]["M"][1]["_dispatchable_routes"] == []
-    assert slates.POLICY["planner_preferred"]["M"][-1]["_resolved_routes"] == []
+    # #690: the Argon low row is registered but not dispatchable until its exact conformance qualifies it.
+    assert slates.POLICY["planner_preferred"]["M"][-1]["_resolved_routes"] == ["agy/gemini-4-argon@low"]
+    assert slates.POLICY["planner_preferred"]["M"][-1]["_dispatchable_routes"] == []
     executor_audit = slates.route_summary(executor, [], [], [])
     planner_audit = slates.route_summary(planner, [], [], [])
     # No runtime candidates were passed, distinct from static catalog resolution.

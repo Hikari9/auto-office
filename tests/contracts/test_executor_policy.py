@@ -91,7 +91,9 @@ def test_hydrogen_conditional_is_known_but_unqualified_and_planner_conditional_r
     policy = _write_policy(policy_root, data)
     h = next(row for row in policy["executor_preferred"]["M"] if row["model_id"] == "gemini-4-hydrogen")
     assert h["_resolved_routes"] and not h["_dispatchable_routes"]
-    assert policy["planner_preferred"]["M"][-1]["_resolved_routes"] == []
+    # #690: the Argon low row is registered but not dispatchable until its exact conformance qualifies it.
+    assert policy["planner_preferred"]["M"][-1]["_resolved_routes"] == ["agy/gemini-4-argon@low"]
+    assert policy["planner_preferred"]["M"][-1]["_dispatchable_routes"] == []
     assert slates.ideal_seed("M", policy)[1]["rung"] == 1
     data["executor_preferred"]["M"][1].update(model_id="unshipped-new-model")
     data["executor_preferred"]["M"][1].pop("conditional")

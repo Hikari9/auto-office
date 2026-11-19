@@ -573,6 +573,15 @@ rows:
       fetched_at: '2026-09-27T14:55:21Z'
       page_title: Gemini 3.8 Flash (low)
     supersession_metadata: null
+  agy/gemini-4-argon@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-page
+      url: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+      fetched_at: '2026-10-17T00:00:00Z'
+      page_title: 'Gemini 4 Argon: low, medium and high reasoning efforts (#690)'
+    supersession_metadata: null
   agy/gemini-4-argon@medium:
     price_fields: null
     speed_fields: null
