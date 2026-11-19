@@ -52,3 +52,37 @@ def test_the_probe_pane_is_closed_after_its_reply_is_read(tmp_path, monkeypatch)
     out = conformance.probe_vision(con, run, cand, {"id": "agy"})
     assert out["result"] == "pass", out
     assert closed == [answered["d"]]
+
+
+def test_a_pane_hosted_supervisor_probe_reads_the_captured_stdout(tmp_path, monkeypatch):
+    """2026-11-19: agy's plan-mode vision probe cannot write reply.txt; the pane hosts the headless supervisor and
+    its stdout log is the reply. The probe must read the launch spec from the dispatch dir, where it is written."""
+    from office import conformance, dispatch, paths, state
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
+    con = db.connect(tmp_path / "runs.db")
+    run_id = "R" + uuid.uuid4().hex[:8]
+    con.execute("INSERT INTO runs(id, status, requirements_version, plan_version, office_version) "
+                "VALUES(?, 'executing', 1, 1, ?)", (run_id, version.current()))
+    con.commit()
+    run = state.get_run(con, run_id)
+    answered = {}
+
+    def launch(run_, d, kind, ddir, *, output, **kw):
+        log = ddir / "output.log"
+        log.write_text(f"PROBE {answered['digits']} {answered['color']}\nEVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS\n")
+        dispatch.write_launch_spec(run_, d["id"], {"kind": kind, "supervisor": "pane"})
+        con.execute("UPDATE dispatches SET terminal_classification='success', exit_code=0, launcher='herdr', "
+                    "log_path=? WHERE id=?", (str(log), d["id"]))
+        con.commit()
+
+    real_probe_image = conformance.probe_image
+    monkeypatch.setattr(conformance, "probe_image",
+                        lambda path, digits, color: answered.update(digits=digits, color=color)
+                        or real_probe_image(path, digits, color))
+    monkeypatch.setattr(dispatch, "launch", launch)
+    monkeypatch.setattr(dispatch, "reclaim_pane", lambda run_, did, **kw: "closed")
+    cand = {"harness": "agy", "invocation_model_id": "gemini-4-hydrogen-high", "effort": "high", "adapter_id": "agy",
+            "model_id": "gemini-4-hydrogen", "harness_version": "1"}
+    out = conformance.probe_vision(con, run, cand, {"id": "agy"})
+    assert out["result"] == "pass", out
+    assert (paths.run_dir(run_id) / "dispatches").is_dir()
