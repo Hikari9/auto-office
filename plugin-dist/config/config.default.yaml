@@ -212,8 +212,8 @@ roles:
   visual_reviewer:
     preferred_seed:
       # Independent visual reviewer chain: primary then ordered fallbacks (#910).
-      # DeepSeek requires an eligible catalog route and vision-capable adapter;
-      # when absent, routing reports the real rejection and proceeds to Sonnet.
+      # A route without an eligible catalog row or a vision-capable adapter is
+      # rejected with its real reason and routing moves to the next entry.
       # Rico 2026-11-19: Gemini 3.8 Flash retired; Hydrogen@high first (it still needs the user's exact allow).
       - {model_id: gemini-4-hydrogen, harness: agy, effort: high}
       - {model_id: gpt-6.1-terra, harness: codex, effort: low}

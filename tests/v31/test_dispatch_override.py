@@ -36,11 +36,12 @@ def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
 
 @pytest.mark.approved
 def test_as_resolves_the_catalog_invocation_slug(env):
-    # agy takes the combined native-Gemini slug; the user types the model and effort.
+    # The catalog's invocation slug differs from the typed model id; the user types the model and effort.
+    # Flash was the old fixture; it is retired in every role (2026-11-19).
     approved_run(env)
-    env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", env=EXTERNAL, check=0)
+    env.office("dispatch", "T1", "--as", "claude/sonnet@high", env=EXTERNAL, check=0)
     d = _dispatch_row(env)
-    assert d["model"] == "gemini-3.8-flash-medium" and d["effort"] == "medium"
+    assert d["model"] == "claude-sonnet-5-5" and d["effort"] == "high"
 
 
 @pytest.mark.approved
@@ -89,7 +90,7 @@ def test_cli_starts_that_exact_argv_in_herdr(env, monkeypatch):
     from test_herdr_agent_launch import BUSY, _calls, _fake
     state_file = _fake(env, monkeypatch, reads=[BUSY])
     approved_run(env)
-    env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", "--external", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high", "--external", check=0)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
     monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
@@ -101,11 +102,11 @@ def test_cli_starts_that_exact_argv_in_herdr(env, monkeypatch):
     d = state.get_dispatch(con, _dispatch_row(env)["id"])
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     (ddir / "brief.md").write_text("ROLE executor\n")
-    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo, cli="agy --model gemini-3.8-flash-medium --yolo")
+    res = dispatch.launch(run, d, "worker", ddir, cwd=env.repo, cli="claude --model claude-sonnet-5-5 --verbose")
     assert res["launcher"] == "herdr" and res["prompt_landed"] is True
     start = next(c for c in _calls(state_file) if c[:2] == ["agent", "start"])
-    assert start[start.index("--kind") + 1] == "agy"
-    assert start[start.index("--") + 1:] == ["--model", "gemini-3.8-flash-medium", "--yolo"]
+    assert start[start.index("--kind") + 1] == "claude"
+    assert start[start.index("--") + 1:] == ["--model", "claude-sonnet-5-5", "--verbose"]
 
 
 @pytest.mark.approved
@@ -167,7 +168,7 @@ def _dispatch_row_or_none(env):
 @pytest.mark.approved
 def test_review_as_is_pinned_on_the_task(env):
     approved_run(env)
-    code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
+    code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high",
                            "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
     assert code == 0, out
     con = env.con()
@@ -185,7 +186,7 @@ def test_a_review_pin_on_a_gear_without_code_review_warns_it_has_no_effect(env):
     gates = json.loads(con.execute("SELECT gates_json FROM runs").fetchone()[0])
     con.execute("UPDATE runs SET gates_json=?, gear='direct'", (json.dumps({**gates, "code_review": False}),))
     con.commit()
-    code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
+    code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high",
                            "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
     assert code == 0 and "--review-as codex/gpt-6-luna@high recorded, but gear direct runs no code review" in out, out
     code, out = env.office("inspect", "task", "T1")
@@ -194,7 +195,7 @@ def test_a_review_pin_on_a_gear_without_code_review_warns_it_has_no_effect(env):
 
 def test_a_review_pin_on_a_reviewed_gear_has_no_warning(env):
     approved_run(env)
-    code, out = env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium",
+    code, out = env.office("dispatch", "T1", "--as", "claude/claude-sonnet-5-5@high",
                            "--review-as", "codex/gpt-6-luna@high", "--review-external", env=EXTERNAL)
     assert code == 0 and "runs no code review" not in out, out
 
@@ -247,10 +248,10 @@ def test_default_reviewer_seeds_and_fallbacks():
         # #837: the seeded order is a preference; strict allow-only is an explicit user opt-in (strict_allow_roles)
         assert roles[role]["strict_seed"] is False, role
     visual = roles["visual_reviewer"]["preferred_seed"]
-    assert visual == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "low"},
+    assert visual == [{"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"},
                       {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"},
-                      {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode", "effort": "max"},
-                      {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
+                      {"model_id": "claude-opus-5-5", "harness": "claude", "effort": "low"},
+                      {"model_id": "claude-sonnet-5-5", "harness": "claude", "effort": "medium"}]
 
 
 @pytest.mark.approved

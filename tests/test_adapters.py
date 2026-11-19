@@ -137,8 +137,8 @@ class TestAdapterConformance(unittest.TestCase):
 
         rows = [
             {
-                'model_id': 'gemini-3.8-flash',
-                'invocation_model_id': 'gemini-3.8-flash-high',
+                'model_id': 'gemini-4-neon',
+                'invocation_model_id': 'gemini-4-neon-high',
                 'invocation_harness': 'agy',
                 'invocation_source': 'local-evidence:test',
                 'effort': 'high',
@@ -194,7 +194,7 @@ class TestAdapterConformance(unittest.TestCase):
         })
         self.assertIn('/claude-sonnet-5-5@high', result['selected'])
         self.assertTrue(any(
-            rejection['stage'] == 6 and '/gemini-3.8-flash@high' in rejection['candidate']
+            rejection['stage'] == 6 and '/gemini-4-neon@high' in rejection['candidate']
             for rejection in result['rejected']
         ))
 

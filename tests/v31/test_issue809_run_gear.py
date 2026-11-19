@@ -444,7 +444,7 @@ def test_sonnet_fallback_can_be_truncated_at_slate_boundary():
     from test_issue809_real_routes import candidate, decide
 
     pool = [candidate("gpt-6.1-terra", "high", 50),
-            candidate("gemini-3.8-flash", "medium", 49, harness="agy"),
+            candidate("gpt-6.1-terra", "medium", 49),
             candidate("claude-sonnet-5-5", "medium", 48, harness="claude"),
             candidate("glm-5.3-flash", "max", 47, harness="opencode"),
             candidate("claude-sonnet-5-5", "medium", 46, harness="agy")]
@@ -480,7 +480,7 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
         {(harness, model) for model, harness in seed}, m_slate
     # M new gear: a route ranked between the pair pushes the agy route down, so the fallback moves it back up.
     m_pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
-              candidate("gemini-3.8-flash", "medium", 43, harness="agy"),
+              candidate("gpt-6.1-terra", "medium", 43),
               candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60)]
     m_new = decide("M", m_pool, gear="M")
     assert [(f["from"], f["to"]) for f in m_new["routing"]["sonnet_self_fallbacks"]] == \
@@ -490,7 +490,7 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     legacy = decide("M", m_pool, gear="express")
     assert "sonnet_self_fallbacks" not in legacy["routing"]
     assert [e["route"] for e in legacy["selection_disclosure"]["slate"]] == \
-        [SONNET_CLAUDE_MEDIUM, "agy@1/gemini-3.8-flash@medium", SONNET_AGY_MEDIUM]
+        [SONNET_CLAUDE_MEDIUM, "codex@1/gpt-6.1-terra@medium", SONNET_AGY_MEDIUM]
     # Same effort only: a Sonnet agy route at high is not the fallback for claude medium; the medium route is.
     mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60)], gear="M")
     assert [(f["from"], f["to"]) for f in mixed["routing"]["sonnet_self_fallbacks"]] == \
