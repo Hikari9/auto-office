@@ -106,7 +106,9 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
     dispatch_mod.launch(run, d, "vision", ddir, cwd=ddir, wait=True, output=out, images=[image], include_dirs=[ddir])
     d = state.get_dispatch(con, dispatch_id)
     from office import gates
-    text = gates._reply_text(d, ddir, out)
+    # The launch spec (and a pane-hosted supervisor's `supervisor: pane` marker) lives in the dispatch dir, not the
+    # probe's work dir; without it a plan-mode agy probe's captured stdout was never read (2026-11-19).
+    text = gates._reply_text(d, paths.run_dir(run["id"]) / "dispatches" / dispatch_id, out)
     # The probe is done once its reply is read: snapshot and close its pane, as a reviewer's is (#910).
     dispatch_mod.reclaim_pane(run, dispatch_id)
     import re

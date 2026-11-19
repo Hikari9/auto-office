@@ -76,8 +76,9 @@ def test_codex_visual_reviewers_get_the_same_submit_rule_and_trust(tmp_path, pan
 
 
 def test_every_visual_reviewer_harness_can_hand_back_with_submit(monkeypatch):
-    """claude (the #1186 shell), codex (the execpolicy rule) and agy (skip-permissions shell) visual reviewers can
-    all run `office review submit`; every reviewer role, visual included, gets the submit identity."""
+    """claude (the #1186 shell) and codex (the execpolicy rule) visual reviewers can run `office review submit`;
+    every reviewer role, visual included, gets the submit identity. agy's vision launch is read-only plan mode
+    (Rico 2026-11-19), so its reply is the supervisor's captured stdout, as for the agy code reviewer."""
     from office import read_scope
     monkeypatch.setattr(read_scope, "claude_sandbox_available", lambda: True)
     assert "visual_reviewer" in review_submit.REVIEW_ROLES
@@ -85,7 +86,10 @@ def test_every_visual_reviewer_harness_can_hand_back_with_submit(monkeypatch):
     argv, _ = adapters.build_argv(A["claude"], "vision", model="m", effort="high", cwd=Path("/tmp/co"), output=OUT)
     assert "Bash" in _tools(argv, "--tools") and f"Bash({EXACT})" in _tools(argv, "--allowedTools")
     assert adapters.profile(A["codex"], "vision")["submit_grant"] == "codex-rules"
-    assert "--dangerously-skip-permissions" in adapters.profile(A["agy"], "vision")["argv"]
+    agy_vision = adapters.profile(A["agy"], "vision")
+    for form in (agy_vision["argv"], agy_vision["interactive"]["argv"]):
+        assert form[form.index("--mode") + 1] == "plan" and "--dangerously-skip-permissions" not in form
+    assert adapters.pane_hosts_supervisor(A["agy"], "vision") and agy_vision["output"] == "stdout"
 
 
 def test_pi_gets_no_bash_only_its_submit_extension_grant():

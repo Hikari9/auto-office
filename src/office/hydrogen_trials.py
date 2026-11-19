@@ -14,8 +14,8 @@ MODEL = "gemini-4-hydrogen"
 WINDOW = 20
 CAP = 3
 MAX_PER_RUN = 1
-REVIEW_ROLES = frozenset(("code_reviewer", "plan_reviewer"))  # H3 (#1168) code; H5 plan
-# Not visual_reviewer: agy's vision profile runs with --dangerously-skip-permissions and no worktree guard (H5).
+# H3 (#1168) code; H5 plan; visual since agy's vision profile launches in read-only plan mode (Rico 2026-11-19).
+REVIEW_ROLES = frozenset(("code_reviewer", "plan_reviewer", "visual_reviewer"))
 REVIEW_EFFORT = "high"  # the effort that ran the 5-case planted-bug set (research/hydrogen-shadow)
 CANARY_MAX = 10  # #1168: owner-approved S canary budget ceiling; a config value above it is refused
 HIGH_RISK = frozenset((
@@ -79,7 +79,8 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
     if not is_hydrogen(candidate):
         return None
     if role in REVIEW_ROLES:
-        # H3 (#1168): owner-promoted voting code reviewer; H5 (Rico 2026-11-15): also a plan reviewer.
+        # H3 (#1168): owner-promoted voting code reviewer; H5 (Rico 2026-11-15): also a plan reviewer;
+        # Rico 2026-11-19: also the first visual reviewer, through agy's plan-mode vision profile.
         # Only the exact @high route that ran the planted-bug set, only under the user's exact allow (a manual --review-as does not stand in
         # for it, H4 #1178), always behind a fresh exact probe (manual_conformance), never through
         # discovery or adaptive exploration.
@@ -89,7 +90,7 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
             return f"Hydrogen review needs the user's exact allow of agy/{MODEL}@{REVIEW_EFFORT} for {role}"
         return None
     if role != "executor":
-        return "Hydrogen is an executor or a code or plan reviewer only (never a worker, planner or other reviewer; not a visual reviewer until agy has a read-only vision launch)"
+        return "Hydrogen is an executor or a code, plan or visual reviewer only (never a worker, planner or other reviewer)"
     if size not in ("XS", "S", "M", "L"):
         return "Hydrogen is excluded for XL and unclassified tasks"
     if candidate.get("harness") != "agy" or candidate.get("effort") != exact_effort(size):

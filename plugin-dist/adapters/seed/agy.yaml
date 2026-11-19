@@ -54,7 +54,7 @@ source_notes: Current office-skills Agy mechanics seeded for migration; exact mo
 # 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
 # IneligibleTierError. agy has no verified read-only sandbox, so it is a code
 # or plan reviewer only through the route-scoped `reviewer` profile below (H4, #1178; H5);
-# visual judgment runs in the run's private evidence directory.
+# visual judgment runs in plan mode in the run's private evidence directory.
 # Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
 # dispatch worktree, where write access is the point.
 # How Office learns this harness's session id (resume needs it). agy takes no id at
@@ -100,9 +100,13 @@ office_profiles:
       supervisor: true
       wall_cap: true
       argv: [--mode, plan, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
+  # Visual reviewer (Rico 2026-11-19: Hydrogen@high first, Flash second). Read-only `--mode plan` with no
+  # permission bypass, like the reviewer profile: plan mode is the write barrier, so the pane hosts the headless
+  # run (`interactive.supervisor`) and Office captures its stdout as the reply. Hydrogen@high and Flash@low both
+  # read prompt-path images in plan mode (local check 2026-11-19, agy 1.5.12).
   vision:
     submit: file
-    argv: [--dangerously-skip-permissions, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
+    argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
     max_minutes: 35
     include_arg: [--add-dir, "{dir}"]
     prompt: argv-bound
@@ -111,4 +115,6 @@ office_profiles:
     output: stdout
     herdr_kind: agy
     interactive:
-      argv: [--dangerously-skip-permissions, --model, "{model}", "{include_dirs}"]
+      supervisor: true
+      wall_cap: true
+      argv: [--mode, plan, --model, "{model}", "{include_dirs}"]

@@ -1,8 +1,9 @@
 """H5 (Rico 2026-11-15): Hydrogen also reviews plans, as the exact user-allowed agy/gemini-4-hydrogen@high.
 
 Same gates as the H3/H4 code reviewer: the user's exact allow for the role and a fresh exact probe,
-through the route-scoped read-only agy `reviewer` profile. Visual review stays vetoed (agy's `vision`
-profile has no write barrier, Luna on H5).
+through the route-scoped read-only agy `reviewer` profile. Visual review was vetoed while agy's `vision`
+profile had no write barrier (Luna on H5); since 2026-11-19 it launches in plan mode and Hydrogen reviews visuals
+under the same exact allow.
 """
 import pytest
 
@@ -86,18 +87,26 @@ def test_refusals_open_plan_review_only_under_the_exact_allow():
                                                    size=None, manual=False, user_allowed=True)
 
 
-@pytest.mark.parametrize("role", ["visual_reviewer", "integration_reviewer", "planner", "worker"])
+@pytest.mark.parametrize("role", ["integration_reviewer", "planner", "worker"])
 def test_other_roles_stay_vetoed(role):
     why = hydrogen_trials.route_refusal(CAND, role=role, size=None, manual=True, user_allowed=True)
-    assert "code or plan reviewer only" in why, role
+    assert "code, plan or visual reviewer only" in why, role
 
 
-def test_visual_reviewer_never_builds_hydrogen_even_with_the_exact_allow(env):
-    cfg = _config(role="visual_reviewer")
+def test_visual_reviewer_builds_hydrogen_only_under_the_exact_allow(env):
+    """Rico 2026-11-19: Hydrogen@high is the first visual reviewer, through agy's read-only plan-mode vision launch."""
+    r = hydrogen_trials.route_refusal
+    assert r(CAND, role="visual_reviewer", size=None, manual=False, user_allowed=True) is None
+    assert "exact allow" in r(CAND, role="visual_reviewer", size=None, manual=True)
+    assert "exact agy/gemini-4-hydrogen@high" in r({**CAND, "effort": "medium"}, role="visual_reviewer",
+                                                   size=None, manual=False, user_allowed=True)
     with db.connect(env / "runs.db") as con:
-        built, _ = candidates.build_candidates(con, "visual_reviewer", probe=False,
-                                               allow_policies=[route_policy.user_policy(cfg)])
-    assert not [c for c in built if hydrogen_trials.is_hydrogen(c)]
+        for cfg, expect in ((_config(role="visual_reviewer"), True), (_config(role="code_reviewer"), False)):
+            built, _ = candidates.build_candidates(con, "visual_reviewer", probe=False,
+                                                   allow_policies=[route_policy.user_policy(cfg)])
+            assert bool([c for c in built if hydrogen_trials.is_hydrogen(c)]) is expect, cfg
+    vision = adapters.profile_for(adapters.load_all()["agy"], "vision", CAND["invocation_model_id"], "high")
+    assert vision and vision["argv"][vision["argv"].index("--mode") + 1] == "plan"
 
 
 def test_a_pinned_hydrogen_plan_reviewer_needs_only_the_run(env, monkeypatch):
@@ -123,12 +132,15 @@ def test_route_policy_names_the_voting_review_role():
     ok, why = routecmd._dispatch_view(row, state, True, True, candidate=dict(CAND), role="plan_reviewer",
                                       probe={"result": "pass"})
     assert ok is True and why.startswith("user allow; exact probe passed; a voting plan reviewer"), why
-    assert "reviews code and plans only" in why
+    assert "reviews code, plans and visuals only" in why
     ok, why = routecmd._dispatch_view(row, state, True, True, candidate=dict(CAND), role="plan_reviewer")
     assert ok is False and why.startswith("user allow as a plan reviewer")
     ok, why = routecmd._dispatch_view(row, state, True, True, candidate=dict(CAND), role="visual_reviewer",
                                       probe={"result": "pass"})
-    assert ok is not True and "code or plan reviewer only" in why, why
+    assert ok is True and why.startswith("user allow; exact probe passed; a voting visual reviewer"), why
+    ok, why = routecmd._dispatch_view(row, state, True, True, candidate=dict(CAND), role="integration_reviewer",
+                                      probe={"result": "pass"})
+    assert ok is not True and "code, plan or visual reviewer only" in why, why
 
 
 def test_policy_header_names_the_hydrogen_gates():

@@ -16,7 +16,7 @@ def test_unsized_hydrogen_requires_proof(enabled, state):
         ROW, {"state": state, "source": "user"}, candidate=CANDIDATE,
         config={"routing": {"hydrogen_trials": {"enabled": enabled}}})
     assert dispatches is False
-    for text in ("depends on task size", "reviews code and plans only as the exact user-allowed agy/gemini-4-hydrogen@high", "S/medium", "3 per rolling 20", "one per run",
+    for text in ("depends on task size", "reviews code, plans and visuals only as the exact user-allowed agy/gemini-4-hydrogen@high", "S/medium", "3 per rolling 20", "one per run",
                  "manual --as", "fresh exact conformance probe pass",
                  "cannot dispatch until a fresh exact probe passes"):
         assert text in reason
