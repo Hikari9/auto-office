@@ -277,8 +277,9 @@ spent). No reference means "fidelity unmeasured". Visual input keys hash only pr
 the reference bytes, the viewport/state contract and the environment, so unrelated edits reuse the
 verdict and a reference change invalidates it.
 
-Judgment uses the `visual_reviewer` role. The preference is Gemini 3.8 Flash medium via agy,
-then Sonnet 5.5 high, then Luna. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
+Judgment uses the `visual_reviewer` role. The shipped preference is Gemini 3.8 Flash via agy, then
+Terra, DeepSeek and Sonnet; a user seed can put the exact user-allowed agy Hydrogen@high first (2026-11-19).
+agy's vision launch is read-only plan mode. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
 `--route` is exempt). A route qualifies
 only after `conformance.probe_vision` — a generated image with random digits and a coloured square,
 sent through that exact harness/model/effort/adapter path in a separate session — returns the right

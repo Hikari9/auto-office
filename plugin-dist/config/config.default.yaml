@@ -204,7 +204,8 @@ roles:
       min_effort: low
       allowed_sources: ["local-evidence:"]
   # Visual judgment is a separate specialist from code review (charter 8B).
-  # Preference order Gemini Flash -> Terra; a route qualifies only after an
+  # Preference order Gemini Flash -> Terra (a user seed may put the exact user-allowed
+  # agy Hydrogen@high first; a seed entry alone is not an allow); a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
   # Reviewer independence is per agent, not per model family: a reviewer is
   # always a fresh dispatch, so it may share the producer's model.
