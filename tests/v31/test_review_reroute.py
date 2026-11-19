@@ -507,11 +507,15 @@ def test_a_lane_review_only_on_the_named_route_never_resumes_the_earlier_reviewe
 
 def test_a_visual_review_only_takes_the_next_fallback_route_without_a_user_pin(env, monkeypatch, tmp_path):
     _fake_capture(monkeypatch, tmp_path)
+    # The first round tries every eligible vision route but one. Flash was that spare route; it is retired by a
+    # shipped deny (2026-11-19), so the user lifts it back to neutral to keep a next fallback to take.
+    env.office("route", "neutral", "agy/gemini-3.8-flash", "--wildcard", "--role", "visual_reviewer")
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
            visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
     env.office("dispatch", "T1", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
-    tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer'")}
+    # Review attempts only: a vision conformance probe (kind='conformance') is not a failed review of this revision.
+    tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer'")}
     env.script(visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}])
     code, out = env.office("review", "L-T1:visual", env=MANUAL)
     assert code == 0 and "visual review re-run" in out and "next fallback reviewer route" in out, out

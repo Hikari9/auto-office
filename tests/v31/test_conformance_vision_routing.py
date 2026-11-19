@@ -94,7 +94,7 @@ def test_visual_chain_is_the_locked_order_and_deepseek_has_no_vision_profile():
     roles = config.load_yaml(config.default_config_path())["roles"]
     assert [(e["harness"], e["model_id"], e["effort"]) for e in roles["visual_reviewer"]["preferred_seed"]] == [
         ("agy", "gemini-4-hydrogen", "high"), ("codex", "gpt-6.1-terra", "low"),
-        ("claude", "claude-opus-5-5", "low"), ("claude", "claude-sonnet-5-5", "medium")]
+        ("claude", "claude-opus-5-5", "low"), ("agy", "claude-sonnet-5-5", "medium")]
     opencode = yaml.safe_load(open("adapters/seed/opencode.yaml"))
     assert "vision" not in opencode["office_profiles"], \
         "opencode gained a vision profile: probe it, then add the image-capable DeepSeek evidence and update this test"

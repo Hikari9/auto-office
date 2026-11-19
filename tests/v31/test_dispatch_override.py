@@ -252,7 +252,7 @@ def test_default_reviewer_seeds_and_fallbacks():
     assert visual == [{"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"},
                       {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"},
                       {"model_id": "claude-opus-5-5", "harness": "claude", "effort": "low"},
-                      {"model_id": "claude-sonnet-5-5", "harness": "claude", "effort": "medium"}]
+                      {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
 
 
 @pytest.mark.approved

@@ -52,6 +52,8 @@ def test_an_exhausted_slate_returns_for_reroute_and_never_picks_an_unplanned_rou
     _approve(env)
     code, out = env.office("dispatch", "T1", env=_quota(env, claude=1, codex=1))
     assert code != 0 and "every planned route is unavailable" in out and "--reroute" in out, out
+    # The only route left outside claude and codex is agy Flash, retired by a shipped deny (2026-11-19); the user lifts it.
+    env.office("route", "neutral", "agy/gemini-3.8-flash", "--wildcard", "--role", "executor")
     code, out = env.office("dispatch", "T1", "--reroute", env=_quota(env, claude=1, codex=1))
     assert code == 0 and "rerouted from current evidence" in out, out
     assert "claude@" not in out.split("executor/")[1].split()[0] and "codex@" not in out.split("executor/")[1].split()[0]

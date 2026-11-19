@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.28.17
 
-Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > Opus low > Sonnet medium. Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.
+Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > claude Opus low > agy Sonnet medium (claude Sonnet medium fails the visual role floor). Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.
 
 ## 3.28.16
 
