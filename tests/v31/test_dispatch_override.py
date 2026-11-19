@@ -36,12 +36,13 @@ def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
 
 @pytest.mark.approved
 def test_as_resolves_the_catalog_invocation_slug(env):
-    # The catalog's invocation slug differs from the typed model id; the user types the model and effort.
-    # Flash was the old fixture; it is retired in every role (2026-11-19).
+    # agy takes the combined native-Gemini slug; the user types the model and effort.
+    # Flash is retired by a shipped deny (2026-11-19), so the user lifts it to neutral first.
     approved_run(env)
-    env.office("dispatch", "T1", "--as", "claude/sonnet@high", env=EXTERNAL, check=0)
+    env.office("route", "neutral", "agy/gemini-3.8-flash@medium", "--role", "executor")
+    env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", env=EXTERNAL, check=0)
     d = _dispatch_row(env)
-    assert d["model"] == "claude-sonnet-5-5" and d["effort"] == "high"
+    assert d["model"] == "gemini-3.8-flash-medium" and d["effort"] == "medium"
 
 
 @pytest.mark.approved
