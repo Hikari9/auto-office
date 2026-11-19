@@ -137,10 +137,18 @@ def test_exact_user_allow_makes_hydrogen_high_a_code_reviewer(tmp_path):
     assert decision["candidate"]["hydrogen_user_allow"] is True
 
 
+@pytest.mark.parametrize("role", ["code_reviewer", "visual_reviewer"])
+def test_exact_user_allow_makes_hydrogen_high_a_voting_reviewer(tmp_path, role):
+    """Rico 2026-11-19: visual review joins code and plan review under the same exact @high allow."""
+    cand = _cand("high")
+    decision, _ = _route(tmp_path, cand, _policy(REVIEW_SPEC, role=role), role=role)
+    assert decision["selected"] == routing.candidate_id(cand), decision
+
+
+@pytest.mark.parametrize("role", ["code_reviewer", "visual_reviewer"])
 @pytest.mark.parametrize("probe", [None, "fail"])
-def test_code_reviewer_hydrogen_still_needs_a_fresh_probe_pass(tmp_path, probe):
-    decision, _ = _route(tmp_path, _cand("high"), _policy(REVIEW_SPEC, role="code_reviewer"),
-                         role="code_reviewer", probe=probe)
+def test_code_reviewer_hydrogen_still_needs_a_fresh_probe_pass(tmp_path, probe, role):
+    decision, _ = _route(tmp_path, _cand("high"), _policy(REVIEW_SPEC, role=role), role=role, probe=probe)
     assert decision["selected"] is None
     assert any("conformance receipt" in r["reason"] for r in _hydrogen_rejections(decision)), decision
 
@@ -152,7 +160,7 @@ def test_code_reviewer_hydrogen_still_needs_a_fresh_probe_pass(tmp_path, probe):
     ("medium", _policy(SPEC, role="code_reviewer"), "medium", "code_reviewer"),
     ("plan-reviewer-medium", _policy(SPEC, role="plan_reviewer"), "medium", "plan_reviewer"),
     ("integration-reviewer", _policy(REVIEW_SPEC, role="integration_reviewer"), "high", "integration_reviewer"),
-    ("visual-reviewer", _policy(REVIEW_SPEC, role="visual_reviewer"), "high", "visual_reviewer"),
+    ("visual-reviewer-medium", _policy(SPEC, role="visual_reviewer"), "medium", "visual_reviewer"),
     ("planner", _policy(REVIEW_SPEC, role="planner"), "high", "planner"),
 ])
 def test_reviewer_promotion_is_exact_and_code_review_only(tmp_path, name, policy, effort, role):
@@ -169,7 +177,7 @@ def test_reviewer_refusal_reasons():
     assert "exact allow" in h.route_refusal(c, role="code_reviewer", size=None, manual=False)
     assert "exact agy/gemini-4-hydrogen@high" in h.route_refusal({**c, "effort": "medium"}, role="code_reviewer",
                                                                   size=None, manual=False, user_allowed=True)
-    # H5: plan review takes the same exact allow; visual and integration review stay vetoed.
+    # H5: plan review takes the same exact allow (visual too since 2026-11-19); integration review stays vetoed.
     assert h.route_refusal(c, role="plan_reviewer", size=None, manual=False, user_allowed=True) is None
     assert "exact allow" in h.route_refusal(c, role="plan_reviewer", size=None, manual=True)
     assert "never a worker, planner or other reviewer" in h.route_refusal(c, role="integration_reviewer", size=None,
