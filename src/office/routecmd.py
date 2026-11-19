@@ -58,7 +58,7 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
         rules = ("Hydrogen executes, and reviews code, plans and visuals only as the exact user-allowed agy/gemini-4-hydrogen@high; "
-                 "exact agy effort @high at every size XS-L; "
+                 "exact agy effort per size (XS/low, S/medium, M/high, L/high); "
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
                  "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
                  "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "

@@ -11,9 +11,9 @@ from office import candidates, executor_slates as slates, routing
 MAIN_ROUTE_MATRIX = {
     ("executor", "XS"): [("claude", "claude-haiku-5-5", "medium"),
                          ("codex", "gpt-6.1-terra", "low"),
-                         ("agy", "gemini-4-hydrogen", "high")],
+                         ("agy", "gemini-4-hydrogen", "low")],
     ("executor", "S"): [("codex", "gpt-6.1-terra", "medium"),
-                        ("agy", "gemini-4-hydrogen", "high"),
+                        ("agy", "gemini-4-hydrogen", "medium"),
                         ("claude", "claude-sonnet-5-5", "medium")],
     ("executor", "M"): [("claude", "claude-sonnet-5-5", "medium"),
                         ("agy", "gemini-4-hydrogen", "high"),

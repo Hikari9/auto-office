@@ -5,8 +5,8 @@ import pytest
 from office import adapters, executor_slates, model_lineages, route_policy, routing, shipped_catalog
 
 EXPECTED = {
-    "XS": [("claude-haiku-5-5", "medium", "claude"), ("gpt-6.1-terra", "low", "codex"), ("gemini-4-hydrogen", "high", "agy")],
-    "S": [("gpt-6.1-terra", "medium", "codex"), ("gemini-4-hydrogen", "high", "agy"), ("claude-sonnet-5-5", "medium", "claude")],
+    "XS": [("claude-haiku-5-5", "medium", "claude"), ("gpt-6.1-terra", "low", "codex"), ("gemini-4-hydrogen", "low", "agy")],
+    "S": [("gpt-6.1-terra", "medium", "codex"), ("gemini-4-hydrogen", "medium", "agy"), ("claude-sonnet-5-5", "medium", "claude")],
     "M": [("claude-sonnet-5-5", "medium", "claude"), ("gemini-4-hydrogen", "high", "agy"), ("gpt-6.1-terra", "high", "codex")],
     "L": [("claude-sonnet-5-5", "high", "claude"), ("gemini-4-hydrogen", "high", "agy")],
     "XL": [("claude-opus-5-5", "medium", "claude"), ("gpt-6.1-sol", "medium", "codex"), ("gemini-4-argon", "high", "agy")],
