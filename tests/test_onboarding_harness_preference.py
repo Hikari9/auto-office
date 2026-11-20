@@ -130,11 +130,24 @@ def test_a_recorded_harness_is_not_asked_again_even_when_the_overlap_narrows(h):
     assert hp["pending"] == [] and h.status()["due"] is False
 
 
-def test_skip_writes_nothing_for_the_harness_round(h):
+def test_skip_records_the_overlap_set_so_the_round_is_not_asked_again(h):
     code, out = h.office("onboard", "--skip")
     assert code == 0 and "preferences unchanged" in out, out
-    assert h.user_data() == {"onboarding": {"schema_version": onboarding.SCHEMA_VERSION}}
-    assert pref(h)["due"] is True
+    assert h.user_data() == {"onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
+                                            "harness_overlap_seen": OVERLAP_HARNESSES}}
+    assert pref(h)["due"] is False and h.status()["due"] is False
+
+
+def test_a_new_overlapping_harness_reopens_the_round(h):
+    h.remove("hermes")
+    code, out = h.office("onboard", "--skip")  # records agy and claude only
+    assert code == 0, out
+    assert h.status()["due"] is False
+    (h.bin / "hermes").write_text("#!/bin/sh\necho 0.9.0\n")  # hermes is installed now and joins the overlap
+    (h.bin / "hermes").chmod(0o755)
+    hp = pref(h)
+    assert hp["due"] is True and hp["pending"] == ["hermes"]
+    assert h.status()["reason"].startswith("harness overlap not yet answered: hermes")
 
 
 def test_no_overlap_means_no_harness_round(h):

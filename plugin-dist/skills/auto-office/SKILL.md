@@ -61,7 +61,7 @@ Round 3 (only when `harness_preference.due` is true, even if the schema is curre
 more installed harnesses run, by provider) and ask **Let Office decide**, **Keep**, or **Recommended**. Recommended asks, for each provider
 and each listed harness, the monthly USD that harness may spend there (`harness_preference.budget_inputs`, PROVIDER:HARNESS=USD); Office
 derives the weights from those shares and shows the arithmetic in `reasoning`. Record with `office onboard --harness-preference office|keep|recommended`
-and `--harness-budget PROVIDER:HARNESS=USD` per pair. A refused answer writes nothing; a skipped round writes nothing and stays due.
+and `--harness-budget PROVIDER:HARNESS=USD` per pair. A refused answer writes nothing. `--skip` records the current overlap set as seen, so the round is asked again only when that set changes.
 
 ## Start
 

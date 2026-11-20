@@ -536,10 +536,14 @@ def _apply_harness(answer: str | None, budgets_specs: list[str] | None) -> tuple
         lines.append("Harness preference: kept")
     if (new_prefs or None) != (current or None):
         changes.append((PREFERENCE_KEY, new_prefs or None))
+    return lines, changes + _seen_changes(overlap)
+
+
+def _seen_changes(overlap: dict) -> list[tuple[str, object]]:
+    """Record the overlapping harnesses as seen (only when that adds one), so the round is not asked again."""
     now = {h for info in overlap.values() for h in info["harnesses"]}
-    if now | seen != seen:
-        changes.append((OVERLAP_SEEN_KEY, sorted(now | seen)))
-    return lines, changes
+    seen = set(_recorded())
+    return [(OVERLAP_SEEN_KEY, sorted(now | seen))] if now | seen != seen else []
 
 
 def harness_overlap(auth: dict) -> dict[str, dict]:
@@ -762,6 +766,8 @@ def apply(answers: dict[str, str | None], *, skip: bool = False, enable_free_mod
     harness_lines, harness_changes = _apply_harness(harness_answer, harness_budgets)
     lines += harness_lines
     changes += harness_changes
+    if skip:
+        changes += _seen_changes(harness_overlap(hermes_access.auth_status()))
     schema_answered = skip or bool(given) or enable_free_models is not None
     if schema_answered and completed_schema() != SCHEMA_VERSION:
         changes.append((SCHEMA_KEY, SCHEMA_VERSION))

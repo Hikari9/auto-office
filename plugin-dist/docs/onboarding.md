@@ -14,7 +14,7 @@ The root `auto-office` skill runs `command -v office` before onboarding. If `off
 |---|---|
 | `office onboard --harness <h> [--json]` | Status only, never prompts or writes: `due`, `reason`, the current harness and its Office integration, every harness with its sign-in state, the three questions with current values, options, eligible and unavailable routes. |
 | `office onboard --planner A --executor A --reviewer A` | Validates every answer, then writes the accepted preferences and `onboarding.schema_version` to the user file in one atomic write. An omitted flag means `keep`. |
-| `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was, including the free-model opt-in. |
+| `office onboard --skip` | Writes `onboarding.schema_version` and the current overlap set as `onboarding.harness_overlap_seen`. Every preference stays as it was, including the free-model opt-in and the harness weights. |
 | `office onboard --enable-free-models` / `--disable-free-models` | Writes `onboarding.free_models_enabled` (`true` / `false`) with the schema marker, alone or together with answers. Not allowed with `--skip`. |
 | `office onboard --harness-preference office\|keep\|recommended [--harness-budget PROVIDER:HARNESS=USD ...]` | Answers the harness overlap round (below). Writes `routing.harness_preference` for `recommended` and `office`, and `onboarding.harness_overlap_seen`. Never touches the schema marker. |
 
@@ -52,8 +52,8 @@ The question is one of three answers:
   The budgets are stored under `onboarding.harness_budgets` as onboarding input; routing never reads them.
 
 Any answer records the overlapping harnesses in `onboarding.harness_overlap_seen`, so they are not asked again. A narrowing overlap asks nothing new.
-An invalid or incomplete answer writes nothing and stays re-askable. `--skip` does not answer this round: it writes only the schema marker, and the
-round stays due. A `--harness-budget` without `recommended` is refused.
+An invalid or incomplete answer writes nothing and stays re-askable. `--skip` writes no weights but records the current overlap set as seen, so the
+round is due again only when that set changes (a new harness joins the overlap). A `--harness-budget` without `recommended` is refused.
 
 ## Eligibility
 
