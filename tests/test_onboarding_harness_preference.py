@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from office import cli, discovery, hermes_access, onboarding
+from office import cli, discovery, onboarding
+from office import hermes_access
 
 OFFICE_AUTH = {"claude": "found", "codex": "found", "agy": "found", "hermes": "found"}
 VERSIONS = {"claude": "2.1.300", "codex": "0.160.0", "agy": "1.3.2", "hermes": "0.9.0"}
