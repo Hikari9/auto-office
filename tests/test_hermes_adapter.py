@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from office import adapters, dispatch, hermes_access, install, review_submit, transcripts
+from office import adapters, dispatch, install, review_submit, transcripts
+from office import hermes_access
 
 CWD = Path("/w")
 REPLY = Path("/d/reply.txt")
