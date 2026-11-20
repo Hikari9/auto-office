@@ -511,7 +511,9 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
     env.office("install", "--only", "claude", check=0)  # "Install recommended"
     env.office("onboard", "--planner", "claude/opus@medium", "--executor", "office", "--reviewer", "keep", check=0)
     code, data = env.ojson("onboard", "--harness", "claude")
-    assert data["data"]["due"] is False and data["data"]["harness"]["integration"]["state"] == "installed"
+    # The schema is current; only the harness round is owed (claude and agy share a model here), so intake is not blocked by it.
+    assert data["data"]["reason"].startswith("harness overlap not yet answered")
+    assert data["data"]["harness"]["integration"]["state"] == "installed"
     assert not (env.home / ".gemini").exists()
     # The pending request continues: intake runs with no second invocation and pins the answers.
     code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
