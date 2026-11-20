@@ -506,6 +506,12 @@ def test_a_lane_review_only_on_the_named_route_never_resumes_the_earlier_reviewe
 
 
 def test_a_visual_review_only_takes_the_next_fallback_route_without_a_user_pin(env, monkeypatch, tmp_path):
+    # _fake_capture patches this process, and an agy executor's submit runs the visual job in a real one. Hide the
+    # Gemini 4 Neon executor (an L/XL slate rung) but keep the other agy rows: the spare Flash vision route below needs them.
+    from office import candidates
+    seed_rows = candidates.catalog_rows
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+        {**r, "dispatchable": False} if r.get("model_id") == "gemini-4-neon" else r for r in seed_rows()])
     _fake_capture(monkeypatch, tmp_path)
     # The first round tries every eligible vision route but one. Flash was that spare route; it is retired by a
     # shipped deny (2026-11-19), so the user lifts it back to neutral to keep a next fallback to take.
@@ -525,12 +531,16 @@ def test_a_visual_review_only_takes_the_next_fallback_route_without_a_user_pin(e
     assert [g["kind"] for g in _gates(env, "visual")] == ["visual", "visual"] and len(_gates(env, "convergence_review")) == 1
     env.office("resume", check=0)  # the queued re-run starts as the visual reviewer
     assert _scope(env, "L-T1")["status"] == "approved", _triples(env, "visual_reviewer")
-    # Since #912 every eligible vision route qualifies, not just the first four, so the re-run starts away
-    # from every route the failed round tried and takes the next fallback instead.
-    assert _last_triple(env, "visual_reviewer") not in tried, _triples(env, "visual_reviewer")
+    # Since #912 every eligible vision route qualifies, not just the first four. The Engineering Index scores and
+    # Haiku 5.5 high's probe leave the failed round with 13 attempts and no untried route, so nothing qualifies away
+    # from the tried set: the re-run goes back to the routing order (the routes tried before may have recovered) and runs.
+    reran = [r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer' "
+                                          "ORDER BY started_at")]
+    assert len(reran) > len(tried) and reran[-1] in tried, reran
 
 
 def test_a_declared_visual_reviewer_is_the_users_own_allow_and_runs_the_rerun(env, monkeypatch, tmp_path):
+    env.hide_agy = True  # _fake_capture patches this process; an agy executor's submit would run the visual job elsewhere
     """A declared visual route needs only a vision launch profile (no routed capability proof): `--as` re-runs on it."""
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
@@ -653,6 +663,7 @@ def test_a_lane_review_only_without_as_never_resumes_the_earlier_reviewer(env, m
 
 
 def test_a_pinned_reviewer_that_is_unchanged_keeps_resuming_its_session_across_rounds(env, monkeypatch):
+    env.hide_agy = True  # the resume spy patches this process; an agy executor's submit would run the review elsewhere
     adds = [GOOD_ADD + f"# r{i}\n" for i in range(3)]
     _start(env, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
            convergence_reviewer=[{"reply": recheck(finding("F1"))}])
