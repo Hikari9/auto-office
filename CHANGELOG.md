@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.29.0
+
+Executor routing follows the Artificial Analysis Engineering Index (2026-11) table: size floors XS 31, S 37, M 40, L 45, XL 52 and Haiku 5.5 / Sonnet 5.5 / Opus 5.5 first rungs, with conditional Hydrogen at XS low, S medium and M high only, a frontend bias that moves the size's agy gemini-* rung to rung 1, and Hydrogen no longer a code reviewer (Luna high then Opus low).
+
 ## 3.28.17
 
 Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > claude Opus low > agy Sonnet medium (claude Sonnet medium fails the visual role floor). Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.
