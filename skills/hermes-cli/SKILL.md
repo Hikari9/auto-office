@@ -15,7 +15,7 @@ Headless is `hermes -z` (one-shot: prints only the final response; exit 0 only f
 - `--reasoning` carries the effort: none, low, medium, high, xhigh and max pass through unchanged (Hermes also accepts minimal and ultra; Office does not use them).
 - The launch env removes every `HERMES_*` variable except `HERMES_HOME` (headless env, pane shell via `agent.env`, route probes). They steer the model, provider, config and session.
 - `hermes -z` has no wall clock of its own (`--run-budget` belongs to `hermes chat`), so the profile's `max_minutes` cap bounds every headless launch.
-- Reviewer and vision profiles run `--in <dispatch dir>` with only the `file,terminal` (and `vision`) toolsets and `office review submit` as the completion step. Hermes has no read-only sandbox, so Office fingerprints the reviewed worktree before and after and fails the review as degraded if it changed. Evidence images reach the vision form as paths in the prompt.
+- Hermes has no reviewer or vision profile: `--yolo` with the terminal toolset can write anywhere, `--in` only moves the cwd, and a post-run fingerprint cannot prevent writes. Review dispatch stays off until an OS-enforced read-only checkout exists.
 
 ## Readback
 
