@@ -57,6 +57,11 @@ Round 2: the three `questions` in order, each with **Let Office decide** (Recomm
 Record with `office onboard --planner <a> --executor <a> --reviewer <a>` (`office`, `keep` or a route) or `office onboard --skip`; a refused
 answer writes nothing, so re-ask it. Then continue the original request at Start; never make the user repeat it. Headless, or no way to ask:
 never wait or `--skip`; continue on the current preferences and tell the user to run `office onboard`.
+Round 3 (only when `harness_preference.due` is true, even if the schema is current): show `harness_preference.overlap` (models that two or
+more installed harnesses run, by provider) and ask **Let Office decide**, **Keep**, or **Recommended**. Recommended asks, for each provider
+and each listed harness, the monthly USD that harness may spend there (`harness_preference.budget_inputs`, PROVIDER:HARNESS=USD); Office
+derives the weights from those shares and shows the arithmetic in `reasoning`. Record with `office onboard --harness-preference office|keep|recommended`
+and `--harness-budget PROVIDER:HARNESS=USD` per pair. A refused answer writes nothing; a skipped round writes nothing and stays due.
 
 ## Start
 

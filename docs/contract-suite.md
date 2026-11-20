@@ -83,6 +83,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_issue_927_onboarding_wording.py` | keep |
 | `tests/test_landings.py` | historical-diagnostic |
 | `tests/test_monitor.py` | historical-diagnostic |
+| `tests/test_onboarding_harness_preference.py` | keep |
 | `tests/test_packet_delivery_channel.py` | keep |
 | `tests/test_pane_busy.py` | keep |
 | `tests/test_plugin_skill_entry.py` | keep |

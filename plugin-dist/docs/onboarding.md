@@ -16,6 +16,7 @@ The root `auto-office` skill runs `command -v office` before onboarding. If `off
 | `office onboard --planner A --executor A --reviewer A` | Validates every answer, then writes the accepted preferences and `onboarding.schema_version` to the user file in one atomic write. An omitted flag means `keep`. |
 | `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was, including the free-model opt-in. |
 | `office onboard --enable-free-models` / `--disable-free-models` | Writes `onboarding.free_models_enabled` (`true` / `false`) with the schema marker, alone or together with answers. Not allowed with `--skip`. |
+| `office onboard --harness-preference office\|keep\|recommended [--harness-budget PROVIDER:HARNESS=USD ...]` | Answers the harness overlap round (below). Writes `routing.harness_preference` for `recommended` and `office`, and `onboarding.harness_overlap_seen`. Never touches the schema marker. |
 
 Free models are off by default. A catalog route marked `free_model` is not offered to routing until the user opts in, and `--disable-free-models` turns it off again. The opt-in persists in the user file, and the status output reports it (`free_models`). Once opted in, a free route competes on merit through normal qualification, scoring and fallback like any other route.
 
@@ -33,6 +34,26 @@ pinned (#440). `office config --run <id> --apply-routing --quote "<words>"` stay
 
 User-facing copy says preference, not promise: *Office favors this route according to its routing policy, but may choose another model or
 effort when availability, quota, task fit, capability, evidence, or policy calls for it.*
+
+## Harness preference round
+
+When two or more installed harnesses can run the same model on a provider, that overlap makes onboarding due once, even when the schema is current.
+`office onboard --harness <h> --json` lists each overlap under `harness_preference.overlap` (models, harnesses, provider) and the harnesses still
+pending. Hermes counts for a provider only when `hermes auth list` shows a usable credential for it, and the JSON lists Hermes providers by name and
+status only (`harnesses[].providers`), never a credential.
+
+The question is one of three answers:
+
+- `office`: Let Office decide. It clears the weights for the overlapping providers only; other `routing.harness_preference` scopes stay.
+- `keep`: leave the weights as they are.
+- `recommended`: derive the weights from monthly USD. Pass `--harness-budget PROVIDER:HARNESS=USD` for every pair in `budget_inputs`
+  (zero or more, finite). Each harness's weight is its share of the provider's total monthly budget, in percent, so a harness with $0 gets weight 0 and
+  is only a fallback. A provider whose budgets all sum to zero gets no weights. The reasoning (`$40/mo of $100 = 40%`) is printed and kept in status.
+  The budgets are stored under `onboarding.harness_budgets` as onboarding input; routing never reads them.
+
+Any answer records the overlapping harnesses in `onboarding.harness_overlap_seen`, so they are not asked again. A narrowing overlap asks nothing new.
+An invalid or incomplete answer writes nothing and stays re-askable. `--skip` does not answer this round: it writes only the schema marker, and the
+round stays due. A `--harness-budget` without `recommended` is refused.
 
 ## Eligibility
 

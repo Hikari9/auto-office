@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.29.0
+
+Onboarding asks one harness-preference round when installed harnesses run the same model (Hermes and claude both run Sonnet): `office onboard --harness-preference office|keep|recommended`. Recommended derives `routing.harness_preference` weights from monthly USD per harness and provider, shows the arithmetic, and records the overlap as seen so it is not asked again. `office onboard --json` lists Hermes providers by name and status only.
+
 ## 3.28.17
 
 Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > claude Opus low > agy Sonnet medium (claude Sonnet medium fails the visual role floor). Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.
