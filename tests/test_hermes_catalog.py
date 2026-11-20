@@ -69,8 +69,7 @@ def test_hermes_covers_the_named_benchmarked_models_with_provider_qualified_slug
     for effort in ("low", "medium", "high", "xhigh", "max"):
         assert f"openai:gpt-6-astra" in slugs
         assert any(r["model_id"] == "gpt-6-astra" and r["effort"] == effort for r in _hermes_rows())
-    flash = {r["effort"] for r in _hermes_rows() if r["invocation_model_id"] == "gemini:gemini-3.8-flash"}
-    assert flash == {"low", "medium", "high"}
+    assert not [r for r in _hermes_rows() if r["model_id"] == "gemini-3.8-flash"], "retired in #1284"
     assert any(r["invocation_model_id"] == "gemini:gemini-4-argon" and r["effort"] == "high" for r in _hermes_rows())
 
 
