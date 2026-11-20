@@ -1505,3 +1505,66 @@ rows:
       kind: hermes-inherited-benchmark
       notes: score resolved at load from the canonical gpt-6-luna@max route under another harness; no benchmarks.tsv row
     supersession_metadata: null
+  hermes/gpt-6-astra@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gemini-3.8-flash@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gemini-3.8-flash@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gemini-3.8-flash@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gemini-3.8-flash@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gemini-3.8-flash@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gemini-3.8-flash@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gemini-4-argon@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gemini-4-argon@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null

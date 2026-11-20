@@ -61,7 +61,17 @@ def test_hermes_rows_exist_with_provider_pinned_slugs():
     assert rows
     for r in rows:
         provider, _, model = r["invocation_model_id"].partition(":")
-        assert provider in {"anthropic", "openai"} and model == r["model_id"], r["invocation_model_id"]
+        assert provider in {"anthropic", "openai", "gemini"} and model == r["model_id"], r["invocation_model_id"]
+
+
+def test_hermes_covers_the_named_benchmarked_models_with_provider_qualified_slugs():
+    slugs = {r["invocation_model_id"] for r in _hermes_rows()}
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        assert f"openai:gpt-6-astra" in slugs
+        assert any(r["model_id"] == "gpt-6-astra" and r["effort"] == effort for r in _hermes_rows())
+    flash = {r["effort"] for r in _hermes_rows() if r["invocation_model_id"] == "gemini:gemini-3.8-flash"}
+    assert flash == {"low", "medium", "high"}
+    assert any(r["invocation_model_id"] == "gemini:gemini-4-argon" and r["effort"] == "high" for r in _hermes_rows())
 
 
 def test_every_hermes_row_has_a_canonical_benchmark_under_another_harness():
@@ -154,3 +164,10 @@ def test_absent_hermes_is_not_a_provider_problem(tmp_path, monkeypatch):
     assert route_policy.provider_unreachable(cand) is None
     assert route_policy.provider_unreachable({"harness": "hermes", "invocation_model_id": "bare"}) is None
     assert route_policy.provider_unreachable({"harness": "codex", "invocation_model_id": "openai:x"}) is None
+
+
+def test_gemini_hermes_routes_follow_the_gemini_credential(hermes_without_openai):
+    _, skipped = _built()
+    assert [s for s in skipped if s["candidate"].startswith("hermes/gemini-")]
+    assert not [s for s in skipped if s["candidate"].startswith("hermes/gemini-") and s["category"] == "provider-unreachable"]
+    assert [s for s in skipped if s["candidate"].startswith("hermes/gpt-6-astra") and s["category"] == "provider-unreachable"]
