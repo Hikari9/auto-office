@@ -132,9 +132,9 @@ _SCOPED_GATE_SHA256 = {
     "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
-    "tests/contracts/test_executor_policy.py": "7f68c6c8c4b8d57645d614225b7723744447f96c6c3f464bf571eb81e83c95b2",
+    "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
     "tests/contracts/test_plugin_distribution.py": "afdf9f3df90550970c9a48d1ea432ea85e74625a2b45bfa44439d5a12a6d9dff",
-    "tests/contracts/test_route_parity.py": "697067001b064631085c0bc5c00302276e9054e40e1090dfc5b8c0848670b6aa",
+    "tests/contracts/test_route_parity.py": "68470936786223ba23971cb1c714220e67e9dad9c0f141b3c293ce36df0d219d",
     "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
@@ -143,6 +143,7 @@ _SCOPED_GATE_SHA256 = {
     "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
     "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
     "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
+    "tests/contracts/test_route_policy_effective.py": "1fef32764cf8c2ba782a7aab984fc5f14dc7dc8f63a85688c154e8be2dd8355d",
 }
 
 
