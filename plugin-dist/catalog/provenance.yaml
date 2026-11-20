@@ -153,9 +153,9 @@ rows:
     exact_probe:
       result: passed
       at: '2026-11-20'
-      command: 'office harness smoke claude --model claude-haiku-5-5 --effort high'
+      command: 'office doctor --probe-route claude/claude-haiku-5-5@high'
       harness_version: claude 2.1.329
-      evidence: 'launch exit 0'
+      evidence: 'model claude-haiku-5-5 at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified'
   claude/claude-haiku-5-5@medium:
     price_fields:
       input_per_mtok: 0.1
@@ -735,11 +735,11 @@ rows:
       page_title: Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
     supersession_metadata: null
     exact_probe:
-      result: passed
+      result: failed
       at: '2026-11-20'
-      command: 'office harness smoke claude --model claude-opus-5-5 --effort high'
+      command: 'office doctor --probe-route claude/claude-opus-5-5@high'
       harness_version: claude 2.1.329
-      evidence: 'launch exit 0'
+      evidence: 'fail (isolation-missing): the probe process group could not be confirmed gone; route stays dispatchable:false'
   claude/claude-opus-5-5@medium:
     price_fields:
       input_per_mtok: 4.0
@@ -1369,9 +1369,9 @@ rows:
     exact_probe:
       result: passed
       at: '2026-11-20'
-      command: 'office harness smoke agy --model gemini-4-neon-medium --effort medium'
+      command: 'office doctor --probe-route agy/gemini-4-neon@medium'
       harness_version: agy 1.5.13
-      evidence: 'launch exit 0; model slug listed by agy models'
+      evidence: 'model gemini-4-neon-medium at effort medium read back from the harness metadata; reply, write, write boundary and process cleanup verified'
     supersession_metadata: null
   agy/gemini-4-neon@high:
     price_fields:
@@ -1391,9 +1391,9 @@ rows:
     exact_probe:
       result: passed
       at: '2026-11-20'
-      command: 'office harness smoke agy --model gemini-4-neon-high --effort high'
+      command: 'office doctor --probe-route agy/gemini-4-neon@high'
       harness_version: agy 1.5.13
-      evidence: 'launch exit 0; model slug listed by agy models'
+      evidence: 'model gemini-4-neon-high at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified'
     supersession_metadata: null
   agy/gemini-4-neon@xhigh:
     price_fields: null
@@ -1439,9 +1439,9 @@ rows:
     exact_probe:
       result: blocked-by-quota
       at: '2026-11-20'
-      command: 'office harness smoke codex --model gpt-6.2-sol --effort medium --allow-unsafe-flags'
+      command: 'office doctor --probe-route codex/gpt-6.2-sol@medium'
       harness_version: codex-cli 0.170.0
-      evidence: 'ERROR: Your workspace is out of credits; route stays dispatchable:false'
+      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; route stays dispatchable:false'
     supersession_metadata: null
   codex/gpt-6.2-sol@high:
     price_fields:
@@ -1461,9 +1461,9 @@ rows:
     exact_probe:
       result: blocked-by-quota
       at: '2026-11-20'
-      command: 'office harness smoke codex --model gpt-6.2-sol --effort high --allow-unsafe-flags'
+      command: 'office doctor --probe-route codex/gpt-6.2-sol@high'
       harness_version: codex-cli 0.170.0
-      evidence: 'ERROR: Your workspace is out of credits; route stays dispatchable:false'
+      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; route stays dispatchable:false'
     supersession_metadata: null
   codex/gpt-6.2-sol@xhigh:
     price_fields:
