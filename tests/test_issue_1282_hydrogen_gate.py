@@ -221,3 +221,18 @@ def test_the_vision_probe_lists_only_hydrogen_low_for_the_visual_reviewer_and_it
     refusal = h.route_refusal(cand, role="visual_reviewer", size=None, manual=False, user_allowed=False)
     assert "needs the user's exact allow" in refusal, "the proof alone never makes the route dispatch"
 
+
+
+@pytest.mark.parametrize("effort", [None, "", "none"])
+def test_an_as_without_an_effort_names_that_cause_not_a_probe_for_none(effort):
+    refusal = h.executor_refusal({"harness": "agy", "model_id": h.MODEL, "effort": effort}, size="S", manual=True)
+    assert refusal[0] == "hydrogen-effort-missing" and "names no effort" in refusal[1]
+    assert "@low, @medium or @high" in refusal[2] and "@none" not in refusal[2]
+
+
+def test_the_declared_route_without_an_effort_is_refused_for_the_missing_effort(env, monkeypatch):
+    _size(monkeypatch, "S")
+    with pytest.raises(Refused) as refusal:
+        _decide("agy/gemini-4-hydrogen")
+    assert refusal.value.category == "hydrogen-effort-missing"
+    assert "probe-route" not in refusal.value.next_step and "@none" not in refusal.value.next_step

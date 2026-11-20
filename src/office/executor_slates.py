@@ -12,7 +12,7 @@ from string import Formatter
 
 import yaml
 
-from office import paths, shipped_catalog
+from office import paths, planfile, shipped_catalog
 
 SIZES = ("XS", "S", "M", "L", "XL")
 EFFORTS = frozenset(("none", "low", "medium", "high", "xhigh", "max"))
@@ -223,16 +223,24 @@ FRONTEND_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".sas
 FRONTEND_PATH_PERCENT = 60
 
 
+def _is_test_path(path: str) -> bool:
+    parts = path.lower().split("/")
+    name = parts[-1]
+    return (any(part in ("test", "tests", "__tests__", "e2e") for part in parts[:-1])
+            or name.startswith("test_") or ".test." in name or ".spec." in name or name.endswith(("_test.py", "_spec.rb")))
+
+
 def frontend_reason(descriptor: dict | None, scope: list | None) -> str | None:
-    """Why a task is frontend-heavy, or None: descriptor domain ui, or >= 60% of its declared paths are frontend
-    files. Any other domain (mixed, backend, unset) is judged on its paths alone. A `+` shared-path marker is
-    not part of the path."""
+    """Why a task is frontend-heavy, or None: descriptor domain ui, or >= 60% of its declared file paths are frontend
+    files. Any other domain (mixed, backend, unset) is judged on its paths alone. A `+` shared-path marker is not part
+    of the path, and directories and test paths are not declared work files, so they are not counted."""
     if (descriptor or {}).get("domain") == "ui":
         return "descriptor domain is ui"
-    paths = list(dict.fromkeys(p.lstrip("+").strip() for p in scope or [] if isinstance(p, str) and p.lstrip("+").strip()))
+    paths = [p for p in dict.fromkeys(p.lstrip("+").strip() for p in scope or [] if isinstance(p, str))
+             if p and not planfile.entry_is_dir(p) and not _is_test_path(p)]
     frontend = sum(1 for p in paths if p.lower().endswith(FRONTEND_EXTENSIONS))
     if paths and frontend * 100 >= FRONTEND_PATH_PERCENT * len(paths):
-        return f"{frontend} of {len(paths)} declared paths are frontend files"
+        return f"{frontend} of {len(paths)} declared file paths are frontend files"
     return None
 
 

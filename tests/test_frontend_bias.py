@@ -97,7 +97,7 @@ def test_the_disclosure_says_why_and_that_no_gate_moved():
     biased = slates.frontend_bias(slates.ideal_seed("L"), {}, _paths(6, 10))
     chosen = {"model_id": "gemini-4-neon", "harness": "agy", "effort": "medium", "quota": {"status": "ok"}}
     reason = routing.selection_disclosure("executor", chosen, biased, "balanced")["reason"]
-    assert "frontend-heavy task (6 of 10 declared paths are frontend files)" in reason
+    assert "frontend-heavy task (6 of 10 declared file paths are frontend files)" in reason
     assert "agy/gemini-4-neon@medium moved to rung 1 for this task only" in reason
     assert "no route added, no gate lifted" in reason
     plain = routing.selection_disclosure("executor", chosen, slates.ideal_seed("L"), "balanced")["reason"]
@@ -141,7 +141,7 @@ def _first(request):
 
 def test_route_role_biases_a_frontend_heavy_task_and_leaves_a_backend_task_on_the_plain_slate(monkeypatch, tmp_path):
     heavy = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "web/b.css", "src/office/m.py"], size="L")
-    assert _first(heavy) == ("agy", "gemini-4-neon", "2 of 3 declared paths are frontend files")
+    assert _first(heavy) == ("agy", "gemini-4-neon", "2 of 3 declared file paths are frontend files")
     plain = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "src/office/m.py", "src/office/n.py"], size="L")
     assert _first(plain) == ("claude", "claude-opus-5-5", None)
     assert [r["model_id"] for r in plain["preferred_seed"]] == [r["model_id"] for r in heavy["preferred_seed"]][1:2] + [
@@ -155,3 +155,18 @@ def test_route_role_never_biases_a_users_own_seed(monkeypatch, tmp_path):
     assert all("frontend_bias" not in row for row in request["preferred_seed"])
     assert request["preferred_seed"][0]["model_id"] == "claude-opus-5-5"
 
+
+
+def test_directories_and_test_paths_are_not_declared_work_files():
+    # Two of three real files are frontend; the directory and the test paths must not dilute the ratio.
+    scope = ["web/a.tsx", "web/b.html", "src/office/m.py", "web/components/", "tests/web/", "tests/test_button.py",
+             "web/Button.test.tsx", "web/__tests__/card.spec.tsx", "docs/**"]
+    assert slates.frontend_reason({}, scope) == "2 of 3 declared file paths are frontend files"
+    # Only directories and tests declared: nothing to judge, so no bias.
+    assert slates.frontend_reason({}, ["web/components/", "tests/web/", "web/Button.test.tsx"]) is None
+    # A backend task whose only frontend entry is a template file stays below the line once directories drop out.
+    assert slates.frontend_reason({}, ["app/templates/a.html", "app.py", "views.py", "app/static/"]) is None
+
+
+def test_html_counts_as_a_frontend_file():
+    assert slates.frontend_reason({}, ["app/templates/a.html", "app/templates/b.html", "app.py"])

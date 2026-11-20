@@ -101,6 +101,9 @@ def executor_refusal(candidate: dict, *, size: str | None, manual: bool, config:
         return ("hydrogen-wrong-harness", f"Hydrogen runs only through agy, not {candidate.get('harness')}",
                 f"use agy/{MODEL}@<effort>")
     if manual:
+        if candidate.get("effort") in (None, "", "none"):
+            return ("hydrogen-effort-missing", f"--as {MODEL} names no effort, and Hydrogen has no default effort",
+                    f"name one, e.g. --as agy/{MODEL}@low, @medium or @high (each needs its own exact probe pass)")
         return None  # exact conformance is checked separately; --as picks the effort
     want = (_USER_ALLOW_EFFORT if user_allowed else _AUTOMATIC_EFFORT).get(size)
     if candidate.get("effort") != want:

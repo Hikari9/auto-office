@@ -131,3 +131,18 @@ def test_conditional_hydrogen_m_and_planner_routes_remain_unqualified():
     # No runtime candidates were passed, distinct from static catalog resolution.
     assert executor_audit[1]["status"] == "not-in-catalog"
     assert planner_audit[-1]["status"] == "not-in-catalog"
+
+
+def test_haiku_high_and_medium_are_executors_at_xs_only_under_the_shipped_role_policy():
+    """AA v5: Haiku 5.5 high has no executor allowance above XS (role-policy.yaml); only XS is allowed, any effort."""
+    from office import route_policy
+    for effort in ("medium", "high"):
+        cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": effort,
+                "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
+        states = {size: route_policy.effective_role_state(cand, "executor", [], size)["state"] for size in route_policy.SIZES}
+        assert states == {"XS": "allow", "S": "neutral", "M": "neutral", "L": "neutral", "XL": "neutral"}, (effort, states)
+    for effort in ("xhigh", "max"):
+        cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": effort,
+                "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
+        assert {route_policy.effective_role_state(cand, "executor", [], size)["state"]
+                for size in route_policy.SIZES} == {"deny"}
