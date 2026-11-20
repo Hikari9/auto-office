@@ -152,7 +152,9 @@ def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):
 
 def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env):
     _approve_slate(env, plan=PLANNED)
-    code, out = env.office("dispatch", "T1", env=_quota(env))
+    # The first dispatch must land off agy, or the Claude-quota rerun below can only fall back onto the same Neon
+    # route: the size slate's agy rung and its Claude rung are both dispatchable in this env.
+    code, out = env.office("dispatch", "T1", env=_quota(env, agy=1))
     assert code == 0, out
     con = env.con()
     parent = dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC LIMIT 1").fetchone())
