@@ -69,6 +69,9 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |
 | `tests/test_h5_hydrogen_plan_reviewer.py` | keep |
+| `tests/test_harness_preference.py` | keep |
+| `tests/test_hermes_adapter.py` | keep |
+| `tests/test_hermes_catalog.py` | keep |
 | `tests/test_hooks.py` | keep |
 | `tests/test_hydrogen_shadow_scorecard.py` | keep |
 | `tests/test_instruction_conformance.py` | keep |
