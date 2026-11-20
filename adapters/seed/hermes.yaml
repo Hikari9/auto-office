@@ -55,6 +55,12 @@ conformance:
 # steer the model, provider, config and session. The PATH `hermes` of a git install is a shell wrapper that execs
 # `python3 -I -c '<inline script>'`, a process Herdr's hermes agent kind cannot detect, so the pane form puts a shim
 # first on PATH that execs the checkout's launcher script under the same interpreter (hermes_access.resolve_launcher).
+trust_justifications:
+  --yolo: >-
+    Hermes cannot answer approval prompts in a headless run or an unattended pane, so every form passes it. It grants
+    unprompted edits and commands, in the Office worktree for the worker form; the reviewer and vision forms work from
+    the dispatch directory with only the file and terminal toolsets and Office fingerprints the reviewed worktree
+    around the run, failing the review as degraded if it changed (Hermes has no read-only sandbox).
 session:
   id: none
 capabilities: [builder, review]
@@ -81,6 +87,8 @@ office_profiles:
   # Office fingerprints the reviewed worktree before and after and fails the review as degraded if it changed.
   reviewer:
     submit: shell
+    # No execpolicy or allowlist file: --yolo already lets the one `office review submit` command run.
+    submit_grant: hermes-yolo
     argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --toolsets, "file,terminal", --in, "{sandbox_dir}", --usage-file, "{usage_file}"]
     prompt: argv-bound
     prompt_flag: "--oneshot="
@@ -95,6 +103,7 @@ office_profiles:
   # with its vision tool, so the vision toolset is added.
   vision:
     submit: shell
+    submit_grant: hermes-yolo
     argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --toolsets, "file,terminal,vision", --in, "{sandbox_dir}", --usage-file, "{usage_file}"]
     prompt: argv-bound
     prompt_flag: "--oneshot="

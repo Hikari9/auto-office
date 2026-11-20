@@ -150,7 +150,7 @@ def integration_status(harness: str) -> dict:
     if harness == "hermes":
         state, detail = herdr_hermes_state()
         if state == "unavailable":
-            return {**out, "state": "harness-missing", "reason": detail}
+            return {**out, "state": "unsupported", "reason": f"{UNVERIFIED['hermes']}; {detail}"}
         return {**out, "state": "installed" if state == "current" else state, "items": [
             {"id": HERDR_HERMES, "state": state, "kind": "herdr-integration",
              "change": ("keep Herdr's hermes integration" if state == "current" else

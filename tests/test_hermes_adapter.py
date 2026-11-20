@@ -298,7 +298,7 @@ def test_the_launcher_script_and_its_interpreter_are_resolved_from_the_shell_wra
 
 def test_the_real_hermes_wrapper_shape_resolves_when_installed():
     exe = hermes_access.shutil.which("hermes")
-    if not exe or not Path(exe).read_bytes().startswith(b"#!/bin/sh"):
+    if not exe or not (Path(exe).read_bytes().startswith(b"#!/bin/sh") and b" -I -c " in Path(exe).read_bytes()):
         pytest.skip("no git-installed hermes wrapper on this host")
     launcher = hermes_access.resolve_launcher(exe)
     assert len(launcher) == 2 and Path(launcher[1]).name == "hermes" and Path(launcher[0]).is_file()
@@ -404,9 +404,10 @@ def test_a_failed_herdr_install_is_reported_not_raised(herdr, monkeypatch, tmp_p
     assert any("failed (no write access)" in line for line in res.lines)
 
 
-def test_a_missing_herdr_is_reported_as_harness_missing(monkeypatch):
+def test_a_missing_herdr_leaves_hermes_unsupported_with_the_reason(monkeypatch):
     monkeypatch.setattr(install, "_herdr_integration", lambda *a: None)
-    assert install.integration_status("hermes")["state"] == "harness-missing"
+    status = install.integration_status("hermes")
+    assert status["state"] == "unsupported" and "herdr is not installed" in status["reason"] and status["items"] == []
 
 
 # ---------------------------------------------------------------- transcripts (Hermes state.db)
