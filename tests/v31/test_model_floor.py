@@ -13,13 +13,12 @@ def test_gemini_floor_is_3_7_by_default():
     assert candidates.below_family_floor("gpt-5.6-luna", floors) is None
 
 
-def test_visual_reviewer_prefers_latest_gemini_flash():
+def test_visual_reviewer_prefers_gemini_hydrogen_over_retired_flash():
     cfg = config.load_yaml(config.default_config_path())
     seed = cfg["roles"]["visual_reviewer"]["preferred_seed"]
-    # Latest Gemini Flash leads (low, then medium); GPT-6.1 Terra low is the fallback. Sonnet is not seeded.
-    assert seed[:2] == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "low"},
+    # Rico 2026-11-19: Hydrogen@high leads, GPT-6.1 Terra low is the fallback; Flash is retired.
+    assert seed[:2] == [{"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"},
                         {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"}]
+    assert not [e for e in seed if e["model_id"] == "gemini-3.8-flash"]
     rows = {(r["invocation_harness"], r["invocation_model_id"]): r for r in candidates.catalog_rows()}
-    for slug in ("gemini-3.8-flash-medium", "gemini-3.8-flash-low"):
-        assert rows[("agy", slug)].get("dispatchable") is not False
     assert not [k for k in rows if (k[1] or "").startswith("gemini-3.1")]

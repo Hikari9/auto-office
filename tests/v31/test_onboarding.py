@@ -114,7 +114,7 @@ def test_reviewer_and_executor_routes_follow_role_policy_not_historical_trust(h)
     why = {u["route"]: u["reason"] for u in reviewer["unavailable"]}
     assert "claude/opus@low" not in why
     executor = h.question("executor")
-    assert "agy/gemini-3.8-flash@medium" in executor["eligible"]
+    assert "agy/claude-sonnet-5-5@medium" in executor["eligible"]
     assert not [o for o in executor["options"] if o.get("seeded")]  # executor ships no seed: adaptive routing decides
     # agy has no reviewer launch profile, so it is never a reviewer choice.
     assert not [r for r in reviewer["eligible"] if r.startswith("agy/")]
@@ -165,13 +165,13 @@ def test_current_harness_detection_order(h, monkeypatch):
 # ------------------------------------------------------------------ apply
 
 def test_apply_writes_role_seeds_and_marker_in_one_write(h):
-    code, out = h.office("onboard", "--planner", "codex/astra@low", "--executor", "agy/gemini-3.8-flash@medium",
+    code, out = h.office("onboard", "--planner", "codex/astra@low", "--executor", "agy/claude-sonnet-5-5@medium",
                          "--reviewer", "codex/gpt-6-luna@high")
     assert code == 0 and "onboarding complete" in out and onboarding.DISCLAIMER in out, out
     data = h.user_data()
     roles = data["roles"]
     assert roles["planner"]["preferred_seed"] == [{"model_id": "astra", "harness": "codex", "effort": "low"}]
-    assert roles["executor"]["preferred_seed"] == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}]
+    assert roles["executor"]["preferred_seed"] == [{"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
     luna = [{"model_id": "gpt-6-luna", "harness": "codex", "effort": "high"}]
     assert roles["plan_reviewer"]["preferred_seed"] == luna and roles["code_reviewer"]["preferred_seed"] == luna
     assert set(roles) == {"planner", "executor", "plan_reviewer", "code_reviewer"}  # no orchestrator, no visual reviewer
@@ -269,7 +269,7 @@ def test_skip_takes_no_answers_and_apply_needs_one(h):
 # ------------------------------------------------------------------ versioning
 
 def test_schema_bump_reprompts_with_current_values_but_a_package_bump_does_not(h, monkeypatch):
-    h.office("onboard", "--executor", "agy/gemini-3.8-flash@medium")
+    h.office("onboard", "--executor", "agy/claude-sonnet-5-5@medium")
     assert h.status()["due"] is False
     monkeypatch.setattr(version, "current", lambda: "9.9.9")
     assert h.status()["due"] is False  # a new package version alone never re-onboards
@@ -277,7 +277,7 @@ def test_schema_bump_reprompts_with_current_values_but_a_package_bump_does_not(h
     data = h.status()
     assert data["due"] is True and "newer than the one completed" in data["reason"]
     executor = next(q for q in data["questions"] if q["id"] == "executor")
-    assert executor["current"]["value"] == "agy/gemini-3.8-flash@medium"  # prefilled, not erased
+    assert executor["current"]["value"] == "agy/claude-sonnet-5-5@medium"  # prefilled, not erased
     h.office("onboard", "--skip")
     assert h.user_data()["onboarding"]["schema_version"] == onboarding.SCHEMA_VERSION
     assert h.user_data()["roles"]["executor"]["preferred_seed"][0]["harness"] == "agy"
@@ -361,7 +361,7 @@ def test_an_interrupted_write_leaves_onboarding_due(h, monkeypatch):
 def test_answers_reach_the_existing_routing_inputs_unchanged(h):
     from office import candidates, db
     from office import config as cfg
-    h.office("onboard", "--planner", "claude/opus@medium", "--executor", "agy/gemini-3.8-flash@medium",
+    h.office("onboard", "--planner", "claude/opus@medium", "--executor", "agy/claude-sonnet-5-5@medium",
              "--reviewer", "codex/gpt-6-luna@high")
     config, _ = cfg.resolve(h.repo)
     assert config["routing"]["adaptive"]["weights"]["balanced"]["preference"] == 0.10  # weights untouched
@@ -373,11 +373,11 @@ def test_answers_reach_the_existing_routing_inputs_unchanged(h):
         assert planner["selected"].endswith("/opus@medium")  # planner keeps its stronger advisory seed
         executor = candidates.route_role(con, config, run, "executor", probe=False)
         assert executor["request"]["preferred_seed"] == [
-            {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}]
+            {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
         reviewer = candidates.route_role(con, config, run, "code_reviewer", probe=False)
         assert reviewer["selected"].endswith("/gpt-6-luna@high")
         visual = candidates.route_role(con, config, run, "visual_reviewer", probe=False)
-        assert visual["request"]["preferred_seed"][0]["model_id"] == "gemini-3.8-flash"  # its own shipped seed
+        assert visual["request"]["preferred_seed"][0]["model_id"] == "gemini-4-hydrogen"  # its own shipped seed
     finally:
         con.close()
 
@@ -527,5 +527,5 @@ def test_intake_is_not_blocked_while_onboarding_is_due_and_running_runs_keep_the
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     pinned = state.get_run(con, run_id)["policy"]["roles"]["executor"].get("preferred_seed")
-    env.office("onboard", "--executor", "agy/gemini-3.8-flash@medium", check=0)
+    env.office("onboard", "--executor", "claude/sonnet@high", check=0)
     assert state.get_run(env.con(), run_id)["policy"]["roles"]["executor"].get("preferred_seed") == pinned

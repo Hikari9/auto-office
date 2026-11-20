@@ -29,7 +29,8 @@ def test_owner_preference_intent_and_non_dispatchable_hydrogen():
         assert actual == expected
         assert not any(item["model_id"] == "gemini-3.8-flash" for item in policy["executor_preferred"][size])
     assert policy["model_restrictions"][0]["allowed_sizes"] == ["XL"]
-    assert routes["agy/gemini-3.8-flash@medium"]["dispatchable"] is True  # historical and visual review untouched
+    # Rico 2026-11-19: Flash is retired by a shipped deny in every role; its catalog rows stay as history.
+    assert routes["agy/gemini-3.8-flash@medium"]["dispatchable"] is True
 
 def test_packaged_hydrogen_catalog_parity():
     root = Path(__file__).resolve().parents[2]
@@ -96,10 +97,10 @@ def test_hydrogen_has_no_shipped_role_allow_benchmark_waiver_or_visual_promotion
             assert route_policy.effective_role_state(candidate, "executor", [], size)["state"] != "allow"
         for role in ("code_reviewer", "plan_reviewer", "visual_reviewer"):
             assert route_policy.effective_role_state(candidate, role, [])["state"] != "allow"
-    assert any(
-        rule["state"] == "allow" and rule["role"] == "visual_reviewer"
-        and "gemini-3.8-flash" in rule["route"] for rule in route_policy.SEED_ROLE_RULES
-    )
+    # Rico 2026-11-19: Gemini 3.8 Flash is retired; the shipped policy denies it at every effort in every role.
+    flash = [rule for rule in route_policy.SEED_ROLE_RULES if "gemini-3.8-flash" in rule["route"]]
+    assert flash and all(rule["state"] == "deny" and "sizes" not in rule for rule in flash)
+    assert {rule["role"] for rule in flash} == set(route_policy.POLICY_ROLES)
 
 
 def test_hydrogen_has_distinct_released_lineage_without_aliasing_flash_or_argon():

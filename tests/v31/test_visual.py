@@ -230,8 +230,9 @@ def test_matching_capture_passes_with_measured_dom(env):
     route = g["route"]  # the route that judged the capture
     judge = con.execute("SELECT harness, model FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer'").fetchone()
     assert proofs[(judge["harness"], judge["model"])][0] == "pass", proofs
-    # First preference is Gemini Flash low, qualified by its own probe.
-    assert (judge["harness"], judge["model"]) == ("agy", "gemini-3.8-flash-low"), dict(judge)
+    # Hydrogen@high leads the seed but needs the user's exact allow, so Terra low judges, qualified by its own probe.
+    # Rico 2026-11-19: Flash is retired.
+    assert (judge["harness"], judge["model"]) == ("codex", "gpt-6.1-terra"), dict(judge)
     receipt = con.execute("SELECT path FROM evidence WHERE kind='capture_receipt'").fetchone()[0]
     import json
     data = json.loads(open(receipt).read())

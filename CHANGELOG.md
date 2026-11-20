@@ -2,6 +2,18 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.17
+
+Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > claude Opus low > agy Sonnet medium (claude Sonnet medium fails the visual role floor). Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.
+
+## 3.28.16
+
+Gemini 4 Argon low is registered (non-dispatchable, effort confidence unknown). Exact agy probes pass for Argon low, medium and high (#690).
+
+## 3.28.15
+
+Hydrogen@high can review visuals. agy's vision launch uses plan mode, and the vision probe reads a pane-hosted supervisor's captured stdout from the dispatch dir.
+
 ## 3.28.14
 
 Main is green again (#1273). A plan-reviewer re-pin records the pin's actor: an unquoted `office review plan --as` is the orchestrator's, as #1115 made it for code reviewers, not the user's. Tests that set routing policy in a run's pinned config now set the live policy (#1120). Tests that submitted an empty tree now make a real change or submit `--no-change` (#1138). Eighteen new test modules get their inventory and legacy-table rows. The plugin install contract test skips system events Claude Code 2.1.326 sends before `init`. Its scoped-gate pin is updated. Two check tests set a quiet-host load factor that the `env` fixture then wiped, so a busy host turned their failing check into UNAVAILABLE; the factor is now set after `env`. The visual readiness 502 probe test uses a fake clock instead of a 0.3s wall-clock window.
