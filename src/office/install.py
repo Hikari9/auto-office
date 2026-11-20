@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -98,11 +100,44 @@ def _backup(path: Path) -> Path | None:
 
 # Claude only: the reviewer read rules office install keeps in permissions.allow.
 READ_RULES = "read-rules"
+# Hermes: Herdr's own lifecycle plugin for the hermes agent kind (`herdr integration install hermes`). Office writes
+# no Hermes hook; this item only runs Herdr's installer, and only when it is asked for by name.
+HERDR_HERMES = "herdr-hermes"
+HERDR_TIMEOUT_S = 30
 
 
 def install_items(harness: str) -> list[str]:
     """What `office install --only <harness> --item <id>` can apply one at a time."""
-    return [*EVENTS.get(harness, {}), *([READ_RULES] if harness == "claude" else [])]
+    return [*EVENTS.get(harness, {}), *([READ_RULES] if harness == "claude" else []),
+            *([HERDR_HERMES] if harness == "hermes" else [])]
+
+
+def _herdr_integration(*args: str) -> subprocess.CompletedProcess | None:
+    """`herdr integration <args>`, or None when herdr is absent or does not answer."""
+    exe = shutil.which("herdr")
+    if not exe:
+        return None
+    try:
+        return subprocess.run([exe, "integration", *args], capture_output=True, text=True, timeout=HERDR_TIMEOUT_S,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def herdr_hermes_state() -> tuple[str, str]:
+    """(state, detail) of Herdr's hermes integration: `current`, `missing` (not installed), `stale` (installed but
+    outdated), or `unavailable` with the reason. Read from `herdr integration status`, which writes nothing."""
+    proc = _herdr_integration("status")
+    if proc is None or proc.returncode != 0:
+        return "unavailable", "herdr is not installed or `herdr integration status` failed"
+    for line in proc.stdout.splitlines():
+        name, _, rest = line.partition(":")
+        if name.strip() == "hermes":
+            rest = rest.strip()
+            state = ("missing" if rest.startswith("not installed") else "current" if rest.startswith("current")
+                     else "stale")
+            return state, re.sub(r"\s+", " ", rest)
+    return "unavailable", "this herdr has no hermes integration"
 
 
 def integration_status(harness: str) -> dict:
@@ -112,6 +147,15 @@ def integration_status(harness: str) -> dict:
     verified hook mapping), `harness-missing` (its config directory is absent)
     or `unreadable`. Each item names the exact change install would make."""
     out: dict = {"harness": harness, "items": [], "legacy_entries": 0}
+    if harness == "hermes":
+        state, detail = herdr_hermes_state()
+        if state == "unavailable":
+            return {**out, "state": "harness-missing", "reason": detail}
+        return {**out, "state": "installed" if state == "current" else state, "items": [
+            {"id": HERDR_HERMES, "state": state, "kind": "herdr-integration",
+             "change": ("keep Herdr's hermes integration" if state == "current" else
+                        f"run `herdr integration install hermes` ({detail}); Herdr writes its lifecycle plugin into "
+                        "the Hermes plugin directory and Office edits no Hermes config")}]}
     if harness not in EVENTS:
         why = UNVERIFIED.get(harness) or f"Office has no verified hook mapping for {harness}"
         return {**out, "state": "unsupported", "reason": why}
@@ -158,7 +202,7 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
     and writes no harness config at all."""
     res = Result()
     if items is not None:
-        known = {i for h in EVENTS for i in install_items(h)}
+        known = {i for h in (*EVENTS, "hermes") for i in install_items(h)}
         unknown = sorted(set(items) - known)
         if unknown:
             from office.state import OfficeError
@@ -251,8 +295,26 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
     for harness, why in UNVERIFIED.items():
         if not only or harness in only:
             res.add(f"{harness}: no hooks written ({why})")
+    # Never part of a plain `office install`: a Hermes outside the Herdr integration is left alone unless it is named.
+    if (wanted is not None and HERDR_HERMES in wanted) or (wanted is None and only and "hermes" in only):
+        res.add(_install_herdr_hermes(dry_run))
     res.next = "office doctor"
     return res
+
+
+def _install_herdr_hermes(dry_run: bool) -> str:
+    state, detail = herdr_hermes_state()
+    if state == "unavailable":
+        return f"hermes: Herdr integration skipped ({detail})"
+    if state == "current":
+        return "hermes: Herdr integration already current"
+    if dry_run:
+        return "hermes: would run `herdr integration install hermes`"
+    proc = _herdr_integration("install", "hermes")
+    if proc is None or proc.returncode != 0:
+        why = ((proc.stderr or proc.stdout) if proc else "herdr did not answer").strip().splitlines()
+        return f"hermes: `herdr integration install hermes` failed ({why[-1] if why else 'no output'}); nothing changed by Office"
+    return "hermes: Herdr integration installed (`herdr integration install hermes`)"
 
 
 def uninstall(purge: bool = False) -> Result:
