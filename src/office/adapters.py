@@ -541,13 +541,13 @@ def classify_failure(adapter: dict | None, text: str) -> dict | None:
 
 def readback_problem(adapter: dict | None, prof: dict | None, slug: str, usage_path: Path | None, *, code: int | None) -> str | None:
     """Why a finished run's own report names a different route than `slug`, or None. Only a profile that declares
-    `readback: hermes-usage` is checked. A clean exit must carry a report; a failed run is judged only when it left one."""
+    `readback: hermes-usage` is checked. A clean exit must carry a report with completed=true; a failed run is judged only when it left one."""
     if (prof or {}).get("readback") != "hermes-usage" or usage_path is None:
         return None
     usage = hermes_access.read_usage(usage_path)
     if usage is None and code != 0:
         return None
-    return hermes_access.readback_problem(slug, usage)
+    return hermes_access.readback_problem(slug, usage, require_completed=code == 0)
 
 
 def toml_path(path: Path) -> str:

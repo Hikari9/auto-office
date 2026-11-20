@@ -1,18 +1,19 @@
 ---
 name: hermes-cli
-description: Hermes CLI mechanics for selected Hermes dispatches (launch, readback, failure attribution, access). Not a lifecycle office.
+description: Directly invocable Auto Office v3 Hermes CLI mechanics primitive. Use when a selected/explicit Hermes harness dispatch needs prompt transport, model and effort selection, working directory targeting, launch environment, liveness detection, completion readback, Herdr pane detection, or Hermes-specific failure attribution. Do not treat this primitive as a separate lifecycle office or proof of adapter promotion.
 ---
 
 # Hermes CLI primitive
 
-Adapter: `../../adapters/seed/hermes.yaml`. New routes start `neutral` (#837); check `office route policy --effective --role <role>`.
-
-- Headless: `hermes -z --oneshot=<prompt>` (one argv element, never stdin). Exit 0 = completed turn, 2 = failed or partial.
-- Route `provider:model` pins provider and model; a bare id pins model only. Always `--ignore-user-config --model <m>`; effort via `--reasoning`.
-- The launch env drops every `HERMES_*` variable except `HERMES_HOME`.
-- Reviewer and vision runs use `--in <dispatch dir>` and `file,terminal` (plus `vision`). Office fingerprints the worktree and fails a changed review as degraded.
-- Readback: `--usage-file` JSON. A `model` or `provider` mismatch, or no report after a clean exit, is `wrong_model`.
-- Exit 2 covers every failed turn, so read the output. Quota or rate-limit text is quota/account; "model not available" is the harness; "context length" is the model; "invalid API key" is the environment.
-- Access: `hermes_access.reachable_providers()` reads `hermes auth list` names and status only.
-- Herdr: `office install --only hermes --item herdr-hermes`. Office writes no Hermes config.
-- Sessions: `$HERMES_HOME/state.db`, read-only.
+Load `../../adapters/seed/hermes.yaml` plus current local override. New routes start `neutral` for every role (#837); inspect defaults with `office route policy --effective --role <role>`.
+- Headless is `hermes -z` (exit 0 only for a completed turn, 2 for any failed one). The prompt is one `--oneshot=<prompt>` argv element, never stdin. The model id is `provider:model` (pins `--provider` and `--model`) or a bare id (pins `--model`).
+- `--ignore-user-config` is always set, so `config.yaml`'s `fallback_providers` cannot swap the model. `--reasoning` takes none, low, medium, high, xhigh, max unchanged.
+- The launch env drops every `HERMES_*` variable except `HERMES_HOME` (headless env, pane shell via `agent.env`, route probes). `hermes -z` has no wall clock, so the profile's `max_minutes` bounds it.
+- Worker only: `--yolo` plus the terminal toolset can write anywhere and `--in` only moves the cwd, so there is no reviewer or vision profile until an OS-enforced read-only checkout exists.
+- Readback: `--usage-file` writes JSON (`model`, `provider`, `completed`). A model or provider mismatch, no report, or `completed` not exactly true after a clean exit ends the dispatch as `wrong_model`; a crash with no report does not.
+- Failure text decides attribution (exit 2 is every failure): "subscription usage is exhausted", "credit balance is too low", "rate limit", "quota exceeded" are quota/account and feed the quota-wall path; "model not available" is the harness, "context length exceeded" the model, "invalid API key" environment/network.
+- `office.hermes_access.reachable_providers()` parses `hermes auth list` names and status only; no secret is read.
+- Herdr cannot detect a git-installed Hermes (PATH `hermes` is a shell wrapper running inline `python3 -I -c`). The pane form resolves the checkout launcher and interpreter (`hermes_access.resolve_launcher`) and puts a shim first on PATH in `agent.env`.
+- `office install --only hermes --item herdr-hermes` runs `herdr integration install hermes`; no other install path does. Office writes no Hermes config.
+- Sessions live in `$HERMES_HOME/state.db`; Office reads it read-only. Skill detection uses `skill-md-read` inference.
+Attribute invocation failures to adapter, quota failures to quota/account, and logical defects to the producer only when evidence supports it.
