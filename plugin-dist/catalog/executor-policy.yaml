@@ -6,27 +6,31 @@ floors: {XS: 31, S: 37, M: 40, L: 45, XL: 52}
 # Owner-approved XS-XL advisory preference intent (not automatic model activation).
 # A `rung` is an advisory preference priority (1 first); equal rungs are
 # adaptive peers. Arrow fallbacks are soft, never eligibility guarantees.
-# Hydrogen routes stay dispatchable:false and lack a pinned v4 score.
+# Rico's AA v5 table (2026-11-19). Hydrogen rungs stay conditional: they dispatch only through the
+# Hydrogen gate (hydrogen_trials.py), never through ordinary scoring. A frontend-heavy task moves its
+# size's agy gemini-* rung to rung 1 for that task only (executor_slates.frontend_bias); no route is added.
+# Argon stays executor-eligible (role-policy.yaml, argon-medium-l floor exception) but is in no slate.
 executor_preferred:
   XS:
-    - {rung: 1, model_id: claude-haiku-5-5, effort: medium, harness: claude}
-    - {rung: 2, model_id: gpt-6.1-terra, effort: low, harness: codex}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: high, harness: claude}
     - {rung: 2, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
+    - {rung: 3, model_id: gpt-6.1-terra, effort: low, harness: codex}
   S:
-    - {rung: 1, model_id: gpt-6.1-terra, effort: medium, harness: codex}
-    - {rung: 1, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
-    - {rung: 2, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
-  M:
     - {rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
-    - {rung: 1, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
-    - {rung: 2, model_id: gpt-6.1-terra, effort: high, harness: codex}
-  L:
+    - {rung: 2, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
+    - {rung: 3, model_id: gpt-6.1-terra, effort: medium, harness: codex}
+  M:
     - {rung: 1, model_id: claude-sonnet-5-5, effort: high, harness: claude}
     - {rung: 2, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
-  XL:
+    - {rung: 3, model_id: gpt-6.1-terra, effort: high, harness: codex}
+  L:
     - {rung: 1, model_id: claude-opus-5-5, effort: medium, harness: claude}
-    - {rung: 2, model_id: gpt-6.1-sol, effort: medium, harness: codex}
-    - {rung: 2, model_id: gemini-4-argon, effort: high, harness: agy}
+    - {rung: 2, model_id: gpt-6.2-sol, effort: medium, harness: codex}
+    - {rung: 3, model_id: gemini-4-neon, effort: medium, harness: agy}
+  XL:
+    - {rung: 1, model_id: claude-opus-5-5, effort: high, harness: claude}
+    - {rung: 2, model_id: gpt-6.2-sol, effort: high, harness: codex}
+    - {rung: 3, model_id: gemini-4-neon, effort: high, harness: agy}
 planner_preferred:
   M:
     - {model_id: claude-opus-5-5, effort: low, harness: claude}
@@ -41,19 +45,9 @@ planner_preferred:
     - {model_id: gpt-6-astra, effort: high, harness: codex}
     - {model_id: gemini-4-argon, effort: high}
 model_restrictions:
-  - {model_id: claude-opus-5-5, allowed_sizes: [XL], reason: "Opus 5.5 is reserved for XL subtasks (got {size})"}
+  - {model_id: claude-opus-5-5, allowed_sizes: [L, XL], reason: "Opus 5.5 is reserved for L and XL subtasks (got {size})"}
   - {model_id: claude-sonnet-5-5, allowed_harnesses: [claude, agy], reason: "Sonnet 5.5 harness must be Claude Code or agy"}
 floor_exceptions:
-  - name: haiku-high-m-owner-authorized-floor
-    model_id: claude-haiku-5-5
-    effort: high
-    harness: claude
-    size: M
-    role: executor
-    score_evidence: numeric-below-floor
-    minimum_score: 38
-    authorization: "owner authorization #861"
-    not_waived: [registration, conformance, trust, quota, risk]
   - name: argon-medium-l-intelligence-floor
     model_id: gemini-4-argon
     effort: medium

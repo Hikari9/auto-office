@@ -94,7 +94,7 @@ def test_hydrogen_conditional_is_known_but_unqualified_and_planner_conditional_r
     # #690: the Argon low row is registered but not dispatchable until its exact conformance qualifies it.
     assert policy["planner_preferred"]["M"][-1]["_resolved_routes"] == ["agy/gemini-4-argon@low"]
     assert policy["planner_preferred"]["M"][-1]["_dispatchable_routes"] == []
-    assert slates.ideal_seed("M", policy)[1]["rung"] == 1
+    assert slates.ideal_seed("M", policy)[1]["rung"] == 2
     data["executor_preferred"]["M"][1].update(model_id="unshipped-new-model")
     data["executor_preferred"]["M"][1].pop("conditional")
     with pytest.raises(slates.ExecutorPolicyError, match="nonexistent catalog tuple"):
