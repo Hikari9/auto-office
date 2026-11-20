@@ -129,7 +129,7 @@ _SCOPED_GATE_SHA256 = {
     "scripts/select_pr_tests.py": "e6d9ddb1cc84b7e72a94d508983279dfb0fc180d6e144e8686c2321be952145b",
     "tests/test_pr_test_selection.py": "4524bbc79a1dcd613bc68ac6778713b6a92adb248ac9d721952a69235f4b6997",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
-    "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
+    "tests/v31/test_verification_coverage.py": "93955393b7dadd87ff0c5408c832e74d4c700a0b048f2a0dd8f6a1e1941742ed",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
