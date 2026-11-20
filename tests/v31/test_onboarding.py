@@ -252,7 +252,8 @@ def test_skip_marks_complete_and_keeps_every_preference(h):
     assert code == 0 and "preferences unchanged" in out, out
     assert h.user_data() == {**prefs, "onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
                                                        "free_models_enabled": True,
-                                                       "harness_overlap_seen": ["agy", "claude"]}}
+                                                       "harness_overlap_seen": ["anthropic|claude-opus-5-5|agy", "anthropic|claude-opus-5-5|claude",
+                                                       "anthropic|claude-sonnet-5-5|agy", "anthropic|claude-sonnet-5-5|claude"]}}
     assert h.repo_config.read_bytes() == repo_before and h.claude_settings.read_bytes() == settings_before
     assert h.status()["due"] is False
     # Skipping again writes nothing.

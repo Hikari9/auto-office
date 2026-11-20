@@ -51,9 +51,9 @@ The question is one of three answers:
   is only a fallback. A provider whose budgets all sum to zero gets no weights. The reasoning (`$40/mo of $100 = 40%`) is printed and kept in status.
   The budgets are stored under `onboarding.harness_budgets` as onboarding input; routing never reads them.
 
-Any answer records the overlapping harnesses in `onboarding.harness_overlap_seen`, so they are not asked again. A narrowing overlap asks nothing new.
+Any answer records the overlap set in `onboarding.harness_overlap_seen`: one `provider|model|harness` entry per harness running a shared model. A narrowing overlap asks nothing new, but a newly shared model reopens the round even when its harnesses were already recorded. Bare harness names written by an earlier version still count for their harness until the next answer replaces them with entries.
 An invalid or incomplete answer writes nothing and stays re-askable. `--skip` writes no weights but records the current overlap set as seen, so the
-round is due again only when that set changes (a new harness joins the overlap). A `--harness-budget` without `recommended` is refused.
+round is due again only when that set changes (a new harness or a newly shared model joins the overlap). A `--harness-budget` without `recommended` is refused.
 
 ## Eligibility
 

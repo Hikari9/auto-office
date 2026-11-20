@@ -511,7 +511,6 @@ def _apply_harness(answer: str | None, budgets_specs: list[str] | None) -> tuple
         raise _usage("no installed harness shares a model with another here, so there is no harness preference to answer",
                      next_step="office onboard --harness <h> --json")
     onboarding_budgets = _stored_budgets()
-    seen = set(_recorded())
     lines: list[str] = []
     changes: list[tuple[str, object]] = []
     current = harness_preference.settings(configcmd._load(paths.user_config_path()))
@@ -540,10 +539,16 @@ def _apply_harness(answer: str | None, budgets_specs: list[str] | None) -> tuple
 
 
 def _seen_changes(overlap: dict) -> list[tuple[str, object]]:
-    """Record the overlapping harnesses as seen (only when that adds one), so the round is not asked again."""
-    now = {h for info in overlap.values() for h in info["harnesses"]}
+    """Record the overlap set as seen (only when it differs from what is recorded), so the round is not asked again.
+    Bare harness names from before entries carried the model are replaced by the entries they cover."""
     seen = set(_recorded())
-    return [(OVERLAP_SEEN_KEY, sorted(now | seen))] if now | seen != seen else []
+    now = overlap_keys(overlap) | {s for s in seen if "|" in s}
+    return [(OVERLAP_SEEN_KEY, sorted(now))] if now != seen else []
+
+
+def _covered(key: str, seen: set[str]) -> bool:
+    """A recorded entry covers its key; a bare harness name (recorded before entries carried the model) covers its harness."""
+    return key in seen or key.rsplit("|", 1)[-1] in seen
 
 
 def harness_overlap(auth: dict) -> dict[str, dict]:
@@ -567,10 +572,18 @@ def harness_overlap(auth: dict) -> dict[str, dict]:
     for model, (provider, harnesses_) in sorted(serving.items()):
         if len(harnesses_) < 2:
             continue
-        entry = out.setdefault(provider, {"models": [], "harnesses": set()})
+        entry = out.setdefault(provider, {"models": [], "harnesses": set(), "pairs": []})
         entry["models"].append(model)
         entry["harnesses"] |= harnesses_
-    return {p: {"models": e["models"], "harnesses": sorted(e["harnesses"])} for p, e in sorted(out.items())}
+        entry["pairs"] += [f"{model}|{h}" for h in sorted(harnesses_)]
+    return {p: {"models": e["models"], "harnesses": sorted(e["harnesses"]), "pairs": e["pairs"]}
+            for p, e in sorted(out.items())}
+
+
+def overlap_keys(overlap: dict) -> set[str]:
+    """The overlap set the round is answered against: one `provider|model|harness` per harness running a shared model,
+    so a newly shared model reopens the round even when its harnesses were already recorded."""
+    return {f"{p}|{pair}" for p, info in overlap.items() for pair in info["pairs"]}
 
 
 def _missing_budgets(overlap: dict, budgets: dict) -> list[str]:
@@ -620,8 +633,8 @@ def _parse_budgets(specs: list[str] | None, overlap: dict) -> dict[str, dict[str
 
 def harness_preference_state(overlap: dict, seen: list[str], budgets: dict) -> dict:
     """The round's state for status: what is due, what is asked, and the recommendation once every budget is known."""
-    harnesses_ = {h for info in overlap.values() for h in info["harnesses"]}
-    pending = sorted(harnesses_ - set(seen))
+    recorded = set(seen)
+    pending = sorted({k.rsplit("|", 1)[-1] for k in overlap_keys(overlap) if not _covered(k, recorded)})
     inputs = [f"{p}:{h}" for p, info in overlap.items() for h in info["harnesses"]]
     budgets = {p: row for p, row in budgets.items() if isinstance(row, dict)}
     stored = {p: {h: usd for h in info["harnesses"] if (usd := _usd((budgets.get(p) or {}).get(h))) is not None}

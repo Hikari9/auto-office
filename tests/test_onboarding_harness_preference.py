@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from office import cli, discovery, onboarding
+from office import candidates, cli, discovery, onboarding
 from office import hermes_access
 
 OFFICE_AUTH = {"claude": "found", "codex": "found", "agy": "found", "hermes": "found"}
@@ -98,6 +98,11 @@ def pref(h: Home) -> dict:
     return h.status()["harness_preference"]
 
 
+def entries(hp: dict) -> list[str]:
+    """The overlap set as it is stored: one provider|model|harness entry per harness running a shared model."""
+    return sorted(f"{o['provider']}|{p}" for o in hp["overlap"] for p in o["pairs"])
+
+
 # ------------------------------------------------------------------ detection and due-once
 
 def test_first_overlap_makes_onboarding_due_once_with_the_overlap_listed(h):
@@ -114,9 +119,11 @@ def test_first_overlap_makes_onboarding_due_once_with_the_overlap_listed(h):
 
 def test_answering_the_round_records_the_harnesses_so_they_are_not_asked_again(h):
     answer_schema(h)
+    expected = entries(pref(h))
     code, out = h.office("onboard", "--harness-preference", "keep")
     assert code == 0 and "harness preference saved" in out, out
-    assert h.user_data()["onboarding"]["harness_overlap_seen"] == OVERLAP_HARNESSES
+    assert h.user_data()["onboarding"]["harness_overlap_seen"] == expected
+    assert "anthropic|claude-sonnet-5-5|hermes" in expected
     data = h.status()
     assert data["due"] is False and data["reason"] == "current"
     assert pref(h)["pending"] == []
@@ -132,10 +139,11 @@ def test_a_recorded_harness_is_not_asked_again_even_when_the_overlap_narrows(h):
 
 
 def test_skip_records_the_overlap_set_so_the_round_is_not_asked_again(h):
+    expected = entries(pref(h))
     code, out = h.office("onboard", "--skip")
     assert code == 0 and "preferences unchanged" in out, out
     assert h.user_data() == {"onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
-                                            "harness_overlap_seen": OVERLAP_HARNESSES}}
+                                            "harness_overlap_seen": expected}}
     assert pref(h)["due"] is False and h.status()["due"] is False
 
 
@@ -147,8 +155,56 @@ def test_a_new_overlapping_harness_reopens_the_round(h):
     (h.bin / "hermes").write_text("#!/bin/sh\necho 0.9.0\n")  # hermes is installed now and joins the overlap
     (h.bin / "hermes").chmod(0o755)
     hp = pref(h)
-    assert hp["due"] is True and hp["pending"] == ["hermes"]
-    assert h.status()["reason"].startswith("harness overlap not yet answered: hermes")
+    # hermes joins the sonnet and opus overlap, and it also shares haiku with claude, which is new too
+    assert hp["due"] is True and hp["pending"] == ["claude", "hermes"]
+    assert h.status()["reason"].startswith("harness overlap not yet answered: claude, hermes")
+
+
+def hide_hermes_haiku(monkeypatch):
+    """Drop the catalog's hermes row for claude-haiku-5-5, so claude and hermes do not share haiku yet.
+    Returns the real catalog function to put back with restore_catalog."""
+    real_rows = candidates.catalog_rows
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+        r for r in real_rows() if not (r.get("invocation_harness") == "hermes" and r.get("model_id") == "claude-haiku-5-5")])
+    return real_rows
+
+
+def restore_catalog(monkeypatch, real_rows) -> None:
+    monkeypatch.setattr(candidates, "catalog_rows", real_rows)  # not monkeypatch.undo: the fixture's PATH and auth stay
+
+
+def test_a_newly_shared_model_for_an_already_recorded_pair_reopens_the_round(h, monkeypatch):
+    real_rows = hide_hermes_haiku(monkeypatch)
+    answer_schema(h)
+    h.office("onboard", "--harness-preference", "keep")
+    assert pref(h)["due"] is False
+    restore_catalog(monkeypatch, real_rows)  # hermes now runs claude-haiku-5-5 too: the same harnesses, a new shared model
+    hp = pref(h)
+    assert [o["harnesses"] for o in hp["overlap"]] == [OVERLAP_HARNESSES]
+    assert "claude-haiku-5-5" in hp["overlap"][0]["models"]
+    assert hp["due"] is True and hp["pending"] == ["claude", "hermes"]
+    assert h.status()["reason"].startswith("harness overlap not yet answered: claude, hermes")
+
+
+def test_recording_a_newly_shared_model_stores_its_entry(h, monkeypatch):
+    real_rows = hide_hermes_haiku(monkeypatch)
+    answer_schema(h)
+    h.office("onboard", "--harness-preference", "keep")
+    restore_catalog(monkeypatch, real_rows)
+    code, out = h.office("onboard", "--harness-preference", "keep")
+    assert code == 0, out
+    stored = h.user_data()["onboarding"]["harness_overlap_seen"]
+    assert "anthropic|claude-haiku-5-5|hermes" in stored and "anthropic|claude-sonnet-5-5|hermes" in stored
+    assert pref(h)["due"] is False
+
+
+def test_bare_harness_names_recorded_before_the_model_was_stored_still_count(h):
+    h.user.write_text(yaml.safe_dump({"onboarding": {"harness_overlap_seen": OVERLAP_HARNESSES}}))
+    assert pref(h)["due"] is False
+    expected = entries(pref(h))
+    code, out = h.office("onboard", "--skip")
+    assert code == 0, out
+    assert h.user_data()["onboarding"]["harness_overlap_seen"] == expected  # the entries replace the bare names
 
 
 def test_no_overlap_means_no_harness_round(h):
