@@ -150,6 +150,12 @@ rows:
       notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
         about 30% larger than Haiku 4.5
     supersession_metadata: null
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office harness smoke claude --model claude-haiku-5-5 --effort high'
+      harness_version: claude 2.1.329
+      evidence: 'launch exit 0'
   claude/claude-haiku-5-5@medium:
     price_fields:
       input_per_mtok: 0.1
@@ -728,6 +734,12 @@ rows:
       fetched_at: '2026-09-27T14:55:06Z'
       page_title: Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
     supersession_metadata: null
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office harness smoke claude --model claude-opus-5-5 --effort high'
+      harness_version: claude 2.1.329
+      evidence: 'launch exit 0'
   claude/claude-opus-5-5@medium:
     price_fields:
       input_per_mtok: 4.0
@@ -1322,4 +1334,150 @@ rows:
       metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
       as_of: '2026-11-11'
       page_title: Claude Fable 5.2
+    supersession_metadata: null
+  agy/gemini-4-neon@low:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-low
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (low)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  agy/gemini-4-neon@medium:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-medium
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (medium)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office harness smoke agy --model gemini-4-neon-medium --effort medium'
+      harness_version: agy 1.5.13
+      evidence: 'launch exit 0; model slug listed by agy models'
+    supersession_metadata: null
+  agy/gemini-4-neon@high:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-high
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (high)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office harness smoke agy --model gemini-4-neon-high --effort high'
+      harness_version: agy 1.5.13
+      evidence: 'launch exit 0; model slug listed by agy models'
+    supersession_metadata: null
+  agy/gemini-4-neon@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (xhigh)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  codex/gpt-6.2-sol@low:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-low
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (low)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  codex/gpt-6.2-sol@medium:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-medium
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (medium)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: blocked-by-quota
+      at: '2026-11-20'
+      command: 'office harness smoke codex --model gpt-6.2-sol --effort medium --allow-unsafe-flags'
+      harness_version: codex-cli 0.170.0
+      evidence: 'ERROR: Your workspace is out of credits; route stays dispatchable:false'
+    supersession_metadata: null
+  codex/gpt-6.2-sol@high:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-high
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (high)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: blocked-by-quota
+      at: '2026-11-20'
+      command: 'office harness smoke codex --model gpt-6.2-sol --effort high --allow-unsafe-flags'
+      harness_version: codex-cli 0.170.0
+      evidence: 'ERROR: Your workspace is out of credits; route stays dispatchable:false'
+    supersession_metadata: null
+  codex/gpt-6.2-sol@xhigh:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-xhigh
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (xhigh)
+      engineering_index_edition: not stated by AA
     supersession_metadata: null

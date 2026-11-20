@@ -26,13 +26,13 @@ def test_registry_does_not_claim_quota_or_trust_from_a_seed_score(tmp_path, monk
 def test_registry_global_version_ceiling_discloses_independent_policy(tmp_path, monkeypatch):
     target = tmp_path / "user-config.yaml"
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(target))
-    target.write_text("routing:\n  user_policy:\n    version_ceilings:\n      openai/gpt-sol: '5.6'\n")
+    target.write_text("routing:\n  user_policy:\n    version_ceilings:\n      openai/gpt-sol: '6.1'\n")
     out = model_registry.view()
     sol = {g["version"]: g for g in out["generations"] if g["lineage"] == "openai/gpt-sol"}
-    assert sol["5.6"]["user_denied"] and not sol["6.1"]["user_denied"]
-    assert "version_ceilings" in sol["5.6"]["user_denial_reason"]
-    assert sol["5.6"]["ceiling_source"] == "user"
-    assert out["policy"]["version_ceilings"] == {"openai/gpt-sol": "5.6"}
+    assert sol["6.1"]["user_denied"] and not sol["6.2"]["user_denied"]
+    assert "version_ceilings" in sol["6.1"]["user_denial_reason"]
+    assert sol["6.1"]["ceiling_source"] == "user"
+    assert out["policy"]["version_ceilings"] == {"openai/gpt-sol": "6.1"}
 
 
 def test_registry_shipped_efforts_are_not_compressed_into_a_fabricated_single_score(tmp_path, monkeypatch):

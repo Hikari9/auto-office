@@ -1,8 +1,8 @@
 # #871: Mutable executor/planner policy data. Runtime catalog route facts remain in TSV files.
 schema_version: 1
-policy_version: owner-xs-xl-peer-rungs-2026-11-14-gated
-benchmark_index: Artificial Analysis Intelligence Index v4.3.2
-floors: {XS: 31, S: 38, M: 40, L: 44, XL: 47}
+policy_version: owner-xs-xl-engineering-index-2026-11-20
+benchmark_index: Artificial Analysis Engineering Index (2026-11)
+floors: {XS: 31, S: 37, M: 40, L: 45, XL: 52}
 # Owner-approved XS-XL advisory preference intent (not automatic model activation).
 # A `rung` is an advisory preference priority (1 first); equal rungs are
 # adaptive peers. Arrow fallbacks are soft, never eligibility guarantees.
