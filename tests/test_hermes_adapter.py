@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from office import adapters, dispatch, hermes_access, install, review_submit, transcripts
+from office import adapters, dispatch, install, review_submit, transcripts
+from office import hermes_access
 
 CWD = Path("/w")
 REPLY = Path("/d/reply.txt")
@@ -59,23 +60,15 @@ def test_worker_interactive_argv_is_pinned(hermes):
                     "--reasoning", "high", "--yolo", "--in", "/w"]
 
 
-@pytest.mark.parametrize("kind,toolsets", [("reviewer", "file,terminal"), ("vision", "file,terminal,vision")])
-def test_reader_profiles_are_pinned_and_work_from_the_dispatch_dir(hermes, kind, toolsets):
-    argv, prof = adapters.build_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY)
-    assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "medium", "--yolo", "--toolsets", toolsets, "--in", "/d", "--usage-file",
-                    "/d/usage.json"]
-    # Read-only to the reviewed worktree: it is never the tool cwd, and Office fingerprints it around the run.
-    assert "/w" not in argv and prof["verify_worktree_unchanged"] is True
-    # `office review submit` is the completion step (a shell harness), not the reply-file fallback.
-    assert prof["submit"] == "shell" and "hermes" not in review_submit.NO_SHELL_HARNESSES
-    pane, herdr_kind = adapters.interactive_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY)
-    assert herdr_kind == "hermes" and pane[:2] == ["--cli", "--ignore-user-config"]
-    assert pane[pane.index("--in") + 1] == "/d" and pane[pane.index("--toolsets") + 1] == toolsets
-
-
-def test_vision_evidence_reaches_hermes_as_paths_in_the_prompt(hermes):
-    assert adapters.profile(hermes, "vision")["image_transport"] == "prompt-path"
+@pytest.mark.parametrize("kind", ["reviewer", "vision"])
+def test_hermes_has_no_reader_profile_because_it_cannot_be_read_only(hermes, kind):
+    """--yolo plus the terminal toolset can write anywhere, `--in` only moves the cwd and a post-run fingerprint cannot
+    prevent writes, so reviewer and vision dispatch stay disabled until an OS-enforced read-only checkout exists."""
+    assert adapters.profile(hermes, kind) is None
+    assert "review" not in hermes["capabilities"] and "reviewer_readonly_args" not in hermes
+    with pytest.raises(adapters.AdapterError):
+        adapters.build_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY)
+    assert adapters.interactive_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY) is None
 
 
 @pytest.mark.parametrize("effort,flag", [("none", "none"), ("low", "low"), ("medium", "medium"), ("high", "high"),
@@ -104,8 +97,8 @@ def test_other_harnesses_keep_their_env():
 def test_fallback_providers_cannot_change_the_model(hermes, tmp_path):
     """--ignore-user-config makes hermes read no config.yaml, so its fallback_providers chain is empty; --model and
     --provider are always explicit, and no env var can override them (HERMES_INFERENCE_MODEL is scrubbed)."""
-    for kind in ("worker", "reviewer", "vision"):
-        argv, _ = adapters.build_argv(hermes, kind, model=SLUG, effort="low", cwd=CWD, output=None if kind == "worker" else REPLY)
+    for kind in ("worker",):
+        argv, _ = adapters.build_argv(hermes, kind, model=SLUG, effort="low", cwd=CWD)
         assert "--ignore-user-config" in argv and "--model" in argv and "--provider" in argv
         assert not {"--fallback", "--base-url", "--api-key"} & set(argv)
     env = adapters.launch_env(hermes, {"HERMES_INFERENCE_MODEL": "swapped", "HERMES_HOME": "/h"})
@@ -186,6 +179,22 @@ def test_a_matching_usage_report_keeps_the_run_successful(hermes, tmp_path):
 def test_a_usage_report_naming_another_route_fails_the_dispatch_as_wrong_model(hermes, tmp_path, fields):
     classification, log = _audit(hermes, tmp_path, _usage(tmp_path, **fields))
     assert classification == "wrong_model" and "wrong model" in log.read_text()
+
+
+@pytest.mark.parametrize("fields", [{"completed": False}, {"completed": None}, {"completed": "true"}, {"completed": 1}])
+def test_a_clean_exit_must_report_completed_true(hermes, tmp_path, fields):
+    classification, log = _audit(hermes, tmp_path, _usage(tmp_path, **fields))
+    assert classification == "wrong_model" and "completed" in log.read_text()
+
+
+def test_a_clean_exit_with_no_completed_field_fails_closed(hermes, tmp_path):
+    usage = tmp_path / "usage.json"
+    usage.write_text(json.dumps({"model": "claude-sonnet-5-5", "provider": "anthropic"}))
+    assert _audit(hermes, tmp_path, usage)[0] == "wrong_model"
+
+
+def test_a_failed_run_is_not_judged_on_completed(hermes, tmp_path):
+    assert _audit(hermes, tmp_path, _usage(tmp_path, completed=False), classification="nonzero", code=2)[0] == "nonzero"
 
 
 def test_a_clean_exit_with_no_usage_report_is_wrong_model_but_a_crash_is_not(hermes, tmp_path):

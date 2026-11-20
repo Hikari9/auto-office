@@ -5,34 +5,15 @@ description: Directly invocable Auto Office v3 Hermes CLI mechanics primitive. U
 
 # Hermes CLI primitive
 
-Load `../../adapters/seed/hermes.yaml` plus current local override. New routes start `neutral` for every role (#837); inspect shipped allow/deny defaults with `office route policy --effective --role <role>`.
-
-## Launch
-
-Headless is `hermes -z` (one-shot: prints only the final response; exit 0 only for a completed turn, 2 for a failed or partial one). `-z` takes the prompt as the value of `--oneshot`, never from stdin, so Office passes it as one `--oneshot=<prompt>` argv element. The route's invocation model id is `provider:model` (pins `--provider` and `--model`) or a bare model id (pins `--model` only).
-
-- `--ignore-user-config` is always set: Hermes then reads no `config.yaml`, so its `fallback_providers` chain cannot swap the model mid-run. It needs `--model`, which Office always passes.
-- `--reasoning` carries the effort: none, low, medium, high, xhigh and max pass through unchanged (Hermes also accepts minimal and ultra; Office does not use them).
-- The launch env removes every `HERMES_*` variable except `HERMES_HOME` (headless env, pane shell via `agent.env`, route probes). They steer the model, provider, config and session.
-- `hermes -z` has no wall clock of its own (`--run-budget` belongs to `hermes chat`), so the profile's `max_minutes` cap bounds every headless launch.
-- Reviewer and vision profiles run `--in <dispatch dir>` with only the `file,terminal` (and `vision`) toolsets and `office review submit` as the completion step. Hermes has no read-only sandbox, so Office fingerprints the reviewed worktree before and after and fails the review as degraded if it changed. Evidence images reach the vision form as paths in the prompt.
-
-## Readback
-
-`--usage-file` makes Hermes write a JSON report (`model`, `provider`, `completed`, `failed`, `failure`, token counts) even when the run fails. Office compares `model` and `provider` with the pinned route: a mismatch, or no report after a clean exit, ends the dispatch as `wrong_model`. A crash with no report is not wrong-model.
-
-## Failure attribution
-
-Hermes exits 2 for every failed turn, so the output decides. "subscription usage is exhausted", "credit balance is too low" and "rate limit" are attributed quota/account, never the model; they feed the usual quota-wall path (route cooldown, task blocked instead of relaunched into the same wall). "quota exceeded" is the same; "model not available" is the harness, "context length exceeded" the model, "invalid API key" environment/network.
-
-## Access and Herdr
-
-- `office.hermes_access.reachable_providers()` lists providers with at least one non-exhausted credential, parsed from `hermes auth list` names and status only; no secret value is read or kept.
-- Herdr cannot detect a git-installed Hermes: the PATH `hermes` is a shell wrapper that execs `python3 -I -c '<inline script>'`. The pane form resolves the checkout's launcher script and its interpreter (`hermes_access.resolve_launcher`) and puts a shim that execs `python3 <install>/hermes` first on PATH in the pane's `agent.env`, so Herdr's `hermes` agent kind sees the process.
-- `office install --only hermes --item herdr-hermes` runs `herdr integration install hermes` (Herdr's own lifecycle plugin). `office install` with no `--item` and no `--only hermes` never does; Office writes no Hermes config.
-
-## Sessions
-
-Hermes records sessions in `$HERMES_HOME/state.db` (default `~/.hermes/state.db`, SQLite). Office reads it read-only to confirm a pane prompt landed, to find the session id and to read a pane reviewer's final reply. Skill detection uses `skill-md-read` inference since Hermes has no first-class Skill tool.
-
-Attribute invocation failures to adapter, quota failures to quota/account, and logical implementation defects to the producer model/role only when evidence supports it.
+Load `../../adapters/seed/hermes.yaml` plus current local override. New routes start `neutral` for every role (#837); inspect defaults with `office route policy --effective --role <role>`.
+- Headless is `hermes -z` (exit 0 only for a completed turn, 2 for any failed one). The prompt is one `--oneshot=<prompt>` argv element, never stdin. The model id is `provider:model` (pins `--provider` and `--model`) or a bare id (pins `--model`).
+- `--ignore-user-config` is always set, so `config.yaml`'s `fallback_providers` cannot swap the model. `--reasoning` takes none, low, medium, high, xhigh, max unchanged.
+- The launch env drops every `HERMES_*` variable except `HERMES_HOME` (headless env, pane shell via `agent.env`, route probes). `hermes -z` has no wall clock, so the profile's `max_minutes` bounds it.
+- Worker only: `--yolo` plus the terminal toolset can write anywhere and `--in` only moves the cwd, so there is no reviewer or vision profile until an OS-enforced read-only checkout exists.
+- Readback: `--usage-file` writes JSON (`model`, `provider`, `completed`). A model or provider mismatch, no report, or `completed` not exactly true after a clean exit ends the dispatch as `wrong_model`; a crash with no report does not.
+- Failure text decides attribution (exit 2 is every failure): "subscription usage is exhausted", "credit balance is too low", "rate limit", "quota exceeded" are quota/account and feed the quota-wall path; "model not available" is the harness, "context length exceeded" the model, "invalid API key" environment/network.
+- `office.hermes_access.reachable_providers()` parses `hermes auth list` names and status only; no secret is read.
+- Herdr cannot detect a git-installed Hermes (PATH `hermes` is a shell wrapper running inline `python3 -I -c`). The pane form resolves the checkout launcher and interpreter (`hermes_access.resolve_launcher`) and puts a shim first on PATH in `agent.env`.
+- `office install --only hermes --item herdr-hermes` runs `herdr integration install hermes`; no other install path does. Office writes no Hermes config.
+- Sessions live in `$HERMES_HOME/state.db`; Office reads it read-only. Skill detection uses `skill-md-read` inference.
+Attribute invocation failures to adapter, quota failures to quota/account, and logical defects to the producer only when evidence supports it.

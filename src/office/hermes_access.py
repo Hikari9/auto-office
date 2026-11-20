@@ -142,11 +142,12 @@ def expected_route(slug: str) -> tuple[str | None, str]:
     return (provider, model) if sep and provider and model else (None, slug)
 
 
-def readback_problem(slug: str, usage: dict | None) -> str | None:
+def readback_problem(slug: str, usage: dict | None, *, require_completed: bool = False) -> str | None:
     """Why the usage report is not the route the dispatch pinned, or None when it matches.
 
     A missing report is a problem too: with no readback the model that ran is unknown. A model matches exactly
     or as the tail of a vendor-qualified id (`anthropic/claude-x` reports `claude-x`, or the reverse).
+    `require_completed` (a clean exit) fails closed unless `completed` is exactly true.
     """
     if usage is None:
         return "Hermes wrote no usage report, so the model that ran is unknown"
@@ -157,4 +158,6 @@ def readback_problem(slug: str, usage: dict | None) -> str | None:
         return f"Hermes ran model {usage.get('model')!r}, not the pinned {model!r}"
     if provider and got_provider != _norm(provider):
         return f"Hermes ran provider {usage.get('provider')!r}, not the pinned {provider!r}"
+    if require_completed and usage.get("completed") is not True:
+        return f"Hermes exited cleanly but reported completed={usage.get('completed')!r}, not true"
     return None
