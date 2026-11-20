@@ -188,17 +188,7 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   per-task review and `--redirect`: follow their `next:` lines and `docs/v31-rolling-review-gates.md`. Runs started before #423 and #418 keep
   their older cap, waiver and plan-review behavior until `office upgrade`.
 
-Executor routing (AA v5, policy `owner-xs-xl-engineering-index-2026-11-20`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
-
-| Size | Rung 1 | Rung 2 | Rung 3 |
-|---|---|---|---|
-| XS | claude Haiku 5.5 high | agy Hydrogen low (conditional) | codex Terra low |
-| S | claude Sonnet 5.5 medium | agy Hydrogen medium (conditional) | codex Terra medium |
-| M | claude Sonnet 5.5 high | agy Hydrogen high (conditional) | codex Terra high |
-| L | claude Opus 5.5 medium | codex Sol medium | agy Neon medium |
-| XL | claude Opus 5.5 high | codex Sol high | agy Neon high |
-
-Hydrogen is conditional: it dispatches only through the Hydrogen gate, at exactly one effort per size (XS low, S medium, M high) and none for L or XL, and it is not a code reviewer (code review is Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only (the frontend bias rule); no route is added. Argon stays executor-eligible through the argon-medium-l floor exception but sits in no slate.
+Executor routing (AA v5, `catalog/executor-policy.yaml`): size floors use the Artificial Analysis Engineering Index (2026-11), XS 31, S 37, M 40, L 45, XL 52. Rung 1 is Haiku 5.5 high (XS), Sonnet 5.5 medium (S) and high (M), Opus 5.5 medium (L) and high (XL). Conditional agy Hydrogen is rung 2 at XS low, S medium and M high only, none for L or XL, and it is not a code reviewer (Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only. Full table: `docs/route-discovery.md`.
 
 ### Risk floor and the lightweight path
 
