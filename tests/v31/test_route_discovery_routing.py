@@ -113,13 +113,15 @@ def test_discovery_off_ignores_pool_candidates_and_hashes_exactly_as_before():
 # decision_hash and a digest of the whole result, computed by routing.route at 341b48b (before #494)
 # for requests that carry no discovery input. The decision hashes are unchanged (replay parity); the whole-result
 # digests were regenerated for #837, which replaced the per-route `trust` eligibility record with `policy`.
+# AA v5 T1: adaptive priors read the Engineering Index; the adaptive prior config names the Engineering Index and these requests carry only v4.3.2
+# scores, so every entry was re-baselined for the changed config and unbenchmarked_p prior.
 # A27: the shipped executor reserve is 20% (r3). These four entries were re-baselined for it; with
 # quota.reserve_percent_by_role.executor forced back to 5 they return to the values above the A27 update.
 GOLDEN_BEFORE_494 = {
-    "two": ("sha256:6a7a4dd4e1f0fe0df9f4a237a6a45787d4ee49f9fa6f93ca294768c4e67d03dc", "32c446b37e909059"),
-    "three": ("sha256:31ff0a5682d0c443fe1c42ccfbf6687aea29afb3daca200c012bbe57d4d2a473", "bc49b356c0c46222"),
-    "worker": ("sha256:551782dddfa651c5cbacb0b824b97543211102d21968ec3589b9414cf999c8fd", "198dec069e0eccc8"),
-    "explore": ("sha256:d2d62a7f2d2d4598661ae048413a7cf223a00ed4e3ae562b19178fa97c007e76", "bcd54d78ae368442"),
+    "two": ("sha256:657a19aa70d13beefaadbb8bbbc6454cd4a39a7ac1471a8b807afa302d93a7a9", "6440f7189df95bce"),
+    "three": ("sha256:a989c33b5be62173c8cd4798d57b056d450cf73fc1906fe83c08b60df5a4aaeb", "3efcedc6bedc77b3"),
+    "worker": ("sha256:b048f7dd052b37debbe94100fa57a881f1606692b32b2c5554aa144e49ec535c", "dfdc8431d9d158c7"),
+    "explore": ("sha256:f31183569e225d94a11d286bed7e52389e2b3aad199544a7a2d1ad39dc8a7168", "36fdd67049f75089"),
 }
 
 
@@ -593,7 +595,9 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     built, skipped = candidates.build_candidates(None, "executor", probe=False, discovery=settings, user_policies=[])
     pool = [c for c in built if c["route_status"] != "available"]
     assert {label(c) for c in pool} >= {f"codex/gpt-6.1-sol@{e}" for e in ("low", "medium", "high", "xhigh", "max")}
-    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "high", "xhigh", "max")}
+    # Haiku high passed its exact probe (2026-11-20), so it is a plain candidate; the other efforts stay discovery rows.
+    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "xhigh", "max")}
+    assert "claude/claude-haiku-5-5@high" not in {label(c) for c in pool}
     for c in pool:
         assert c["discovery"] is True and c["route_status"] == "discovered-unconfirmed" and c["probe_key"]
         assert c["probe_key"].split("|")[:4] == [c["harness"], "2.0.0", c["invocation_model_id"], c["effort"]]
@@ -623,7 +627,7 @@ def test_a_fresh_exact_pass_attaches_to_exactly_that_candidate(installed, tmp_pa
     by = {label(c): c for c in built}
     assert by["codex/gpt-6.1-sol@high"]["probe"]["result"] == "pass"
     assert by["codex/gpt-6.1-sol@high"]["route_status"] == "probe-passed"
-    for sibling in ("codex/gpt-6.1-sol@low", "codex/gpt-6.1-sol@xhigh", "claude/claude-haiku-5-5@high"):
+    for sibling in ("codex/gpt-6.1-sol@low", "codex/gpt-6.1-sol@xhigh", "claude/claude-haiku-5-5@max"):
         assert by[sibling]["probe"] is None and by[sibling]["route_status"] == "discovered-unconfirmed"
 
 

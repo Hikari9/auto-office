@@ -23,7 +23,8 @@ def test_legacy_benchmarks_are_preserved_only_in_the_nonrouting_archive():
     seed = shipped_catalog.load(root)
     archived = archive["models"]
     active = seed["models"]
-    assert archive["benchmark_index_version"] == seed["benchmark_index_version"] == INDEX
+    assert archive["benchmark_index_version"] == INDEX
+    assert seed["benchmark_index_version"] == "Artificial Analysis Engineering Index (2026-11)"
     assert len(archived) == 26
     assert {r["model_id"] for r in archived} == ARCHIVED_FAMILIES
     assert all(r["dispatchable"] is False for r in archived)

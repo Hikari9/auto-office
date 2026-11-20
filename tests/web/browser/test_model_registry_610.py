@@ -42,17 +42,17 @@ def test_desktop_grid_and_persistent_inspector_use_distinct_policy_and_facts(pag
     errors = navigate(page, url)
     table = page.locator(".model-table")
     assert table.is_visible()
-    rows = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')
+    rows = page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')
     assert rows.count() >= 1
     rows.first.get_by_role("button", name="Inspect").click()
     inspector = page.locator("[data-testid=model-inspector]")
     assert inspector.is_visible()
-    expect(inspector).to_contain_text("gpt-6.1-sol", timeout=5000)
+    expect(inspector).to_contain_text("gpt-6.2-sol", timeout=5000)
     assert "Allowed by you" in inspector.text_content()
     assert "Unknown — not probed" in inspector.text_content()
     assert "Effort-specific benchmark" in inspector.text_content()
     page.locator('[data-testid=model-search]').fill("luna")
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0, timeout=5000)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(0, timeout=5000)
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6-luna"]')).not_to_have_count(0, timeout=5000)
     page.locator('[data-testid=model-search]').fill("")
     expect(rows.first.get_by_role("button", name="Inspect")).to_have_attribute("aria-pressed", "true")
@@ -65,7 +65,7 @@ def test_narrow_mobile_uses_expandable_cards_with_no_required_horizontal_scroll(
     errors = navigate(page, url)
     page.locator(".model-mobile-cards").wait_for(state="visible")
     assert not page.locator(".model-table").is_visible()
-    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.1-sol"]').first
+    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.2-sol"]').first
     card.get_by_role("button", name="Expand evidence & policy").click()
     expect(card.locator('[data-testid=model-card-evidence]')).to_be_visible(timeout=5000)
     assert "Allowed by you" in card.text_content()
@@ -85,7 +85,7 @@ def test_confirmed_global_deny_uses_settings_command_and_never_optimistically_mu
     page.on("request", lambda req: sent.append(json.loads(req.post_data)) if
             req.url.endswith("/api/commands") and req.method == "POST" else None)
     errors = navigate(page, url)
-    page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first.get_by_role(
+    page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]').first.get_by_role(
         "button", name="Inspect").click()
     inspector = page.locator('[data-testid=model-inspector]')
     inspector.get_by_role("button", name="Deny this model").click()
@@ -99,7 +99,7 @@ def test_confirmed_global_deny_uses_settings_command_and_never_optimistically_mu
     request = sent[0]
     assert request["kind"] == "settings_set"
     assert request["target"] == {"tier": "machine", "key": "routing.user_policy.denied_models"}
-    assert request["payload"]["value"] == ["codex/gpt-6.1-sol"]
+    assert request["payload"]["value"] == ["codex/gpt-6.2-sol"]
     # This fixture's command executor records a receipt, but never changes config.
     # The UI must continue showing the re-read server value, not a fake success.
     page.wait_for_timeout(450)
@@ -116,9 +116,9 @@ def test_grid_compares_named_effort_benchmark_provenance_and_factual_state(page,
     headings = page.locator(".model-table thead").inner_text()
     for heading in ("Benchmark sample", "Provenance", "Factual availability", "My policy"):
         assert heading in headings
-    record = next(g for g in model_registry.view()["generations"] if g["model_id"] == "gpt-6.1-sol")
+    record = next(g for g in model_registry.view()["generations"] if g["model_id"] == "gpt-6.2-sol")
     sample = next(e for e in record["efforts"] if e["effort"] == "medium")
-    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]').first
     bench = row.locator('[data-testid=model-grid-benchmark]')
     expect(bench).to_contain_text(f'{sample["benchmark_score"]} · medium')
     expect(bench).to_contain_text(sample["benchmark_index"])
@@ -144,17 +144,17 @@ def test_registry_filters_independent_policy_from_runtime_facts(page, registry_s
 
     url, _ = registry_site
     Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
-        "routing:\n  user_policy:\n    version_ceilings:\n      openai/gpt-sol: '5.6'\n")
+        "routing:\n  user_policy:\n    version_ceilings:\n      openai/gpt-sol: '6.1'\n")
     page.set_viewport_size({"width": 1500, "height": 950})
     errors = navigate(page, url)
     policy = page.locator('[data-testid=model-policy-filter]')
     factual = page.locator('[data-testid=model-factual-filter]')
     policy.select_option("denied")
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-5.6-sol"]')).to_have_count(1)
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)
-    policy.select_option("allowed")
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-5.6-sol"]')).to_have_count(0)
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(0)
+    policy.select_option("allowed")
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(1)
     policy.select_option("")  # factual filters must operate independently of user denials
     facts = factual.evaluate("el => [...el.options].filter(o => o.value).map(o => ({value:o.value,label:o.textContent}))")
     assert facts, "At least one factual state must be filterable independently"
@@ -174,7 +174,7 @@ def test_mobile_no_match_is_visible_and_cards_show_evidence_without_expansion(pa
     url, _ = registry_site
     page.set_viewport_size({"width": 390, "height": 844})
     errors = navigate(page, url)
-    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.1-sol"]').first
+    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.2-sol"]').first
     expect(card).to_be_visible()
     assert "Benchmark" in card.inner_text()
     assert "Source:" in card.inner_text()
@@ -201,14 +201,14 @@ def test_scoped_manual_only_is_not_mislabeled_fully_allowed_or_globally_manual(p
 
     url, _ = registry_site
     Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
-        "routing:\n  user_policy:\n    overkill_rules:\n      - route: codex/gpt-6.1-sol\n        roles: [executor]\n")
+        "routing:\n  user_policy:\n    overkill_rules:\n      - route: codex/gpt-6.2-sol\n        roles: [executor]\n")
     page.set_viewport_size({"width": 1500, "height": 950})
     errors = navigate(page, url)
-    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]').first
     expect(row.locator('[data-testid=model-grid-policy]')).to_contain_text("Scoped manual-only by you")
     page.locator('[data-testid=model-policy-filter]').select_option("scoped-manual")
     expect(page.locator('[data-testid=model-registry-row]')).to_have_count(1)
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(1)
     assert errors == []
 
 
@@ -218,11 +218,11 @@ def test_effort_scoped_denial_shows_partial_policy_in_grid_inspector_mobile_and_
 
     url, _ = registry_site
     Path(os.environ["OFFICE_USER_CONFIG"]).write_text(
-        "routing:\n  user_policy:\n    denied_models:\n      - codex/gpt-6.1-sol@medium\n"
+        "routing:\n  user_policy:\n    denied_models:\n      - codex/gpt-6.2-sol@medium\n"
     )
     page.set_viewport_size({"width": 1500, "height": 950})
     errors = navigate(page, url)
-    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]').first
+    row = page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]').first
     expect(row.locator('[data-testid=model-grid-policy]')).to_have_text("Some efforts denied by you")
     row.get_by_role("button", name="Inspect").click()
     inspector = page.locator('[data-testid=model-inspector]')
@@ -233,11 +233,11 @@ def test_effort_scoped_denial_shows_partial_policy_in_grid_inspector_mobile_and_
     policy_filter.select_option("partially-denied")
     expect(page.locator('[data-testid=model-registry-row]')).to_have_count(1)
     policy_filter.select_option("allowed")
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(0)
     policy_filter.select_option("partially-denied")
 
     page.set_viewport_size({"width": 390, "height": 844})
-    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.1-sol"]').first
+    card = page.locator('[data-testid=model-registry-card][data-model="gpt-6.2-sol"]').first
     expect(card).to_be_visible()
     expect(card).to_contain_text("Some efforts denied by you")
     card.get_by_role("button", name="Expand evidence & policy").click()
