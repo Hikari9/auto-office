@@ -138,7 +138,7 @@ def _by_size_text(by_size: dict) -> str:
 def _slate_entry(row: dict, role: str) -> str:
     """One slate or seed rung as harness/model@effort, with what a conditional rung needs to dispatch."""
     harness = row.get("harness") or "*"
-    route = f"{harness}/{row['model_id']}@{row['effort']}"
+    route = f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else "")
     if not row.get("conditional"):
         return route
     if hydrogen_trials.MODEL in route:
@@ -233,7 +233,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                                                  adapter, kind, row.get("invocation_model_id") or row["model_id"], row["effort"])),
                                              candidate=c, role=r, size=size, config=cfg_effective, probe=probe,
                                              canary=canary)
-            result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
+            result = {"role": r, "route": f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else ""),
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
                       "dispatches": dispatches, "dispatch_reason": why}

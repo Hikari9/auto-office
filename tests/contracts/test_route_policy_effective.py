@@ -71,3 +71,27 @@ def test_hydrogen_visual_rung_is_conditional_and_not_dispatching_without_the_use
     assert "user's exact allow of agy/gemini-4-hydrogen@low for visual_reviewer" in row["dispatch_reason"]
     assert result.data["preferred_seed"]["visual_reviewer"][0] == "agy/gemini-4-hydrogen@low"
 
+
+def test_a_seed_entry_without_an_effort_renders_without_one(fresh_install):
+    """office config roles.<role>.preferred_seed luna,opus stores entries with no effort."""
+    cfg = {"roles": {"code_reviewer": {"preferred_seed": [{"model_id": "luna"}, {"harness": "claude", "model_id": "opus"}]}}}
+    lines, data = routecmd._slate_view(("code_reviewer",), cfg, None)
+    assert lines == ["  code_reviewer preferred_seed: */luna > claude/opus"]
+    assert data["preferred_seed"]["code_reviewer"] == ["*/luna", "claude/opus"]
+
+
+def test_the_slate_view_is_absent_without_the_executor_role_or_the_effective_flag(fresh_install):
+    visual = routecmd.policy(role="visual_reviewer", effective=True)
+    assert not lines_with(visual, "executor slate ") and "executor_slates" in visual.data
+    assert visual.data["executor_slates"] == {}
+    plain = routecmd.policy()
+    assert not lines_with(plain, "executor slate ") and not lines_with(plain, "preferred_seed: ")
+    assert "executor_slates" not in plain.data
+
+
+def test_the_xs_slate_data_names_each_route_and_marks_only_the_hydrogen_rung_conditional(fresh_install):
+    rows = routecmd.policy(role="executor", effective=True, size="XS").data["executor_slates"]["XS"]
+    assert [(r["rung"], r["route"], r["conditional"]) for r in rows] == [
+        (1, "claude/claude-haiku-5-5@high", False), (2, "agy/gemini-4-hydrogen@low", True),
+        (3, "codex/gpt-6.1-terra@low", False)]
+

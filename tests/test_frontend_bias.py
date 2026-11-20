@@ -103,3 +103,55 @@ def test_the_disclosure_says_why_and_that_no_gate_moved():
     plain = routing.selection_disclosure("executor", chosen, slates.ideal_seed("L"), "balanced")["reason"]
     assert "frontend-heavy" not in plain
 
+
+class _Routed(Exception):
+    pass
+
+
+def _route_request(monkeypatch, tmp_path, scope, *, domain="mixed", size="L", user_seed=None):
+    """The request route_role hands to routing.route for an executor task, captured at the routing seam."""
+    from office import candidates, db, routing
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(candidates.state, "get_task", lambda *_a, **_k: {"scope": scope, "descriptor": {}})
+    monkeypatch.setattr(candidates, "_effective_task_descriptor",
+                        lambda *_a, **_k: {"task_size": size, "domain": domain})
+    seen = {}
+
+    def capture(request, **_kwargs):
+        seen["request"] = request
+        raise _Routed
+
+    monkeypatch.setattr(routing, "route", capture)
+    config = {"roles": {"executor": {"preferred_seed_by_size": {size: user_seed}}}} if user_seed else {}
+    con = db.connect()
+    try:
+        with pytest.raises(_Routed):
+            candidates.route_role(con, config, {"id": "r1", "gear": size, "risk": {"size_class": size}}, "executor",
+                                  task_id="T1", probe=False)
+    finally:
+        con.close()
+    return seen["request"]
+
+
+def _first(request):
+    row = request["preferred_seed"][0]
+    return row["harness"], row["model_id"], row.get("frontend_bias")
+
+
+def test_route_role_biases_a_frontend_heavy_task_and_leaves_a_backend_task_on_the_plain_slate(monkeypatch, tmp_path):
+    heavy = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "web/b.css", "src/office/m.py"], size="L")
+    assert _first(heavy) == ("agy", "gemini-4-neon", "2 of 3 declared paths are frontend files")
+    plain = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "src/office/m.py", "src/office/n.py"], size="L")
+    assert _first(plain) == ("claude", "claude-opus-5-5", None)
+    assert [r["model_id"] for r in plain["preferred_seed"]] == [r["model_id"] for r in heavy["preferred_seed"]][1:2] + [
+        "gpt-6.2-sol", "gemini-4-neon"], "the plain slate keeps the table order"
+
+
+def test_route_role_never_biases_a_users_own_seed(monkeypatch, tmp_path):
+    seed = [{"harness": "claude", "model_id": "claude-opus-5-5", "effort": "medium"},
+            {"harness": "agy", "model_id": "gemini-4-neon", "effort": "medium"}]
+    request = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "web/b.css"], size="L", user_seed=seed)
+    assert all("frontend_bias" not in row for row in request["preferred_seed"])
+    assert request["preferred_seed"][0]["model_id"] == "claude-opus-5-5"
+

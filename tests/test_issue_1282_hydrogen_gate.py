@@ -142,3 +142,82 @@ def test_visual_reviewer_hydrogen_runs_at_low_only_and_code_reviewer_is_not_a_hy
     assert "code review left Hydrogen" in h.route_refusal(_cand("high"), role="code_reviewer", size=None,
                                                           manual=True, user_allowed=True)
 
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_an_explicit_as_keeps_the_requested_route_and_effort(env, monkeypatch, effort):
+    _size(monkeypatch, "S")
+    spec = f"agy/gemini-4-hydrogen@{effort}"
+    _probe_pass(spec)
+    decision = _decide(spec)
+    assert decision["candidate"]["model_id"] == "gemini-4-hydrogen"
+    assert decision["candidate"]["effort"] == effort and decision["candidate"]["harness"] == "agy"
+
+
+def test_a_run_and_task_that_exist_but_carry_no_size_name_the_missing_size(env, monkeypatch):
+    """The executor_refusal path (a task is found, its size is not), not the no-run/no-scope guard."""
+    _size(monkeypatch, None)
+    with pytest.raises(Refused) as refusal:
+        _decide(scope="T1")
+    assert refusal.value.category == "hydrogen-no-task-size"
+    assert "has none" in refusal.value.message and "descriptor task_size" in refusal.value.next_step
+
+
+SAFE_RISK = {"size_class": "S", "blast_radius": "local"}
+SAFE_DESCRIPTOR = {"task_size": "S", "bounds": "bounded", "domain": "backend"}
+
+
+@pytest.mark.parametrize("size, effort, kwargs, code, words", [
+    ("L", "high", {}, "hydrogen-effort-mismatch", "no automatic effort for L"),
+    ("L", "low", {"user_allowed": True}, "hydrogen-effort-mismatch", "automatically at @high for L"),
+    ("XXL", "high", {}, "hydrogen-no-task-size", "does not know task size"),
+    ("XS", "low", {}, "hydrogen-manual-required", "XS requires explicit manual selection"),
+    ("S", "medium", {"risk": SAFE_RISK, "descriptor": SAFE_DESCRIPTOR, "disabled": True},
+     "hydrogen-canary-disabled", "canary is disabled"),
+    ("S", "medium", {"risk": {**SAFE_RISK, "irreversible": True}, "descriptor": SAFE_DESCRIPTOR},
+     "hydrogen-task-not-safe", "bounded, reversible, low-risk"),
+])
+def test_every_automatic_refusal_has_its_own_code_and_next_step(size, effort, kwargs, code, words):
+    kwargs = dict(kwargs)
+    enabled = not kwargs.pop("disabled", False)
+    config = {"routing": {"hydrogen_trials": {"enabled": enabled}}}
+    refusal = h.executor_refusal(_cand(effort), size=size, manual=False, config=config, **kwargs)
+    assert refusal and refusal[0] == code and words in refusal[1] and refusal[2]
+
+
+def test_a_user_allow_at_l_high_and_a_safe_automatic_s_task_are_not_refused():
+    config = {"routing": {"hydrogen_trials": {"enabled": True}}}
+    assert h.executor_refusal(_cand("high"), size="L", manual=False, config=config, user_allowed=True) is None
+    assert h.executor_refusal(_cand("medium"), size="S", manual=False, config=config, risk=SAFE_RISK,
+                              descriptor=SAFE_DESCRIPTOR) is None
+
+
+def test_manual_denial_refuses_a_review_role_for_its_own_cause_and_needs_a_receipt(env):
+    with db.connect() as con:
+        visual = h.manual_denial(con, _cand("low"), role="visual_reviewer", size=None, user_allowed=False)
+        assert visual[0] == "hydrogen-role-refused" and "exact allow" in visual[1]
+        code_review = h.manual_denial(con, _cand("high"), role="code_reviewer", size=None, user_allowed=True)
+        assert code_review[0] == "hydrogen-role-refused" and "code review left Hydrogen" in code_review[1]
+        # An allowed visual review and an XS-L executor both still need the fresh exact receipt.
+        assert h.manual_denial(con, _cand("low"), role="visual_reviewer", size=None, user_allowed=True)[0] == "hydrogen-no-probe"
+        assert h.manual_denial(con, _cand("high"), role="executor", size="S")[0] == "hydrogen-no-probe"
+    no_db = h.manual_denial(None, _cand("high"), role="executor", size="S")
+    assert no_db[0] == "hydrogen-no-probe" and "runs.db" in no_db[1]
+
+
+def _ids(role, **kwargs):
+    from office import routing
+    with db.connect() as con:
+        built, _skipped = candidates.build_candidates(con, role, probe=False, **kwargs)
+    return {routing.candidate_id(c): c for c in built}
+
+
+def test_the_vision_probe_lists_only_hydrogen_low_for_the_visual_reviewer_and_it_still_needs_the_allow(env):
+    hydrogen = {i for i in _ids("visual_reviewer", vision_probe=True) if "gemini-4-hydrogen" in i}
+    assert hydrogen == {"agy@1/gemini-4-hydrogen@low"}
+    assert not [i for i in _ids("visual_reviewer") if "gemini-4-hydrogen" in i], "never listed without the probe flag"
+    for role in ("plan_reviewer", "code_reviewer"):
+        assert not [i for i in _ids(role, vision_probe=True) if "gemini-4-hydrogen" in i], role
+    cand = _ids("visual_reviewer", vision_probe=True)["agy@1/gemini-4-hydrogen@low"]
+    refusal = h.route_refusal(cand, role="visual_reviewer", size=None, manual=False, user_allowed=False)
+    assert "needs the user's exact allow" in refusal, "the proof alone never makes the route dispatch"
+
