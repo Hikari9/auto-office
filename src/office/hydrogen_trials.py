@@ -14,9 +14,12 @@ MODEL = "gemini-4-hydrogen"
 WINDOW = 20
 CAP = 3
 MAX_PER_RUN = 1
-# H3 (#1168) code; H5 plan; visual since agy's vision profile launches in read-only plan mode (Rico 2026-11-19).
-REVIEW_ROLES = frozenset(("code_reviewer", "plan_reviewer", "visual_reviewer"))
-REVIEW_EFFORT = "high"  # the effort that ran the 5-case planted-bug set (research/hydrogen-shadow)
+# H5 plan reviewer; visual since agy's vision profile launches in read-only plan mode (Rico 2026-11-19).
+# Rico 2026-11-19 (AA v5 table): code review left Hydrogen, so code_reviewer is not a Hydrogen role.
+# Each reviewer role runs Hydrogen at exactly one effort: plan at the @high that ran the 5-case planted-bug set
+# (research/hydrogen-shadow), visual at @low (the AA v5 visual reviewer rung).
+REVIEW_EFFORTS = {"plan_reviewer": "high", "visual_reviewer": "low"}
+REVIEW_ROLES = frozenset(REVIEW_EFFORTS)
 CANARY_MAX = 10  # #1168: owner-approved S canary budget ceiling; a config value above it is refused
 HIGH_RISK = frozenset((
     "security", "credential", "credentials", "secret", "secrets", "payment", "payments",
@@ -53,8 +56,15 @@ def validate(config: dict) -> list[str]:
     return []
 
 
-def exact_effort(size: str) -> str | None:
-    return {"XS": "low", "S": "medium", "M": "high", "L": "high"}.get(size)
+# The automatic Hydrogen executor effort per size (AA v5 table): none for L and XL.
+_AUTOMATIC_EFFORT = {"XS": "low", "S": "medium", "M": "high"}
+# A user's exact role allow of the route (not an --as) keeps its earlier L effort.
+_USER_ALLOW_EFFORT = {**_AUTOMATIC_EFFORT, "L": "high"}
+
+
+def exact_effort(size: str | None) -> str | None:
+    """The effort Hydrogen runs automatically at this size, or None where it has none (L, XL, unsized)."""
+    return _AUTOMATIC_EFFORT.get(size)
 
 
 def user_allowed(rule: dict | None) -> bool:
@@ -70,6 +80,51 @@ def user_allowed(rule: dict | None) -> bool:
             and route_policy._is_exact_spec(rule.get("rule")))
 
 
+def executor_refusal(candidate: dict, *, size: str | None, manual: bool, config: dict | None = None,
+                     risk: dict | None = None, descriptor: dict | None = None,
+                     user_allowed: bool = False) -> tuple[str, str, str] | None:
+    """(code, message, next_step) of the first reason Hydrogen cannot execute this task, else None.
+
+    Every cause has its own code, so an operator is never sent to re-probe for a size or effort problem (#1282).
+    A user's explicit `--as` (`manual`) accepts any effort for an XS-L task; automatic routing and a role
+    allow keep the effort the table names for the size. The exact probe is checked by `manual_denial`."""
+    if size is None:
+        return ("hydrogen-no-task-size", "Hydrogen needs the task's size and this task has none",
+                "classify the task (its descriptor task_size) and retry, or route it to another harness")
+    if size == "XL":
+        return ("hydrogen-xl-excluded", "Hydrogen is excluded for XL tasks even with --as or a user allow",
+                "route the XL task to an Opus, Sol or Neon route; Hydrogen covers XS-L only")
+    if size not in _USER_ALLOW_EFFORT:
+        return ("hydrogen-no-task-size", f"Hydrogen does not know task size {size!r}",
+                "classify the task as XS, S, M or L and retry")
+    if candidate.get("harness") != "agy":
+        return ("hydrogen-wrong-harness", f"Hydrogen runs only through agy, not {candidate.get('harness')}",
+                f"use agy/{MODEL}@<effort>")
+    if manual:
+        return None  # exact conformance is checked separately; --as picks the effort
+    want = (_USER_ALLOW_EFFORT if user_allowed else _AUTOMATIC_EFFORT).get(size)
+    if candidate.get("effort") != want:
+        if want is None:
+            return ("hydrogen-effort-mismatch",
+                    f"Hydrogen has no automatic effort for {size} tasks (got @{candidate.get('effort')})",
+                    f"use --as agy/{MODEL}@<effort> with a fresh exact probe pass for that effort")
+        return ("hydrogen-effort-mismatch",
+                f"Hydrogen runs automatically at @{want} for {size} tasks, not @{candidate.get('effort')}",
+                f"use agy/{MODEL}@{want}, or name this effort with --as after its exact probe passes")
+    if user_allowed:
+        return None
+    if size not in ("S", "M"):
+        return ("hydrogen-manual-required", f"Hydrogen {size} requires explicit manual selection after conformance",
+                f"use --as agy/{MODEL}@{want} or add the user's exact allow of it")
+    if not settings(config)["enabled"]:
+        return ("hydrogen-canary-disabled", "automatic Hydrogen canary is disabled pending exact qualification",
+                "use --as agy/" + MODEL + "@<effort> or enable routing.hydrogen_trials")
+    if not safe_task(size, risk, descriptor):
+        return ("hydrogen-task-not-safe", "automatic Hydrogen requires a bounded, reversible, low-risk S/M task",
+                "use --as agy/" + MODEL + "@<effort> or route the task elsewhere")
+    return None
+
+
 def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
                   config: dict | None = None, risk: dict | None = None,
                   descriptor: dict | None = None, user_allowed: bool = False) -> str | None:
@@ -79,31 +134,22 @@ def route_refusal(candidate: dict, *, role: str, size: str | None, manual: bool,
     if not is_hydrogen(candidate):
         return None
     if role in REVIEW_ROLES:
-        # H3 (#1168): owner-promoted voting code reviewer; H5 (Rico 2026-11-15): also a plan reviewer;
-        # Rico 2026-11-19: also the first visual reviewer, through agy's plan-mode vision profile.
-        # Only the exact @high route that ran the planted-bug set, only under the user's exact allow (a manual --review-as does not stand in
-        # for it, H4 #1178), always behind a fresh exact probe (manual_conformance), never through
-        # discovery or adaptive exploration.
-        if candidate.get("harness") != "agy" or candidate.get("effort") != REVIEW_EFFORT:
-            return f"Hydrogen reviews only as the exact agy/{MODEL}@{REVIEW_EFFORT} route"
+        # H5 (Rico 2026-11-15): plan reviewer; Rico 2026-11-19: also the first visual reviewer, through agy's
+        # plan-mode vision profile. Only the one exact effort the role runs at, only under the user's exact
+        # allow (a manual --review-as does not stand in for it, H4 #1178), always behind a fresh exact probe
+        # (manual_conformance), never through discovery or adaptive exploration.
+        effort = REVIEW_EFFORTS[role]
+        if candidate.get("harness") != "agy" or candidate.get("effort") != effort:
+            return f"Hydrogen reviews only as the exact agy/{MODEL}@{effort} route"
         if not user_allowed:
-            return f"Hydrogen review needs the user's exact allow of agy/{MODEL}@{REVIEW_EFFORT} for {role}"
+            return f"Hydrogen review needs the user's exact allow of agy/{MODEL}@{effort} for {role}"
         return None
     if role != "executor":
-        return "Hydrogen is an executor or a code, plan or visual reviewer only (never a worker, planner or other reviewer)"
-    if size not in ("XS", "S", "M", "L"):
-        return "Hydrogen is excluded for XL and unclassified tasks"
-    if candidate.get("harness") != "agy" or candidate.get("effort") != exact_effort(size):
-        return "Hydrogen requires the exact approved agy model/size/effort"
-    if manual or user_allowed:
-        return None  # exact conformance checked separately; neither opens the automatic canary
-    if size not in ("S", "M"):
-        return "Hydrogen XS/L requires explicit manual selection after conformance"
-    if not settings(config)["enabled"]:
-        return "automatic Hydrogen canary is disabled pending exact qualification"
-    if not safe_task(size, risk, descriptor):
-        return "automatic Hydrogen requires a bounded, reversible, low-risk S/M task"
-    return None
+        return ("Hydrogen is an executor, a plan reviewer or a visual reviewer only; code review left Hydrogen "
+                "(never a worker, planner or other reviewer)")
+    refusal = executor_refusal(candidate, size=size, manual=manual, config=config, risk=risk,
+                               descriptor=descriptor, user_allowed=user_allowed)
+    return refusal[1] if refusal else None
 
 
 def safe_task(size: str | None, risk: dict | None, descriptor: dict | None) -> bool:
@@ -125,20 +171,36 @@ def safe_task(size: str | None, risk: dict | None, descriptor: dict | None) -> b
     return True
 
 
-def manual_conformance(con, candidate: dict, *, role: str, size: str | None,
-                       user_allowed: bool = False) -> str | None:
-    """Manual XS/L (and manual S/M) needs a fresh *exact* model+effort probe receipt.
-    A code or plan review also needs the user's exact allow (`user_allowed`); manual selection alone is not one."""
-    denial = route_refusal(candidate, role=role, size=size, manual=True, user_allowed=user_allowed)
+def manual_denial(con, candidate: dict, *, role: str, size: str | None,
+                  user_allowed: bool = False) -> tuple[str, str, str] | None:
+    """(code, message, next_step) when a manual Hydrogen route is refused, else None.
+
+    Manual XS-L (and a manual or allowed review) needs a fresh *exact* model+effort probe receipt.
+    A plan or visual review also needs the user's exact allow (`user_allowed`); manual selection alone is not one."""
+    if is_hydrogen(candidate) and role == "executor":
+        denial = executor_refusal(candidate, size=size, manual=True)
+    else:
+        message = route_refusal(candidate, role=role, size=size, manual=True, user_allowed=user_allowed)
+        denial = (("hydrogen-role-refused", message, "route this role to a non-Hydrogen route or add the user's exact allow")
+                  if message else None)
     if denial:
         return denial
     if con is None:
-        return "Hydrogen conformance requires durable runs.db evidence"
+        return ("hydrogen-no-probe", "Hydrogen conformance requires durable runs.db evidence",
+                "run the command against the live Office state")
     from office import route_probe
     receipt = route_probe.status(con, candidate)
     if not receipt or receipt.get("result") != "pass":
-        return "Hydrogen manual route needs a fresh exact harness/model/effort conformance receipt"
+        return ("hydrogen-no-probe",
+                "Hydrogen manual route needs a fresh exact harness/model/effort conformance receipt",
+                f"run office doctor --probe-route agy/{MODEL}@{candidate.get('effort')}, then retry")
     return None
+
+
+def manual_conformance(con, candidate: dict, *, role: str, size: str | None,
+                       user_allowed: bool = False) -> str | None:
+    denial = manual_denial(con, candidate, role=role, size=size, user_allowed=user_allowed)
+    return denial[1] if denial else None
 
 
 def run_safe(config: dict, run: dict, task: dict) -> bool:

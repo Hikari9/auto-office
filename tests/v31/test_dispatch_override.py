@@ -206,7 +206,8 @@ def test_pinned_same_model_reviewer_runs_as_a_fresh_dispatch(env):
     """#337: --review-as pins the reviewer of the task's lane; it is still a fresh dispatch."""
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@high", "--review-as", "codex/gpt-6-luna@high", check=0)
+    # Terra high clears the Engineering Index floor of every size (Luna's 27.3 misses XS), and it is both pins here.
+    env.office("dispatch", "T1", "--as", "codex/gpt-6.1-terra@high", "--review-as", "codex/gpt-6.1-terra@high", check=0)
     con = env.con()
     reviewed = [c for c in env.calls() if c.get("role") == "convergence_reviewer"]
     assert reviewed and reviewed[0]["harness"] == "codex", env.calls()
@@ -240,19 +241,23 @@ def test_routed_review_does_not_exclude_the_producers_family(env, role):
 def test_default_reviewer_seeds_and_fallbacks():
     from office import config
     roles = config.load_yaml(config.default_config_path())["roles"]
+    # AA v5: plan review keeps the earlier four routes; code review is Luna high then Opus low only (Hydrogen and
+    # the rest left it), and the two roles no longer share a rule block.
+    plan = [{"model_id": "luna", "harness": "codex", "effort": "high"},
+            {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode", "effort": "max"},
+            {"model_id": "opus", "harness": "claude", "effort": "low"},
+            {"model_id": "claude-opus-5-5", "harness": "agy", "effort": "low"}]
+    code = [{"model_id": "luna", "harness": "codex", "effort": "high"},
+            {"model_id": "opus", "harness": "claude", "effort": "low"}]
+    assert roles["plan_reviewer"]["preferred_seed"] == plan
+    assert roles["code_reviewer"]["preferred_seed"] == code
     for role in ("plan_reviewer", "code_reviewer"):
-        seed = roles[role]["preferred_seed"]
-        assert seed == [{"model_id": "luna", "harness": "codex", "effort": "high"},
-                        {"model_id": "deepseek-v4.1-flash-free", "harness": "opencode", "effort": "max"},
-                        {"model_id": "opus", "harness": "claude", "effort": "low"},
-                        {"model_id": "claude-opus-5-5", "harness": "agy", "effort": "low"}], role
         # #837: the seeded order is a preference; strict allow-only is an explicit user opt-in (strict_allow_roles)
         assert roles[role]["strict_seed"] is False, role
     visual = roles["visual_reviewer"]["preferred_seed"]
-    assert visual == [{"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"},
+    assert visual == [{"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "low", "conditional": True},
                       {"model_id": "gpt-6.1-terra", "harness": "codex", "effort": "low"},
-                      {"model_id": "claude-opus-5-5", "harness": "claude", "effort": "low"},
-                      {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
+                      {"model_id": "claude-opus-5-5", "harness": "claude", "effort": "low"}]
 
 
 @pytest.mark.approved

@@ -1,4 +1,4 @@
-"""Pin owner-approved #1143 executor preferences and preserve main planner policy."""
+"""Pin the AA v5 executor table (Rico, 2026-11-19) and preserve main planner policy."""
 from __future__ import annotations
 
 import pytest
@@ -6,23 +6,24 @@ import pytest
 from office import candidates, executor_slates as slates, routing
 
 
-# Literal independent expected owner-approved executor preferences (#1143),
+# Literal independent expected owner-approved executor slates (AA v5 table),
 # not derived from policy YAML. Planner rows remain unchanged from main.
 MAIN_ROUTE_MATRIX = {
-    ("executor", "XS"): [("claude", "claude-haiku-5-5", "medium"),
-                         ("codex", "gpt-6.1-terra", "low"),
-                         ("agy", "gemini-4-hydrogen", "low")],
-    ("executor", "S"): [("codex", "gpt-6.1-terra", "medium"),
+    ("executor", "XS"): [("claude", "claude-haiku-5-5", "high"),
+                         ("agy", "gemini-4-hydrogen", "low"),
+                         ("codex", "gpt-6.1-terra", "low")],
+    ("executor", "S"): [("claude", "claude-sonnet-5-5", "medium"),
                         ("agy", "gemini-4-hydrogen", "medium"),
-                        ("claude", "claude-sonnet-5-5", "medium")],
-    ("executor", "M"): [("claude", "claude-sonnet-5-5", "medium"),
+                        ("codex", "gpt-6.1-terra", "medium")],
+    ("executor", "M"): [("claude", "claude-sonnet-5-5", "high"),
                         ("agy", "gemini-4-hydrogen", "high"),
                         ("codex", "gpt-6.1-terra", "high")],
-    ("executor", "L"): [("claude", "claude-sonnet-5-5", "high"),
-                        ("agy", "gemini-4-hydrogen", "high")],
-    ("executor", "XL"): [("claude", "claude-opus-5-5", "medium"),
-                         ("codex", "gpt-6.1-sol", "medium"),
-                         ("agy", "gemini-4-argon", "high")],
+    ("executor", "L"): [("claude", "claude-opus-5-5", "medium"),
+                        ("codex", "gpt-6.2-sol", "medium"),
+                        ("agy", "gemini-4-neon", "medium")],
+    ("executor", "XL"): [("claude", "claude-opus-5-5", "high"),
+                         ("codex", "gpt-6.2-sol", "high"),
+                         ("agy", "gemini-4-neon", "high")],
     ("planner", "XS"): [(None, "opus", "medium"), (None, "astra", "low")],
     ("planner", "S"): [(None, "opus", "medium"), (None, "astra", "low")],
     ("planner", "M"): [
@@ -97,32 +98,28 @@ def test_effective_shipped_routes_match_owner_executor_and_main_planner(key, exp
     ), decision
 
 
-def test_m_executor_haiku_high_keeps_its_floor_exception():
-    candidate = {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
-                 "invocation_model_id": "claude-haiku-5-5", "harness_version": "1.0",
-                 "capabilities": ["builder"], "invocation_source": "local-evidence: contract fixture",
-                 "benchmark_indexes": {slates.INDEX: 38}, "quota": {"status": "ok"},
-                 "route_status": "available", "price_fields": {"input_per_mtok": 1, "output_per_mtok": 2}}
-    assert slates.benchmark_gate(candidate, "M", slates.POLICY)
-    decision = routing.route({
-        "role": "executor", "playbook": "Change", "preferred_seed": slates.ideal_seed("M"),
-        "slate_anchor": True, "allow_free_models": True,
-        "policy": {"required_capabilities": ["builder"], "floor": {
-            "min_effort": "none", "allowed_sources": ["local-evidence:"]}},
-        "context": {"gear": "M", "size_class": "M"},
-        "candidates": [candidate],
-    })
-    assert decision["status"] == "selected", decision
-    assert routing.candidate_id(decision["candidate"]) == "claude@1/claude-haiku-5-5@high"
-    [selected_waiver] = decision["routing"]["floor_exceptions"]
-    assert selected_waiver["exception"] == "haiku-high-m-owner-authorized-floor"
-    assert selected_waiver["observed_score"] == 38
+def _haiku_high(score):
+    return {"model_id": "claude-haiku-5-5", "harness": "claude", "effort": "high",
+            "invocation_model_id": "claude-haiku-5-5", "harness_version": "1.0",
+            "capabilities": ["builder"], "invocation_source": "local-evidence: contract fixture",
+            "benchmark_indexes": {slates.INDEX: score}, "quota": {"status": "ok"},
+            "route_status": "available", "price_fields": {"input_per_mtok": 1, "output_per_mtok": 2}}
+
+
+def test_haiku_high_has_no_m_floor_exception_but_clears_xs():
+    """AA v5: haiku-high-m-owner-authorized-floor is retired. Haiku high is the XS executor on its own score."""
+    assert "haiku-high-m-owner-authorized-floor" not in {
+        e["name"] for e in slates.POLICY["floor_exceptions"]}
+    below_m = _haiku_high(38)
+    assert "requires" in slates.benchmark_gate(below_m, "M", slates.POLICY)
+    assert slates.floor_exception(below_m, "M", "executor", slates.POLICY) is None
+    assert slates.benchmark_gate(_haiku_high(36.5), "XS", slates.POLICY) is None
 
 
 def test_conditional_hydrogen_m_and_planner_routes_remain_unqualified():
     executor = slates.ideal_seed("M", slates.POLICY)
     planner = slates.planner_seed("M", slates.POLICY)
-    assert executor[1] == {"model_id": "gemini-4-hydrogen", "effort": "high", "harness": "agy", "rung": 1}
+    assert executor[1] == {"model_id": "gemini-4-hydrogen", "effort": "high", "harness": "agy", "rung": 2}
     assert planner[-1] == {"model_id": "gemini-4-argon", "effort": "low"}
     assert slates.POLICY["executor_preferred"]["M"][1]["_resolved_routes"]
     assert slates.POLICY["executor_preferred"]["M"][1]["_dispatchable_routes"] == []

@@ -235,11 +235,11 @@ def _executor_candidate(model, effort, harness):
             "benchmark_indexes": {executor_slates.POLICY["benchmark_index"]: 60}}
 
 
-XL_CANDIDATES = [_executor_candidate("claude-opus-5-5", "medium", "claude"),
-                 _executor_candidate("gpt-6.1-sol", "medium", "codex"),
-                 _executor_candidate("gemini-4-argon", "high", "gemini")]
+XL_CANDIDATES = [_executor_candidate("claude-opus-5-5", "high", "claude"),
+                 _executor_candidate("gpt-6.2-sol", "high", "codex"),
+                 _executor_candidate("gemini-4-neon", "high", "gemini")]
 GREENFIELD_RUN = {"gear": "greenfield", "gates": {"gear_model_version": "run-gear-1"}, "risk": {}}
-OPUS_DENY = {"role_rules": [{"role": "executor", "route": "claude/claude-opus-5-5@medium", "state": "deny"}],
+OPUS_DENY = {"role_rules": [{"role": "executor", "route": "claude/claude-opus-5-5@high", "state": "deny"}],
              "denied": [], "overkill": [], "ceilings": {}, "sources": {"role_rules": "user"}}
 
 
@@ -258,9 +258,9 @@ def test_xl_slate_entry_denied_or_disabled_falls_back_to_next_eligible_route_and
                             "context": {"gear": candidates._slate_gear(GREENFIELD_RUN)},
                             "size_class": sized["task_size"]})
     assert result["status"] == "selected", result
-    assert result["selected"] == "codex@1/gpt-6.1-sol@medium", result["selected"]
+    assert result["selected"] == "codex@1/gpt-6.2-sol@high", result["selected"]
     skipped = executor_slates.skip_lines(executor_slates.route_summary(seed, pool, result["rejected"], result["slate"]))
-    first = [line for line in skipped if line.startswith("#1 claude/claude-opus-5-5@medium")]
+    first = [line for line in skipped if line.startswith("#1 claude/claude-opus-5-5@high")]
     assert len(first) == 1, skipped
     assert ("deny" if denied else "not-in-catalog") in first[0], first[0]
 

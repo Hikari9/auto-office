@@ -218,6 +218,40 @@ def ideal_seed(task_size: str | None, policy: dict = POLICY) -> list[dict]:
     return [_seed_entry(row) for row in policy["executor_preferred"].get(task_size, ())]
 
 
+# AA v5 frontend bias: a frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only.
+FRONTEND_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".sass", ".less", ".html", ".astro")
+FRONTEND_PATH_PERCENT = 60
+
+
+def frontend_reason(descriptor: dict | None, scope: list | None) -> str | None:
+    """Why a task is frontend-heavy, or None: descriptor domain ui, or >= 60% of its declared paths are frontend
+    files. Any other domain (mixed, backend, unset) is judged on its paths alone. A `+` shared-path marker is
+    not part of the path."""
+    if (descriptor or {}).get("domain") == "ui":
+        return "descriptor domain is ui"
+    paths = list(dict.fromkeys(p.lstrip("+").strip() for p in scope or [] if isinstance(p, str) and p.lstrip("+").strip()))
+    frontend = sum(1 for p in paths if p.lower().endswith(FRONTEND_EXTENSIONS))
+    if paths and frontend * 100 >= FRONTEND_PATH_PERCENT * len(paths):
+        return f"{frontend} of {len(paths)} declared paths are frontend files"
+    return None
+
+
+def frontend_bias(seed: list[dict], descriptor: dict | None, scope: list | None) -> list[dict] | None:
+    """The slate with its agy gemini-* rung moved to rung 1, or None when the bias does not apply.
+
+    It only reorders routes already on the slate: it adds no route and lifts no gate (a conditional Hydrogen
+    rung still needs its own gate). The moved entry carries `frontend_bias`, the reason the selection
+    disclosure repeats."""
+    moved = next((row for row in seed or [] if row.get("harness") == "agy"
+                  and str(row.get("model_id", "")).startswith("gemini-") and row.get("rung", 1) > 1), None)
+    reason = frontend_reason(descriptor, scope) if moved else None
+    if not reason:
+        return None
+    return [{**moved, "rung": 1, "frontend_bias": reason}] + [
+        {**row, **({"rung": row["rung"] + 1} if "rung" in row and row["rung"] < moved["rung"] else {})}
+        for row in seed if row is not moved]
+
+
 def model_restriction(candidate: dict, size: str | None, policy: dict = POLICY) -> str | None:
     """Automatic-only model restrictions; explicit user routes have own gates."""
     if size not in policy["floors"]:

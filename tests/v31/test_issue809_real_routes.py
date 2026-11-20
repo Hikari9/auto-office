@@ -51,6 +51,13 @@ def _issue861_policy():
         {"model_id": "claude-haiku-5-5", "effort": "high", "harness": "claude"},
         {"model_id": "glm-5.3-flash", "effort": "max", "harness": "opencode", "conditional": True},
         {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex"}]
+    # AA v5 retired this exception from the shipped policy (Haiku high is XS-only); a pre-v5 pinned run still carries it.
+    policy["floor_exceptions"].insert(0, {
+        "name": "haiku-high-m-owner-authorized-floor", "model_id": "claude-haiku-5-5", "effort": "high",
+        "harness": "claude", "size": "M", "role": "executor", "score_evidence": "numeric-below-floor",
+        "minimum_score": 38, "authorization": "owner authorization #861",
+        "not_waived": ["registration", "conformance", "trust", "quota", "risk"],
+        "_resolved_routes": ["claude/claude-haiku-5-5@high"], "_dispatchable_routes": ["claude/claude-haiku-5-5@high"]})
     return policy
 
 
@@ -182,7 +189,7 @@ def test_issue861_discovery_candidates_are_never_ordinary_dispatches():
         "risk": {"size_class": "M", "blast_radius": "repo",
                  "irreversible": False},
     }
-    decision = decide("M", [haiku, terra], discovery=discovery)
+    decision = decide_861([haiku, terra], discovery=discovery)
     assert decision["selected"] == fallback_id, decision
     assert decision["discovery"]["intent"] == "probe", decision
     assert decision["discovery"]["fallback"] == fallback_id
@@ -213,7 +220,7 @@ def test_issue861_fresh_probe_trial_has_persisted_numeric_floor_receipt():
     }
     handle = {"candidate": haiku_id, "probe_key": haiku["probe_key"],
               "reservation_id": "R861", "attempt_id": "R861"}
-    choice = decide("M", [haiku, terra], discovery=discovery, discovery_input=handle)
+    choice = decide_861([haiku, terra], discovery=discovery, discovery_input=handle)
     assert choice["selected"] == haiku_id, choice
     assert choice["discovery"]["intent"] == "trial", choice
     assert choice["discovery"]["fallback"] == terra_id
@@ -258,8 +265,9 @@ def test_issue861_authenticated_user_override_receipt_beats_role_deny_and_persis
 
 def test_issue1143_m_sonnet_lead_is_not_disclosed_as_the_861_temporary_fallback():
     sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
-    terra = candidate("gpt-6.1-terra", "high", 44)
-    current = decide("M", [sonnet, terra], gear="M")
+    # AA v5: Sonnet high leads the M slate, on its Engineering Index score (46.2) against Terra high (46.4).
+    current = decide("M", [candidate("claude-sonnet-5-5", "high", 46.2, harness="claude"),
+                           candidate("gpt-6.1-terra", "high", 46.4)], gear="M")
     assert current["candidate"]["model_id"] == "claude-sonnet-5-5", current
     assert "operational_fallback" not in current["selection_disclosure"], current["selection_disclosure"]
     pinned = decide_861([dict(candidate("claude-haiku-5-5", "high", 38, harness="claude"),

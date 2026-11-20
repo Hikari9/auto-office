@@ -16,7 +16,7 @@ def test_unsized_hydrogen_requires_proof(enabled, state):
         ROW, {"state": state, "source": "user"}, candidate=CANDIDATE,
         config={"routing": {"hydrogen_trials": {"enabled": enabled}}})
     assert dispatches is False
-    for text in ("depends on task size", "reviews code, plans and visuals only as the exact user-allowed agy/gemini-4-hydrogen@high", "S/medium", "3 per rolling 20", "one per run",
+    for text in ("depends on task size", "reviews plans (@high) and visuals (@low) only as the exact user-allowed", "S/medium", "3 per rolling 20", "one per run",
                  "manual --as", "fresh exact conformance probe pass",
                  "cannot dispatch until a fresh exact probe passes"):
         assert text in reason
@@ -28,9 +28,16 @@ def test_unsized_hydrogen_requires_proof(enabled, state):
 
 def test_reviewer_and_sized_canary_reasons():
     state = {"state": "neutral", "source": "default"}
-    dispatches, reviewer = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="code_reviewer")
+    dispatches, reviewer = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="plan_reviewer")
     assert dispatches is False
     assert "Hydrogen reviews only as the exact agy/gemini-4-hydrogen@high route" in reviewer
+    dispatches, visual = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="visual_reviewer")
+    assert dispatches is False
+    assert "Hydrogen reviews only as the exact agy/gemini-4-hydrogen@low route" in visual
+    # Code review left Hydrogen (AA v5): it is not a Hydrogen review role at any effort.
+    dispatches, code = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, role="code_reviewer")
+    assert dispatches is False
+    assert "code review left Hydrogen" in code
     config = {"routing": {"hydrogen_trials": {"enabled": True}}}
     dispatches, sized = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="S", config=config,
                                                 probe={"result": "pass"})
@@ -42,7 +49,7 @@ def test_reviewer_and_sized_canary_reasons():
     assert "automatic Hydrogen canary is disabled" in disabled
     dispatches, wrong_effort = routecmd._dispatch_view(ROW, state, candidate=CANDIDATE, size="M", config=config)
     assert dispatches is False
-    assert "exact approved agy model/size/effort" in wrong_effort
+    assert "Hydrogen runs automatically at @high for M tasks, not @medium" in wrong_effort
 
 
 def test_non_hydrogen_allow_behavior_unchanged():
@@ -128,7 +135,7 @@ def test_policy_with_invalid_probe_database(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("role,state,expected", [
     ("executor", {"state": "deny", "source": "user"}, "denied by user"),
-    ("code_reviewer", {"state": "neutral", "source": "default"}, "Hydrogen reviews only as the exact"),
+    ("plan_reviewer", {"state": "neutral", "source": "default"}, "Hydrogen reviews only as the exact"),
 ])
 def test_disabled_canary_note_only_on_unsized_executor(role, state, expected):
     dispatches, reason = routecmd._dispatch_view(

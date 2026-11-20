@@ -78,8 +78,8 @@ def test_atomic_booking_requires_writer_transaction(database):
 
 
 def test_seed_peers_are_equal_weight_and_arrows_remain_distinct():
-    expected = {"XS": [1, 2, 2], "S": [1, 1, 2], "M": [1, 1, 2],
-                "L": [1, 2], "XL": [1, 2, 2]}
+    # AA v5: every size is a strict three-rung ladder, so no two rungs are peers and the arrow order is the rung order.
+    expected = {size: [1, 2, 3] for size in ("XS", "S", "M", "L", "XL")}
     for size, rungs in expected.items():
         seed = executor_slates.ideal_seed(size)
         assert [entry["rung"] for entry in seed] == rungs
@@ -89,9 +89,9 @@ def test_seed_peers_are_equal_weight_and_arrows_remain_distinct():
             assert routing.preferred_rank(c, seed) == entry["rung"] - 1
             assert adaptive._preference_component(c, seed)[0] == 1 / entry["rung"]
     assert [x["model_id"] for x in executor_slates.ideal_seed("L")] == [
-        "claude-sonnet-5-5", "gemini-4-hydrogen"]
+        "claude-opus-5-5", "gpt-6.2-sol", "gemini-4-neon"]
     assert not any("flash" in x["model_id"] for s in expected for x in executor_slates.ideal_seed(s))
-    assert executor_slates.POLICY["benchmark_index"] == "Artificial Analysis Intelligence Index v4.3.2"
+    assert executor_slates.POLICY["benchmark_index"] == "Artificial Analysis Engineering Index (2026-11)"
 
 
 def test_unknown_size_is_not_l_implicitly():
@@ -115,7 +115,9 @@ def test_hydrogen_never_qualifies_from_generic_allow_or_unverified_effort():
     assert h.route_refusal(c, role="executor", size="XL", manual=True)
     assert h.route_refusal(c, role="visual_reviewer", size="S", manual=True)
     assert h.route_refusal(c, role="executor", size="XS", manual=False)
-    assert h.route_refusal(c, role="executor", size="M", manual=True)
+    assert h.route_refusal(c, role="executor", size="M", manual=False)  # automatic M is @high only
+    # #1282: a user's --as names any effort for an XS-L task; only XL and a missing size stay refused.
+    assert h.route_refusal(c, role="executor", size="M", manual=True) is None
     assert h.route_refusal(c, role="executor", size="S", manual=True) is None
     assert h.manual_conformance(None, c, role="executor", size="XL")
 
