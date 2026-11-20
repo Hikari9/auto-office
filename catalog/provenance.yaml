@@ -1323,3 +1323,185 @@ rows:
       as_of: '2026-11-11'
       page_title: Claude Fable 5.2
     supersession_metadata: null
+  hermes/claude-sonnet-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-haiku-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-haiku-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-haiku-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-haiku-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
