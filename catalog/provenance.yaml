@@ -739,7 +739,7 @@ rows:
       at: '2026-11-20'
       command: 'office doctor --probe-route claude/claude-opus-5-5@high'
       harness_version: claude 2.1.329
-      evidence: 'fail (isolation-missing): the probe process group could not be confirmed gone; route stays dispatchable:false'
+      evidence: 'fail (isolation-missing): the probe process group could not be confirmed gone; 2026-11-20 round-2 retries x2 from the T1 worktree were refused (route-denied: executor is denied by shipped: claude@2/claude-opus-5-5@high), nothing launched; route stays dispatchable:false (routes.tsv now false, was \M)'
   claude/claude-opus-5-5@medium:
     price_fields:
       input_per_mtok: 4.0
@@ -1441,7 +1441,7 @@ rows:
       at: '2026-11-20'
       command: 'office doctor --probe-route codex/gpt-6.2-sol@medium'
       harness_version: codex-cli 0.170.0
-      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; route stays dispatchable:false'
+      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; round-2 retry 2026-11-20 blocked: unknown-route (installed catalog has no gpt-6.2-sol row); route stays dispatchable:false'
     supersession_metadata: null
   codex/gpt-6.2-sol@high:
     price_fields:
@@ -1463,7 +1463,7 @@ rows:
       at: '2026-11-20'
       command: 'office doctor --probe-route codex/gpt-6.2-sol@high'
       harness_version: codex-cli 0.170.0
-      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; route stays dispatchable:false'
+      evidence: 'refused (quota-reserve: quota 0% left would cross the 5% protected reserve); nothing launched; round-2 retry 2026-11-20 blocked: unknown-route (installed catalog has no gpt-6.2-sol row); route stays dispatchable:false'
     supersession_metadata: null
   codex/gpt-6.2-sol@xhigh:
     price_fields:
