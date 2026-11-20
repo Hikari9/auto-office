@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, greenfield, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, greenfield, harness_preference, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
 from office import config as office_config
 
 KIND_FOR_ROLE = {
@@ -1348,6 +1348,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "hydrogen_descriptor": descriptor_for_route,
         "hydrogen_independent_review": (run.get("gates") or {}).get("code_review") is True,
     }
+    if prefs := harness_preference.settings(config):
+        request["harness_preference"] = prefs
     if role == "executor" and not override:
         from office import hydrogen_trials
         # Budget from the live config (a global runs.db cap); enabled and the user allow stay pinned.
