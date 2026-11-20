@@ -2659,11 +2659,15 @@ def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False)
     an unknown `--agent` may fall back to a default agent that can write anywhere.
     The non-strict callers only record the reason (agent.env is written either way)."""
     adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
-    if not adapter or not spec.get("output"):
+    if not adapter:
         return {}
+    # A pane agent Herdr cannot detect through the harness's PATH launcher (Hermes' shell wrapper) gets a shim first on PATH.
+    launcher = adapters.pane_launch_env(adapter, paths.run_dir(run["id"]) / "dispatches" / dispatch["id"])
+    if not spec.get("output"):
+        return launcher
     try:
-        return adapters.reviewer_env(adapter, spec["kind"], cwd=Path(spec["cwd"]), output=Path(spec["output"]),
-                                     include_dirs=[Path(i) for i in spec.get("include_dirs") or []])
+        return {**launcher, **adapters.reviewer_env(adapter, spec["kind"], cwd=Path(spec["cwd"]), output=Path(spec["output"]),
+                                                     include_dirs=[Path(i) for i in spec.get("include_dirs") or []])}
     except adapters.AdapterError as exc:
         if strict:
             raise
@@ -2687,7 +2691,9 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
     carry.update(harness_env or {})
     env_file = ddir / "agent.env"
-    env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
+    prelude = adapters.shell_env_prelude(adapters.load_all().get(dispatch.get("adapter_id") or ""))
+    env_file.write_text((f"{prelude}\n" if prelude else "")
+                        + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
     env_file.chmod(0o600)
     return env_file
 
@@ -4986,13 +4992,15 @@ def supervise(dispatch_id: str) -> int:
                 _launch_notice(run, d, why)
                 classification, code = "preflight_failed", 127
                 return 1
+        usage_file = paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "usage.json"  # the harness's run report (hermes --usage-file)
+        usage_file.unlink(missing_ok=True)  # a stale report must never vouch for this run
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
                                          include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
                                          session_id=None if spec.get("headless_resume") else
                                          (d.get("session_id") if spec.get("headless_fresh") else _assigned_session(d)),
-                                         resume_args=spec.get("headless_resume"))
+                                         resume_args=spec.get("headless_resume"), usage_file=usage_file)
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -5012,6 +5020,7 @@ def supervise(dispatch_id: str) -> int:
             _launch_notice(run, d, str(exc))
             classification, code = "preflight_failed", 127
             return 1
+        env = adapters.launch_env(adapter, env)
         with log_path.open("ab") as log:
             os.chmod(log_path, 0o600)
             stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
@@ -5069,6 +5078,7 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+        classification = _audit_exit(adapter, prof, d.get("model") or "", usage_file, log_path, classification, code)
         if classification == "success" and not wrote and not output:
             # A worker with no reply file ended cleanly but said nothing: the
             # prompt may never have been consumed (adapter failure_signatures).
@@ -5111,6 +5121,33 @@ def _note(log_path, text: str) -> None:
             log.write(f"\n[office] {text}\n".encode())
     except OSError:
         pass
+
+
+def _audit_exit(adapter: dict, prof: dict, slug: str, usage_file: Path, log_path: Path, classification: str,
+                code: int | None) -> str:
+    """The classification once the harness's own report is read back. A report naming another model or provider than
+    the pinned slug makes the run `wrong_model`, whatever the exit code. A failed run whose output matches an adapter
+    failure signature is noted with that signature's attribution (a quota or account wall is not the model's fault)."""
+    if classification in ("timeout", "signal"):
+        return classification
+    wrong = adapters.readback_problem(adapter, prof, slug, usage_file, code=code)
+    if wrong:
+        _note(log_path, f"wrong model: {wrong}")
+        return "wrong_model"
+    sig = adapters.classify_failure(adapter, _log_tail(log_path)) if classification == "nonzero" else None
+    if sig:
+        _note(log_path, f"exit {code} attributed to {sig.get('attribution')} ({sig.get('id')}), not the model")
+    return classification
+
+
+def _log_tail(log_path, size: int = 8000) -> str:
+    try:
+        with Path(log_path).open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - size))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _mark(dispatch_id: str, pid_child: int) -> None:
@@ -5988,9 +6025,14 @@ def _quota_wall(run: dict, d: dict) -> str | None:
         return None
     from office import gates
     text = gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"])
-    for line in [ln.strip() for ln in text.splitlines() if ln.strip()][-5:][::-1]:
-        if not line.startswith("[office]") and gates._quota_signature(line):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("[office]")][-5:]
+    for line in lines[::-1]:
+        if gates._quota_signature(line):
             return line[:200]
+    # The adapter's own quota/account signatures (Hermes exits 2 for every failed turn, so its text decides).
+    sig = adapters.classify_failure(adapters.load_all().get(d.get("adapter_id") or ""), "\n".join(lines))
+    if sig and sig.get("attribution") == "quota/account":
+        return next((ln[:200] for ln in lines[::-1] if str(sig["pattern"]).lower() in ln.lower()), str(sig["pattern"]))
     return None
 
 
