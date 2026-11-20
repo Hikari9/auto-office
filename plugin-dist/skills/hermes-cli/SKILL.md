@@ -1,6 +1,6 @@
 ---
 name: hermes-cli
-description: Hermes CLI mechanics for selected Hermes dispatches: launch, readback, failure attribution, access. Not a lifecycle office.
+description: Hermes CLI mechanics for selected Hermes dispatches (launch, readback, failure attribution, access). Not a lifecycle office.
 ---
 
 # Hermes CLI primitive
