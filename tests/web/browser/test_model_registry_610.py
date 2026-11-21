@@ -150,7 +150,8 @@ def test_registry_filters_independent_policy_from_runtime_facts(page, registry_s
     policy = page.locator('[data-testid=model-policy-filter]')
     factual = page.locator('[data-testid=model-factual-filter]')
     policy.select_option("denied")
-    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(1)
+    # Both harness rows of gpt-6.1-sol (codex and hermes, #1305) sit under the version ceiling.
+    expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(2)
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.2-sol"]')).to_have_count(0)
     policy.select_option("allowed")
     expect(page.locator('[data-testid=model-registry-row][data-model="gpt-6.1-sol"]')).to_have_count(0)

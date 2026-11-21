@@ -72,7 +72,8 @@ def test_v4_production_pin_and_unchanged_catalog():
     # Planner and reviewer floors keep the Intelligence Index v4.3.2 rows: the extraction never rewrote them.
     assert evidence.manifest()["production_index_unchanged"] == "Artificial Analysis Intelligence Index v4.3.2"
     assert all("Artificial Analysis Intelligence Index v4.3.2" in (row.get("benchmark_indexes") or {})
-               for row in m["models"] if row["model_id"] in ("gpt-6-luna", "claude-opus-5-5") and row["effort"] in ("high", "low"))
+               for row in m["models"] if row["model_id"] in ("gpt-6-luna", "claude-opus-5-5") and row["effort"] in ("high", "low")
+               and row.get("invocation_harness") != "hermes")  # Hermes rows inherit scores at load
 
 
 def test_untrusted_source_or_cross_edition_must_fail_closed(tmp_path):
