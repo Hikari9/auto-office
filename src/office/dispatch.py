@@ -2358,6 +2358,10 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
+    if role == "reviewer":
+        # Python the reviewer starts keeps bytecode outside the checkout: it neither leaves `__pycache__` for
+        # the worktree guard to trip on nor loads a planted one in place of the source under review (#1182).
+        env["PYTHONPYCACHEPREFIX"] = str(paths.run_dir(run["id"]) / "pycache" / dispatch["id"])
     argv, extra = frontdoor.current_argv()
     env.update(extra)
     shim = paths.data_home() / "bin"
@@ -2684,7 +2688,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
             wenv.pop(k, None)
         if dispatch.get("role") in review_submit.REVIEW_ROLES and dispatch.get("gate_id"):
             wenv.update(review_submit.token_env(run, dispatch))
-    carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
+    carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH", "PYTHONPYCACHEPREFIX")}
     carry.update(harness_env or {})
     env_file = ddir / "agent.env"
     env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
