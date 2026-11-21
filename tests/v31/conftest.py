@@ -169,6 +169,7 @@ class Env:
         """`restored`: tmp already holds a repository copied from a snapshot. `contract`
         pins the review contract new runs start with (the user config's review.contract)."""
         self.approved = False
+        self.restored_from = None  # the builder a `dispatched` marker restored this Env's state from
         # A suite that patches an in-process seam (gates.run_reviewer) sets this to hide every agy row from routing.
         self.hide_agy = False
         self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
@@ -453,6 +454,43 @@ def _approved_snapshot(tmp_path_factory, request):
 
 
 @pytest.fixture(scope="module")
+def _dispatched_snapshots():
+    """Per module: builder and contract -> the directory holding that builder's snapshot (#1302)."""
+    return {}
+
+
+def _restore_dispatched(request, monkeypatch) -> Env:
+    """`@pytest.mark.dispatched("build")`: an Env holding the state `build(env)` leaves, built once per module.
+
+    `build` names a function of the test module (a bare callable would make the marker a decorator).
+
+    `build` drives the full lifecycle (trust, start, approve, dispatch) the first time; every later test with the
+    same marker restores a copy at the same absolute directory. The Env's `restored_from` is `build`, so the
+    builder can return early when a test calls it again.
+    """
+    build = getattr(request.module, request.node.get_closest_marker("dispatched").args[0])
+    contract = _contract(request)
+    cache = request.getfixturevalue("_dispatched_snapshots")
+    key = (build.__module__, build.__qualname__, contract)
+    if key not in cache:
+        root = request.getfixturevalue("tmp_path_factory").mktemp("dispatched")
+        mp = pytest.MonkeyPatch()
+        try:
+            build(_activate(Env(root / "env", mp, contract=contract), mp))
+            shutil.copytree(root / "env", root / "snapshot", symlinks=True)
+        finally:
+            mp.undo()
+        cache[key] = root
+    live, snapshot = cache[key] / "env", cache[key] / "snapshot"
+    shutil.rmtree(live, ignore_errors=True)
+    shutil.copytree(snapshot, live, symlinks=True)
+    e = Env(live, monkeypatch, restored=True, contract=contract)
+    e.approved = True
+    e.restored_from = build
+    return e
+
+
+@pytest.fixture(scope="module")
 def _trust_snapshots():
     """The routes `Env.trust()` records, worked out by the first call of each module and inputs."""
     return {}
@@ -461,7 +499,9 @@ def _trust_snapshots():
 @pytest.fixture
 def env(request, tmp_path, monkeypatch):
     """An isolated Env. With `@pytest.mark.approved`, one whose default plan is already approved."""
-    if request.node.get_closest_marker("approved"):
+    if request.node.get_closest_marker("dispatched"):
+        e = _restore_dispatched(request, monkeypatch)
+    elif request.node.get_closest_marker("approved"):
         live, snapshot = request.getfixturevalue("_approved_snapshot")
         shutil.rmtree(live, ignore_errors=True)
         shutil.copytree(snapshot, live, symlinks=True)

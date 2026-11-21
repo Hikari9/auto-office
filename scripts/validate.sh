@@ -15,8 +15,9 @@ if [ "$#" -ne 0 ]; then
   echo "Unexpected validate arguments: $*" >&2
   exit 2
 fi
-if [ "${VALIDATE_WORKERS:-2}" -gt 2 ] || [ "${VALIDATE_WORKERS:-2}" -lt 1 ]; then
-  echo "[VALIDATE] VALIDATE_WORKERS must be 1 or 2" >&2
+# Default 2. VALIDATE_WORKERS=4 is opt-in for an otherwise idle host (docs/validation.md).
+if [ "${VALIDATE_WORKERS:-2}" -gt 4 ] || [ "${VALIDATE_WORKERS:-2}" -lt 1 ]; then
+  echo "[VALIDATE] VALIDATE_WORKERS must be 1 to 4 (default 2; 3-4 only on an idle host)" >&2
   exit 2
 fi
 cd "$(git rev-parse --show-toplevel)"

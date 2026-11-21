@@ -16,6 +16,8 @@ Office runs the full suite under `verification.full_suite_timeout_seconds` (defa
 
 `verification.job_timeout_seconds` is unused. No job-level timeout is enforced, so the full-suite check limit is not bounded by it.
 
+Workers: `scripts/validate.sh` runs pytest with `-n "${VALIDATE_WORKERS:-2}"`. The default stays 2 and accepts 1 to 4. `VALIDATE_WORKERS=4 scripts/validate.sh --full` is opt-in for an otherwise idle host only: with other runs, reviewers or a second suite on the machine, 4 workers contend for CPU and the lifecycle tests' subprocess timing, which costs more in flakes than it saves. Set it in the shell that runs the script. As an Office check command an `env`-style prefix is not recognized as the full suite (see above), so export it in the environment instead.
+
 `VALIDATE_BUILD=1 scripts/validate.sh --full` also builds the wheel and checks packaged resources. A scoped receipt never satisfies a full-suite requirement.
 
 ## Visual review diagnostics (#942)
