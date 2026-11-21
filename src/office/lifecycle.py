@@ -82,8 +82,8 @@ def greenfield_detection(new_work) -> dict | None:
     if new_work is None:
         return None
     parts = list(new_work)
-    value, why = (str(p).strip() for p in parts) if len(parts) == 2 else ("", "")
-    value = value.lower()
+    value, why = (" ".join(str(p).split()) for p in parts) if len(parts) == 2 else ("", "")
+    value = value.lower()  # the why is one line: it is echoed in start, refusal and inspect output
     if value not in ("yes", "no") or not why:
         raise Usage("bad-new-work", f"--new-work takes yes or no and a nonempty reason, got {list(new_work)!r}",
                     next_step='office start --new-work yes|no "<why>" ...')

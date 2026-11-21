@@ -20,7 +20,7 @@ from office.util import sha256_file, sha256_obj
 NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
                          route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
 RUN_GEARS = ("XS", "S", "M", "L", "XL")
-# Explicit opt-in for a new or near-empty repository. Never selected by size auto-fit.
+# Explicit opt-in for new work (a new project, or a new component with nothing it must fit into). Never auto-fit.
 SPECIAL_GEARS = ("greenfield",)
 GEARS = (*RUN_GEARS, *SPECIAL_GEARS)
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")

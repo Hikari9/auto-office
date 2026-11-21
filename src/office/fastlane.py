@@ -124,8 +124,11 @@ def handoff_text(con, run: dict, task_id: str, reason: str) -> str:
     compact = ("then run /compactable and compact this pane on COMPACT NOW" if _herdr(con, run) else
                "suggestion: compact this session at the next boundary (Office cannot compact it here; "
                "the run carries on without it)")
-    return (f"fastlane {task_id} is too big ({reason}): commit a checkpoint, hand the rest to Office executors "
-            f"(office rerun {task_id} now delegates, or split the rest with office amend), {compact}")
+    from office import greenfield
+    # #1300: a greenfield plan is one cohesive task, so splitting it with office amend is refused there.
+    how = (f"office rerun {task_id} now delegates" if greenfield.enabled(run) else
+           f"office rerun {task_id} now delegates, or split the rest with office amend")
+    return f"fastlane {task_id} is too big ({reason}): commit a checkpoint, hand the rest to Office executors ({how}), {compact}"
 
 
 def _record(con, run: dict, task_id: str, reason: str, detail: dict) -> dict | None:

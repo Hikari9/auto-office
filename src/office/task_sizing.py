@@ -237,7 +237,7 @@ def _fastlane_mode(gear, d: dict, risk: dict, size, estimate, fastlane: dict, pa
 
     policy = fastlane.get("policy")
     if gear == "greenfield":
-        gear = "XL"  # #1300 G3: the one cohesive greenfield build is led at the XL floor
+        gear = "XL"  # #1300 G3: the one cohesive greenfield build is an XL task (its route and overflow target)
     if gear not in SIZES:
         return record("delegated", f"dedicated executor: a {gear or 'legacy'} run has no fastlane")
     if fastlane.get("overflow"):
