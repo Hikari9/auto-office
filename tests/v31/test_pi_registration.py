@@ -500,6 +500,12 @@ def test_reviewer_env_keeps_python_bytecode_outside_the_checkout(tmp_path, monke
     prefix = Path(dispatch.worker_env(run, d, "reviewer")["PYTHONPYCACHEPREFIX"])
     assert prefix.name == "D1" and prefix.parent.name == "pycache"
     assert "PYTHONPYCACHEPREFIX" not in dispatch.worker_env(run, d, "executor")
+    # A reviewer launched from agent.env (pane or by hand) gets the same prefix; a worker does not.
+    reviewer_env = dispatch.write_agent_env(run, {**d, "role": "reviewer"}, tmp_path, worker=False).read_text()
+    assert f"export PYTHONPYCACHEPREFIX={prefix}\n" in reviewer_env
+    (tmp_path / "w").mkdir()
+    worker_env = dispatch.write_agent_env(run, {**d, "role": "executor"}, tmp_path / "w", worker=True).read_text()
+    assert "PYTHONPYCACHEPREFIX" not in worker_env
 
 
 def test_worktree_guard_is_off_for_harnesses_with_their_own_sandbox(tmp_path):
