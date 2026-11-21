@@ -20,7 +20,7 @@ Every PR that lands on `main` bumps the release version in that same PR, followi
 
 For an ordinary PR, run `scripts/validate.sh --pr`: it always runs `tests/contracts/`, the named safety-smoke set and tests selected for changed files. Use `scripts/validate.sh --full` for test infrastructure changes, deleted or renamed tests, release work, or when the task requires full regression coverage. See `docs/validation.md`.
 
-Per-merge landings verify with `scripts/validate.sh --pr`. The full `scripts/validate.sh` runs only before the last merge of a batch, for release or test infrastructure work, or when the task explicitly requires full regression coverage. Never re-run the full suite to clear `integration-coverage-incomplete` when `--pr` is accepted. Why: run b9a08a6a ran the roughly 70 minute full suite twice on 2026-11-21.
+Per-merge landings verify with `scripts/validate.sh --pr`. The full `scripts/validate.sh` runs only before the last merge of a batch, for release or test infrastructure work, when tests are deleted or renamed, or when the task explicitly requires full regression coverage. In an Office plan, declare that full check as the bare `scripts/validate.sh`: land does not credit `--full`. Never re-run the full suite to clear `integration-coverage-incomplete` when `--pr` is accepted. Why: run b9a08a6a ran the roughly 70 minute full suite twice on 2026-11-21.
 
 ## Owner-approved experimental exception (#1143)
 
