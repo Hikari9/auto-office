@@ -3,6 +3,7 @@
 Tests outside tests/v31 exercise the helper scripts under scripts/ (hooks, monitor, reports).
 """
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -30,6 +31,10 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "office"))
 
 _SCRUBBED_PREFIXES = ("OFFICE_", "HERDR_", "AUTO_OFFICE_")
 
+# The host's own Hermes, resolved before any test edits PATH. Under a test's isolated HOME,
+# "hermes auth list" can hang to its 20 s timeout on every routing call that asks for providers.
+_HOST_HERMES = shutil.which("hermes")
+
 
 @pytest.fixture(scope="session")
 def _empty_office_user_config(tmp_path_factory):
@@ -56,6 +61,28 @@ def _libyaml_safe_load():
         yield
     finally:
         yaml.safe_load = original
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_host_hermes():
+    """Never run the host's real Hermes CLI in process: it reads as absent ({}).
+
+    A fake hermes a test puts on PATH, or passes explicitly, still runs.
+    """
+    from office import hermes_access
+    original = hermes_access.auth_status
+
+    def guarded(*, hermes=None):
+        exe = hermes or shutil.which("hermes")
+        if _HOST_HERMES and exe and os.path.realpath(exe) == os.path.realpath(_HOST_HERMES):
+            return {}
+        return original(hermes=hermes)
+
+    hermes_access.auth_status = guarded
+    try:
+        yield
+    finally:
+        hermes_access.auth_status = original
 
 
 @pytest.fixture(autouse=True)
