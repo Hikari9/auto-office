@@ -576,15 +576,24 @@ class _Tracker:
             held = _workspace_pids(self.base)
             if held is None:
                 return None
+            starts = {}
             for pid in held:
-                # A holder of the workspace is the probe's now, so its start time is what
-                # identifies it from here on, even when its pid was seen before as another process.
                 start = process_start(pid)
                 if start:
-                    self.seen[pid] = start
-                    found.add(pid)
+                    starts[pid] = start
                 elif not _pid_gone(pid):
                     return None  # a holder that runs on with no readable identity: never confirm cleanup
+            if starts:
+                # The start time read after lsof names the holder only if that pid still holds the
+                # workspace afterwards: a pid reused in between by an unrelated process does not
+                # know the random workspace path. A holder is the probe's, so its start time is
+                # what identifies it from here on, even when its pid was seen before as another process.
+                again = _workspace_pids(self.base)
+                if again is None:
+                    return None
+                for pid in starts.keys() & again:
+                    self.seen[pid] = starts[pid]
+                    found.add(pid)
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
 
 

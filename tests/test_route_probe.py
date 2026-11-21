@@ -1070,6 +1070,11 @@ def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeyp
     gone.wait()
     monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {gone.pid})
     assert tracker.scan(None) == set()
+    # a holder is recorded only when the pid still holds the workspace after its start was read
+    calls = iter([{os.getpid() + 1_000_000}, set()])
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: next(calls))
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: "Sat Jan  1 00:00:00 2000")
+    assert tracker.scan(None) == set() and os.getpid() + 1_000_000 not in tracker.seen
 
 
 def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
