@@ -1032,6 +1032,40 @@ def test_a_cleanup_that_cannot_be_observed_is_never_reported_clean(world, monkey
     assert route_probe._terminate_tree(proc.pid, tracker, proc=proc) is False
 
 
+def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
+    """#1296: a long-lived Claude hook daemon outside the probe starts a child for the
+    probe's session and never reaps it. The exited child stays a zombie that carries
+    the probe's lineage, but it runs nothing, so cleanup is still confirmed."""
+    nonce = "nonce-zombie-" + uuid.uuid4().hex
+    env = {**os.environ, route_probe.NONCE_ENV: nonce}
+    zombie = route_probe.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"],
+                                          env=env, start_new_session=True)
+    try:
+        leader = route_probe.subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        leader.wait()
+        tracker = route_probe._Tracker(nonce, None)
+        assert zombie.pid in tracker.observe(None)
+        deadline = time.time() + 10
+        while time.time() < deadline:  # exited but not reaped: this test process is its parent
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(zombie.pid)], capture_output=True, text=True).stdout
+            if state.strip().startswith("Z"):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the child never became a zombie")
+        assert zombie.pid in tracker.scan(None)
+        assert route_probe._running({zombie.pid}) == set()
+        assert route_probe._terminate_tree(leader.pid, tracker, proc=leader, term_wait=0.2, kill_wait=0.2) is True
+    finally:
+        zombie.wait()
+
+
+def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
+    assert route_probe._running({os.getpid()}) == {os.getpid()}
+    monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
+    assert route_probe._running({os.getpid()}) is None
+
+
 # ------------------------------------------------------------------ concurrent database setup (C3)
 
 def test_a_lock_that_outlasts_the_wait_is_a_refusal_not_a_crash_or_a_launch(world, monkeypatch):

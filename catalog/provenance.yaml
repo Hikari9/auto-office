@@ -735,11 +735,11 @@ rows:
       page_title: Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
     supersession_metadata: null
     exact_probe:
-      result: failed
-      at: '2026-11-20'
+      result: passed
+      at: '2026-11-22'
       command: 'office doctor --probe-route claude/claude-opus-5-5@high'
-      harness_version: claude 2.1.329
-      evidence: 'fail (isolation-missing): the probe process group could not be confirmed gone; cached failure attempt edb171d0-9b01a91f65a2211e4e7f8f27 (orchestrator re-probe 2026-11-21 returned the cached record, 7 day cache, no new launch); route stays dispatchable:false pending a follow-up'
+      harness_version: claude 2.1.330
+      evidence: 'model claude-opus-5-5 at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified (attempt e1e142e6-5439aaeca99a4588d71ec939). Supersedes the 2026-11-20 isolation-missing failure (edb171d0), caused by an unreaped zombie child of a Claude hook daemon outside the probe (#1296).'
   claude/claude-opus-5-5@medium:
     price_fields:
       input_per_mtok: 4.0

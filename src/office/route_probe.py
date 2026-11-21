@@ -580,6 +580,28 @@ class _Tracker:
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
 
 
+def _running(pids: set[int]) -> set[int] | None:
+    """The pids that still run. A zombie (an exited child its parent has not reaped)
+    runs no code and writes nothing, so it is not left over (#1296: a long-lived Claude
+    hook daemon outside the probe never reaps the child it started for the probe's
+    session). A pid no longer listed is gone. None when the states cannot be read,
+    so the caller fails closed."""
+    try:
+        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=", "-p",
+                                  ",".join(str(p) for p in sorted(pids))],
+                                 capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode not in (0, 1):  # 1: none of the pids is listed any more
+        return None
+    alive = set()
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit() and not parts[1].startswith("Z"):
+            alive.add(int(parts[0]))
+    return alive & pids
+
+
 def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | None = None, seed: bool = True,
                     term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
     """Stop the probe's process group and every process the tracker attributes to
@@ -589,7 +611,8 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         if proc is not None:
             proc.poll()  # reap the leader so a zombie does not count as alive
         # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
-        return tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+        pids = tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+        return _running(pids) if pids else pids
 
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
         pids = left()
