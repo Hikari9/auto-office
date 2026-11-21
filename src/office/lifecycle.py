@@ -85,7 +85,7 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
           benchmark_refresh: bool = False, from_run: str | None = None,
           plan_review_rounds: int | None = None, review_rounds: int | None = None,
-          card: str | None = None, no_card: bool = False) -> Result:
+          card: str | None = None, no_card: bool = False, fastlane: bool | None = None) -> Result:
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -131,10 +131,17 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
+    from office import fastlane as fastlane_mod
     try:
-        gates = cfg.resolve_gates(gear, risk, config)
+        fastlane_gate = fastlane_mod.pin(gear, fastlane)
+    except ValueError as exc:
+        raise Usage("fastlane-gear", str(exc), next_step="drop --fastlane/--no-fastlane, or use --gear XS|S|M|L|XL")
+    try:
+        gates = cfg.resolve_gates(gear, risk, config, fastlane=fastlane_gate)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
+    if fastlane_gate is not None:
+        gates["fastlane"] = fastlane_gate  # #1297: pinned for the run's life
     gates["run_gear_rationale"] = cfg.gear_rationale(gear, risk, volume=volume,
                                                       interview=interview, adversarial=adversarial)
     if plan_review_rounds is not None:
@@ -265,6 +272,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         if gear in cfg.LEGACY_GEARS:
             res.add(f"compatibility notice: {gear} is a historical preset, not an XS-XL run gear; "
                     "use --gear XS|S|M|L|XL for new work; original review/risk gates remain pinned")
+        if fastlane_line := fastlane_mod.summary({"gates": gates}):
+            res.add(fastlane_line)
         res.add(f"funded gates: plan review={bool(gates['plan_review'])}, independent convergence="
                 f"{bool(gates['code_review'])}, browser={bool(gates['visual'])}; "
                 "scope, checks, authorization and landing remain mandatory")

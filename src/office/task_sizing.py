@@ -150,7 +150,8 @@ def execution_gear(run: dict) -> str | None:
     return run.get("gear") if gates.get("gear_model_version") == "run-gear-1" else None
 
 
-def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None, *, task_count: int | None = None) -> dict:
+def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None, *, task_count: int | None = None,
+                   fastlane: dict | None = None, parallel: bool = False) -> dict:
     """Who executes a task: the orchestrator inline, or a dedicated executor (the default).
 
     XS runs go inline by default; an S run only on a measured estimate that inline beats dedicated dispatch;
@@ -166,6 +167,8 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
         return {"mode": mode, "owner": "orchestrator" if mode == "inline" else "executor", "why": why,
                 "estimated_savings": savings, "decision_version": EXECUTION_VERSION}
 
+    if fastlane is not None:  # #1297: a run that pinned a fastlane policy at start
+        return _fastlane_mode(gear, d, risk, size, estimate, fastlane, parallel)
     if gear not in ("XS", "S", "M"):
         return record("delegated", f"dedicated executor: a {gear or 'legacy'} run never executes inline")
     if risk.get("classification") != "low":
@@ -184,6 +187,67 @@ def execution_mode(gear: str | None, descriptor: dict | None, risk: dict | None,
                                    f"dedicated {estimate['dedicated_text']} {estimate['unit']}")
     return record("inline", f"measured cost-to-success ({gear} run): inline {estimate['inline_text']} vs dedicated "
                             f"{estimate['dedicated_text']} {estimate['unit']} ({estimate['evidence']})", estimate)
+
+
+FASTLANE_EXECUTION_VERSION = "execution-mode-2"
+_LED = ("orchestrator-led with its own strategy (inline or its own subagents, no Office executor routing); "
+        "independent review still required")
+
+
+def evidence_text(text: str | None) -> str | None:
+    """A declared statement with real content (at least 12 characters and 3 words), or None."""
+    value = (text or "").strip()
+    return value if len(value) >= 12 and len(value.split()) >= 3 else None
+
+
+def _fastlane_mode(gear, d: dict, risk: dict, size, estimate, fastlane: dict, parallel: bool) -> dict:
+    """#1297 execution mode. `inline` keeps its recorded name (owner orchestrator) and now means orchestrator-led:
+    the orchestrator may implement inline or use its own subagents. Overflow is checked first and latches
+    delegation for every later decision; then the invoker's flag wins; otherwise Office applies fastlane only when
+    it is sure (low risk, and the XS default or all of quality, time and cost)."""
+
+    def record(mode: str, why: str, savings: dict | None = None, checks: dict | None = None) -> dict:
+        out = {"mode": mode, "owner": "orchestrator" if mode == "inline" else "executor", "why": why,
+               "estimated_savings": savings, "decision_version": FASTLANE_EXECUTION_VERSION,
+               "fastlane": fastlane.get("policy")}
+        if checks is not None:
+            out["fastlane_checks"] = checks
+        return out
+
+    policy = fastlane.get("policy")
+    if gear not in SIZES:
+        return record("delegated", f"dedicated executor: a {gear or 'legacy'} run has no fastlane")
+    if fastlane.get("overflow"):
+        return record("delegated", "dedicated executor: fastlane overflowed, so the remaining work goes to Office executors")
+    if policy == "off":
+        return record("delegated", "dedicated executor: the invoker turned fastlane off (--no-fastlane)")
+    if policy == "on":
+        return record("inline", f"fastlane forced by the invoker's --fastlane flag: {_LED}")
+    cls = risk.get("classification")
+    if cls != "low":
+        return record("delegated", f"dedicated executor: not sure, fastlane is only suggested on low risk (risk is {cls or 'unknown'})")
+    if gear == "XS" and size in ("XS", "S"):
+        return record("inline", f"fastlane: XS default for a bounded low-risk task, {_LED}")
+    if size not in SIZES or str(d.get("task_size_rationale") or "").startswith("insufficient"):
+        return record("delegated", "dedicated executor: not sure, the task size is unknown")
+    quality = evidence_text(d.get("inline_quality"))
+    checks = {"quality": bool(quality), "time": not parallel, "cost": bool(estimate and estimate["beneficial"])}
+    failed = []
+    if not quality:
+        failed.append(f"quality (no inline_quality: statement that the orchestrator's model meets the {size} executor floor)")
+    if parallel:
+        failed.append("time (the plan has tasks Office executors could run in parallel)")
+    if estimate is None:
+        failed.append("cost (no measured inline=<n> dedicated=<n> <unit>: <evidence> estimate)")
+    elif not estimate["beneficial"]:
+        failed.append(f"cost (orchestrator-led {estimate['inline_text']} does not beat executors "
+                      f"{estimate['dedicated_text']} {estimate['unit']})")
+    if failed:
+        return record("delegated", "dedicated executor: not sure, fastlane needs quality, time and cost all in favour; "
+                                   "failed " + "; ".join(failed), checks=checks)
+    return record("inline", f"fastlane ({gear} run, {size} task): quality ({quality}), time (no parallel tasks) and cost "
+                            f"(orchestrator-led {estimate['inline_text']} vs executors {estimate['dedicated_text']} "
+                            f"{estimate['unit']}: {estimate['evidence']}) all favour it; {_LED}", estimate, checks)
 
 
 # ------------------------------------------------------------------ expected budget per size class (#917)

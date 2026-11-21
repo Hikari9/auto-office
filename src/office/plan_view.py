@@ -130,6 +130,9 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
     config = state.pinned_config(run)
     code_review = bool((run.get("gates") or {}).get("code_review"))
     lay = layout(tasks)
+    from office import fastlane
+    fastlane_gate = fastlane.gate(run)
+    fastlane_parallel = fastlane.parallel(tasks) if fastlane_gate is not None else False
     roles = ["executor"] + (["code_reviewer"] if code_review else [])
     quota_snapshot = candidates.probe_quota_snapshot(
         con, roles, family_floors=config.get("model_family_floors")) if tasks else {}
@@ -167,7 +170,8 @@ def preview(con, run: dict, tasks: list[dict]) -> dict:
             sizing = task_sizing.classify({**t, "descriptor": desc}, run_gear=run.get("gear"))
         else:
             sizing = desc or task_sizing.classify(t, run_gear=run.get("gear"))
-        mode = task_sizing.execution_mode(task_sizing.execution_gear(run), {**desc, **sizing}, run.get("risk"), task_count=len(tasks))
+        mode = task_sizing.execution_mode(task_sizing.execution_gear(run), {**desc, **sizing}, run.get("risk"), task_count=len(tasks),
+                                          fastlane=fastlane_gate, parallel=fastlane_parallel)
         out[t["id"]] = {"title": t["title"], "depends": list(t.get("depends") or []), **lay[t["id"]],
                         "task_size": sizing.get("task_size"),
                         "task_size_rationale": sizing.get("task_size_rationale"),

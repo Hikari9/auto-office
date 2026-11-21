@@ -41,6 +41,37 @@ Inline rules (`task_sizing.execution_mode`), applied per task, each recording ow
 
 Elevated risk always delegates. An inline task keeps its fenced lease, scope, self-review subagents, convergence review and landing.
 
+Runs started after #1297 pin a fastlane policy and decide through it (see [Fastlane](#fastlane-1297)); the table above is what runs pinned before it keep.
+
+## Fastlane (#1297)
+
+Fastlane means the **orchestrator leads a task with its own strategy**, instead of Office routing and dispatching an executor. It may implement inline or use its own in-session subagents, with no model floor on those subagents (Rico, 2026-11-21). **One independent code review is always mandatory**, at every gear including XS, with the usual 3-round cap. The gear still decides planning and plan review. Fastlane removes only Office executor routing.
+
+The policy is pinned at `office start` in `gates.fastlane`:
+
+| Policy | Set by | Who leads a task |
+| --- | --- | --- |
+| `on` | `--fastlane` | The orchestrator, at any XS-XL gear, any task size and any risk. The invoker's flag always wins. |
+| `off` | `--no-fastlane` | An Office executor. |
+| `auto` | default | XS gear with an XS or S task on low risk: the orchestrator. Otherwise the orchestrator only when Office is sure: low risk, a known task size, and all three checks below pass. "Not sure" delegates. |
+
+The three `auto` checks compare orchestrator-led with its own strategy against Office-routed executors:
+
+- **Quality:** the task's `inline_quality:` descriptor says why the orchestrator's model meets this task size's executor floor. Office cannot see the orchestrator's model, so the plan review judges this statement.
+- **Time:** no two live tasks could run in parallel (one task, or a dependency chain).
+- **Cost:** `inline_advantage: inline=<n> dedicated=<n> <unit>: <evidence>` is strictly cheaper. "inline" counts the orchestrator plus its subagents.
+
+Each decision is recorded in the task's route record (`execution_mode`, `decision_version: execution-mode-2`, `fastlane`, `fastlane_checks`). Greenfield and runs started before #1297 have no fastlane gate and keep their execution rules.
+
+**Too big:** while an orchestrator-led task is live, two triggers record `gates.fastlane.overflow`:
+
+- the orchestrator's context crosses `orchestrator_context.threshold_tokens` (default 250000; the same measurement and `ctx-high` notice Office already had)
+- the task touches files outside its scope, or more than 2x the base-tree files its scope matches
+
+From then on every task decision delegates. That covers remaining tasks, tasks added by amendment, and `office rerun <task>` of the led task. The `ctx-high` line tells the orchestrator to commit a checkpoint and hand the rest to executors. Inside Herdr it then runs `/compactable` and compacts on `COMPACT NOW`; rico-mode's SO81 watcher prompts the same deduped check. Anywhere else the line is a one-line suggestion to compact. It never blocks or fails a gate.
+
+**Cost:** with `economics.collect: true`, `office economics ingest` also reads Claude subagent transcripts (`<session>/subagents/*.jsonl`) as role `root-subagent`, and attributes root turns inside a led task's dispatch window to that task. With collection off, the route record says `cost_measured: false`: the cost is unknown, never zero.
+
 ## Per-task sizing, profiles and adaptive routing
 
 At plan acceptance, every implementation task gets `task_size`, `task_size_rationale`, `profile`, `task_size_version`, and `profile_version` in its descriptor. Planner-declared evidence is considered; otherwise runtime uses ownership scopes, interfaces, dependency edges, boundedness, work type and uncertainty. Unknown scope defaults to **M**, not XS. XL tasks with independent ownership/interface boundaries carry a **decomposition recommended** flag. Every task in an XL run, including documentation XS tasks, gets its own route.

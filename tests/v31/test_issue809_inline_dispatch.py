@@ -162,7 +162,8 @@ def _xs_plan():
 def _m_plan(estimate=EST):
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
                             "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
-                            f"inline_advantage: {estimate}\n", 1)
+                            f"inline_advantage: {estimate}\n"
+                            "inline_quality: the orchestrator model meets this task size executor floor\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -222,7 +223,8 @@ def test_the_diagram_shows_owner_reason_and_outcome(env):
 
 def test_an_s_run_with_a_measured_estimate_dispatches_inline_and_shows_the_savings(env):
     body = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S\ntask_size_rationale: one bounded file, no interfaces\n"
-                            f"inline_advantage: {EST}\n", 1)
+                            f"inline_advantage: {EST}\n"
+                            "inline_quality: the orchestrator model meets this task size executor floor\n", 1)
     _approved(env, body, "S")
     code, out = env.office("dispatch", "T1")
     assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
@@ -303,26 +305,30 @@ def test_a_relaunch_of_a_delegated_m_task_never_becomes_inline(env):
     assert _mode(env)["mode"] == "delegated"
 
 
-def test_a_multi_task_s_run_dispatches_inline_on_a_measured_estimate_and_delegates_without_one(env):
+def test_a_multi_task_s_run_with_parallel_tasks_delegates_even_with_a_measured_estimate(env):
+    """#1297: a new run decides through fastlane, whose time check fails when Office executors could run two
+    tasks side by side; a measured cost estimate alone no longer leads a parallel task inline."""
     with_estimate = PLAN_TWO.replace("visual: none\n\n### T2", f"visual: none\ntask_size: S\n"
                                      "task_size_rationale: one bounded function in one file\n"
-                                     f"inline_advantage: {EST}\n\n### T2", 1)
+                                     f"inline_advantage: {EST}\n"
+                                     "inline_quality: the orchestrator model meets this task size executor floor\n\n### T2", 1)
     with_estimate = with_estimate.replace("visual: none\n", "visual: none\ntask_size: S\n"
                                           "task_size_rationale: one bounded function in one file\n", 3)
     _approved(env, with_estimate, "S")
     env.office("dispatch", "T1", check=0)
-    assert _mode(env)["mode"] == "inline" and _mode(env)["estimated_savings"]["savings"] == 8
+    mode = _mode(env)
+    assert mode["mode"] == "delegated" and "time" in mode["why"] and mode["fastlane_checks"]["time"] is False, mode
     env.office("dispatch", "T2", check=0)
     con = env.con()
     rows = {r["id"]: json.loads(r["route_json"])["execution_mode"]["mode"]
             for r in con.execute("SELECT id, route_json FROM tasks")}
-    assert rows == {"T1": "inline", "T2": "delegated"}, rows
+    assert rows == {"T1": "delegated", "T2": "delegated"}, rows
 
 
 def test_m_with_two_tasks_is_delegated(env):
     _approved(env, PLAN_TWO, "M")
     env.office("dispatch", "T1", check=0)
-    assert _mode(env)["mode"] == "delegated" and "single-task" in _mode(env)["why"]
+    assert _mode(env)["mode"] == "delegated" and "not sure" in _mode(env)["why"]  # #1297: fastlane's three checks fail
 
 
 def test_an_explicit_launch_override_beats_inline(env):

@@ -285,6 +285,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-rounds", type=int, metavar="N",
                    help="at most N substantive rounds per lane or shared-scope convergence review (default 3; "
                         "config review.max_rounds)")
+    fast = s.add_mutually_exclusive_group()
+    fast.add_argument("--fastlane", dest="fastlane", action="store_const", const=True, default=None,
+                      help="the orchestrator leads every task with its own strategy (inline or its own subagents) "
+                           "instead of Office executor routing, at any size; that size's reviews still apply")
+    fast.add_argument("--no-fastlane", dest="fastlane", action="store_const", const=False,
+                      help="never fastlane: Office routes executors (XS otherwise defaults to fastlane)")
     s.add_argument("--from-run", metavar="RUN",
                    help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
                         "v3.1 work onto the current review contract); the earlier run is not changed")
@@ -872,7 +878,7 @@ def _run(args, unknown) -> int:
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
-                              card=args.card, no_card=args.no_card,
+                              card=args.card, no_card=args.no_card, fastlane=args.fastlane,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
