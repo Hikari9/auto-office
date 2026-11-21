@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from office import adaptive, route_learning, routing
 
 ROOT = Path(__file__).resolve().parents[2]
-IDX = "Artificial Analysis Intelligence Index v4.3.2"
+IDX = "Artificial Analysis Engineering Index (2026-11)"
 
 
 def cand(harness, model, effort="medium", *, out=2.0, inp=0.5, idx=45, tps=100.0, ttft=1000, quota=60,

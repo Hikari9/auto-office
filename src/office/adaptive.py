@@ -64,7 +64,7 @@ DEFAULTS = {
         # local spend once dispatches record money_actual.
         "input_mtok_per_attempt": 0.05, "output_mtok_per_attempt": 0.06,
         "rework_per_review_round": 0.35, "review_rounds_prior": 0.6, "attempts_prior": 1.3,
-        "benchmark_index": "Artificial Analysis Intelligence Index v4.3.2",
+        "benchmark_index": "Artificial Analysis Engineering Index (2026-11)",
         "benchmark_midpoint": 38.0, "benchmark_scale": 8.0, "unbenchmarked_p": 0.45,
     },
 }

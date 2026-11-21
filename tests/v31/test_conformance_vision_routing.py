@@ -88,13 +88,12 @@ def test_a_selectable_route_spends_no_vision_probe(monkeypatch):
 
 
 def test_visual_chain_is_the_locked_order_and_deepseek_has_no_vision_profile():
-    """#910: DeepSeek cannot launch for images, so it left the chain. Rico 2026-11-19: Flash retired, Hydrogen@high leads."""
+    """#910: DeepSeek cannot launch for images, so it left the chain. Rico 2026-11-19 (AA v5 table): Flash retired, Hydrogen@low leads."""
     import yaml
     from office import config
     roles = config.load_yaml(config.default_config_path())["roles"]
     assert [(e["harness"], e["model_id"], e["effort"]) for e in roles["visual_reviewer"]["preferred_seed"]] == [
-        ("agy", "gemini-4-hydrogen", "high"), ("codex", "gpt-6.1-terra", "low"),
-        ("claude", "claude-opus-5-5", "low"), ("agy", "claude-sonnet-5-5", "medium")]
+        ("agy", "gemini-4-hydrogen", "low"), ("codex", "gpt-6.1-terra", "low"), ("claude", "claude-opus-5-5", "low")]
     opencode = yaml.safe_load(open("adapters/seed/opencode.yaml"))
     assert "vision" not in opencode["office_profiles"], \
         "opencode gained a vision profile: probe it, then add the image-capable DeepSeek evidence and update this test"

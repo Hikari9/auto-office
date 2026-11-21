@@ -45,7 +45,8 @@ def test_codex_headless_gate_accepts_written_reply_before_final_chat(env, monkey
     monkeypatch.setattr(fake_agent, "_act", write_reply)
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  **{"codex:code_reviewer": [{"reply": "[review](reply.txt)"}]})
-    env.office("dispatch", "T1", check=0)
+    # The reviewer is codex only when the executor is not: the ranker no longer picks a claude executor by default.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert task_row(env)["status"] == "accepted"
     con = env.con()
     reviewer = con.execute("SELECT id, run_id, launcher FROM dispatches WHERE role='code_reviewer' AND harness='codex'").fetchone()

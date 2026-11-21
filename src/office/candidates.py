@@ -637,7 +637,7 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      discovery: dict | None = None,
                      user_policies: list[dict] | None = None,
                      allow_policies: list[dict] | None = None, manual_hydrogen: bool = False,
-                     task_size: str | None = None) -> tuple[list[dict], list[dict]]:
+                     task_size: str | None = None, vision_probe: bool = False) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -654,6 +654,10 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     dispatchable (#845): an allowed route is a candidate even when its catalog row, a user catalog
     overlay or the family floor says otherwise, and it needs no probe. Routing still applies deny,
     capability, quota and independence rules to it.
+
+    `vision_probe` (office doctor --probe-vision) lists the visual reviewer's exact Hydrogen route without the
+    user's allow so its vision proof can be recorded. The proof alone never dispatches it: routing still needs the
+    user's exact allow (hydrogen_trials.route_refusal).
     """
     from office import onboarding, route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
@@ -694,6 +698,9 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             from office import hydrogen_trials
             if role == "executor" and manual_hydrogen:
                 allowed = {"source": "hydrogen-manual", "rule": label}
+            elif (vision_probe and role == "visual_reviewer"
+                  and row.get("effort") == hydrogen_trials.REVIEW_EFFORTS["visual_reviewer"]):
+                allowed = {"source": "vision-probe", "rule": label}
             else:
                 sizes = [size for size in route_policy.SIZES
                          if hydrogen_trials.user_allowed(route_policy.effective_role_state(identity, role, allow_pols, size))
@@ -1039,15 +1046,17 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root, role=role or "executor",
                           run_id=run_id, scope=scope, claim=claim)
     # #1143 is a hard exception to the legacy #845 quoted allow: even the
-    # user's --as cannot skip exact Hydrogen effort/identity qualification or
+    # user's --as cannot skip exact Hydrogen identity qualification or
     # select XL. No run/scope means there is no trustworthy size classification.
+    # #1282: --as picks the effort for an XS-L task; every refusal names its own cause and next step.
     if cand.get("model_id") == "gemini-4-hydrogen" or cand.get("alias_resolved_to") == "gemini-4-hydrogen":
         from contextlib import closing
         from office import db, hydrogen_trials
         # A pinned Hydrogen reviewer has no task size (H4, #1178; H5): dispatch --review-as, review --as, rerun and the
         # gate's pin checks name only the run. An executor still needs the task that classifies its size.
         if not run_id or (not scope and (role or "executor") not in hydrogen_trials.REVIEW_ROLES):
-            raise Refused("hydrogen-manual-unqualified", "Hydrogen manual routing needs a classified run/task and exact probe")
+            raise Refused("hydrogen-no-task-size", "Hydrogen manual routing needs a run and task that classify its size",
+                          next_step="name the run and task so its size is known, or route it to another harness")
         with closing(db.connect()) as proof_con:
             pinned = state.get_run(proof_con, run_id)
             task = state.get_task(proof_con, run_id, scope)
@@ -1055,11 +1064,11 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             # A manual --review-as is not the exact user allow a Hydrogen review needs (H4, #1178).
             allowed = (role in hydrogen_trials.REVIEW_ROLES and hydrogen_trials.user_allowed(
                 route_policy.effective_role_state(cand, role, required_user_policies(repo_root), size)))
-            denial = hydrogen_trials.manual_conformance(proof_con, cand, role=role or "executor", size=size,
-                                                        user_allowed=allowed)
+            denial = hydrogen_trials.manual_denial(proof_con, cand, role=role or "executor", size=size,
+                                                   user_allowed=allowed)
             if denial:
-                raise Refused("hydrogen-manual-unqualified", denial,
-                              next_step="run an exact conformance probe, verify account authorization and retry manually")
+                code, message, next_step = denial
+                raise Refused(code, message, next_step=next_step)
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -1267,6 +1276,9 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         (run.get("risk") or {}).get("size_class")
     seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role,
                                                    executor_policy=executor_policy)
+    if seed and role == "executor" and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
+        # AA v5: a frontend-heavy task tries its size's agy gemini-* rung first. Same routes, same gates.
+        seed = executor_slates.frontend_bias(seed, descriptor_for_route, (task_for_route or {}).get("scope")) or seed
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
                       *live]

@@ -182,7 +182,7 @@ roles:
       # Intelligence, not effort, is the floor (#183). Scores are version-pinned;
       # a candidate without a score for this exact index version fails closed.
       min_effort: none
-      min_benchmark_index: {index_name: Artificial Analysis Intelligence Index v4.3.2, min_score: 31}
+      min_benchmark_index: {index_name: Artificial Analysis Engineering Index (2026-11), min_score: 31}
       allowed_sources: ["local-evidence:", "documented:"]
   worker:
     required_capabilities: []
@@ -190,11 +190,10 @@ roles:
       min_effort: low
       allowed_sources: ["local-evidence:", "documented:"]
   code_reviewer:
+    # Rico 2026-11-19: Luna high then Opus low only. Hydrogen and the rest leave code review.
     preferred_seed:
       - {model_id: luna, harness: codex, effort: high}
-      - {model_id: deepseek-v4.1-flash-free, harness: opencode, effort: max}
       - {model_id: opus, harness: claude, effort: low}
-      - {model_id: claude-opus-5-5, harness: agy, effort: low}
     # The review order is the whole order: no unseeded route is substituted when these are unavailable.
     strict_seed: false # legacy seed is advisory; only explicit user allow/deny is authoritative
     required_capabilities: [review]
@@ -210,8 +209,8 @@ roles:
       min_effort: low
       allowed_sources: ["local-evidence:"]
   # Visual judgment is a separate specialist from code review (charter 8B).
-  # Preference order Hydrogen@high -> Terra low -> Opus low -> Sonnet medium (Hydrogen needs the user's exact
-  # allow; a seed entry alone is not one); a route qualifies only after an
+  # Preference order Hydrogen@low -> Terra low -> Opus low (Hydrogen is conditional: it needs the user's exact
+  # allow of agy/gemini-4-hydrogen@low; a seed entry alone is not one); a route qualifies only after an
   # image-sensitive conformance probe of its exact harness/model/effort path.
   # Reviewer independence is per agent, not per model family: a reviewer is
   # always a fresh dispatch, so it may share the producer's model.
@@ -220,11 +219,10 @@ roles:
       # Independent visual reviewer chain: primary then ordered fallbacks (#910).
       # A route without an eligible catalog row or a vision-capable adapter is
       # rejected with its real reason and routing moves to the next entry.
-      # Rico 2026-11-19: Gemini 3.8 Flash retired; Hydrogen@high first (it still needs the user's exact allow).
-      - {model_id: gemini-4-hydrogen, harness: agy, effort: high}
+      # Rico 2026-11-19 (AA v5 table): Hydrogen@low first, conditional on the user's exact allow.
+      - {model_id: gemini-4-hydrogen, harness: agy, effort: low, conditional: true}
       - {model_id: gpt-6.1-terra, harness: codex, effort: low}
       - {model_id: claude-opus-5-5, harness: claude, effort: low}
-      - {model_id: claude-sonnet-5-5, harness: agy, effort: medium}
     required_capabilities: [review, vision]
     floor:
       min_effort: low

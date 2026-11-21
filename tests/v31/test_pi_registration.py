@@ -21,9 +21,9 @@ from pathlib import Path
 import pytest
 
 import fake_agent
-from conftest import GOOD_ADD, approved_run, enable_decommissioned_mimo, retired_mimo_rows, task_row
+from conftest import GOOD_ADD, approved_run, retired_mimo_rows, task_row
 
-from office import adapters, candidates, configcmd, routing
+from office import adapters, candidates, configcmd, executor_slates, routing, user_catalog
 from office.state import Refused
 
 PI = "pi"
@@ -179,6 +179,16 @@ def pi_on_path(tmp_path, monkeypatch):
     _fake_pi_script(tmp_path)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     return tmp_path
+
+
+def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low") -> None:
+    """A dispatchable user-catalog copy of the archived MiMo row (#786) with a fixture Engineering Index score.
+
+    The pi launch tests exercise the harness (preflight, timeout, conformance), not the model. The retired row has no
+    published score on the executor policy's index, and the size floor would refuse it, so the fixture carries one."""
+    row = next(r for r in retired_mimo_rows(harness) if r["model_id"] == model_id)
+    scores = {**(row.get("benchmark_indexes") or {}), executor_slates.INDEX: 60.0}
+    user_catalog.save({"models": [{**row, "effort": effort, "dispatchable": True, "benchmark_indexes": scores}]})
 
 
 def _install_pi(env):
@@ -649,7 +659,8 @@ def _pi_review(env, reviewer, *, review_as=True):
     _install_pi(env)
     harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=reviewer)
-    args = ["dispatch", "T1", "--as", "codex/gpt-6-luna@high"]
+    # Terra high clears the Engineering Index floor of every size; the executor is incidental to the pi reviewer under test.
+    args = ["dispatch", "T1", "--as", "codex/gpt-6.1-terra@high"]
     if review_as:
         args += ["--review-as", LUNA]
     return env.office(*args, env=PI_LUNA_ENV, check=0)

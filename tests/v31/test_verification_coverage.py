@@ -379,6 +379,9 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
     env.git("commit", "-qm", "fixture: actual scoped validation")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
     plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    # The scoped-gate digests are monkeypatched in this process, so the executor's submit must run in it too: agy
+    # executors run as a real process the patch cannot reach.
+    env.hide_agy = True
     approved_run(env, plan=plan,
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
                                               "T2": {"mul.py": GOOD_MUL}}, "submit": True}],
@@ -465,6 +468,9 @@ def pytest_collection_modifyitems(config, items):
     env.git("update-ref", "refs/remotes/origin/main", "HEAD")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
     plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    # The scoped-gate digests are monkeypatched in this process, so the executor's submit must run in it too: agy
+    # executors run as a real process the patch cannot reach.
+    env.hide_agy = True
     approved_run(env, plan=plan,
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
                                               "T2": {"mul.py": GOOD_MUL}}, "submit": True}],

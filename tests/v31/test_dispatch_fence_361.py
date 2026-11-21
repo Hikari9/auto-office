@@ -838,7 +838,8 @@ def test_notify_worker_refuses_a_pane_herdr_cannot_describe(env, monkeypatch, re
 
 @pytest.mark.approved
 def test_notify_worker_sends_to_a_real_shaped_pane_tied_to_its_agent_record(env, monkeypatch):
-    result, sends, _ = _nudged(env, monkeypatch, lambda d: {"cwd": "/tmp/office/T1", "agent": "claude"},
-                               record=lambda d: {"name": dispatch.herdr_agent_name(d["id"]), "agent": "claude",
+    # The pane reports the harness the dispatch ran on; the ranker no longer picks claude by default.
+    result, sends, _ = _nudged(env, monkeypatch, lambda d: {"cwd": "/tmp/office/T1", "agent": d["harness"]},
+                               record=lambda d: {"name": dispatch.herdr_agent_name(d["id"]), "agent": d["harness"],
                                                  "pane_id": "w1:p7"}, raw=True)
     assert result["sent"] is True and sends == [("w1:p7", "office status has an update")]

@@ -14,7 +14,7 @@ INSTALLED_CLAUDE = "2.1.311"
 INSTALLED_CODEX = "0.130.0"
 SONNET = "claude/claude-sonnet-5-5@high"
 PLAIN = "codex/gpt-6-luna@low"  # no shipped executor rule, so no size scope
-SHIPPED_SONNET_BY_SIZE = "deny XS,S,M (shipped), allow L (shipped), neutral XL (default)"
+SHIPPED_SONNET_BY_SIZE = "deny XS,S (shipped), allow M (shipped), neutral L,XL (default)"
 
 
 @pytest.fixture
@@ -72,8 +72,8 @@ def test_the_unsized_row_carries_by_size_as_a_map(isolated):
     assert row["by_size"] == {
         "XS": {"state": "deny", "source": "shipped"},
         "S": {"state": "deny", "source": "shipped"},
-        "M": {"state": "deny", "source": "shipped"},
-        "L": {"state": "allow", "source": "shipped"},
+        "M": {"state": "allow", "source": "shipped"},
+        "L": {"state": "neutral", "source": "default"},
         "XL": {"state": "neutral", "source": "default"},
     }
 
@@ -82,7 +82,7 @@ def test_a_user_size_rule_is_named_with_its_source_and_grouped_by_state(isolated
     write_rules(isolated, {"role": "executor", "route": SONNET, "state": "allow", "sizes": ["XS"]})
     result = view()
     assert line_for(result, SONNET).endswith(
-        "; by size: allow XS (user), deny S,M (shipped), allow L (shipped), neutral XL (default)")
+        "; by size: allow XS (user), deny S (shipped), allow M (shipped), neutral L,XL (default)")
     assert row_for(result, SONNET)["by_size"]["XS"] == {"state": "allow", "source": "user"}
 
 
@@ -101,10 +101,11 @@ def test_an_unsized_user_rule_covers_every_size_so_no_suffix_is_shown(isolated):
 
 
 def test_a_sized_view_shows_no_by_size_breakdown(isolated):
-    result = view(size="M")
+    result = view(size="S")
     assert not [ln for ln in result.lines if "by size" in ln]
     assert not [r for r in result.data["effective"] if "by_size" in r]
     assert row_for(result, SONNET)["state"] == "deny"
+    assert row_for(view(size="M"), SONNET)["state"] == "allow"
 
 
 APPLY_LINE = ("running runs apply this rule at their next routing decision; "

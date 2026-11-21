@@ -452,3 +452,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_752_recheck_next_requalifies.py` | keep |
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |
+| `tests/test_frontend_bias.py` | keep |
+| `tests/test_issue_1282_hydrogen_gate.py` | keep |
+| `tests/v31/test_engineering_index_null_score.py` | keep |
+| `tests/v31/test_issue1297_fastlane.py` | keep |

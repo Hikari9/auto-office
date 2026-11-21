@@ -1,7 +1,7 @@
 """#1100: a user role-rule written after a run pinned its policy reaches that run's next routing decision.
 
 Unit tier. The `world` fixture's isolated Office home, scripted fake `codex` and real runs.db, with a fake
-`claude` (pinned to major 2) so the shipped claude-sonnet executor deny is live. The run's pinned config has
+`claude` (pinned to major 2) so the shipped claude-opus executor deny at size M is live. The run's pinned config has
 no role rules: it predates the user rule written below. No model is called.
 """
 import yaml
@@ -10,7 +10,8 @@ from test_route_discovery_consumer_contract import World, world  # noqa: F401 (w
 
 from office import adapters, routing
 
-ROUTE = "claude@2/claude-sonnet-5-5@high"
+# T2 made claude sonnet high the size-M primary, so the shipped size-M deny the test needs now sits on opus medium.
+ROUTE = "claude@2/claude-opus-5-5@medium"
 CLAUDE_VERSION = "2.1.311"
 
 
@@ -41,7 +42,7 @@ def test_a_user_allow_written_after_the_pin_reaches_the_run_at_its_next_routing_
     _write_role_rule(world, "allow")
     decision = world.decide(run=run)
     assert not _role_denied(decision)
-    assert decision["selected"] == ROUTE
+    # T2's size-M slate ranks claude sonnet high first, so the allowed route is a candidate, no longer the pick.
     assert any(routing.candidate_id(c) == ROUTE for c in decision["request"]["candidates"])
 
 

@@ -74,9 +74,11 @@ def test_hermes_covers_the_named_benchmarked_models_with_provider_qualified_slug
 
 
 def test_every_hermes_row_has_a_canonical_benchmark_under_another_harness():
+    # A canonical row has some benchmark score; the current index (AA Engineering Index)
+    # may be absent for it, and then the Hermes row inherits that absence (see below).
     canonical = {(r["model_id"], r["effort"]) for r in _rows()
                  if r["invocation_harness"] != "hermes" and not r.get("alias_family")
-                 and (r.get("benchmark_indexes") or {}).get(_index()) is not None}
+                 and any(v is not None for v in (r.get("benchmark_indexes") or {}).values())}
     for r in _hermes_rows(_rows()):
         assert (r["model_id"], r["effort"]) in canonical, f"hermes/{r['model_id']}@{r['effort']} has no canonical benchmark"
 
@@ -84,12 +86,20 @@ def test_every_hermes_row_has_a_canonical_benchmark_under_another_harness():
 def test_hermes_score_equals_the_canonical_score_at_the_same_effort_without_duplicate_rows():
     index = _index()
     rows = candidates.catalog_rows()
+    scored = unscored = 0
     for h in _hermes_rows(rows):
         sources = [r for r in rows if r["invocation_harness"] != "hermes" and not r.get("alias_family")
                    and (r["model_id"], r["effort"]) == (h["model_id"], h["effort"])
                    and (r.get("benchmark_indexes") or {}).get(index) is not None]
-        assert sources
-        assert {s["benchmark_indexes"][index] for s in sources} == {h["benchmark_indexes"][index]}
+        inherited = (h.get("benchmark_indexes") or {}).get(index)
+        if sources:
+            assert {s["benchmark_indexes"][index] for s in sources} == {inherited}
+            scored += 1
+        else:
+            # No canonical score at this index: the Hermes row stays unscored (never 0).
+            assert inherited is None, f"hermes/{h['model_id']}@{h['effort']} invented {inherited!r}"
+            unscored += 1
+    assert scored, "no Hermes row inherited a current-index score"
     with open(shipped_catalog.files()[2], newline="", encoding="utf-8") as f:
         assert not [r for r in csv.DictReader(f, delimiter="\t") if r["route_key"].startswith("hermes/")]
 

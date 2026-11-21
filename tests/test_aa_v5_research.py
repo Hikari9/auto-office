@@ -62,14 +62,18 @@ def test_eng_index_reverses_coding_order_without_policy_activation():
 def test_v4_production_pin_and_unchanged_catalog():
     from office import shipped_catalog
     m = shipped_catalog.load()
-    assert m["benchmark_index_version"] == "Artificial Analysis Intelligence Index v4.3.2"
+    assert m["benchmark_index_version"] == "Artificial Analysis Engineering Index (2026-11)"
     assert m["models"]
     assert all("Artificial Analysis Intelligence Index v5.0.1" not in (row.get("benchmark_indexes") or {})
                for row in m["models"])
     from office import adaptive
     assert adaptive.settings({})["priors"]["benchmark_index"] == m["benchmark_index_version"]
     # The extracted evidence is standalone and import never mutates v4 catalog.
-    assert evidence.manifest()["production_index_unchanged"] == m["benchmark_index_version"]
+    # Planner and reviewer floors keep the Intelligence Index v4.3.2 rows: the extraction never rewrote them.
+    assert evidence.manifest()["production_index_unchanged"] == "Artificial Analysis Intelligence Index v4.3.2"
+    assert all("Artificial Analysis Intelligence Index v4.3.2" in (row.get("benchmark_indexes") or {})
+               for row in m["models"] if row["model_id"] in ("gpt-6-luna", "claude-opus-5-5") and row["effort"] in ("high", "low")
+               and row.get("invocation_harness") != "hermes")  # Hermes rows inherit scores at load
 
 
 def test_untrusted_source_or_cross_edition_must_fail_closed(tmp_path):
@@ -361,3 +365,49 @@ def test_shadow_doc_names_no_local_paths():
     for rel in ("docs/benchmarks/aa-v5.0.1-shadow-862.md", "plugin-dist/docs/benchmarks/aa-v5.0.1-shadow-862.md"):
         text=(evidence.ROOT/rel).read_text()
         assert not re.search(r"~/|/Users/|/home/|/tmp/|\.local/share", text), rel
+
+
+ROOT = Path(__file__).resolve().parents[1]
+EI = "Artificial Analysis Engineering Index (2026-11)"
+FETCH_MODELS = {"Claude Opus 5.5": ("claude/claude-opus-5-5", "agy/claude-opus-5-5"), "Gemini 4 Neon": ("agy/gemini-4-neon",),
+                "GPT-6.2 Sol": ("codex/gpt-6.2-sol",), "Gemini 4 Argon": ("agy/gemini-4-argon",)}
+
+
+def _ei_evidence():
+    root = ROOT / "research" / "aa-v5.0.1"
+    lines = {}
+    for line in (root / "observations.jsonl").read_text().splitlines():
+        o = json.loads(line)
+        lines.setdefault(o["route_key"], []).append(o["engineering_index"])
+    for line in (root / "aa-ei-fetch-2026-11-19.jsonl").read_text().splitlines():
+        o = json.loads(line)
+        for base in FETCH_MODELS[o["model"]]:
+            lines.setdefault(f"{base}@{o['effort']}", []).append(o["engineering_index"])
+    return lines
+
+
+def test_engineering_index_rows_trace_to_one_evidence_line_and_nulls_make_no_row():
+    from office import shipped_catalog
+    evidence_lines = _ei_evidence()
+    rows = {r["route_key"] if "route_key" in r else f"{r['invocation_harness']}/{r['model_id']}@{r['effort']}": r
+            for r in shipped_catalog.load()["models"]}
+    scored = {k: r["benchmark_indexes"][EI] for k, r in rows.items() if (r.get("benchmark_indexes") or {}).get(EI) is not None}
+    assert scored and all(k in evidence_lines and scored[k] in evidence_lines[k] for k in scored)
+    # A null evidence score yields no EI row, and no sibling effort is substituted.
+    assert all(any(s is not None for s in evidence_lines[k]) for k in scored)
+    assert "agy/gemini-4-argon@low" not in scored and (rows["agy/gemini-4-argon@low"]["benchmark_indexes"] or {}).get(EI) is None
+    assert scored["agy/gemini-4-neon@medium"] == 60.9146628246753 and scored["codex/gpt-6.2-sol@high"] == 58.7055365800866
+    # Every non-null evidence route that exists in the catalog has its row.
+    assert all(k in scored for k, v in evidence_lines.items() if k in rows and any(s is not None for s in v))
+
+
+def test_executor_floors_use_the_engineering_index_and_reviewers_keep_v432():
+    from office import executor_slates
+    assert executor_slates.POLICY["benchmark_index"] == EI
+    assert executor_slates.POLICY["floors"] == {"XS": 31, "S": 37, "M": 40, "L": 45, "XL": 52}
+    text = (ROOT / "config" / "config.default.yaml").read_text()
+    seg = lambda a, b: text[text.index(f"\n  {a}:\n"):text.index(f"\n  {b}:\n")]
+    assert EI in seg("executor", "worker") and "v4.3.2" not in seg("executor", "worker")
+    assert "Intelligence Index v4.3.2" in seg("plan_reviewer", "executor") and EI not in seg("plan_reviewer", "executor")
+    assert "Intelligence Index v4.3.2" in seg("code_reviewer", "browser_verifier")
+    assert text.count(EI) == 1 and text.count("Intelligence Index v4.3.2") == 2  # only the executor floor moved

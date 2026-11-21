@@ -277,8 +277,8 @@ spent). No reference means "fidelity unmeasured". Visual input keys hash only pr
 the reference bytes, the viewport/state contract and the environment, so unrelated edits reuse the
 verdict and a reference change invalidates it.
 
-Judgment uses the `visual_reviewer` role. The shipped preference is agy Hydrogen@high (it needs the user's exact
-allow), then Terra low, Opus low and Sonnet medium. Gemini 3.8 Flash is retired in every role (Rico 2026-11-19).
+Judgment uses the `visual_reviewer` role. The shipped preference is agy Hydrogen@low (conditional: it needs the user's exact
+allow), then Terra low and Opus low. Gemini 3.8 Flash is retired in every role (Rico 2026-11-19).
 agy's vision launch is read-only plan mode. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
 `--route` is exempt). A route qualifies
 only after `conformance.probe_vision` — a generated image with random digits and a coloured square,

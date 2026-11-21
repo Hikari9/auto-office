@@ -10,7 +10,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from office import adapters, candidates, config as cfg, configcmd, hydrogen_trials, route_policy, scoring
+from office import adapters, candidates, config as cfg, configcmd, executor_slates, hydrogen_trials, route_policy, scoring
 from office.result import Result
 
 
@@ -57,10 +57,12 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
     if hydrogen_trials.is_hydrogen(candidate or row):
         candidate = candidate or {**row, "harness": row.get("invocation_harness")}
-        rules = ("Hydrogen executes, and reviews code, plans and visuals only as the exact user-allowed agy/gemini-4-hydrogen@high; "
-                 "exact agy effort per size (XS/low, S/medium, M/high, L/high); "
+        rules = ("Hydrogen executes XS-L tasks and reviews plans (@high) and visuals (@low) only as the exact user-allowed "
+                 "agy/gemini-4-hydrogen route for that role; never code review or XL; "
+                 "automatic effort per size (XS/low, S/medium, M/high, none for L); "
                  "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
-                 "is true, at most 3 per rolling 20 and one per run; manual --as and the automatic canary "
+                 "is true, at most 3 per rolling 20 and one per run; a manual --as takes any effort for XS-L; "
+                 "manual --as and the automatic canary "
                  "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "
                  "canary limits (enabled flag, S/M, risk) but still needs that pass")
         if canary and canary.get("budget"):
@@ -86,8 +88,8 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
             refusal = f"{candidate.get('harness')} has no launch profile for this role"
         proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
         if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
-            # H3 (#1168), H5, visual (Rico 2026-11-19): the exact user-allowed @high route is a voting reviewer, never a canary trial.
-            kind = {"plan_reviewer": "plan", "visual_reviewer": "visual"}.get(role, "code")
+            # H5, visual (Rico 2026-11-19): the exact user-allowed route is a voting reviewer, never a canary trial.
+            kind = {"plan_reviewer": "plan", "visual_reviewer": "visual"}[role]
             if not proof:
                 return True, f"user allow; exact probe passed; a voting {kind} reviewer; " + rules
             return False, f"user allow as a {kind} reviewer; {rules}{proof}"
@@ -131,6 +133,41 @@ def _by_size_text(by_size: dict) -> str:
     for size, verdict in by_size.items():
         groups.setdefault((verdict["state"], verdict["source"]), []).append(size)
     return ", ".join(f"{state} {','.join(sizes)} ({source})" for (state, source), sizes in groups.items())
+
+
+def _slate_entry(row: dict, role: str) -> str:
+    """One slate or seed rung as harness/model@effort, with what a conditional rung needs to dispatch."""
+    harness = row.get("harness") or "*"
+    route = f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else "")
+    if not row.get("conditional"):
+        return route
+    if hydrogen_trials.MODEL in route:
+        gate = (f"the user's exact allow: office route allow {route} --role {role}" if role in hydrogen_trials.REVIEW_ROLES
+                else "the Hydrogen gate (hydrogen_trials)")
+        return f"{route} (conditional, not dispatching without {gate})"
+    return f"{route} (conditional)"
+
+
+def _slate_view(roles: tuple[str, ...], cfg_effective: dict, size: str | None) -> tuple[list[str], dict]:
+    """Executor slates in rung order per size, and each reviewer role's preferred_seed order (AA v5)."""
+    lines, data = [], {"executor_slates": {}, "preferred_seed": {}}
+    if "executor" in roles:
+        for s in ([size] if size else list(route_policy.SIZES)):
+            rows = executor_slates.POLICY["executor_preferred"].get(s, ())
+            data["executor_slates"][s] = [{"rung": row.get("rung"), "route": _slate_entry({**row, "conditional": False}, "executor"),
+                                           "conditional": bool(row.get("conditional"))} for row in rows]
+            if rows:
+                lines.append(f"  executor slate {s}: " + " > ".join(
+                    f"{row.get('rung')} {_slate_entry(row, 'executor')}" for row in rows)
+                    + "; a frontend-heavy task moves its agy gemini-* rung to rung 1 for that task only")
+    for r in roles:
+        if r in ("executor", "worker"):
+            continue
+        seed = candidates.role_policy(cfg_effective, r).get("preferred_seed") or []
+        if seed:
+            data["preferred_seed"][r] = [_slate_entry({**row, "conditional": False}, r) for row in seed]
+            lines.append(f"  {r} preferred_seed: " + " > ".join(_slate_entry(row, r) for row in seed))
+    return lines, data
 
 
 def policy(*, role: str | None = None, effective: bool = False, size: str | None = None) -> Result:
@@ -196,7 +233,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                                                  adapter, kind, row.get("invocation_model_id") or row["model_id"], row["effort"])),
                                              candidate=c, role=r, size=size, config=cfg_effective, probe=probe,
                                              canary=canary)
-            result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
+            result = {"role": r, "route": f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else ""),
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
                       "dispatches": dispatches, "dispatch_reason": why}
@@ -216,6 +253,10 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
             lines += role_lines
     if con is not None:
         con.close()
+    slate_data = {}
+    if show_rows:
+        slate_lines, slate_data = _slate_view(roles, cfg_effective, size)
+        lines += slate_lines
     rows = candidates.catalog_rows()
     for r in roles:
         seed = route_policy.preferred_seed_policy(r, candidates.role_policy(cfg_effective, r).get("preferred_seed"))
@@ -243,7 +284,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
     lines.append("reshuffle in one command: office route allow|neutral|deny|clear <route>[,<route>...] --role <role>; "
                  "order a role with office config roles.<role>.preferred_seed")
     return Result(lines=lines, data={"policy": p, "effective": output, "legacy_denied": legacy,
-                                     "catalog_overlay_disabled": overlay})
+                                     "catalog_overlay_disabled": overlay, **slate_data})
 
 
 def change(action: str, *, role: str | None, route: str | None, wildcard: bool = False,

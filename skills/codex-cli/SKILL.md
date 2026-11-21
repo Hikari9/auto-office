@@ -83,3 +83,4 @@ Read the resume banner's `workdir:` line before letting it run — a resume issu
 `-c model_reasoning_effort=` is required on resume too — a resume inherits the session's context but **not** its effort, and silently degrades to the config default without it.
 
 Attribute invocation/stdio bugs and false liveness reads to adapter, resume/workdir inheritance to harness, quota walls to quota/account, and logical implementation defects to the producer model/role only when evidence supports it.
+- Executor routing (AA v5): codex Terra is the rung 3 executor for XS low, S medium and M high, and Sol is rung 2 for L medium and XL high. Floors follow the Artificial Analysis Engineering Index (2026-11). Hydrogen is a conditional rung 2 for XS-M and is not a code reviewer: code review is Luna high then Opus low.

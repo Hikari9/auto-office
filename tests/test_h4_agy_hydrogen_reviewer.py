@@ -1,4 +1,5 @@
-"""H4 (#1178): agy reviews code only as the exact user-allowed Hydrogen@high route.
+"""H4 (#1178): agy reviews only as the exact user-allowed Hydrogen@high route. Code review left Hydrogen in AA v5, so
+these tests use the plan reviewer, which shares the reviewer launch profile.
 
 The shipped agy adapter declares a read-only (`--mode plan`) reviewer profile scoped by `routes` to
 gemini-4-hydrogen-high@high. These tests run the real seed adapter and catalog rows through candidate
@@ -28,7 +29,7 @@ def env(tmp_path, monkeypatch):
 
 def _config(*routes):
     return {"routing": {"user_policy": {"role_rules": [
-        {"role": "code_reviewer", "route": r, "state": "allow"} for r in routes]}}}
+        {"role": "plan_reviewer", "route": r, "state": "allow"} for r in routes]}}}
 
 
 def _live(monkeypatch, cfg: dict) -> dict:
@@ -70,7 +71,7 @@ def test_profile_for_opens_only_the_hydrogen_route():
 
 def test_build_candidates_admits_only_hydrogen_high_as_agy_reviewer(env):
     cfg = _config(ALLOW, "agy@1/gemini-4-hydrogen@medium", "agy@1/claude-opus-5-5@low")
-    built, skipped = candidates.build_candidates(None, "code_reviewer", probe=False,
+    built, skipped = candidates.build_candidates(None, "plan_reviewer", probe=False,
                                                  allow_policies=[route_policy.user_policy(cfg)])
     agy_built = [c for c in built if c["harness"] == "agy"]
     assert [(c["model_id"], c["effort"]) for c in agy_built] == [("gemini-4-hydrogen", "high")]
@@ -99,7 +100,7 @@ def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env, 
     cfg = _live(monkeypatch, _config(ALLOW))
     agy = _agy()
     with db.connect(env / "runs.db") as con:
-        built, _ = candidates.build_candidates(con, "code_reviewer", probe=False,
+        built, _ = candidates.build_candidates(con, "plan_reviewer", probe=False,
                                                allow_policies=[route_policy.user_policy(cfg)])
         cand = next(c for c in built if c["harness"] == "agy")
         fp = route_probe.fingerprint(cand, agy)
@@ -108,10 +109,10 @@ def test_route_role_dispatches_the_allowed_hydrogen_reviewer_after_a_probe(env, 
                     (route_probe.key(cand, agy), fp["harness"], fp["harness_version"], fp["adapter_hash"],
                      fp["profile"], fp["invocation_model_id"], fp["effort"], "pass", now_iso()))
         con.commit()
-        seeded = {**cfg, "roles": {"code_reviewer": {"preferred_seed": [
+        seeded = {**cfg, "roles": {"plan_reviewer": {"preferred_seed": [
             {"model_id": "gemini-4-hydrogen", "harness": "agy", "effort": "high"}]}}}
         decision = candidates.route_role(con, seeded, {"gear": "S", "risk": {"size_class": "S"}},
-                                         "code_reviewer", probe=False, observe=True)
+                                         "plan_reviewer", probe=False, observe=True)
     assert decision["selected"] == routing.candidate_id(cand), decision
 
 
@@ -132,10 +133,10 @@ def test_build_argv_renders_plan_mode_for_hydrogen_and_refuses_other_agy_models(
 def test_manual_review_bypass_is_refused_without_the_exact_allow():
     c = {"model_id": hydrogen_trials.MODEL, "harness": "agy", "effort": "high",
          "invocation_model_id": "gemini-4-hydrogen-high"}
-    assert "exact allow" in hydrogen_trials.route_refusal(c, role="code_reviewer", size=None, manual=True)
-    assert "exact allow" in hydrogen_trials.manual_conformance(None, c, role="code_reviewer", size=None)
+    assert "exact allow" in hydrogen_trials.route_refusal(c, role="plan_reviewer", size=None, manual=True)
+    assert "exact allow" in hydrogen_trials.manual_conformance(None, c, role="plan_reviewer", size=None)
     # With the allow, only the probe evidence is left to check.
-    assert "runs.db" in hydrogen_trials.manual_conformance(None, c, role="code_reviewer", size=None,
+    assert "runs.db" in hydrogen_trials.manual_conformance(None, c, role="plan_reviewer", size=None,
                                                            user_allowed=True)
 
 
@@ -145,15 +146,15 @@ def test_a_pinned_hydrogen_reviewer_needs_only_the_run_not_a_task(env, monkeypat
     db.connect().close()
     # Past the scope gate: the remaining refusals are the exact allow, then the probe receipt.
     with pytest.raises(Refused, match="exact allow"):
-        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config={}, run_id="r1")
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="plan_reviewer", config={}, run_id="r1")
     with pytest.raises(Refused, match="conformance receipt"):
-        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_live(monkeypatch, _config(ALLOW)),
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="plan_reviewer", config=_live(monkeypatch, _config(ALLOW)),
                                      run_id="r1")
     # An executor still needs the task that classifies its size.
-    with pytest.raises(Refused, match="classified run/task"):
+    with pytest.raises(Refused, match="classify its size"):
         candidates.declared_decision("agy/gemini-4-hydrogen@medium", role="executor", config={}, run_id="r1")
-    with pytest.raises(Refused, match="classified run/task"):
-        candidates.declared_decision(HYDROGEN, flag="--review-as", role="code_reviewer", config=_config(ALLOW))
+    with pytest.raises(Refused, match="classify its size"):
+        candidates.declared_decision(HYDROGEN, flag="--review-as", role="plan_reviewer", config=_config(ALLOW))
 
 
 def test_route_policy_reports_no_profile_for_non_executor_roles():
@@ -161,15 +162,15 @@ def test_route_policy_reports_no_profile_for_non_executor_roles():
     cand = {"harness": "agy", "model_id": "gemini-4-hydrogen", "effort": "high"}
     state = {"state": "allow", "source": "user", "rule": ALLOW}
     pass_probe = {"result": "pass"}
-    ok, why = routecmd._dispatch_view(row, state, True, False, candidate=cand, role="code_reviewer",
+    ok, why = routecmd._dispatch_view(row, state, True, False, candidate=cand, role="plan_reviewer",
                                       probe=pass_probe)
     assert ok is False and "no launch profile" in why
-    ok, why = routecmd._dispatch_view(row, state, False, True, candidate=cand, role="code_reviewer",
+    ok, why = routecmd._dispatch_view(row, state, False, True, candidate=cand, role="plan_reviewer",
                                       probe=pass_probe)
     assert ok is False and "not installed" in why
-    ok, why = routecmd._dispatch_view(row, state, True, True, candidate=cand, role="code_reviewer",
+    ok, why = routecmd._dispatch_view(row, state, True, True, candidate=cand, role="plan_reviewer",
                                       probe=pass_probe)
-    assert ok is True and why.startswith("user allow; exact probe passed; a voting code reviewer")
+    assert ok is True and why.startswith("user allow; exact probe passed; a voting plan reviewer")
     assert "dispatches (" not in why
 
 
@@ -259,3 +260,16 @@ def test_a_herdr_agent_pane_without_the_supervisor_still_gets_no_log_reply(tmp_p
     from office import gates
     d, ddir, reply = _pane_dispatch(tmp_path, "print('VERDICT: APPROVED\\nNEXT: land')", supervisor="")
     assert gates._reply_text(d, ddir, reply) == ""
+
+
+def test_code_review_is_not_a_hydrogen_role_even_with_the_exact_allow(env, monkeypatch):
+    cfg = {"routing": {"user_policy": {"role_rules": [
+        {"role": "code_reviewer", "route": ALLOW, "state": "allow"}]}}}
+    with db.connect(env / "runs.db") as con:
+        built, _ = candidates.build_candidates(con, "code_reviewer", probe=False,
+                                               allow_policies=[route_policy.user_policy(cfg)])
+    assert not [c for c in built if hydrogen_trials.is_hydrogen(c)]
+    c = {"model_id": hydrogen_trials.MODEL, "harness": "agy", "effort": "high",
+         "invocation_model_id": "gemini-4-hydrogen-high"}
+    assert "code review left Hydrogen" in hydrogen_trials.route_refusal(
+        c, role="code_reviewer", size=None, manual=True, user_allowed=True)

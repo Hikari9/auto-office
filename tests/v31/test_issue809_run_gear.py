@@ -438,6 +438,8 @@ def test_a_revision_that_drops_the_run_gear_recommendation_clears_it(env):
 
 SONNET_CLAUDE_MEDIUM = "claude@1/claude-sonnet-5-5@medium"
 SONNET_AGY_MEDIUM = "agy@1/claude-sonnet-5-5@medium"
+SONNET_CLAUDE_HIGH = "claude@1/claude-sonnet-5-5@high"
+SONNET_AGY_HIGH = "agy@1/claude-sonnet-5-5@high"
 
 
 def test_sonnet_fallback_can_be_truncated_at_slate_boundary():
@@ -470,32 +472,39 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
             candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60),
             candidate("gpt-6.1-terra", "medium", 44),
             candidate("glm-5.3-flash", "max", 42, harness="opencode")]
+    # T2 moved the M seed to Sonnet/Terra at high effort, so the M cases below use a high-effort pool.
+    m_hi = [candidate("claude-sonnet-5-5", "high", 45, harness="claude"),
+            candidate("claude-sonnet-5-5", "high", 41, harness="agy", remaining=60),
+            candidate("gpt-6.1-terra", "high", 44),
+            candidate("glm-5.3-flash", "max", 42, harness="opencode")]
     # The M slate's leading routes are the effective policy's seed routes the pool holds (#871), not a frozen tuple.
-    # Exact effort too: since #1143 the M seed names Terra High, which this Terra Medium pool does not hold.
-    pooled = {(c["model_id"], c["harness"], c["effort"]) for c in pool}
+    # Exact effort too: the M seed names Sonnet and Terra at high, which the medium pool above does not hold.
+    pooled = {(c["model_id"], c["harness"], c["effort"]) for c in m_hi}
     seed = [(e["model_id"], e["harness"]) for e in executor_slates.ideal_seed("M")
             if (e["model_id"], e.get("harness"), e["effort"]) in pooled]
     assert seed, "the M seed must name at least one pooled route"
-    m_slate = decide("M", pool, gear="M")["selection_disclosure"]["slate"]
-    assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed)]} == \
-        {(harness, model) for model, harness in seed}, m_slate
+    m_slate = decide("M", m_hi, gear="M")["selection_disclosure"]["slate"]
+    # The new-gear Sonnet self-fallback promotes the pooled agy Sonnet route next to claude Sonnet, so the leading
+    # routes are the pooled seed routes plus that one failover route.
+    assert {(e["route"].split("@")[0], e["route"].split("/", 1)[1].split("@")[0]) for e in m_slate[:len(seed) + 1]} == \
+        {(harness, model) for model, harness in seed} | {("agy", "claude-sonnet-5-5")}, m_slate
     # M new gear: a route ranked between the pair pushes the agy route down, so the fallback moves it back up.
-    m_pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
-              candidate("gpt-6.1-terra", "medium", 43),
-              candidate("claude-sonnet-5-5", "medium", 41, harness="agy", remaining=60)]
+    m_pool = [candidate("claude-sonnet-5-5", "high", 45, harness="claude"),
+              candidate("gpt-6.1-terra", "high", 43),
+              candidate("claude-sonnet-5-5", "high", 41, harness="agy", remaining=60)]
     m_new = decide("M", m_pool, gear="M")
     assert [(f["from"], f["to"]) for f in m_new["routing"]["sonnet_self_fallbacks"]] == \
-        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], m_new["routing"]
-    assert [e["route"] for e in m_new["selection_disclosure"]["slate"][:2]] == [SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM]
+        [(SONNET_CLAUDE_HIGH, SONNET_AGY_HIGH)], m_new["routing"]
+    assert [e["route"] for e in m_new["selection_disclosure"]["slate"][:2]] == [SONNET_CLAUDE_HIGH, SONNET_AGY_HIGH]
     # Legacy express keeps the agy route where utility put it, with no fallback record.
     legacy = decide("M", m_pool, gear="express")
     assert "sonnet_self_fallbacks" not in legacy["routing"]
     assert [e["route"] for e in legacy["selection_disclosure"]["slate"]] == \
-        [SONNET_CLAUDE_MEDIUM, "codex@1/gpt-6.1-terra@medium", SONNET_AGY_MEDIUM]
-    # Same effort only: a Sonnet agy route at high is not the fallback for claude medium; the medium route is.
-    mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60)], gear="M")
+        [SONNET_CLAUDE_HIGH, "codex@1/gpt-6.1-terra@high", SONNET_AGY_HIGH]
+    # Same effort only: a Sonnet agy route at medium is not the fallback for claude high; the high route is.
+    mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "medium", 47, harness="agy", remaining=60)], gear="M")
     assert [(f["from"], f["to"]) for f in mixed["routing"]["sonnet_self_fallbacks"]] == \
-        [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], mixed["routing"]
+        [(SONNET_CLAUDE_HIGH, SONNET_AGY_HIGH)], mixed["routing"]
     # L new gear at high effort: the seed already puts the agy route straight after claude at the same effort.
     l_pool = [candidate("claude-sonnet-5-5", "high", 47, harness="claude"),
               candidate("claude-sonnet-5-5", "high", 47, harness="agy", remaining=60),
@@ -509,9 +518,10 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
         [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xs["routing"]
     assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
     assert "sonnet_self_fallbacks" not in decide("XS", pool, gear="express")["routing"]
-    xl_pool = [candidate("claude-sonnet-5-5", "medium", 50, harness="claude"),
-               candidate("gpt-6.1-terra", "medium", 49),
-               candidate("claude-sonnet-5-5", "medium", 48, harness="agy", remaining=60)]
+    # The XL subtask floor is an Engineering Index of 52 (T2), so the fixture scores clear it in the same order.
+    xl_pool = [candidate("claude-sonnet-5-5", "medium", 55, harness="claude"),
+               candidate("gpt-6.1-terra", "medium", 54),
+               candidate("claude-sonnet-5-5", "medium", 53, harness="agy", remaining=60)]
     xl = decide("XL", xl_pool, gear="XL")
     assert [(f["from"], f["to"]) for f in xl["routing"]["sonnet_self_fallbacks"]] == \
         [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xl["routing"]

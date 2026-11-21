@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.0
+
+Executor routing follows the Artificial Analysis Engineering Index (2026-11) table: size floors XS 31, S 37, M 40, L 45, XL 52 and Haiku 5.5 / Sonnet 5.5 / Opus 5.5 first rungs, with conditional Hydrogen at XS low, S medium and M high only, a frontend bias that moves the size's agy gemini-* rung to rung 1, and Hydrogen no longer a code reviewer (Luna high then Opus low).
+
 ## 3.30.1
 
 Cheaper per-command lifecycle polls (#1302). An Office process reads its own start time from `ps` once and reuses it (claims, supervisor identity); start times of other pids are still read live on every check. `repo_identity` asks Git for the toplevel and common dir in one `rev-parse`. A lane-gate test that made 467 subprocess calls now makes 242.

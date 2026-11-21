@@ -24,7 +24,8 @@ QUOTE = "I switched the pane to sonnet"
 def live(request, monkeypatch):
     env = request.getfixturevalue("env")
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
-    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    # The harness-fixed refusals below need a claude dispatch; the adaptive ranker no longer picks claude by default.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", env=EXTERNAL, check=0)
     for k, v in EXTERNAL.items():
         monkeypatch.setenv(k, v)
     return env
@@ -42,7 +43,9 @@ def _snapshot(con):
 
 
 def _route_events(con):
-    return [json.loads(r[0]) for r in con.execute("SELECT payload_json FROM events WHERE kind='route.changed'")]
+    events = [json.loads(r[0]) for r in con.execute("SELECT payload_json FROM events WHERE kind='route.changed'")]
+    # the `live` fixture's own `--as` dispatch records one orchestrator reroute; it is setup, not under test
+    return [e for e in events if not e["reason"].startswith("orchestrator choice")]
 
 
 pytestmark = pytest.mark.approved
