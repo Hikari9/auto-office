@@ -60,15 +60,37 @@ def test_worker_interactive_argv_is_pinned(hermes):
                     "--reasoning", "high", "--yolo", "--in", "/w"]
 
 
-@pytest.mark.parametrize("kind", ["reviewer", "vision"])
-def test_hermes_has_no_reader_profile_because_it_cannot_be_read_only(hermes, kind):
-    """--yolo plus the terminal toolset can write anywhere, `--in` only moves the cwd and a post-run fingerprint cannot
-    prevent writes, so reviewer and vision dispatch stay disabled until an OS-enforced read-only checkout exists."""
-    assert adapters.profile(hermes, kind) is None
-    assert "review" not in hermes["capabilities"] and "reviewer_readonly_args" not in hermes
+def test_reviewer_is_restored_with_the_accepted_risk(hermes):
+    """Requirement r3: Hermes is a default reviewer with full tools. --yolo and the terminal toolset can write the
+    reviewed worktree; the post-run fingerprint detects that, and the source note records the accepted risk."""
+    assert "review" in hermes["capabilities"]
+    prof = adapters.profile(hermes, "reviewer")
+    assert prof["submit"] == "shell" and prof["herdr_kind"] == "hermes" and prof["verify_worktree_unchanged"] is True
+    assert "--in" not in prof["argv"] and "--toolsets" not in prof["argv"]
+    assert "accepted risk" in hermes["source_notes"] and "cannot prevent" in hermes["source_notes"]
+    assert "--accept-hooks" in hermes["trust_justifications"]
+
+
+def test_reviewer_headless_argv_keeps_the_usage_readback(hermes):
+    argv, prof = adapters.build_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD,
+                                     usage_file=Path("/d/usage.json"))
+    assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "high", "--yolo", "--usage-file", "/d/usage.json"]
+    assert prof["readback"] == "hermes-usage" and prof["prompt_flag"] == "--oneshot="
+
+
+def test_reviewer_interactive_argv_is_pinned(hermes):
+    argv, kind = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
+    assert kind == "hermes"
+    assert argv == ["--yolo", "--accept-hooks", "-m", SLUG, "--reasoning", "high"]
+
+
+def test_hermes_has_no_vision_profile(hermes):
+    """Vision stays off: Hermes reads images only through its vision toolset, which is not restored here."""
+    assert adapters.profile(hermes, "vision") is None
+    assert adapters.interactive_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD) is None
     with pytest.raises(adapters.AdapterError):
-        adapters.build_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY)
-    assert adapters.interactive_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY) is None
+        adapters.build_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY)
 
 
 @pytest.mark.parametrize("effort,flag", [("none", "none"), ("low", "low"), ("medium", "medium"), ("high", "high"),
