@@ -1,2 +1,2 @@
 """The one place the Auto Office release version lives. Bump it here and nowhere else (see AGENTS.md)."""
-__version__ = "3.28.17"
+__version__ = "3.30.0"

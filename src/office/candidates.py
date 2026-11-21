@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, greenfield, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, greenfield, harness_preference, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
 from office import config as office_config
 
 KIND_FOR_ROLE = {
@@ -42,7 +42,30 @@ _QUOTA_TTL = 60.0
 def catalog_rows() -> list[dict]:
     data = shipped_catalog.load()
     from office import user_catalog
-    return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
+    return inherit_benchmarks(model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or [])))))
+
+
+# Harnesses that re-launch a model another harness already benchmarked: their rows carry no scores of their own.
+BENCHMARK_INHERITORS = frozenset({"hermes"})
+
+
+def inherit_benchmarks(rows: list[dict]) -> list[dict]:
+    """Give each inheriting row the benchmark fields of its canonical model at the same effort.
+
+    The canonical row is a non-inheriting, non-alias row of the same model (an alias resolves to its target) with
+    scores. A row with no such source keeps what it has, so a missing source shows as an unscored route.
+    """
+    canonical: dict[tuple, dict] = {}
+    for r in rows:
+        if r.get("invocation_harness") not in BENCHMARK_INHERITORS and not r.get("alias_family") and r.get("benchmark_indexes"):
+            canonical.setdefault((r.get("model_id"), r.get("effort")), r)
+    out = []
+    for r in rows:
+        source = canonical.get((r.get("alias_resolved_to") or r.get("model_id"), r.get("effort"))) \
+            if r.get("invocation_harness") in BENCHMARK_INHERITORS else None
+        out.append({**r, "benchmark_indexes": source["benchmark_indexes"], "task_benchmarks": source.get("task_benchmarks")}
+                   if source else r)
+    return out
 
 
 _ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date",
@@ -656,6 +679,9 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             continue
         if row.get("status_reason"):
             state = {**state, "reason": row["status_reason"]}
+        if adapter and adapters.installed(adapter) and (why := route_policy.provider_unreachable(row)):
+            skipped.append({"candidate": label, "category": route_policy.PROVIDER_UNREACHABLE, "reason": why})
+            continue
         floor = below_family_floor(row.get("model_id"), family_floors)
         allowed = None
         identity = {"harness": harness, "model_id": row.get("model_id"),
@@ -1322,6 +1348,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "hydrogen_descriptor": descriptor_for_route,
         "hydrogen_independent_review": (run.get("gates") or {}).get("code_review") is True,
     }
+    if prefs := harness_preference.settings(config):
+        request["harness_preference"] = prefs
     if role == "executor" and not override:
         from office import hydrogen_trials
         # Budget from the live config (a global runs.db cap); enabled and the user allow stay pinned.

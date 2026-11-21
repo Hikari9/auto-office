@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from office import paths, read_scope
+from office import hermes_access, paths, read_scope
 from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
@@ -504,6 +504,52 @@ def run_preflight(adapter: dict, model: str) -> tuple[bool, str]:
     return True, ""
 
 
+HERMES = "hermes"
+
+
+def _is_hermes(adapter: dict | None) -> bool:
+    return os.path.basename(executable(adapter or {}) or "") == HERMES
+
+
+def launch_env(adapter: dict | None, env: dict[str, str]) -> dict[str, str]:
+    """`env` as this harness's launch should see it: Hermes loses every HERMES_* variable but HERMES_HOME (they
+    steer the model, provider, config and session, so a dispatch could run another route than the one pinned)."""
+    return hermes_access.launch_env(env) if _is_hermes(adapter) else env
+
+
+def shell_env_prelude(adapter: dict | None) -> str | None:
+    """A shell line for a pane that clears what `launch_env` clears; None when the harness needs none."""
+    return hermes_access.scrub_shell_line() if _is_hermes(adapter) else None
+
+
+def pane_launch_env(adapter: dict | None, directory: Path) -> dict[str, str]:
+    """Extra env a pane-hosted agent needs so Herdr can detect it. A git-installed Hermes is a shell wrapper
+    around `python3 -I -c`, which Herdr cannot see; a shim in `directory` runs the launcher script instead."""
+    return hermes_access.write_launcher_shim(directory / "bin") if _is_hermes(adapter) else {}
+
+
+def classify_failure(adapter: dict | None, text: str) -> dict | None:
+    """The adapter failure signature (id, attribution, pattern) matched by the tail of a failed run's output.
+    Matching ignores the exit code: Hermes exits 2 for any failed turn, so the text decides whether the quota or
+    the account is at fault and not the model."""
+    tail = (text or "")[-4000:].lower()
+    for sig in (adapter or {}).get("failure_signatures") or []:
+        if isinstance(sig, dict) and sig.get("pattern") and str(sig["pattern"]).lower() in tail:
+            return sig
+    return None
+
+
+def readback_problem(adapter: dict | None, prof: dict | None, slug: str, usage_path: Path | None, *, code: int | None) -> str | None:
+    """Why a finished run's own report names a different route than `slug`, or None. Only a profile that declares
+    `readback: hermes-usage` is checked. A clean exit must carry a report with completed=true; a failed run is judged only when it left one."""
+    if (prof or {}).get("readback") != "hermes-usage" or usage_path is None:
+        return None
+    usage = hermes_access.read_usage(usage_path)
+    if usage is None and code != 0:
+        return None
+    return hermes_access.readback_problem(slug, usage, require_completed=code == 0)
+
+
 def toml_path(path: Path) -> str:
     """`path`, resolved, as a TOML basic string. Codex keys `projects` trust on
     the canonical path (macOS `/tmp` is `/private/tmp`), and a JSON string is a
@@ -518,10 +564,12 @@ def toml_path(path: Path) -> str:
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
                include_dirs: list[Path] | None = None, session_id: str | None = None,
-               resume_args: list[str] | None = None) -> tuple[list[str], dict]:
+               resume_args: list[str] | None = None, usage_file: Path | None = None) -> tuple[list[str], dict]:
     """Return (argv, profile). Placeholders are substituted element-wise; the
     prompt never passes through a shell. `session_id` is appended through the
-    adapter's `session.assign_arg` when the harness accepts an assigned id."""
+    adapter's `session.assign_arg` when the harness accepts an assigned id.
+    `{provider}` and `{model_name}` split a `provider:model` slug (no provider: the flag before it is dropped);
+    `{usage_file}` is where the harness writes its run report (`usage_file`, else beside the reply or cwd)."""
     prof = profile(adapter, kind)
     if not prof:
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
@@ -533,6 +581,8 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     include_dirs = read_scope.with_read_dirs(kind, include_dirs, output)
     # The one directory a sandboxed reviewer may write: its dispatch dir, else cwd.
     sandbox_dir = Path(output).parent if output else Path(cwd)
+    pinned_provider, model_name = hermes_access.expected_route(model)
+    usage_path = usage_file or (Path(output).with_name("usage.json") if output else Path(cwd) / "usage.json")
     argv = [exe]
     for raw in prof.get("argv") or []:
         arg = str(raw)
@@ -549,6 +599,10 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
         if "{effort}" in arg and mapped_effort is None:
             # This harness has no knob for this effort: drop the flag and the
             # value that follows it, rather than passing a literal 'None'.
+            if argv and argv[-1].startswith("-"):
+                argv.pop()
+            continue
+        if arg == "{provider}" and not pinned_provider:
             if argv and argv[-1].startswith("-"):
                 argv.pop()
             continue
@@ -599,6 +653,8 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             deny = [r for c in cmds for r in (f"Bash({c})", f"Bash({c} *)")] if granted else ["Bash"]
             arg = arg.replace("{bash_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
+               .replace("{provider}", pinned_provider or "").replace("{model_name}", model_name)
+               .replace("{usage_file}", str(usage_path))
                .replace("{last_message}", str(Path(output).with_name("last-message.txt") if output else Path(cwd) / "last-message.txt"))
                .replace("{cwd_toml}", toml_path(cwd))
                .replace("{sandbox_dir_toml}", toml_path(sandbox_dir))
