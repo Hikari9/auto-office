@@ -440,10 +440,16 @@ def _herdr(env, **files) -> dict:
     return {**EXTERNAL, "FAKE_HERDR_DIR": str(state), "OFFICE_EXECUTOR_IDLE_STALL_S": "0"}
 
 
-def _as_herdr(env) -> dict:
-    """Make T1's dispatch a running pane-hosted one, as if herdr had launched it."""
+def _as_herdr(env, harness: str | None = None) -> dict:
+    """Make T1's dispatch a running pane-hosted one, as if herdr had launched it.
+
+    `harness` pins the dispatch's harness. A test that relies on herdr's `working` status passes a non-codex
+    harness: Office ignores `working` on codex panes (herdr keeps reporting it after the turn ends), and the
+    automatic route can land on codex (#1313 moved it there, and the harness pick varies by run)."""
     con = env.con()
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p1', status='running' WHERE task_id='T1' AND role='executor'")
+    if harness:
+        con.execute("UPDATE dispatches SET harness=?, adapter_id=? WHERE task_id='T1' AND role='executor'", (harness, harness))
     con.commit()
     return dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' AND role='executor'").fetchone())
 
@@ -455,7 +461,7 @@ def _wait(env, e, timeout="1"):
 def test_a_working_agent_is_not_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="thinking")
-    _as_herdr(env)
+    _as_herdr(env, harness="claude")
     code, out = _wait(env, e)
     assert code == 124 and not re.search(r"\bstall", out), out
 
@@ -636,7 +642,7 @@ def test_a_session_limit_is_a_usage_limit_stall_despite_busy_markers(env):
 def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
-    _as_herdr(env)
+    _as_herdr(env, harness="claude")
     code, out = _wait(env, e)
     assert code == 124 and not re.search(r"\bstall", out), out
 
