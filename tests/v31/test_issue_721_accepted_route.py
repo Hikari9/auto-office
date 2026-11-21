@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from conftest import task_row
+from conftest import strip_gear_model, task_row
 from test_revoke_accepted import EXTERNAL, _accepted
 
 NEW = "codex/gpt-6-astra@low"
@@ -42,6 +42,7 @@ def test_accepted_task_records_future_route_without_changing_accepted_evidence(e
 
 def test_revoke_of_new_acceptance_work_does_not_restore_stale_acceptance(env):
     accepted = _accepted(env)
+    strip_gear_model(env)  # the replacement route has no exact-effort Engineering Index score for a size floor
     env.office("amend", "T1", "--add-accept", "reject nonnumeric arguments", "--", "tighten input handling",
                env=EXTERNAL, check=0)
     code, out = env.office("revoke", "T1", "--reason", "change executor")

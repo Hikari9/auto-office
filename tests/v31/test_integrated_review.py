@@ -151,7 +151,8 @@ def test_xl_size_alone_is_not_integration_risk(env):
     _start(env, plan=PLAN_TWO, extra=("--size-class", "XL"),
            executor=[{"write_by_task": WORK, "submit": True}], convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", "T2", "--parallel", check=0)
-    assert '"high": true' in _run_row(env)["risk_json"]
+    # XS-XL size is complexity, never risk: an XL size class leaves the run's integration flag off.
+    assert '"integration": false' in _run_row(env)["risk_json"]
     assert _scopes(env) == ["L-T1", "L-T2"]
     assert _decision(env)["required"] is False
 

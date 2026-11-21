@@ -46,7 +46,7 @@ def virtual_wait_clock(monkeypatch):
 
 
 def _go(env):
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("status", check=0)  # consume the dispatch events
 
