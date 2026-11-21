@@ -72,7 +72,8 @@ def test_cli_new_run_stores_independent_size_profile_and_gear_funding(env):
     desc = state.get_task(con, rid, "T1")["descriptor"]
     assert run["gear"] == "XS" and run["gates"]["gear_model_version"] == "run-gear-1"
     assert desc["task_size"] == "XS" and desc["profile"] == "lean"
-    assert not run["gates"]["code_review"] and run["gates"]["review_contract"] == contract.CONVERGENCE
+    # #1297: a new XS run is fastlane by default, and fastlane always funds one independent review.
+    assert run["gates"]["code_review"] and run["gates"]["review_contract"] == contract.CONVERGENCE
     diagram = con.execute("SELECT preview_json FROM plans WHERE run_id=?", (rid,)).fetchone()[0]
     assert json.loads(diagram)["tasks"]["T1"]["task_size"] == "XS"
 

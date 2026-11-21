@@ -457,7 +457,7 @@ board:
 orchestrator_context:
   enabled: true
   # Set to 0 to disable context-high notices.
-  threshold_tokens: 272000
+  threshold_tokens: 250000
 # Per-executor context cap (#939). Crossing it signals the orchestrator; Office
 # never rotates an executor by itself. `office executor-context <task>` records the
 # orchestrator's choice. 0 or enabled: false disables the signal and rotation.

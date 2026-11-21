@@ -189,7 +189,10 @@ def _transcripts(harness: str, session_id: str) -> list[Path]:
     if not safe:
         return []
     if harness == "claude":
-        return sorted((transcripts.claude_home() / "projects").glob(f"*/{safe}.jsonl"))
+        # #1297: Claude Code writes each in-session subagent's turns to <session>/subagents/*.jsonl; read them too,
+        # so an orchestrator-led task's subagent spend is not silently missing from the ledger.
+        projects = transcripts.claude_home() / "projects"
+        return sorted(projects.glob(f"*/{safe}.jsonl")) + sorted(projects.glob(f"*/{safe}/subagents/*.jsonl"))
     if harness == "codex":
         return sorted((transcripts.codex_home() / "sessions").glob(f"*/*/*/rollout-*{safe}.jsonl"))
     return []
@@ -239,11 +242,16 @@ def record(con, events: list[dict], **assoc) -> int:
     for ev in events:
         row = {"run_id": None, "dispatch_id": None, "task_id": None, "role": None, "phase": None,
                "attribution": None, "quota_units": None, **ev}
+        led = assoc.get("led")
         for k, v in assoc.items():
-            if v is not None and (k not in ev or ev.get(k) is None):
+            if k != "led" and v is not None and (k not in ev or ev.get(k) is None):
                 row[k] = v
+        if callable(led) and row.get("dispatch_id") is None and (hit := led(row.get("occurred_at"))):
+            row["task_id"], row["dispatch_id"] = hit
         if callable(row.get("attribution")):
             row["attribution"] = row["attribution"](row.get("occurred_at"))
+        if callable(row.get("task_id")):
+            row["task_id"] = row["task_id"](row.get("occurred_at"))
         con.execute(_UPSERT, {**row, "ledger_version": LEDGER_VERSION, "recorded_at": now})
     return len(events)
 
@@ -261,6 +269,38 @@ def _window(start: str | None, end: str | None):
             return "outside"
         return "office"
     return attribution
+
+
+SUBAGENT_ROLE = "root-subagent"
+
+
+def _led_task(con, run_id: str):
+    """Map a root-session turn's time to (task id, dispatch id) of the orchestrator-led (#1297 fastlane / inline)
+    task whose dispatch window holds it, or None. Office derives both from its own dispatch rows, so task reports
+    count the led task's root and subagent spend; a usage file still cannot pick a task."""
+    windows = []
+    try:
+        rows = con.execute("SELECT d.id, d.task_id, d.started_at, d.ended_at, t.route_json FROM dispatches d JOIN tasks t "
+                           "ON t.run_id=d.run_id AND t.id=d.task_id WHERE d.run_id=? AND d.started_at IS NOT NULL",
+                           (run_id,)).fetchall()
+    except Exception:  # an older schema without these columns has no led tasks to attribute
+        return None
+    for r in rows:
+        try:
+            mode = ((json.loads(r["route_json"] or "{}") or {}).get("execution_mode") or {}).get("mode")
+        except ValueError:
+            continue
+        if mode == "inline":
+            windows.append((r["task_id"], r["id"], r["started_at"], r["ended_at"]))
+    if not windows:
+        return None
+
+    def task_at(at: str | None) -> tuple[str, str] | None:
+        for task_id, dispatch_id, start, end in windows:
+            if _window(start, end)(at) == "office":
+                return task_id, dispatch_id
+        return None
+    return task_at
 
 
 def ingest(con, run: dict, *, file: str | None = None, harness: str | None = None, session: str | None = None,
@@ -299,6 +339,7 @@ def ingest(con, run: dict, *, file: str | None = None, harness: str | None = Non
         end = b["ended_at"] or run.get("terminal_at")
         sources.append((b["harness"], b["session_id"], {"run_id": run["id"], "role": "root",
                         "attribution": _window(b["bound_at"], end)}))
+    led = _led_task(con, run["id"])
     for h, sid, assoc in sources:
         files = _transcripts(h, sid) if h in PARSERS else []
         if not files:
@@ -307,8 +348,13 @@ def ingest(con, run: dict, *, file: str | None = None, harness: str | None = Non
         counts["sessions"] += 1
         for path in files:
             events = PARSERS[h](path, sid)
+            row_assoc = assoc
+            if assoc.get("role") == "root":
+                # Root turns inside an orchestrator-led task's window belong to that task; subagent files are
+                # reported as their own role so the subagent spend stays visible.
+                row_assoc = {**assoc, "led": led, **({"role": SUBAGENT_ROLE} if path.parent.name == "subagents" else {})}
             with db.transaction(con):
-                counts["events"] += record(con, events, **assoc)
+                counts["events"] += record(con, events, **row_assoc)
     lines.append(f"ingested {counts['events']} usage event(s) from {counts['sessions']} session transcript(s)"
                  + (f"; {counts['missing_transcripts']} session(s) had no readable transcript"
                     if counts["missing_transcripts"] else ""))

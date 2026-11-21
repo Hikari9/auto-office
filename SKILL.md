@@ -68,7 +68,7 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
 3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
-   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for near-empty repos only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read;
+   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for near-empty repos only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read; `--fastlane`/`--no-fastlane` (orchestrator-led with its own strategy, inline or own subagents, independent review always; XS defaults to it, `docs/xs-xl-run-gear.md`);
    unset risk is unknown, never low: an unknown run keeps independent code review under every gear until the plan classifies it, see "Risk floor and the lightweight path").
    Never ask about benchmark refreshes; benchmark refreshes are maintainer-only and are not available in the installed plugin.
 4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.
@@ -233,7 +233,7 @@ it. It composes one integration branch, runs file-disjoint Herdr lanes and exits
 ## Resume
 
 After a restart or compaction: `office resume` (or `office resume <id>` when several runs exist). It reconstructs pending
-work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 272000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
+work from runs.db (`office context` adds a bounded snapshot with stale references flagged); never start a new run to continue an old one. Only on the user's request, `office start --from-run <run>` moves an old run's work onto the current review contract. When `office status` shows `ctx-high:`, wait for a natural boundary and run `/compactable`; compact only on `COMPACT NOW`, then verify compaction and continue. It fires once per high-context episode and rearms below the configured threshold. Set `orchestrator_context.threshold_tokens` to change the 250000-token default, `0` or `orchestrator_context.enabled: false` to disable it.
 
 ## Executor context cap
 
