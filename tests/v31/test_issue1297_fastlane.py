@@ -18,7 +18,7 @@ from office import task_sizing
 CONFIG = cfg.load_yaml(cfg.default_config_path())
 LOW = {"classification": "low"}
 EST = "inline=14 dedicated=22 minutes: reuses the loaded session and skips an eight minute brief and spin-up"
-QUALITY = "the orchestrator runs Opus at high effort, above the M executor floor"
+QUALITY = "claude/claude-opus-5-5@high: the orchestrator runs Opus at high effort, above the M executor floor"
 AUTO = {"version": fastlane.VERSION, "policy": "auto", "by": "default"}
 ON = {**AUTO, "policy": "on", "by": "flag"}
 OFF = {**AUTO, "policy": "off", "by": "flag"}
@@ -290,6 +290,25 @@ def test_a_callable_task_id_is_resolved_per_row(tmp_path):
     ev = {"harness": "claude", "session_id": "s", "turn_id": "t", "event_id": "e1", "model": "m",
           "occurred_at": "2026-11-21T00:00:05Z", "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0,
           "cache_write_tokens": 0, "cost_usd": None, "cost_kind": "unknown", "source": "claude-transcript", "source_path": "x"}
-    economics.record(con, [ev], run_id="r", role="root-subagent", task_id=lambda at: "T1" if at else None)
-    row = con.execute("SELECT task_id, role FROM usage_events").fetchone()
-    assert (row["task_id"], row["role"]) == ("T1", "root-subagent")
+    economics.record(con, [ev], run_id="r", role="root-subagent", led=lambda at: ("T1", "D1") if at else None)
+    row = dict(con.execute("SELECT task_id, dispatch_id, role FROM usage_events").fetchone())
+    assert (row["task_id"], row["dispatch_id"], row["role"]) == ("T1", "D1", "root-subagent")
+    # Task reports count the row: its task comes through the led dispatch Office recorded.
+    assert economics._task_of(row) == "T1"
+
+
+def test_a_route_below_the_task_size_floor_fails_the_quality_check():
+    # Luna at high scores below the L floor; Opus at high clears it.
+    low = _desc("L", inline_advantage=EST, inline_quality="codex/gpt-6-luna@high: luna is plenty for this work")
+    out = task_sizing.execution_mode("L", low, LOW, fastlane=AUTO)
+    assert out["mode"] == "delegated" and out["fastlane_checks"]["quality"] is False
+    assert "requires" in out["why"] and "gpt-6-luna" in out["why"]
+    assert task_sizing.orchestrator_floor(QUALITY, "L") is None
+
+
+def test_an_unknown_or_missing_orchestrator_route_fails_the_quality_check():
+    assert "not in the catalog" in task_sizing.orchestrator_floor("nope/model-x@high: a made up route here", "M")
+    assert "must start with" in task_sizing.orchestrator_floor("the orchestrator is strong enough for this", "M")
+    out = task_sizing.execution_mode("M", _desc("M", inline_advantage=EST,
+                                                inline_quality="the orchestrator is strong enough for this"), LOW, fastlane=AUTO)
+    assert out["mode"] == "delegated" and out["fastlane_checks"]["quality"] is False

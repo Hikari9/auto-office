@@ -163,7 +163,7 @@ def _m_plan(estimate=EST):
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
                             "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
                             f"inline_advantage: {estimate}\n"
-                            "inline_quality: the orchestrator model meets this task size executor floor\n", 1)
+                            "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -224,7 +224,7 @@ def test_the_diagram_shows_owner_reason_and_outcome(env):
 def test_an_s_run_with_a_measured_estimate_dispatches_inline_and_shows_the_savings(env):
     body = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S\ntask_size_rationale: one bounded file, no interfaces\n"
                             f"inline_advantage: {EST}\n"
-                            "inline_quality: the orchestrator model meets this task size executor floor\n", 1)
+                            "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n", 1)
     _approved(env, body, "S")
     code, out = env.office("dispatch", "T1")
     assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
@@ -311,7 +311,7 @@ def test_a_multi_task_s_run_with_parallel_tasks_delegates_even_with_a_measured_e
     with_estimate = PLAN_TWO.replace("visual: none\n\n### T2", f"visual: none\ntask_size: S\n"
                                      "task_size_rationale: one bounded function in one file\n"
                                      f"inline_advantage: {EST}\n"
-                                     "inline_quality: the orchestrator model meets this task size executor floor\n\n### T2", 1)
+                                     "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n\n### T2", 1)
     with_estimate = with_estimate.replace("visual: none\n", "visual: none\ntask_size: S\n"
                                           "task_size_rationale: one bounded function in one file\n", 3)
     _approved(env, with_estimate, "S")

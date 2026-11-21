@@ -57,7 +57,7 @@ The policy is pinned at `office start` in `gates.fastlane`:
 
 The three `auto` checks compare orchestrator-led with its own strategy against Office-routed executors:
 
-- **Quality:** the task's `inline_quality:` descriptor says why the orchestrator's model meets this task size's executor floor. Office cannot see the orchestrator's model, so the plan review judges this statement.
+- **Quality:** the task's `inline_quality:` descriptor starts with the orchestrator's own route, `<harness>/<model>@<effort>: <why>`. Office looks the route up in the catalog and applies the executor floor for the task's size (#809). A route that is missing from the catalog or below the floor fails the check, and the plan review judges whether the named route is the real orchestrator.
 - **Time:** no two live tasks could run in parallel (one task, or a dependency chain).
 - **Cost:** `inline_advantage: inline=<n> dedicated=<n> <unit>: <evidence>` is strictly cheaper. "inline" counts the orchestrator plus its subagents.
 

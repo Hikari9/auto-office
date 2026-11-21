@@ -91,7 +91,7 @@ Task phases are checkpoints inside one executor session, not separate Office tas
 task_size: XS | S | M | L | XL   (each task independently; greenfield pins a cohesive XL executor task)
 task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
 inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; fastlane cost check, orchestrator-led including its subagents vs Office executors)
-inline_quality: <why the orchestrator's model meets this task size's executor floor>   (optional; fastlane quality check, #1297)
+inline_quality: <harness>/<model>@<effort>: <why>  (the orchestrator's own route; Office checks it against this task size's executor floor)   (optional; fastlane quality check, #1297)
 """
 
 REVIEW_FORMAT = """\

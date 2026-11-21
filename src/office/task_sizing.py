@@ -200,6 +200,27 @@ def evidence_text(text: str | None) -> str | None:
     return value if len(value) >= 12 and len(value.split()) >= 3 else None
 
 
+def orchestrator_floor(text: str | None, size: str | None) -> str | None:
+    """Why an inline_quality statement fails the executor floor for `size`, or None when it passes.
+
+    The statement starts with the orchestrator's own route, `<harness>/<model>@<effort>: <why>`. Office looks the
+    route up in the catalog and applies the same size floor an executor of that size must meet (#809)."""
+    from office import candidates, executor_slates
+    route, sep, _ = (text or "").partition(":")
+    route = route.strip()
+    if not sep or "/" not in route or "@" not in route or " " in route:
+        return "inline_quality must start with the orchestrator's route, <harness>/<model>@<effort>: <why>"
+    parsed = candidates.parse_route_override(route)
+    if not (parsed["harness"] and parsed["model_id"] and parsed["effort"]):
+        return "inline_quality must start with the orchestrator's route, <harness>/<model>@<effort>: <why>"
+    rows = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == parsed["harness"]
+            and parsed["model_id"] in (r.get("model_id"), r.get("invocation_model_id")) and r.get("effort") == parsed["effort"]]
+    if not rows:
+        return f"the orchestrator route {route} is not in the catalog, so its {size} floor cannot be checked"
+    failed = [executor_slates.benchmark_gate(r, size) for r in rows]
+    return None if any(f is None for f in failed) else f"the orchestrator route {route}: {failed[0]}"
+
+
 def _fastlane_mode(gear, d: dict, risk: dict, size, estimate, fastlane: dict, parallel: bool) -> dict:
     """#1297 execution mode. `inline` keeps its recorded name (owner orchestrator) and now means orchestrator-led:
     the orchestrator may implement inline or use its own subagents. Overflow is checked first and latches
@@ -231,10 +252,15 @@ def _fastlane_mode(gear, d: dict, risk: dict, size, estimate, fastlane: dict, pa
     if size not in SIZES or str(d.get("task_size_rationale") or "").startswith("insufficient"):
         return record("delegated", "dedicated executor: not sure, the task size is unknown")
     quality = evidence_text(d.get("inline_quality"))
-    checks = {"quality": bool(quality), "time": not parallel, "cost": bool(estimate and estimate["beneficial"])}
+    below = orchestrator_floor(quality, size) if quality else None
+    checks = {"quality": bool(quality) and below is None, "time": not parallel,
+              "cost": bool(estimate and estimate["beneficial"])}
     failed = []
     if not quality:
-        failed.append(f"quality (no inline_quality: statement that the orchestrator's model meets the {size} executor floor)")
+        failed.append(f"quality (no inline_quality: <harness>/<model>@<effort>: <why> naming the orchestrator's route "
+                      f"for the {size} executor floor)")
+    elif below:
+        failed.append(f"quality ({below})")
     if parallel:
         failed.append("time (the plan has tasks Office executors could run in parallel)")
     if estimate is None:
