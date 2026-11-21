@@ -81,16 +81,6 @@ def test_revoking_a_lane_review_ends_its_reviewer_and_job_and_closes_the_gate_un
     assert "no specialist reviewer returned a verdict" not in (_status(env).get("next") or "")
 
 
-def test_a_revoked_lane_review_can_be_reviewed_by_the_orchestrator_instead(env, tmp_path):
-    _unavailable_lane(env)
-    _rewind_to_running(env)
-    env.office("revoke", "L-T1:convergence", check=0)
-    report = tmp_path / "r.txt"
-    report.write_text(APPROVED)
-    env.office("review", "L-T1:convergence", "--report", str(report), check=0)
-    assert _scope(env, "L-T1")["status"] == "approved"
-
-
 def test_a_lane_gate_whose_reviewer_ended_is_reaped_unavailable_and_is_not_gate_busy_for_waive(env):
     _unavailable_lane(env)
     gid = _rewind_to_running(env, live_reviewer=False, queued_job=False)
@@ -408,7 +398,7 @@ def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env,
     assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
 
 
-@pytest.mark.parametrize("job_status", ["failed", "done"])
+@pytest.mark.parametrize("job_status", ["failed"])  # "done" settles through the same reconcile branch
 def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, job_status):
     """#1022: the lane review's job failed (or finished without settling it) while the gate stayed queued, with no
     reviewer and no job left. Reconcile settles it UNAVAILABLE, so the scope's fallback and office resume apply."""

@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.20
+
+Slim the test suite, first pass (#1302). Removes 14 duplicate fallback tests and parametrize cases in the review re-route, lane revoke and review fallback-job suites; each removed case runs the same branch as a test that stays.
+
 ## 3.28.19
 
 Fastlane (#1297). The orchestrator can lead a task itself, inline or with its own cheaper subagents, instead of Office routing an executor. An independent code review is always required.
