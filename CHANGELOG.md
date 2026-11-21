@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.2
+
+- Herdr landing test pins its reviewer harness: the reviewer re-prompt Enter test now asserts the configured retry count for a non-Codex reviewer, and a new test keeps the Codex one-Enter cap (#790). Routing drift had moved the fixture onto codex, failing main.
+
 ## 3.31.1
 
 Removes the Auto Office 3.0 runtime and the six old gear presets, with no backward compatibility.
