@@ -146,6 +146,27 @@ def test_a_run_pinned_to_a_removed_gear_fails_with_gear_removed_and_can_still_be
     assert code == 0, out
 
 
+def test_a_removed_gear_run_refuses_upgrade_repins_and_queued_jobs(env):
+    from office import db, jobs
+    env.trust()
+    start_inline(env, plan=PLAN_ONE, gear="M")
+    con, run = _run(env)
+    state.update_run(con, run["id"], gear="express")
+    con.commit()
+    for cmd in (("upgrade", run["id"][:8], "--apply"),
+                ("config", "--apply-routing", "--run", run["id"][:8], "--quote", "re-pin it"),
+                ("config", "--apply-verification", "--run", run["id"][:8], "--quote", "re-pin it")):
+        code, out = env.office(*cmd)
+        assert code == 2 and "gear-removed" in out, (cmd, out)
+    run = state.get_run(con, run["id"])
+    with db.transaction(con):
+        jid = state.enqueue(con, run, "integrate", {"key": "k"}, dedup_key="gear-removed", max_attempts=3)
+        con.execute("UPDATE outbox SET status='claimed', claim_token='tok', attempts=1 WHERE id=?", (jid,))
+    jobs._run_attempt(con, jid, "tok")
+    job = state.get_job(con, jid)
+    assert job["status"] == "failed" and "no longer has" in job["error"], dict(job)
+
+
 @pytest.mark.parametrize("gear", config.RUN_GEARS)
 def test_a_canonical_gear_prints_no_compatibility_notice(env, gear):
     env.trust()

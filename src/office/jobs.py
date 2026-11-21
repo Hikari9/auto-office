@@ -49,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from office import db, frontdoor, paths, state, version
+from office import config as cfg
 from office.util import ALIVE, DEAD, UNKNOWN, claim_identity, claim_liveness, dumps, now_iso, process_start
 
 KICK_THROTTLE_SECONDS = 10
@@ -558,6 +559,10 @@ def _run_attempt(con, job_id: str, token: str) -> int:
             raise state.Refused("runtime-version-mismatch",
                                 f"runtime {version.current()} will not execute a job for a run pinned to "
                                 f"{run['office_version']}")
+        if run.get("gear") and run["gear"] not in cfg.GEARS:
+            # A run pinned to a gear this release removed: user commands refuse it, so its queued work must too.
+            raise state.Refused("gear-removed", f"job {job_id} belongs to a run pinned to gear {run['gear']!r}, "
+                                "which Office no longer has; end it with office close --abandon")
         handler = _handlers()[job["kind"]]
         result = handler(con, run, job) or {}
         with db.transaction(con):

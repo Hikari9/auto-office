@@ -891,6 +891,8 @@ def _run(args, unknown) -> int:
         try:
             target = discovery.resolve(con, run_arg=args.target or args.run_arg, state_dir=args.state_dir,
                                        harness=args.harness, session=args.session)
+            from office import config as cfg
+            cfg.require_supported_gear(target.run.get("gear"))
             return emit(upgrade.upgrade(con, target.run, to=args.to, apply=args.apply), args)
         finally:
             con.close()

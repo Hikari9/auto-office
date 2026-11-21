@@ -118,6 +118,7 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its parent's),
   posts review results, and marks it ready on acceptance. Reviewers are read only from their reply files, never pane text. A bad reply re-prompts
   the same reviewer (no round spent); after three it needs you.
+  Fastlane changes only who executes: its mandatory independent review goes through this same gate, the reviewer in its own Herdr pane when Herdr is detected.
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
   workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
 - Idle-only outcome QA (#904): only while work is in flight and `next:` names no action, check one recently returned task's outcome against the user's goal and its acceptance evidence in a small slice, then re-check `office status`. P0 (dispatch, answers, findings, recoveries) and P1 (integration, required gates, landing) always come first. QA is never a gate, a second code review or a test run; with no idle window it is skipped and not claimed. Detail: `docs/orchestrator-reference.md` (Idle-only outcome QA).

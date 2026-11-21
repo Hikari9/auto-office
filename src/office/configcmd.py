@@ -526,6 +526,7 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     reads the run's pinned `quota` reserves (`reserve_percent` and `reserve_percent_by_role`):
     without it a lowered reserve could never reach a live run. `quote` is the user's words authorizing it."""
     run, repo, files, live = _repin_target(con, run_arg, quote, "--apply-routing")
+    cfg.require_supported_gear(run.get("gear"))
     policy = dict(run.get("policy") or {})
     blocks = ("roles", "routing", "quota")
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
@@ -576,6 +577,7 @@ def apply_run_verification(con, run_arg: str | None, quote: str | None) -> Resul
     A suite that outgrew the timeout pinned at start (#755) otherwise exits 124 on every retry, and raising
     the value in a config file never reaches the run. Later checks of the run use the re-pinned values."""
     run, _repo, _files, live = _repin_target(con, run_arg, quote, "--apply-verification")
+    cfg.require_supported_gear(run.get("gear"))
     policy = dict(run.get("policy") or {})
     pinned = dict(policy.get("verification") or {})
     want = live.get("verification") or {}
