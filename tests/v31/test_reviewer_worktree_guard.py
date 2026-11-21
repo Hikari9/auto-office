@@ -42,7 +42,7 @@ def _pi_review(env, reviewer):
     harnesscmd.model_add("pi/openai/gpt-6-luna", ["high"], model_id="gpt-6-luna", roles=["reviewer"])
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD, "keep.txt": "x"}, "submit": True}],
                  convergence_reviewer=reviewer)
-    return env.office("dispatch", "T1", "--as", "codex/gpt-6-luna@high", "--review-as", LUNA, env=PI_LUNA_ENV, check=0)
+    return env.office("dispatch", "T1", "--as", "codex/gpt-6.1-terra@high", "--review-as", LUNA, env=PI_LUNA_ENV, check=0)
 
 
 def _reviewer_cwds(env):
