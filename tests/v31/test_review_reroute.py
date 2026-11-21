@@ -822,9 +822,10 @@ def test_a_pane_mismatch_names_the_review_only_command_for_its_gate(env, monkeyp
 
 @pytest.mark.parametrize("snapshot", [
     ({}, {}),
+    ({"agent": {}}, {}),
     ({"agent": "claude"}, {"name": "someone-else", "pane_id": "w1:p7", "agent": "claude"}),
     ({"agent": "claude"}, {"name": "office-D1", "pane_id": "w1:p9", "agent": "claude"}),
-], ids=["empty", "other-name", "other-pane"])  # kind-only / empty-agent: the same no-identity branch as empty
+], ids=["empty", "empty-agent", "other-name", "other-pane"])  # kind-only: the same no-identity branch as empty
 def test_an_empty_or_partial_herdr_report_never_receives_the_review_reprompt(env, monkeypatch, snapshot):
     from office import dispatch
     monkeypatch.setattr(dispatch, "pane_snapshot", lambda *a, **k: snapshot)
