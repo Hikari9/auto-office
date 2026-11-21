@@ -127,12 +127,13 @@ def repo_identity(cwd: Path | str | None = None) -> tuple[Path, Path] | None:
     """
     cwd = Path(cwd or os.getcwd())
     try:
-        top = git(cwd, "rev-parse", "--show-toplevel")
-        common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        # One rev-parse for both answers (#1302): it fails as a whole outside a work tree.
+        lines = git(cwd, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir").splitlines()
     except (GitError, OSError):
         return None
-    if not top or not common:
+    if len(lines) != 2 or not lines[0] or not lines[1]:
         return None
+    top, common = lines
     return Path(top).resolve(), Path(common).resolve()
 
 
