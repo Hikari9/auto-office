@@ -2114,12 +2114,21 @@ def _c_start(pid: int | None) -> str | None:
     when it is checked under another."""
     if not pid or pid <= 0:
         return None
+    own = pid == os.getpid()
+    if own and pid in _OWN_C_START:
+        return _OWN_C_START[pid]
     try:
         out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return " ".join(out.split()) or None
+    start = " ".join(out.split()) or None
+    if own and start:  # this process's own start never changes (#1302); other pids stay live reads
+        _OWN_C_START[pid] = start
+    return start
+
+
+_OWN_C_START: dict[int, str] = {}
 
 
 def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
