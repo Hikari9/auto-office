@@ -60,15 +60,79 @@ def test_worker_interactive_argv_is_pinned(hermes):
                     "--reasoning", "high", "--yolo", "--in", "/w"]
 
 
-@pytest.mark.parametrize("kind", ["reviewer", "vision"])
-def test_hermes_has_no_reader_profile_because_it_cannot_be_read_only(hermes, kind):
-    """--yolo plus the terminal toolset can write anywhere, `--in` only moves the cwd and a post-run fingerprint cannot
-    prevent writes, so reviewer and vision dispatch stay disabled until an OS-enforced read-only checkout exists."""
-    assert adapters.profile(hermes, kind) is None
-    assert "review" not in hermes["capabilities"] and "reviewer_readonly_args" not in hermes
-    with pytest.raises(adapters.AdapterError):
-        adapters.build_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY)
-    assert adapters.interactive_argv(hermes, kind, model=SLUG, effort="medium", cwd=CWD, output=REPLY) is None
+def test_reviewer_is_restored_with_the_accepted_risk(hermes):
+    """Requirement r3: Hermes is a default reviewer with full tools. --yolo and the terminal toolset can write the
+    reviewed worktree; the post-run fingerprint detects that, and the source note records the accepted risk."""
+    assert "review" in hermes["capabilities"]
+    prof = adapters.profile(hermes, "reviewer")
+    assert prof["submit"] == "shell" and prof["herdr_kind"] == "hermes" and prof["verify_worktree_unchanged"] is True
+    assert "--in" not in prof["argv"] and "--toolsets" not in prof["argv"]
+    assert "accepted risk" in hermes["source_notes"] and "cannot prevent" in hermes["source_notes"]
+    assert "--accept-hooks" in hermes["trust_justifications"]
+
+
+def test_reviewer_headless_argv_keeps_the_usage_readback(hermes):
+    argv, prof = adapters.build_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD,
+                                     usage_file=Path("/d/usage.json"))
+    assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "high", "--yolo", "--usage-file", "/d/usage.json"]
+    assert prof["readback"] == "hermes-usage" and prof["prompt_flag"] == "--oneshot="
+
+
+def test_reviewer_interactive_argv_is_pinned(hermes):
+    argv, kind = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
+    assert kind == "hermes"
+    assert argv == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "high", "--yolo", "--accept-hooks", "--in", str(CWD)]
+
+
+def test_reviewer_interactive_argv_pins_the_provider_and_ignores_user_config(hermes):
+    """The pane reviewer must pin the route's provider and skip config.yaml's fallback_providers, as the executor does."""
+    argv, _ = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
+    assert "--ignore-user-config" in argv
+    assert argv[argv.index("--provider") + 1] == "anthropic"
+    assert argv[argv.index("--in") + 1] == str(CWD)  # the pane starts in the reviewed worktree, as the worker's does
+
+
+@pytest.mark.parametrize("kind", ["worker", "reviewer", "vision"])
+def test_every_profile_has_headless_and_interactive_forms_pinning_the_provider(hermes, kind):
+    """Requirement r3: worker, reviewer and vision each launch headless and in a Herdr pane, both pinned to the route's
+    provider and skipping config.yaml's fallback_providers."""
+    prof = adapters.profile(hermes, kind)
+    assert prof and prof["herdr_kind"] == "hermes" and prof["interactive"]["argv"]
+    headless, _ = adapters.build_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY,
+                                      usage_file=Path("/d/usage.json"))
+    pane, kind_ = adapters.interactive_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY)
+    assert kind_ == "hermes"
+    for argv in (headless, pane):
+        assert "--ignore-user-config" in argv
+        assert argv[argv.index("--provider") + 1] == "anthropic"
+
+
+def test_vision_profile_is_restored_with_the_vision_toolset_and_dispatch_directory(hermes):
+    """Restored from 7b2a3ffc^: images reach Hermes as paths in the prompt and are read with its vision tool; the
+    agent works from the dispatch directory, and the worktree fingerprint still applies. Capability stays
+    [builder, review]: vision is earned only by the image-sensitive conformance proof."""
+    assert hermes["capabilities"] == ["builder", "review"]
+    prof = adapters.profile(hermes, "vision")
+    assert prof["image_transport"] == "prompt-path" and prof["verify_worktree_unchanged"] is True
+    assert prof["submit"] == "shell" and prof["prompt_flag"] == "--oneshot=" and prof["readback"] == "hermes-usage"
+    argv, _ = adapters.build_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY,
+                                  usage_file=Path("/d/usage.json"))
+    assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "medium", "--yolo", "--toolsets", "file,terminal,vision", "--in", "/d",
+                    "--usage-file", "/d/usage.json"]
+    pane, kind = adapters.interactive_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY)
+    assert kind == "hermes"
+    assert pane == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "medium", "--yolo", "--accept-hooks", "--toolsets", "file,terminal,vision",
+                    "--in", "/d"]
+
+
+def test_vision_profile_drops_the_provider_flag_for_a_bare_model_id(hermes):
+    """A bare model id pins only the model; the vision toolset stays on the argv."""
+    argv, _ = adapters.build_argv(hermes, "vision", model="claude-sonnet-5-5", effort="medium", cwd=CWD, output=REPLY)
+    assert "--provider" not in argv and "file,terminal,vision" in argv
 
 
 @pytest.mark.parametrize("effort,flag", [("none", "none"), ("low", "low"), ("medium", "medium"), ("high", "high"),

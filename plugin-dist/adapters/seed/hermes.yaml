@@ -58,10 +58,14 @@ conformance:
 trust_justifications:
   --yolo: >-
     Hermes cannot answer approval prompts in a headless run or an unattended pane, so every form passes it. It grants
-    unprompted edits and commands in the Office worktree, which is why only the worker form exists.
+    unprompted edits and commands in the Office worktree; the worker and reviewer forms both run with it (accepted risk, see
+    source_notes).
+  --accept-hooks: >-
+    Auto-approves shell hooks declared in the user Hermes config (for example the Herdr agent-state plugin) so the pane
+    does not stop on a hooks dialog. It grants no repository hooks.
 session:
   id: none
-capabilities: [builder]
+capabilities: [builder, review]
 # `{provider}`/`{model_name}` come from the pinned slug: `provider:model` pins both, a bare id only the model (the
 # --provider flag is then dropped). --ignore-user-config removes config.yaml's fallback_providers (and every other
 # customization), so a fallback provider cannot swap the model mid-run; it requires --model, which is always given.
@@ -80,10 +84,41 @@ office_profiles:
     # `hermes -z` has no wall clock of its own (--run-budget belongs to `hermes chat`), so the supervisor's cap
     # bounds every headless launch.
     max_minutes: 60
-  # No reviewer or vision profile: Hermes has no read-only sandbox. --yolo plus the terminal toolset lets the agent run
-  # any command, so `--in <dir>` only moves the cwd and cannot keep a reviewed worktree unwritten (a post-run
-  # fingerprint detects changes, it cannot prevent them). Hermes review dispatch stays disabled until an OS-enforced
-  # read-only checkout with a narrowly writable submit path exists; no reviewer_readonly_args is declared either.
+  # Reviewer (restored by requirement r3; the user accepted the risk): Hermes has no read-only sandbox, so --yolo lets
+  # the reviewer write the reviewed worktree. Office fingerprints it before and after the run (verify_worktree_unchanged)
+  # and fails the review as degraded if it changed: this detects a write, it cannot prevent one. Headless keeps the
+  # worker's `-z` form so the usage-file readback (completed=true on a clean exit) still applies.
+  reviewer:
+    submit: shell
+    submit_grant: hermes-yolo
+    argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --usage-file, "{usage_file}"]
+    prompt: argv-bound
+    prompt_flag: "--oneshot="
+    output: stdout
+    herdr_kind: hermes
+    readback: hermes-usage
+    verify_worktree_unchanged: true
+    interactive:
+      argv: [--cli, --ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --accept-hooks, --in, "{cwd}"]
+    max_minutes: 60
+  # Visual reviewer (restored from 7b2a3ffc^): the evidence images reach Hermes as paths in the prompt (`hermes -z` has
+  # no --image), read with its vision tool, so the vision toolset is added. Like the codex vision reviewer it works from
+  # the dispatch directory (`--in {sandbox_dir}`); the same post-run fingerprint applies, and it cannot prevent a write.
+  # Capability stays [builder, review]: vision is earned only by the image-sensitive conformance proof.
+  vision:
+    submit: shell
+    submit_grant: hermes-yolo
+    argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --toolsets, "file,terminal,vision", --in, "{sandbox_dir}", --usage-file, "{usage_file}"]
+    prompt: argv-bound
+    prompt_flag: "--oneshot="
+    image_transport: prompt-path
+    output: stdout
+    herdr_kind: hermes
+    readback: hermes-usage
+    verify_worktree_unchanged: true
+    interactive:
+      argv: [--cli, --ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --accept-hooks, --toolsets, "file,terminal,vision", --in, "{sandbox_dir}"]
+    max_minutes: 60
 source_notes: >-
   Hermes adapter for hermes 0.23.3 (git install). Headless: `hermes -z` (one-shot, prints only the final response,
   exit 0 only for a completed turn, 2 for a failed or partial one) with --usage-file for the model/provider/completed
@@ -92,3 +127,5 @@ source_notes: >-
   (auth.json, .env) still load under --ignore-user-config. Hermes records sessions in ~/.hermes/state.db; the usage
   report's session_id is not read yet, so session id is none and no resume form exists. Provider reachability comes
   from `hermes auth list` (office.hermes_access.reachable_providers, names and status only).
+  Reviewer restored by requirement r3 as an accepted risk (the user chose it): Hermes has no read-only sandbox, so a
+  review can write the worktree; the post-run fingerprint detects a write but cannot prevent one, and fails the review.

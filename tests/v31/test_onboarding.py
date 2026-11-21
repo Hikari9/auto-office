@@ -178,7 +178,9 @@ def test_apply_writes_role_seeds_and_marker_in_one_write(h):
     assert data["onboarding"] == {"schema_version": onboarding.SCHEMA_VERSION}
     assert "&id" not in h.user.read_text()  # plain YAML a person can edit
     status = h.status()
-    assert status["due"] is False
+    # The schema is current; the harness round (claude and agy both run claude-sonnet-5-5) is owed until answered or skipped.
+    assert status["completed_schema"] == onboarding.SCHEMA_VERSION
+    assert status["due"] is True and status["reason"].startswith("harness overlap not yet answered")
     reviewer = next(q for q in status["questions"] if q["id"] == "reviewer")
     assert reviewer["current"] == {**reviewer["current"], "choice": "route", "value": "codex/gpt-6-luna@high",
                                    "eligible": True}
@@ -249,7 +251,9 @@ def test_skip_marks_complete_and_keeps_every_preference(h):
     code, out = h.office("onboard", "--skip")
     assert code == 0 and "preferences unchanged" in out, out
     assert h.user_data() == {**prefs, "onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
-                                                       "free_models_enabled": True}}
+                                                       "free_models_enabled": True,
+                                                       "harness_overlap_seen": ["anthropic|claude-opus-5-5|agy", "anthropic|claude-opus-5-5|claude",
+                                                       "anthropic|claude-sonnet-5-5|agy", "anthropic|claude-sonnet-5-5|claude"]}}
     assert h.repo_config.read_bytes() == repo_before and h.claude_settings.read_bytes() == settings_before
     assert h.status()["due"] is False
     # Skipping again writes nothing.
@@ -270,9 +274,9 @@ def test_skip_takes_no_answers_and_apply_needs_one(h):
 
 def test_schema_bump_reprompts_with_current_values_but_a_package_bump_does_not(h, monkeypatch):
     h.office("onboard", "--executor", "agy/claude-sonnet-5-5@medium")
-    assert h.status()["due"] is False
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # the schema is current; only the round is owed
     monkeypatch.setattr(version, "current", lambda: "9.9.9")
-    assert h.status()["due"] is False  # a new package version alone never re-onboards
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # a new package version alone never re-onboards
     monkeypatch.setattr(onboarding, "SCHEMA_VERSION", onboarding.SCHEMA_VERSION + 1)
     data = h.status()
     assert data["due"] is True and "newer than the one completed" in data["reason"]
@@ -508,7 +512,9 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
     env.office("install", "--only", "claude", check=0)  # "Install recommended"
     env.office("onboard", "--planner", "claude/opus@medium", "--executor", "office", "--reviewer", "keep", check=0)
     code, data = env.ojson("onboard", "--harness", "claude")
-    assert data["data"]["due"] is False and data["data"]["harness"]["integration"]["state"] == "installed"
+    # The schema is current; only the harness round is owed (claude and agy share a model here), so intake is not blocked by it.
+    assert data["data"]["reason"].startswith("harness overlap not yet answered")
+    assert data["data"]["harness"]["integration"]["state"] == "installed"
     assert not (env.home / ".gemini").exists()
     # The pending request continues: intake runs with no second invocation and pins the answers.
     code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")

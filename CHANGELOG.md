@@ -2,6 +2,14 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.30.0
+
+Hermes is a reviewer again (requirement r3, accepted risk): `adapters/seed/hermes.yaml` restores the reviewer profile with `--yolo --accept-hooks` and no `--in`, and a post-run fingerprint detects, but cannot prevent, worktree writes. The vision profile returns too (7b2a3ffc^ form: `--toolsets file,terminal,vision --in {sandbox_dir}`, headless and pane); capabilities stay [builder, review], so vision needs its conformance proof. The completed=true readback from 7b2a3ffc stays.
+
+## 3.29.0
+
+Onboarding asks one harness-preference round when installed harnesses run the same model (Hermes and claude both run Sonnet): `office onboard --harness-preference office|keep|recommended`. Recommended derives `routing.harness_preference` weights from monthly USD per harness and provider, shows the arithmetic, and records the overlap as seen so it is not asked again. `office onboard --json` lists Hermes providers by name and status only.
+
 ## 3.28.19
 
 Fastlane (#1297). The orchestrator can lead a task itself, inline or with its own cheaper subagents, instead of Office routing an executor. An independent code review is always required.
