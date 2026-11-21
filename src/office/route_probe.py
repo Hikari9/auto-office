@@ -592,7 +592,7 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
     try:
         listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=,lstart=", "-p",
                                   ",".join(str(p) for p in sorted(pids))],
-                                 capture_output=True, text=True, timeout=10)
+                                 capture_output=True, text=True, timeout=10)  # same locale as _process_table, so starts compare
     except (OSError, subprocess.SubprocessError):
         return None
     if listing.returncode not in (0, 1):  # 1: none of the pids is listed any more
@@ -601,7 +601,11 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
     alive = set()
     for line in listing.stdout.splitlines():
         m = re.match(r"^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s*$", line)
-        if not m or m.group(2).startswith("Z"):
+        if not m:
+            if line.strip():
+                return None  # a row we cannot read may be a live process: never confirm cleanup on it
+            continue
+        if m.group(2).startswith("Z"):
             continue
         pid = int(m.group(1))
         if pid in starts and " ".join(starts[pid].split()) != " ".join(m.group(3).split()):

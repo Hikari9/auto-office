@@ -1060,6 +1060,13 @@ def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
         zombie.wait()
 
 
+def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
+    """An unreadable ps row may be a live process, so cleanup fails closed (#1296 review)."""
+    garbled = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()} S+ not-a-start-time\n", stderr="")
+    monkeypatch.setattr(route_probe.subprocess, "run", lambda *a, **k: garbled)
+    assert route_probe._running({os.getpid()}) is None
+
+
 def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
     """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
