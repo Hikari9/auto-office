@@ -30,7 +30,7 @@ def _approve(env, plan=PLANNED):
 
 def test_plan_shows_the_planner_slate_and_dispatch_follows_its_primary(env):
     out = _approve(env)
-    assert "ROUTING  (planner choice)" in out and PRIMARY in out, out
+    assert "ROUTING  (planner choice" in out and PRIMARY in out, out  # T2 appends ", departs from ranking; ..." to the header
     code, out = env.office("dispatch", "T1", env=_quota(env))
     assert code == 0 and "executor/claude@1/claude-opus-5-5@medium" in out, out
     con = env.con()
@@ -51,7 +51,8 @@ def test_fresh_quota_forces_the_recorded_fallback_and_says_why(env):
 
 def test_an_exhausted_slate_returns_for_reroute_and_never_picks_an_unplanned_route(env):
     _approve(env)
-    code, out = env.office("dispatch", "T1", env=_quota(env, claude=1, codex=1))
+    # agy joins the exhausted harnesses: T2's ranked slate carries gemini-4-neon as a planned fallback.
+    code, out = env.office("dispatch", "T1", env=_quota(env, claude=1, codex=1, agy=1))
     assert code != 0 and "every planned route is unavailable" in out and "--reroute" in out, out
     # The only route left outside claude and codex is agy Flash, retired by a shipped deny (2026-11-19); the user lifts it.
     env.office("route", "neutral", "agy/gemini-3.8-flash", "--wildcard", "--role", "executor")
