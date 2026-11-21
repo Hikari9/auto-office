@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.5
+
+`office close --landed-externally` no longer fails a run whose run-level check is `scripts/validate.sh --pr` (#1312). The squash-landing proof re-ran every check on the merged default-branch commit, where the PR selector's diff against its merge-base is empty, so the gate always failed closed with `landing-checks-failed`. The PR selector's integrity-checked integration attestation on the reviewed composed commit is now carried instead, recorded under `squash_proof.checks.carried` and labeled scoped. Every other run and task check still re-runs on the merged commit. An unattested scoped check is not carried, and an unmerged PR still refuses.
+
 ## 3.31.4
 
 Route probes no longer fail `isolation-missing` on a zombie they do not own (#1296). A long-lived Claude hook daemon outside the probe (TokenEconomizer's te-hookd) starts a child for the probe's Claude session and never reaps it. The exited child stayed a zombie in the probe's lineage, and cleanup counted it as a live process, so every claude probe made while the daemon ran failed. Cleanup now confirms only processes that still run, and fails closed when process states cannot be read. With the fix, `claude/claude-opus-5-5@high` passed its exact probe (attempt e1e142e6) and is dispatchable again, so XL executor rung 1 is back.
