@@ -128,7 +128,9 @@ def test_auto_still_refuses_a_task_that_routes_automatically_with_no_stale_rerou
 
 def test_status_and_the_refused_rerun_name_the_same_planned_route_when_nothing_routes(env):
     rerouted = _orchestrator_reroute(env)
-    for route in (_route(rerouted), PRIMARY, FB1, FB2):
+    # T2's ranked slate fills the slot FB2 leaves with codex/gpt-6.2-sol@medium or agy/gemini-4-neon@medium (they tie);
+    # deny both so nothing routes.
+    for route in (_route(rerouted), PRIMARY, FB1, FB2, "codex/gpt-6.2-sol@medium", "agy/gemini-4-neon@medium"):
         routecmd.change("deny", role="executor", route=route)
     code, out = env.office("status")
     assert f"routes: T1 {CLAUDE} (planned; will not run:" in out, out

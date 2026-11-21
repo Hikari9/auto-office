@@ -132,7 +132,8 @@ def test_a_pointer_that_never_landed_is_retried_through_the_job_without_counting
 
     monkeypatch.setattr(gates, "_launch_spec", spec)
     _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
-    env.office("dispatch", "T1", check=0)
+    # The patch above reaches only the in-process claude supervisor (the ranker no longer picks claude by default).
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     gate = _lane(env)
     first, second = _attempts(env, gate["id"])
     assert first["triple"] == second["triple"] and first["failure"]["class"] == "pointer"
@@ -222,7 +223,8 @@ def test_a_redispatch_that_finds_a_working_route_settles_the_review(env, monkeyp
 
     monkeypatch.setattr(gates, "_review_attempt", flaky)
     _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
-    env.office("dispatch", "T1", check=0)
+    # The patch above reaches only the in-process claude supervisor (the ranker no longer picks claude by default).
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     gate = _lane(env)
     assert state["n"] == 1 and gate["review_status"] == "COMPLETED" and gate["verdict"] == "APPROVED", gate
     (event,) = _redispatches(env)

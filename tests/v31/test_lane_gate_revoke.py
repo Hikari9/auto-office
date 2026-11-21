@@ -180,7 +180,7 @@ def test_a_waived_gate_is_no_fallback_while_the_other_unavailable_gate_still_is(
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"exit": 1}], visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the capture patch reaches only the in-process claude supervisor
     env.office(*WAIVE, check=0)
     st = _scope(env, "L-T1")
     assert st["status"] == "unavailable" and st["fallback_kind"] == "visual", st
@@ -370,7 +370,7 @@ def test_a_revoked_reviewer_is_not_a_route_failure_and_takes_no_fallback(env, mo
     monkeypatch.setattr(dispatch, "launch", launch)
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": APPROVED}] * 3)
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the launch patch reaches only the in-process claude supervisor
     gate = _gates(env, "convergence_review")[0]
     assert gate["review_status"] == "REVOKED" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
     assert len(_q(env, f"SELECT id FROM dispatches WHERE gate_id='{gate['id']}'")) == 1
