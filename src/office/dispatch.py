@@ -422,7 +422,7 @@ def _fastlane_led_route(con, run: dict, task: dict) -> dict | None:
         return None
     try:
         cand = candidates.declared_candidate(parsed["harness"], parsed["model_id"], parsed["effort"], role="executor",
-                                             run_id=run["id"], scope=task["id"])
+                                             repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"])
     except (Usage, Refused):
         return None
     return {"status": "selected", "selected": routing.candidate_id(cand), "candidate": cand,
