@@ -1119,7 +1119,7 @@ def test_allocation_reports_per_run_probe_and_trial_use(world):
 
 # ------------------------------------------------------------------ claude: effort read back from the session transcript
 
-CLAUDE_ROUTE = "claude/claude-haiku-5-5@high"  # a discovery-eligible, not yet dispatchable claude row
+CLAUDE_ROUTE = "claude/claude-haiku-5-5@medium"  # a discovery-eligible, not yet dispatchable claude row (haiku@high became dispatchable)
 
 
 def claude_ensure(world, con):
@@ -1141,7 +1141,7 @@ def test_claude_opus_low_is_dispatchable_on_recorded_probe_evidence():
 def test_claude_passes_when_its_transcript_names_the_exact_model_and_effort(world):
     rec = claude_ensure(world, world.con())
     assert (rec["result"], rec["reason_class"]) == ("pass", None)
-    assert "claude-haiku-5-5 at effort high" in rec["detail"]
+    assert "claude-haiku-5-5 at effort medium" in rec["detail"]
 
 
 def test_the_claude_transcript_directory_is_removed_after_the_probe(world):

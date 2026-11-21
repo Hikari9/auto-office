@@ -30,7 +30,8 @@ print(json.dumps({{"result": {{}}}}))
 '''
 
 
-def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route=None):
+def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route="claude/claude-opus-5-5@medium"):
+    # These tests stub the claude adapter; the ranker's default executor is no longer a claude route.
     if route:
         env.office("route", "allow", route, "--role", "executor", check=0)
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
@@ -193,7 +194,7 @@ def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
 @pytest.mark.approved
 def test_rerun_keeps_its_route_unless_rerouted_and_refuses_on_live_quota(env, monkeypatch):
     """#300: replay is sticky; fresh quota can refuse it; --reroute routes from current evidence."""
-    parent = _setup(env, monkeypatch)
+    parent = _setup(env, monkeypatch, route=None)  # the label is "original route" only for an unpinned dispatch
     con = env.con()
     triple = con.execute("SELECT triple FROM dispatches WHERE id=?", (parent,)).fetchone()[0]
     harness = triple.split("@", 1)[0]

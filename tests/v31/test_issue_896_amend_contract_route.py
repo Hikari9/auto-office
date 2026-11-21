@@ -24,7 +24,8 @@ QUOTE = "switch T1 to sonnet"
 def live(request, monkeypatch):
     env = request.getfixturevalue("env")
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
-    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    # The route-change tests need a claude dispatch; the adaptive ranker no longer picks one by default.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", env=EXTERNAL, check=0)
     for k, v in EXTERNAL.items():
         monkeypatch.setenv(k, v)
     return env

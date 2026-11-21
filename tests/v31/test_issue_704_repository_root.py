@@ -286,7 +286,7 @@ def test_missing_browser_capture_names_install_and_resume_without_spending_a_rev
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
     start_inline(env, plan=PLAN_ONE.replace("visual: none", "visual:\n  url: http://127.0.0.1:3999/\n  viewports: desktop"))
     env.office("approve", "plan", "--quote", "go", check=0)
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the patches above reach only the in-process claude supervisor
     con = env.con()
     try:
         gate = dict(con.execute("SELECT * FROM gates WHERE kind='visual'").fetchone())

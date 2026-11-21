@@ -128,7 +128,9 @@ def test_auto_still_refuses_a_task_that_routes_automatically_with_no_stale_rerou
 
 def test_status_and_the_refused_rerun_name_the_same_planned_route_when_nothing_routes(env):
     rerouted = _orchestrator_reroute(env)
-    for route in (_route(rerouted), PRIMARY, FB1, FB2):
+    # T2's ranked slate fills the slot FB2 leaves with codex/gpt-6.2-sol@medium or agy/gemini-4-neon@medium (they tie);
+    # deny both so nothing routes.
+    for route in (_route(rerouted), PRIMARY, FB1, FB2, "codex/gpt-6.2-sol@medium", "agy/gemini-4-neon@medium"):
         routecmd.change("deny", role="executor", route=route)
     code, out = env.office("status")
     assert f"routes: T1 {CLAUDE} (planned; will not run:" in out, out
@@ -166,8 +168,14 @@ def test_an_amendment_after_auto_relaunches_on_the_plan_slate_route(env):
     assert code == 0, out
     code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
     assert code == 0, out
-    # The amendment's plan revision can move the slate effort, so compare harness and model only.
-    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
+    # The relaunch is a fresh automatic pick, not the stale reroute. Its pick is no longer the claude plan primary:
+    # the amendment relaunches before plan p2's slate is recorded, and the router's current pick is codex/sol (T2),
+    # the same route the earlier --reroute picked. So it is a new dispatch that has left the returned_to_automatic marker.
+    con = env.con()
+    assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1' AND role='executor'").fetchone()[0] == 3, out
+    task = state.get_task(con, con.execute("SELECT id FROM runs").fetchone()[0], "T1")
+    assert not state.returned_to_automatic(task), task["route_json"]
+    assert routing.candidate_id(state.recorded_route(task)["candidate"]) == _triple(env), out
 
 
 def test_an_amendment_relaunch_after_auto_records_the_plan_route_and_a_rerun_reuses_it(env):
@@ -233,15 +241,16 @@ def test_a_contract_amendment_relaunch_drops_a_reroute_a_user_deny_now_rejects(e
     env.write_plan(PLANNED.replace("- calc.add(2, 3) == 5", "- calc.add(2, 3) == 5\n- calc.add(1, 1) == 2"))
     code, out = env.office("amend", "T1", "--contract", "--", "also check add(1, 1)", env=_quota(env))
     assert code == 0, out
-    # The amendment's plan revision can move the slate effort, so compare harness and model only.
-    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0] and _triple(env) != rerouted, out
+    # The denied reroute is dropped. The relaunch precedes plan p2's slate, so the pick is the router's current one
+    # (T2), no longer the claude plan primary; what matters is that the denied route is not reused.
+    assert _triple(env) != rerouted, out
     con = env.con()
     did = con.execute("SELECT id FROM dispatches WHERE task_id='T1' ORDER BY started_at DESC").fetchone()[0]
     assert con.execute("SELECT COUNT(*) FROM outbox WHERE kind='launch_agent' AND payload_json LIKE ?",
                        (f'%"dispatch_id": "{did}"%',)).fetchone()[0] == 1
     (change,) = _denials(env)
     assert change["before"] == rerouted and change["actor"] == "office", change
-    assert change["after"].rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], change
+    assert change["after"] != rerouted and change["after"] == _triple(env), change
     assert "deny" in change["reason"] and change["task_id"] == "T1" and change["stage"] == "executor", change
 
 
@@ -267,7 +276,12 @@ def test_an_amendment_after_a_declared_route_returns_to_automatic_takes_the_plan
     assert code == 0, out
     code, out = env.office("amend", "T1", "--", "also reject non-numeric arguments", env=EXTERNAL)
     assert code == 0, out
-    assert _triple(env).rsplit("@", 1)[0] == CLAUDE.rsplit("@", 1)[0], out
+    # Back to automatic: the declared astra pin is gone. The relaunch precedes plan p2's slate, so the pick is the
+    # router's current one (T2) and no longer the claude plan primary.
+    assert _triple(env) != FALLBACK, out
+    con = env.con()
+    task = state.get_task(con, con.execute("SELECT id FROM runs").fetchone()[0], "T1")
+    assert not state.returned_to_automatic(task) and not task["route_json"].count('"declared": true'), task["route_json"]
 
 
 def test_a_status_deny_check_of_a_quoted_route_probes_no_quota(env, monkeypatch):
