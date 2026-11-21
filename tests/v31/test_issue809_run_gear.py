@@ -155,7 +155,8 @@ def test_a_removed_gear_run_refuses_upgrade_repins_and_queued_jobs(env):
     con.commit()
     for cmd in (("upgrade", run["id"][:8], "--apply"),
                 ("config", "--apply-routing", "--run", run["id"][:8], "--quote", "re-pin it"),
-                ("config", "--apply-verification", "--run", run["id"][:8], "--quote", "re-pin it")):
+                ("config", "--apply-verification", "--run", run["id"][:8], "--quote", "re-pin it"),
+                ("config", "--run", run["id"][:8], "verification")):
         code, out = env.office(*cmd)
         assert code == 2 and "gear-removed" in out, (cmd, out)
     run = state.get_run(con, run["id"])

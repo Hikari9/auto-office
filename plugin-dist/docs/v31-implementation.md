@@ -313,7 +313,8 @@ The 3.0 helper surface (`scripts/office_runtime.py` and its helpers), `office ra
 1. Merge with 3.1 as the default for new runs (`runtime.new_runs` defaults to `3.1`).
 2. `uv tool install git+https://github.com/Hikari9/auto-office` (or `--editable` from the checkout), `office install`, `office doctor`.
 3. Rollback to 3.0 is gone: `runtime: {new_runs: "3.0"}` is refused as removed. Pin an earlier 3.1+ line
-   with `runtime.new_runs` if needed; every existing run keeps working on its pinned line.
+   with `runtime.new_runs` if needed. An existing run keeps its pinned line unless it is pinned to a removed gear
+   (direct, direct+review, light, quick, express, full): those fail with `gear-removed` and can only be abandoned.
 4. Keep each released runtime registered while any run pinned to it is active (`office doctor`
    lists them).
 

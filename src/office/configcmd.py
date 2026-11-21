@@ -631,6 +631,7 @@ def run_get(con, run_arg: str, key: str, origin: bool, cwd: Path) -> Result:
     run = state.find_run(con, run_arg)
     if run is None:
         raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    cfg.require_supported_gear(run.get("gear"))
     short = run["id"][:8]
     if key == RESERVE_KEY:
         return _run_reserves(run, short, cwd)
