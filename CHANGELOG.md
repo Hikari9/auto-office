@@ -13,6 +13,7 @@ Fastlane (#1297). The orchestrator can lead a task itself, inline or with its ow
   
   If Office is not sure, it delegates. It never chooses fastlane on unknown or elevated risk.
 - **Overflow:** the orchestrator context passes `orchestrator_context.threshold_tokens` (now 250k), or the task touches files outside its scope plan. Either one rides the existing `ctx.high` notice and makes every later task delegate. The handoff tells the orchestrator to compact inside Herdr. Elsewhere it only suggests compacting.
+- **No executor route:** a task the orchestrator leads does not need an executor route to qualify. In that case Office records the orchestrator's own `inline_quality` route, which is also where work goes if fastlane overflows. If that route is missing too, dispatch refuses and says why.
 - **Cost:** the economics ledger reads Claude subagent transcripts as `root-subagent` and counts them toward the led task. Inline route records say whether cost is measured.
 
 ## 3.28.17

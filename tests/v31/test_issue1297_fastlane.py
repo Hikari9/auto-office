@@ -312,3 +312,47 @@ def test_an_unknown_or_missing_orchestrator_route_fails_the_quality_check():
     out = task_sizing.execution_mode("M", _desc("M", inline_advantage=EST,
                                                 inline_quality="the orchestrator is strong enough for this"), LOW, fastlane=AUTO)
     assert out["mode"] == "delegated" and out["fastlane_checks"]["quality"] is False
+
+
+
+# ------------------------------------------------------------------ no executor route (#1297 review round 3)
+
+def _xs_led_plan(quality=True):
+    extra = ("inline_quality: claude/claude-sonnet-5-5@high: the orchestrator runs Sonnet high, above the XS floor\n"
+             if quality else "")
+    return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: XS\n"
+                            "task_size_rationale: bounded local change with no external interfaces\n" + extra, 1)
+
+
+def _no_executor_route(monkeypatch):
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "planned_route", lambda *a, **k: {
+        "status": "no_qualifying_candidate", "selected": None, "rejected": [], "skipped": []})
+
+
+def test_fastlane_leads_on_the_orchestrator_route_when_no_executor_route_qualifies(env, monkeypatch):
+    from conftest import start_inline
+    env.trust()
+    start_inline(env, plan=_xs_led_plan(), gear="XS")
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    _no_executor_route(monkeypatch)
+    code, out = env.office("dispatch", "T1")
+    assert code == 0, out
+    con = env.con()
+    try:
+        route = json.loads(con.execute("SELECT route_json FROM tasks WHERE id='T1'").fetchone()["route_json"])
+    finally:
+        con.close()
+    assert route["execution_mode"]["mode"] == "inline"
+    # The recorded route is the orchestrator's own: the overflow handoff target.
+    assert route["candidate"]["model_id"] == "claude-sonnet-5-5" and route["candidate"]["harness"] == "claude"
+
+
+def test_fastlane_without_any_recordable_route_refuses_and_says_why(env, monkeypatch):
+    from conftest import start_inline
+    env.trust()
+    start_inline(env, plan=_xs_led_plan(quality=False), gear="XS")
+    env.office("approve", "plan", "--quote", "approved", check=0)
+    _no_executor_route(monkeypatch)
+    code, out = env.office("dispatch", "T1")
+    assert code != 0 and "overflow handoff target" in out, out

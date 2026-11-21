@@ -245,6 +245,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
             if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
                 routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
+        if routes[tid].get("status") != "selected" and not (as_model or route or cli or external):
+            routes[tid] = _fastlane_led_route(con, run, task) or routes[tid]
         if routes[tid].get("status") == "selected":
             _apply_execution_mode(con, run, task, routes[tid], launch_prefs, explicit=bool(as_model or route or cli or external))
     res = Result()
@@ -325,7 +327,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 stack_after = None
             decision = routes[tid]
             if decision.get("status") != "selected":
-                raise Refused("no-route", _route_failure(tid, decision), scope=tid,
+                raise Refused("no-route", _route_failure(tid, decision) + _fastlane_route_note(con, run, task), scope=tid,
                               preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
             decision = settle_discovery(con, run, task, decision, launching=not stack_after)
             _record_routing(con, run, decision)
@@ -392,6 +394,53 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
 def _economics_on(run: dict) -> bool:
     from office import economics
     return economics.enabled(run)
+
+
+def _fastlane_mode(con, run: dict, task: dict) -> dict | None:
+    from office import fastlane
+    gate = fastlane.gate(run)
+    if gate is None:
+        return None
+    live = [t for t in state.tasks(con, run["id"]) if t["status"] not in ("superseded", "cancelled")]
+    return task_sizing.execution_mode(task_sizing.execution_gear(run), candidates._effective_task_descriptor(run, task),
+                                      run.get("risk"), task_count=len(live), fastlane=gate,
+                                      parallel=fastlane.parallel(live))
+
+
+def _fastlane_led_route(con, run: dict, task: dict) -> dict | None:
+    """#1297: a task fastlane hands to the orchestrator does not depend on an executor route qualifying. When none
+    does, the pinned fastlane decision is checked and the task is recorded on the orchestrator's own route (the one
+    its inline_quality names), which is also the overflow handoff target. None when fastlane would not lead the
+    task, or no usable orchestrator route is named."""
+    mode = _fastlane_mode(con, run, task)
+    if not mode or mode["mode"] != "inline":
+        return None
+    text = (candidates._effective_task_descriptor(run, task) or {}).get("inline_quality") or ""
+    route = text.partition(":")[0].strip()
+    parsed = candidates.parse_route_override(route) if "/" in route and "@" in route else {}
+    if not (parsed.get("harness") and parsed.get("model_id") and parsed.get("effort")):
+        return None
+    try:
+        cand = candidates.declared_candidate(parsed["harness"], parsed["model_id"], parsed["effort"], role="executor",
+                                             run_id=run["id"], scope=task["id"])
+    except (Usage, Refused):
+        return None
+    return {"status": "selected", "selected": routing.candidate_id(cand), "candidate": cand,
+            "request": {"role": "executor", "task_id": task["id"]}, "route_source": "fastlane",
+            "selection_disclosure": {"triple": routing.candidate_id(cand),
+                                     "reason": "fastlane: no executor route qualified; recorded on the orchestrator's "
+                                               "own route, which is also the overflow handoff target"}}
+
+
+def _fastlane_route_note(con, run: dict, task: dict) -> str:
+    """#1297: the refusal note when fastlane would lead a task but neither an executor route nor the orchestrator's
+    named route can be recorded. That route is the overflow handoff target (delegate_after_overflow)."""
+    mode = _fastlane_mode(con, run, task)
+    if not mode or mode["mode"] != "inline":
+        return ""
+    return ("; fastlane would let the orchestrator lead this task, but no executor route qualifies and its "
+            "inline_quality names no usable orchestrator route (<harness>/<model>@<effort>: <why>) to record as the "
+            "overflow handoff target")
 
 
 def _apply_execution_mode(con, run: dict, task: dict, decision: dict, launch_prefs: dict, *, explicit: bool) -> None:
