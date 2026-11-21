@@ -161,7 +161,8 @@ def test_stray_worktree_holding_the_integration_branch_is_named_and_resume_retri
     env.git("worktree", "add", "-q", "-b", f"office/{run_id[:8]}/integration", str(stray))
     env.office("dispatch", "T1", check=0)
     integ = _landing(con, run_id)["integration"]
-    assert integ["status"] == "blocked" and str(stray) in integ["detail"] and "office resume" in integ["detail"], integ
+    # git names the worktree in its own spelling (C:/... on Windows)
+    assert integ["status"] == "blocked" and stray.as_posix() in integ["detail"].replace("\\", "/") and "office resume" in integ["detail"], integ
     code, data = env.ojson("status")
     assert "office resume" in data["next"], data
     env.git("worktree", "remove", "--force", str(stray))

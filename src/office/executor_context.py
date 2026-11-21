@@ -126,7 +126,7 @@ def _git(wt: str | None, *args: str) -> str:
     if not wt or not (Path(wt) / ".git").exists():
         return ""
     try:
-        result = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, encoding="utf-8", timeout=5)
         return result.stdout if result.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""

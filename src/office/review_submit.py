@@ -18,7 +18,7 @@ import secrets
 import shlex
 from pathlib import Path
 
-from office import contract, db, paths, review_parse, state
+from office import contract, db, paths, portable, review_parse, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import atomic_write_json, now_iso, sha256_bytes
@@ -248,7 +248,7 @@ def submit(con, text: str) -> Result:
             raise Refused("review-closed", f"review gate {gate['id']} closed while the review was being submitted")
         tmp = output.with_name(output.name + ".submitting")
         tmp.write_text(text + "\n", encoding="utf-8")
-        os.replace(tmp, output)
+        portable.replace(tmp, output)
         atomic_write_json(ddir / SUBMITTED_FILE, {"at": now_iso(), "sha256": sha256_bytes((text + "\n").encode())},
                           mode=0o600)
         state.emit(con, run, "review.submitted", f"{d.get('task_id') or gate.get('scope') or 'plan'} {d['role']} "

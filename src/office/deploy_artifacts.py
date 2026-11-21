@@ -118,7 +118,10 @@ def preserve(run: dict, checkout: Path) -> dict | None:
                 with os.fdopen(fd, "rb") as inp, dest.open("xb") as out:
                     shutil.copyfileobj(inp, out)
                     out.flush()
-                    os.fchmod(out.fileno(), before["mode"])
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(out.fileno(), before["mode"])
+                    else:  # Windows: chmod by path only sets the read-only bit
+                        os.chmod(dest, before["mode"])
                     os.fsync(out.fileno())
             if _entry(dest) != before or _entry(source) != before:
                 raise OSError(f"rollback output changed while archiving: {name!r}")
@@ -150,7 +153,7 @@ def preserve(run: dict, checkout: Path) -> dict | None:
         return record
     finally:
         if stage.exists():
-            shutil.rmtree(stage)
+            portable.rmtree(stage)
 
 
 def receipt(run: dict) -> list[dict]:

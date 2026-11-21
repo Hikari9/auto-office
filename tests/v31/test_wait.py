@@ -583,6 +583,7 @@ def test_usage_limit_parses_time_forms():
     assert got["resets_at"] == _utc(2026, 10, 3, 0, 0)
 
 
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset (switching the local zone) is POSIX")
 def test_usage_limit_without_a_zone_uses_the_local_zone(monkeypatch):
     import time
     from office import dispatch
@@ -800,6 +801,8 @@ def test_a_resolved_limit_clears_the_stored_episode(env, virtual_wait_clock):
 @pytest.fixture
 def new_york(monkeypatch):
     import time
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset (switching the local zone) is POSIX")
     monkeypatch.setenv("TZ", "America/New_York")
     time.tzset()
     yield

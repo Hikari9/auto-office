@@ -300,7 +300,8 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
         tmp = web_dir() / f"web.pid.{os.getpid()}.tmp"
         tmp.write_text(json.dumps({"pid": os.getpid(), "started": _started(os.getpid()),
                                    "host": httpd.server_address[0], "port": real_port, "url": url,
-                                   "fixture": fixture}), encoding="utf-8")
+                                   "fixture": fixture, "launch": os.environ.get("OFFICE_WEB_LAUNCH")}),
+                       encoding="utf-8")
         os.replace(tmp, pid_file())  # written last and atomically: a reader sees a ready server or none
         log.info("office web: serving %s%s", url, f" (fixture {fixture})" if fixture else "")
         if ready:
@@ -329,15 +330,18 @@ def start(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     from office import frontdoor
     argv, extra = frontdoor.current_argv()
     cmd = [*argv, "web", "serve", "--host", host, "--port", str(port)] + (["--fixture", fixture] if fixture else [])
-    env = {**os.environ, **extra}
+    # The server names this launch in its pid file: on Windows the venv's python.exe redirector (and Office's UTF-8
+    # re-run) serve from a child process, so the pid it records is not proc.pid.
+    launch = os.urandom(8).hex()
+    env = {**os.environ, **extra, "OFFICE_WEB_LAUNCH": launch}
     with open(web_dir() / "web.log", "ab") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
                                 **portable.session_kwargs(), close_fds=True)
     deadline = time.time() + wait
     while time.time() < deadline:
         info = read_pid()
-        if info and info["pid"] == proc.pid:
-            return Result(lines=[f"office web running at {info['url']} (pid {proc.pid})"], next="office web stop",
+        if info and (info.get("launch") == launch or info["pid"] == proc.pid):
+            return Result(lines=[f"office web running at {info['url']} (pid {info['pid']})"], next="office web stop",
                           data=info)
         if proc.poll() is not None:
             raise WebError("web-start-failed", f"office web exited with {proc.returncode}",

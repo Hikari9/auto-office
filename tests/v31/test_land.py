@@ -43,7 +43,7 @@ def _integration_tree(env) -> str:
 
 def test_e2e_merges_bottom_up_deploys_verifies_and_closes(env, monkeypatch):
     marker = env.tmp / "deployed"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','w').write('ok')\"", verify=f"test -f {marker}")
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker.as_posix()}','w').write('ok')\"", verify=f"test -f {marker.as_posix()}")
     bare, out, data = _run(env, monkeypatch, plan)
     assert "merge PRs bottom-up into main (merge) -> deploy prod `python3" in out and "-> verify `test -f" in out, out
     assert data["next"] == "office land (end state: e2e)", data
@@ -95,7 +95,7 @@ def test_failing_required_checks_merge_nothing(env, monkeypatch):
 
 def test_preview_deploys_the_integration_and_leaves_prs_open(env, monkeypatch):
     marker = env.tmp / "preview"
-    bare, _, _ = _run(env, monkeypatch, _plan("preview", preview=f"cp calc.py {marker}"))
+    bare, _, _ = _run(env, monkeypatch, _plan("preview", preview=f"cp calc.py {marker.as_posix()}"))
     code, out = env.office("land")
     assert code == 0 and "preview deploy ok" in out, out
     assert "return a + b" in marker.read_text()

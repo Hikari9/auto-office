@@ -13,13 +13,15 @@ authors = [{ name = "Auto Office maintainers" }]
 dependencies = [
   "PyYAML>=6",
   "jsonschema>=4.18",
+  # Windows ships no IANA time-zone database; zoneinfo reads it from this package there.
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 # Deterministic browser capture for visual gates. Without it the visual gate
 # reports CAPTURE_BLOCKED instead of passing.
 visual = ["playwright>=1.40"]
-test = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6.100"]
+test = ["pytest>=8", "pytest-xdist>=3", "hypothesis>=6.100", "distlib>=0.3.8; sys_platform == 'win32'"]
 # Mutation testing is a periodic audit of the core-logic tests, not part of the gate: see docs/mutation-testing.md.
 mutation = ["mutmut>=3.2,<4"]
 

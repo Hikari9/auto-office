@@ -101,8 +101,8 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
            if not (k.startswith("OFFICE_") and k not in ("OFFICE_DATA_HOME", "OFFICE_STATE_HOME"))}
     started, timed_out = time.time(), False
     with log.open("w", encoding="utf-8") as fh:
-        proc = subprocess.Popen(cfg["setup"], shell=True, cwd=str(wt), stdout=fh, stderr=subprocess.STDOUT,
-                                env=env, **portable.session_kwargs())
+        proc = subprocess.Popen(**portable.shell_run_args(cfg["setup"], env), cwd=str(wt), stdout=fh,
+                                stderr=subprocess.STDOUT, **portable.session_kwargs())
         try:
             code = proc.wait(timeout=cfg["timeout"])
         except subprocess.TimeoutExpired:

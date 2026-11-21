@@ -1,4 +1,6 @@
 """#500: launch argv is inspectable without recording prompts or credentials."""
+import os
+
 from office import dispatch
 
 
@@ -34,7 +36,7 @@ def test_redaction_adversarial_combinations():
 def test_launch_spec_is_private(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch.paths, "run_dir", lambda _: tmp_path)
     dispatch.write_launch_spec({"id": "R1"}, "D1", {"argv": []})
-    assert (tmp_path / "dispatches" / "D1" / "launch.json").stat().st_mode & 0o077 == 0
+    assert os.name == "nt" or (tmp_path / "dispatches" / "D1" / "launch.json").stat().st_mode & 0o077 == 0  # no mode bits on Windows
 
 
 def test_record_both_forms_preserves_persisted_launch_evidence(tmp_path, monkeypatch):

@@ -17,17 +17,15 @@ accepts appended fix PR lanes before it recomposes.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
 import shlex
-import signal
 import subprocess
 import tempfile
 from pathlib import Path
 
-from office import integration, land, paths, prs, state
+from office import integration, land, paths, portable, prs, state
 from office.result import Result
 from office.state import Refused, Usage
 
@@ -217,7 +215,7 @@ def _save(path: Path, data: dict) -> None:
         fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(target, path)
+    portable.replace(target, path)
 
 
 @contextlib.contextmanager
@@ -228,13 +226,13 @@ def _lock(path: Path):
     lock = path.parent.parent / "landing.lock"
     with open(lock, "a") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fh, blocking=False)
         except BlockingIOError as exc:
             raise Refused("batch-running", "another batch landing is active in this repository") from exc
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def _entries(manifest: dict, con, repo: Path) -> tuple[list[dict], dict[int, dict]]:
@@ -458,22 +456,24 @@ def _suite_env(home: Path) -> dict:
 def _execute(argv: list[str], cwd: Path, timeout: int, out, home: Path) -> int:
     """Run the suite in its own process group. Output goes to the log file, not a pipe a descendant could hold open."""
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=_suite_env(home), stdin=subprocess.DEVNULL,
-                                stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        env = _suite_env(home)
+        proc = subprocess.Popen(portable.resolve_argv(argv, env), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=subprocess.STDOUT, **portable.session_kwargs())
     except OSError as exc:
         out.write(f"suite could not start: {exc}\n")
         return 127
     try:
         return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            portable.killpg(proc.pid, portable.SIGKILL)
         proc.wait()
         out.write(f"\nfull suite timed out after {timeout}s\n")
         return 124
     finally:
         # Also reap background children that the suite left in its process group.
         with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
+            portable.killpg(proc.pid, portable.SIGKILL)
 
 
 def _run_full(repo: Path, sha: str, manifest: dict, folder: Path) -> tuple[int, Path]:

@@ -18,6 +18,19 @@ _path_entries = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
 if _path_entries[:1] != [_INTERPRETER_DIR]:
     os.environ["PATH"] = os.pathsep.join([_INTERPRETER_DIR, *_path_entries])
 
+if sys.platform == "win32":
+    # Tests script fake harnesses, hooks and tools as `#!` files marked executable. Windows runs neither
+    # shebangs nor extensionless files, so `chmod +x` on such a file also writes a sibling `<name>.exe`
+    # launcher (`shutil.which` and CreateProcess both find it). See tests/_win_shebang.py.
+    from tests import _win_shebang  # noqa: E402
+    _win_shebang.install()
+    # Office runs in Python's UTF-8 mode on Windows (office/__main__.py). Every Office process a test starts, and
+    # the pytest-xdist workers (started after this), inherit it; run `python -X utf8 -m pytest` without `-n`.
+    os.environ["PYTHONUTF8"] = "1"
+    # Git for Windows' system config turns on core.autocrlf, which rewrites line endings in the byte-exact repos the
+    # tests build. Every git the tests run gets git's POSIX default instead.
+    os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.autocrlf", "GIT_CONFIG_VALUE_0": "false"})
+
 # Property tests must be reproducible: `derandomize` fixes the example sequence per test, and no
 # example database means a laptop run and a hook run see the same inputs. A failure still prints
 # `@reproduce_failure` (print_blob), and a shrunk counterexample worth keeping belongs in an

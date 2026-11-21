@@ -25,13 +25,14 @@ from conftest import GOOD_ADD, PLAN_ONE, approved_run
 # is proven by its pid answering nothing — "now" stays 1 in its state file
 # when it was stopped instead of finishing.
 PROBE = r'''
-import fcntl, json, os, sys, time
+import json, os, sys, time
+from office import portable  # flock on POSIX, LockFileEx on Windows
 d, secs = sys.argv[1], float(sys.argv[2])
 os.makedirs(d, exist_ok=True)
 lock = open(os.path.join(d, "probe.lock"), "a")
 
 def bump(delta, pid=0):
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    portable.lock_exclusive(lock)
     path = os.path.join(d, "state.json")
     st = json.load(open(path)) if os.path.exists(path) else {"now": 0, "max": 0, "runs": 0, "pid": None}
     st["now"] += delta
@@ -40,7 +41,7 @@ def bump(delta, pid=0):
     if pid:
         st["pid"] = pid
     json.dump(st, open(path, "w"))
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    portable.unlock(lock)
 
 bump(1, os.getpid())
 time.sleep(secs)
@@ -54,7 +55,7 @@ def _probe_plan(env, secs: float) -> tuple[str, Path]:
     probe = env.tmp / "probe.py"
     probe.write_text(PROBE)
     out = env.tmp / "probe"
-    command = " ".join(["python3", str(probe), str(out), str(secs)])
+    command = " ".join(["python3", probe.as_posix(), out.as_posix(), str(secs)])
     return PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {command}"), out
 
 

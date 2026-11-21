@@ -389,7 +389,7 @@ def _safe_restack_push(con, run: dict, task: dict, dispatch: dict, rev: dict,
     ref = f"refs/heads/{branch}"
     try:
         got = subprocess.run(["git", "-C", dispatch["worktree"], "ls-remote", "--heads", "origin", ref],
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, text=True, encoding="utf-8", timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return False, "non-fast-forward: could not verify remote task branch"
     if got.returncode != 0:

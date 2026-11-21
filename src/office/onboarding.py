@@ -24,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from office import adapters, candidates, route_policy, configcmd, db, discovery, harness_preference, hermes_access, install, paths, routing
+from office import adapters, candidates, route_policy, configcmd, db, discovery, harness_preference, hermes_access, install, paths, portable, routing
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError
@@ -157,7 +157,7 @@ def _run_opencode(*args: str) -> tuple[subprocess.CompletedProcess | None, str]:
     """Run one opencode command; on failure return None and a one-line reason."""
     label = "opencode " + " ".join(args)
     try:
-        proc = subprocess.run(["opencode", *args], capture_output=True, text=True, timeout=10,
+        proc = subprocess.run(portable.resolve_argv(["opencode", *args]), capture_output=True, text=True, timeout=10,
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, f"{label} timed out"
@@ -197,15 +197,18 @@ def _kilo_signed_in() -> tuple[bool, str]:
     if shutil.which("kilo") is None:
         return False, "kilo is not installed"
     try:
-        proc = subprocess.run(["kilo", "auth", "list"], capture_output=True, text=True, timeout=10,
+        proc = subprocess.run(portable.resolve_argv(["kilo", "auth", "list"]), capture_output=True, timeout=10,
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return False, "kilo auth list timed out"
-    except UnicodeDecodeError:
-        # text=True decodes both stdout and stderr, so invalid UTF-8 on either raises here.
-        return False, "kilo auth list printed unparseable output"
     except (OSError, subprocess.SubprocessError):
         return False, "could not run kilo auth list"
+    try:
+        # Both streams, strictly: invalid UTF-8 on either is unparseable. Decoded here, not by text=True, which on
+        # Windows decodes in a reader thread whose error is lost (the stream then reads as nothing).
+        proc.stdout, proc.stderr = proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, "kilo auth list printed unparseable output"
     if proc.returncode != 0:
         return False, f"kilo auth list exited {proc.returncode}"
 

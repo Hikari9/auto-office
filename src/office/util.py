@@ -59,7 +59,7 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
         os.fsync(fh.fileno())
     if mode is not None:
         os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    portable.replace(tmp, path)
 
 
 def atomic_write_json(path: Path, obj: Any, mode: int | None = None) -> None:

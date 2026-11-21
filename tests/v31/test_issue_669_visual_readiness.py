@@ -70,7 +70,7 @@ def _capture(monkeypatch, tmp_path, frames, *, ready=None, fail_browser=False):
         pid = 556677
         def wait(self, **kwargs): return 0
     monkeypatch.setattr(visual.subprocess, "Popen", lambda *a, **kw: Server())
-    monkeypatch.setattr(visual.os, "killpg", lambda *a: None)
+    monkeypatch.setattr(visual.portable, "killpg", lambda *a: None)
     return visual.capture_all(
         object(), {"id": "r"*32, "office_version": "test", "repo_root": str(tmp_path)},
         {"id": "T1", "title": "UI", "visual": {"url": "http://127.0.0.1:5555/", "start": "serve"}},

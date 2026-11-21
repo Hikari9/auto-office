@@ -160,7 +160,8 @@ def _resolve_adapter(ident: str | None, file: str | None = None) -> tuple[dict, 
 
 def _probe(argv: list[str]) -> str:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+        proc = subprocess.run(portable.resolve_argv(argv), capture_output=True, text=True, timeout=15,
+                              stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (proc.stdout or "") + (proc.stderr or "")
@@ -593,7 +594,8 @@ def _run_capped(argv: list[str], *, cwd: Path, stdin_text: str | None, cap: int)
     """Run in its own session so a timeout kills the whole process group: a
     grandchild holding the pipes open cannot hang the smoke."""
     import signal
-    proc = subprocess.Popen(argv, cwd=cwd, env=_smoke_env(), text=True, **portable.session_kwargs(),
+    env = _smoke_env()
+    proc = subprocess.Popen(portable.resolve_argv(argv, env), cwd=cwd, env=env, text=True, **portable.session_kwargs(),
                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:

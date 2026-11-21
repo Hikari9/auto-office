@@ -45,7 +45,8 @@ def test_ready_prints_the_sourced_submit_line_and_submit_follows(env):
     wenv, wt, d = _dispatched(env)
     code, out = env.office("preflight", cwd=wt, env=wenv)
     assert code == 0 and out.startswith("PREFLIGHT ready"), out
-    assert f"agent.env && office submit" in out and d["id"] in out, out
+    # A Windows path is shell-quoted and backslashed; compare the shape, not the spelling.
+    assert "agent.env && office submit" in out.replace("'", "") and d["id"] in out, out
     code, out = env.office("submit", cwd=wt, env=wenv)
     assert code == 0, out
 
@@ -56,7 +57,8 @@ def test_wrong_role_is_a_fix_naming_the_agent_env(env):
     wenv, wt, d = _dispatched(env)
     code, out = env.office("preflight", cwd=wt, env={**wenv, "OFFICE_ROLE": "reviewer"})
     assert code == 1 and out.startswith("PREFLIGHT fix"), out
-    assert "OFFICE_ROLE=reviewer" in out and f"{d['id']}/agent.env && office submit" in out, out
+    plain = out.replace("'", "").replace("\\", "/")
+    assert "OFFICE_ROLE=reviewer" in out and f"{d['id']}/agent.env && office submit" in plain, out
 
 
 @pytest.mark.integration

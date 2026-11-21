@@ -16,6 +16,10 @@ from conftest import approved_run
 from office import db, paths, state, visual
 from office.util import now_iso, process_start
 
+# The owner of a bound port is found with lsof and stopped by its POSIX process group; Windows has neither, and
+# there a visual capture on an occupied port reports the generic blocker.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="leftover detection reads lsof and POSIX process groups")
+
 
 def test_port_conflict_names_pid_command_and_possible_finished_dispatch(monkeypatch, tmp_path):
     class Conn:

@@ -9,9 +9,9 @@ matches, or to .office/plans/legacy-<date>.md when none does.
 """
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
+from office import portable
 from office.util import now_iso, sha256_bytes, short
 
 LEGACY = Path(".office") / "PLAN.md"
@@ -71,4 +71,4 @@ def relocate_legacy(con, root: Path) -> str | None:
 
 
 def remove(root: Path, run: dict) -> None:
-    shutil.rmtree(draft(root, run).parent, ignore_errors=True)
+    portable.rmtree(draft(root, run).parent, ignore_errors=True)

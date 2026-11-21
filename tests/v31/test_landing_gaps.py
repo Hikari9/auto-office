@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+
+import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
 from office import gates, prs, state
@@ -12,6 +15,8 @@ from test_land import _integration_tree, _main_tree, _run
 from test_task_prs import PLAN_STACKED, gh
 
 MARK = "<!-- office:pr run=r task=T1 -->"
+NEEDS_LOADAVG = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no load average, so "
+                                   "gates.host_overloaded() never reports host load there")
 
 
 # ------------------------------------------------------------------ PR body
@@ -95,13 +100,14 @@ def test_rebase_when_main_has_not_moved_is_a_no_op(env, monkeypatch):
 # ------------------------------------------------------------------ check timeout under load
 
 def test_host_overloaded_compares_load_with_cpus(monkeypatch):
-    monkeypatch.setattr(gates.os, "getloadavg", lambda: (100.0, 0, 0))
+    monkeypatch.setattr(gates.portable, "loadavg", lambda: (100.0, 0, 0))
     monkeypatch.setattr(gates.os, "cpu_count", lambda: 10)
     assert gates.host_overloaded() == "host load 100 exceeds 20 (10 CPUs)"
-    monkeypatch.setattr(gates.os, "getloadavg", lambda: (5.0, 0, 0))
+    monkeypatch.setattr(gates.portable, "loadavg", lambda: (5.0, 0, 0))
     assert gates.host_overloaded() is None
 
 
+@NEEDS_LOADAVG
 def test_run_check_timeout_under_load_is_unavailable_not_a_finding(env, monkeypatch):
     plan = PLAN_ONE.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: sleep 5\n")
     (env.repo / ".auto-office").mkdir(exist_ok=True)
@@ -119,10 +125,11 @@ def test_run_check_timeout_under_load_is_unavailable_not_a_finding(env, monkeypa
     assert landing["integration"]["status"] == "blocked" and "UNAVAILABLE" in detail and "host load" in detail, landing
 
 
+@NEEDS_LOADAVG
 def test_task_check_timeout_under_load_blocks_then_resume_reruns_it(env, monkeypatch):
     marker = env.tmp / "slow-once"
     plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"',
-                            f"checks: test -f {marker} || (touch {marker}; sleep 5)")
+                            f"checks: test -f {marker.as_posix()} || (touch {marker.as_posix()}; sleep 5)")
     assert plan != PLAN_ONE
     (env.repo / ".auto-office").mkdir(exist_ok=True)
     (env.repo / ".auto-office" / "config.yaml").write_text("verification:\n  check_timeout_seconds: 2\n")

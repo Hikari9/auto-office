@@ -504,10 +504,10 @@ def _tool(name: str, *system: str) -> str:
 
 def _process_table() -> list[tuple[int, int, str, str]] | None:
     """(pid, ppid, start time, command and, where the OS shows it, environment) for
-    every process, or None when it cannot be read (always, on Windows: no `ps`, and no way to read
-    another process's environment)."""
+    every process, or None when it cannot be read. On Windows the table comes from a process snapshot and
+    shows no environment, so attribution there is by descent from the leader alone."""
     if portable.IS_WINDOWS:
-        return None
+        return portable.windows_process_table()
     try:
         listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), _PS_ENV_FLAGS, "-o", "pid=,ppid=,lstart=,command="], capture_output=True,
                                  text=True, timeout=10, check=True).stdout
@@ -520,9 +520,11 @@ def _process_table() -> list[tuple[int, int, str, str]] | None:
 def _workspace_pids(base: Path) -> set[int] | None:
     """Processes holding any file or directory (including their cwd) under the
     probe's disposable base. Nothing else knows that random path, so a holder is
-    the probe's. None when the holders cannot be listed (always, on Windows: no `lsof`)."""
+    the probe's. None when the holders cannot be listed. Windows has no `lsof` (and no `setsid`): there the
+    tracker's descent from the leader, which keeps linking through parents that already exited, is the
+    attribution, and this adds no holders."""
     if portable.IS_WINDOWS:
-        return None
+        return set()
     try:
         proc = subprocess.run([_tool("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"), "-nP", "-F", "p", "+D", str(base)], capture_output=True, text=True,
                               timeout=30)
@@ -546,6 +548,7 @@ class _Tracker:
     def __init__(self, nonce: str, base: Path | None) -> None:
         self.nonce, self.base = nonce, base
         self.seen: dict[int, str] = {}
+        self.gone: dict[int, int] = {}  # Windows: when a seen process was first seen exited or reused
 
     def observe(self, root: int | None) -> set[int] | None:
         table = _process_table()
@@ -560,14 +563,18 @@ class _Tracker:
             started[pid] = start
             if tag.search(command):
                 found.add(pid)
-        queue = [pid for pid, start in self.seen.items() if started.get(pid) == start]
+        # A seen process that has since exited still links its children: Windows keeps the dead parent's pid
+        # as their ppid (POSIX reparents them, so the walk adds nothing there).
+        # A child that started after its parent was seen gone belongs to whatever reused the pid.
+        follows = portable.orphan_filter(self.gone, self.seen, started)
+        queue = [pid for pid, start in self.seen.items() if started.get(pid, start) == start]
         if root:
             queue.append(root)
         while queue:
             pid = queue.pop()
             if pid not in found:
                 found.add(pid)
-                queue.extend(children.get(pid, []))
+                queue.extend(c for c in children.get(pid, []) if follows(pid, c))
         found = {pid for pid in found if pid in started}
         self.seen.update({pid: started[pid] for pid in found})
         return found
@@ -603,13 +610,7 @@ class _Tracker:
 
 def _pid_gone(pid: int) -> bool:
     """True only when no process has this pid any more."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
+    return portable.pid_exists(pid) is False  # not `os.kill(pid, 0)`, which on Windows interrupts the console
 
 
 def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] | None:
@@ -620,7 +621,24 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
     start time differs from the one the tracker saw was reused by another process, so
     it is not ours to wait for or signal (ps shows start times to the second; reusing a
     pid within the same second would take a full wrap of the pid space). None when the
-    states cannot be read, so the caller fails closed."""
+    states cannot be read, so the caller fails closed. Windows has no zombies and no
+    `ps`: there an exited process is gone, and its creation time names the instance."""
+    if portable.IS_WINDOWS:
+        alive = set()
+        for pid in pids:
+            exists = portable.pid_exists(pid)
+            if exists is None:
+                return None
+            if not exists:
+                continue
+            if starts is not None:
+                if pid not in starts:
+                    return None
+                now = portable.windows_process_start(pid)
+                if starts[pid] and now and now != starts[pid]:
+                    continue
+            alive.add(pid)
+        return alive
     try:
         listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=,lstart=", "-p",
                                   ",".join(str(p) for p in sorted(pids))],
@@ -678,7 +696,9 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
             return False
         if not pids and not _group_alive(pgid):
             return True
-        if group_ours():
+        # Windows: a job this process holds stays the probe's group after its leader exits, and with no
+        # environments or `lsof` there it is the only thing that reaches a child the tracker never saw.
+        if group_ours() or portable.owns_group(pgid):
             try:
                 portable.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):
@@ -729,7 +749,7 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
     ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
     gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours, start=rec.get("start"))
     if base is not None:  # a claude probe keeps its session record in the user's config dir, not under base
-        shutil.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
+        portable.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
     if not ours and pid:
         return (f"recorded probe pid {pid} is no longer that process; "
                 + ("attributable descendants stopped" if gone else "attributable descendants did not exit"))
@@ -1215,7 +1235,7 @@ class _Workspace:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         proc = subprocess.run(["git", "-c", "user.name=office-probe", "-c", "user.email=probe@office.invalid",
                                "-c", "commit.gpgsign=false", "-C", str(cwd or self.repo), *args],
-                              capture_output=True, text=True, timeout=30, env=env, check=True)
+                              capture_output=True, text=True, encoding="utf-8", timeout=30, env=env, check=True)
         return proc.stdout
 
     def _setup(self) -> None:
@@ -1246,7 +1266,7 @@ class _Workspace:
             rel = path.relative_to(self.base)
             if rel.parts[0] in ("wt", "tmp", "home") or rel.parts[:2] == ("repo", ".git"):
                 continue
-            out[str(rel)] = "dir" if path.is_dir() else sha256_file(path)
+            out[rel.as_posix()] = "dir" if path.is_dir() else sha256_file(path)
         return out
 
     def outside_change(self) -> str | None:
@@ -1265,9 +1285,9 @@ class _Workspace:
         return path.read_text(errors="replace") if path.is_file() else None
 
     def remove(self) -> None:
-        shutil.rmtree(self.base, ignore_errors=True)
+        portable.rmtree(self.base, ignore_errors=True)
         if self.transcript_dir:
-            shutil.rmtree(self.transcript_dir, ignore_errors=True)
+            portable.rmtree(self.transcript_dir, ignore_errors=True)
 
 
 def _sbpl(path: Path | str) -> str:
@@ -1300,7 +1320,7 @@ def write_boundary_reason() -> str | None:
     except (OSError, subprocess.SubprocessError) as exc:
         return f"sandbox-exec could not be exercised: {exc}"
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        portable.rmtree(base, ignore_errors=True)
 
 
 def _boundary_argv(ws: _Workspace) -> list[str]:
@@ -1314,8 +1334,7 @@ def _boundary_argv(ws: _Workspace) -> list[str]:
 
 def _spawn(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
     """The one place a probe child is created: its own session, output piped back."""
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-                            **portable.session_kwargs())
+    return portable.popen_group(portable.resolve_argv(argv, env), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 
 
 def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, nonce: str) -> dict:
@@ -1396,11 +1415,13 @@ def _launch(argv: list[str], prof: dict, prompt: str, cwd: Path, env: dict, time
                 data, _ = proc.communicate(timeout=5)
             except (subprocess.TimeoutExpired, ValueError, OSError):
                 data = b""
-        out["output"] = (data or b"").decode(errors="replace")
+        # Windows consoles end lines with CRLF; the reply and metadata parsers are line-anchored.
+        out["output"] = (data or b"").decode(errors="replace").replace("\r\n", "\n")
         out["returncode"] = proc.returncode
     finally:
         # Normal exit or not, nothing the probe started may outlive it.
         out["group_gone"] = _terminate_tree(proc.pid, tracker, proc=proc) and out["group_gone"]
+        portable.release_group(proc.pid)
     return out
 
 

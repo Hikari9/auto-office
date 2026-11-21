@@ -122,7 +122,7 @@ def test_env_files_are_copied_with_their_mode(repo, tmp_path):
     copied = land.copy_env_files(repo, checkout, [".env", "myaccount/.env", "absent.env"])
     assert copied == [".env", "myaccount/.env"]
     assert (checkout / ".env").read_text() == "TOKEN=1\n"
-    assert stat.S_IMODE((checkout / ".env").stat().st_mode) == 0o640
+    assert os.name == "nt" or stat.S_IMODE((checkout / ".env").stat().st_mode) == 0o640  # Windows has no mode bits
     assert (checkout / "myaccount" / ".env").read_text() == "TOKEN=2\n"
 
 
@@ -183,7 +183,7 @@ def test_land_reports_the_deploy_cwd_and_copies_env_files(env, monkeypatch):
     (env.repo / ".env").write_text("TOKEN=abc\n")
     (env.repo / ".env").chmod(0o600)
     seen = env.tmp / "seen"
-    cmd = f"python3 -c \"import os; open('{seen}','w').write(os.getcwd() + chr(10) + open('.env').read())\""
+    cmd = f"python3 -c \"import os; open('{seen.as_posix()}','w').write(os.getcwd() + chr(10) + open('.env').read())\""
     _run(env, monkeypatch, _plan("preview", preview=cmd, verify="test -f .env"))
     code, out = env.office("land")
     assert code == 0, out

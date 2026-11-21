@@ -23,7 +23,7 @@ import pytest
 from host_tools import host_tool_dirs
 import yaml
 
-from office import adapters, candidates, harnesscmd, install, onboarding, route_policy, routing
+from office import adapters, candidates, db, harnesscmd, install, onboarding, paths, route_policy, routing
 from office.state import Refused
 
 SLUG = "opencode/muse-spark-1.3-contributor-free"
@@ -114,6 +114,8 @@ def fake(tmp_path, monkeypatch):
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "ok")
+    # the harness-version memo lives in the data home: keep the fake's version out of the developer's own
+    monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
     for key in ("OFFICE_AUTH_FIXTURE", "OFFICE_USER_ADAPTERS"):
         monkeypatch.delenv(key, raising=False)
     for mod in (adapters, harnesscmd):
@@ -406,5 +408,6 @@ def test_onboarding_role_routes_honour_the_free_model_opt_in(fake, monkeypatch, 
            "effort": "xhigh", "dispatchable": True, "free_model": True}
     monkeypatch.setattr(candidates, "catalog_rows", lambda: [row])
     (tmp_path / "user-config.yaml").write_text("onboarding:\n  free_models_enabled: true\n")
+    db.connect(paths.runs_db()).close()  # routing reads the (isolated) runs.db for live concurrency
     _, why_not = onboarding.role_routes(sqlite3.connect(":memory:"), {}, "worker")
     assert not any("opt-in" in reason for reason in why_not.values()), why_not

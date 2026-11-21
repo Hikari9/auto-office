@@ -45,7 +45,8 @@ def test_missing_headless_shell_provides_install_command(monkeypatch):
         "/cache/chromium_headless_shell-1248/chrome-headless-shell")
     message, problem = doctor._visual_capture_status()
     assert problem and "headless shell missing" in message
-    assert "playwright install chromium-headless-shell" in message
+    deps = " --with-deps" if sys.platform.startswith("linux") else ""  # Linux also needs the browser's system libraries
+    assert f"playwright install{deps} chromium-headless-shell" in message
     assert calls == [("launch", {"headless": True, "timeout": 10000})]
 
 

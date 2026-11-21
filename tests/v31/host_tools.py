@@ -12,4 +12,6 @@ def host_tool_dirs() -> list[str]:
     root = os.environ.get("SystemRoot", r"C:\Windows")
     dirs = [os.path.join(root, "System32"), root]
     git = shutil.which("git")
-    return dirs + ([os.path.dirname(git)] if git else [])
+    from tests import _win_shebang  # the `python3` that forwards to the interpreter running the tests
+    return (dirs + ([os.path.dirname(git)] if git else []) + ([_win_shebang.PYTHON3_DIR] if _win_shebang.PYTHON3_DIR else [])
+            + _win_shebang.unix_tool_dirs())

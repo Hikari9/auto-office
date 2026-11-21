@@ -177,7 +177,7 @@ def done(summary: str) -> str:
 
 
 def _git(repo, *args) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8")
 
 
 def base_branch(run: dict, landing: dict) -> str:

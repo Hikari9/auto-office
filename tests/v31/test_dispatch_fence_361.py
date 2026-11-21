@@ -642,10 +642,10 @@ def test_back_to_back_resume_launches_end_with_each_pane_matching_its_own_dispat
     for d, res in ((d1, r1), (d3, r3)):
         pane = world.panes[res["pane"]]
         assert world.agents[dispatch.herdr_agent_name(d["id"])]["pane_id"] == res["pane"] and pane["agent"] == "claude"
-        assert pane["cwd"] == d["worktree"]
+        assert Path(pane["cwd"]) == Path(d["worktree"])  # the OS spelling of the worktree
     # Each brief went to the pane whose agent and cwd belong to the dispatch it names.
-    assert sorted((name, pane, snap["cwd"]) for name, pane, snap in world.delivered) == sorted(
-        (dispatch.herdr_agent_name(d["id"]), res["pane"], d["worktree"]) for d, res in ((d1, r1), (d3, r3)))
+    assert sorted((name, pane, Path(snap["cwd"])) for name, pane, snap in world.delivered) == sorted(
+        (dispatch.herdr_agent_name(d["id"]), res["pane"], Path(d["worktree"])) for d, res in ((d1, r1), (d3, r3)))
 
 
 def test_a_cross_assigned_agent_fails_only_its_own_launch(world):
@@ -669,7 +669,7 @@ def test_one_poisoned_pane_leaves_the_healthy_dispatch_untouched(world):
     assert len(healthy) == len(refused) == 1, landed
     (name, pane, snap), = world.delivered
     d_ok = out[healthy[0]][0]
-    assert name == dispatch.herdr_agent_name(d_ok["id"]) and snap["cwd"] == d_ok["worktree"]
+    assert name == dispatch.herdr_agent_name(d_ok["id"]) and Path(snap["cwd"]) == Path(d_ok["worktree"])
     assert [did for did, _ in world.notices] == [out[refused[0]][0]["id"]]
     assert "brief NOT sent" in world.notices[0][1]
     final = {did: spec for did, spec in world.specs}

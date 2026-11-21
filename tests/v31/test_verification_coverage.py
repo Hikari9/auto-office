@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -357,7 +358,7 @@ def pytest_collection_modifyitems(config, items):
 p=argparse.ArgumentParser()
 p.add_argument("--output")
 a=p.parse_args()
-open(a.output,"w").write("tests/test_smoke.py\\n")
+open(a.output,"w",newline="\\n").write("tests/test_smoke.py\\n")
 ''')
     (scripts / "validate.sh").write_text('''#!/usr/bin/env bash
 set -e
@@ -456,12 +457,14 @@ def pytest_collection_modifyitems(config, items):
     shutil.copy2(source / "pyproject.toml", env.repo / "pyproject.toml")
     fixture_venv = env.tmp / "gate-venv"
     fixture_venv.mkdir()
-    (fixture_venv / "bin").symlink_to(source / ".venv/bin", target_is_directory=True)
-    (fixture_venv / "lib").symlink_to(source / ".venv/lib", target_is_directory=True)
+    for sub in ("Scripts", "Lib") if sys.platform == "win32" else ("bin", "lib"):
+        (fixture_venv / sub).symlink_to(source / ".venv" / sub, target_is_directory=True)
     shutil.copy2(source / ".venv/pyvenv.cfg", fixture_venv / "pyvenv.cfg")
     (fixture_venv / ".validate-stamp").write_text(
         hashlib.sha256((env.repo / "pyproject.toml").read_bytes()).hexdigest() + "\n")
     (env.repo / ".venv").symlink_to(fixture_venv, target_is_directory=True)
+    if sys.platform == "win32":  # Git for Windows checks committed links out as text files by default
+        env.git("config", "core.symlinks", "true")
     env.git("add", "-A")
     env.git("commit", "-qm", "fixture: pinned gate")
     env.git("update-ref", "refs/remotes/origin/main", "HEAD")

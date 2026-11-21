@@ -1,5 +1,6 @@
 """#537: clean Git merges are not proof that shared appends are safe."""
 from pathlib import Path
+import os
 import subprocess
 import pytest
 from office import integration, convergence, paths, state
@@ -66,6 +67,7 @@ def test_unsupported_shared_binary_data_blocks_clean_composition(tmp_path, base,
             wt, SHARED, [SHARED], env=paths.commit_identity_env(repo))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no executable bit for git to see change")
 def test_shared_file_mode_change_rejected(tmp_path):
     repo, wt, root, merge = siblings(tmp_path, first=b"", second=b"", first_mode=True, other=True)
     assert merge.returncode == 0

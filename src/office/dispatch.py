@@ -2670,7 +2670,8 @@ def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess
     The one place a harness child is created, so tests can replace it."""
     # Popen's cwd leaves $PWD at the supervisor's directory; opencode takes its working
     # directory from $PWD, so the checkout would count as external and be denied.
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    return subprocess.Popen(portable.resolve_argv(argv, env), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
                             env={**env, "PWD": str(cwd)}, **portable.session_kwargs())
 
 
@@ -2821,7 +2822,8 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     env_file = ddir / "agent.env"
     prelude = adapters.shell_env_prelude(adapters.load_all().get(dispatch.get("adapter_id") or ""))
     env_file.write_text((f"{prelude}\n" if prelude else "")
-                        + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
+                        + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())),
+                        encoding="utf-8", newline="\n")  # a shell sources this: no CRLF on Windows
     env_file.chmod(0o600)
     return env_file
 
@@ -5648,10 +5650,11 @@ def _process_table() -> list[tuple[int, int, int, str, str, str]] | None:
     """(pid, ppid, pgid, state, start, command-and-environment) for every process, or None when the table cannot be
     trusted. `ps` runs in the C locale, so the start time parses (and matches a recorded identity) whatever the
     user's locale is; a table that does not contain this very process was misread, and says nothing.
-    Windows cannot read another process's environment, so it has no table: callers treat None as "cannot
-    confirm the tree is gone"."""
+    On Windows the table is a process snapshot: no process groups (pgid 0), no zombies, and no environment, so a
+    worker is found by its recorded roots and their descendants."""
     if portable.IS_WINDOWS:
-        return None
+        table = portable.windows_process_table()
+        return None if table is None else [(pid, ppid, 0, "R", start, name) for pid, ppid, start, name in table]
     try:
         listing = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-axeww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
                                  capture_output=True,
@@ -5702,6 +5705,7 @@ class _WorkerTree:
         self.roots = roots
         self.pgid = pgid  # the verified agent's process group: every live member of it is the worker's
         self.seen: dict[int, str] = {}
+        self.gone: dict[int, int] = {}  # Windows: when a recorded process was first seen exited or reused
 
     def scan(self, _root=None) -> set[int] | None:
         table = _process_table()
@@ -5732,16 +5736,19 @@ class _WorkerTree:
                 pid = parent[pid]
             return False
 
+        follows = portable.orphan_filter(self.gone, {**self.seen, **self.roots}, started)
+
         def with_descendants(seed) -> set[int]:
             out, queue = set(mine), list(seed)  # this process and its ancestors are never walked into
             while queue:
                 pid = queue.pop()
                 if pid not in out:
                     out.add(pid)
-                    queue.extend(children.get(pid, []))
+                    queue.extend(c for c in children.get(pid, []) if follows(pid, c))
             return out - mine
 
-        named = {p for p, st in {**self.seen, **self.roots}.items() if started.get(p) == st}
+        # A named process that has since exited still links its children on Windows, where they keep its pid as ppid.
+        named = {p for p, st in {**self.seen, **self.roots}.items() if started.get(p, st) == st}
         # A tag alone is not proof: the `ps`, `lsof` or `git` this process runs inherits the tag it carries. A
         # recorded identity or the agent's group stays the worker's whoever started it.
         found = with_descendants(named | grouped) | with_descendants(p for p in tagged if p not in mine and not started_by_me(p))
@@ -5810,7 +5817,8 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
     # one still has the worktree as its working directory it may be writing there: not confirmed.
     if d.get("worktree") and Path(d["worktree"]).is_dir():
         for attempt in range(3):  # a closing pane's shell takes a moment to go
-            holders = _cwd_holders(Path(d["worktree"]))
+            holders = _cwd_holders(Path(d["worktree"]), since=parse_iso(d["started_at"]).timestamp()
+                                   if d.get("started_at") else None)
             table = _process_table()
             if holders is None or table is None:
                 return False, "the processes working in the worktree cannot be listed, so exit is unconfirmed"
@@ -5832,7 +5840,11 @@ def _file_stamp(path: Path) -> str:
         st = path.lstat()
     except OSError:
         return "gone"
-    return "link:" + os.readlink(path) if stat.S_ISLNK(st.st_mode) else f"{st.st_size}:{st.st_mtime_ns}"
+    if not stat.S_ISLNK(st.st_mode):
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    text = os.readlink(path)
+    # Windows reports an absolute target in its `\\?\` device form; the stamp keeps the path as written
+    return "link:" + (text[4:] if portable.IS_WINDOWS and text.startswith("\\\\?\\") else text)
 
 
 def _worktree_snapshot(wt: Path) -> dict | None:
@@ -5888,12 +5900,48 @@ def _foreign(pids: set[int], table: list[tuple]) -> set[int]:
     return {p for p in pids if p in parent and p not in mine and not ours(p)}
 
 
-def _cwd_holders(wt: Path) -> set[int] | None:
+def _proc_owner(entry: Path) -> int | None:
+    """The real uid of a Linux process (`Uid:` in /proc/<pid>/status, which every user can read), or None
+    when it cannot be read. Not the owner of the /proc entry: the kernel shows a non-dumpable process
+    (a setuid program, one that dropped dumpability) as root's there, though this user started it."""
+    try:
+        for line in (entry / "status").read_text().splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _proc_started(entry: Path) -> float | None:
+    """When a Linux process started (epoch seconds), from /proc/<pid>/stat, which every user can read; None
+    when it cannot be read."""
+    try:
+        fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        btime = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+        return btime + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def _cwd_holders(wt: Path, since: float | None = None) -> set[int] | None:
     """Processes whose working directory is inside `wt`, or None when they cannot be listed. Linux reads
     /proc; elsewhere `lsof`, whose failure (nonzero beyond its "nothing found", or no listing at all) is not
-    an empty answer."""
+    an empty answer. `since` is when the failed dispatch began: on Linux a process that hides its directory
+    but started before then cannot be one its worker started."""
     root = str(wt.resolve())
     inside = lambda path: path == root or path.startswith(root + os.sep)
+    if portable.IS_WINDOWS:
+        cwds = portable.windows_cwds()
+        if cwds is None:
+            return None
+        # A process keeps its directory as it was spelled (a junction, a subst or mapped drive, an 8.3 name);
+        # the worktree path is resolved, so each directory is resolved the same way before comparing.
+        root = os.path.normcase(root.rstrip("\\/"))
+        spelled = lambda cwd: os.path.normcase(cwd).rstrip("\\/")
+        return {pid for pid, cwd in cwds.items()
+                if inside(spelled(os.path.normpath(cwd))) or inside(spelled(os.path.realpath(cwd)))}
     if Path("/proc/self/cwd").exists():
         holders = set()
         for entry in Path("/proc").iterdir():
@@ -5903,6 +5951,16 @@ def _cwd_holders(wt: Path) -> set[int] | None:
                         holders.add(int(entry.name))
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # gone since the listing
+                except PermissionError:
+                    # Another account's process (init, a system daemon: its real uid is not this user's) hides
+                    # its directory from this user; a worker Office started runs as this user, and a setuid
+                    # program it runs keeps this user's real uid. One of this user's that keeps privileges
+                    # (`systemd --user`, `(sd-pam)`) hides it too, but started at login, before the dispatch.
+                    # Any other that hides it may be the one writing.
+                    started = _proc_started(entry)
+                    older = since is not None and started is not None and started < since - 1
+                    if not older and _proc_owner(entry) in (None, os.getuid()):
+                        return None
                 except OSError:
                     return None  # a process whose directory cannot be read may be the one writing
         return holders

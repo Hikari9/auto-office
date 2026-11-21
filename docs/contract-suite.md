@@ -86,6 +86,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_onboarding_harness_preference.py` | keep |
 | `tests/test_packet_delivery_channel.py` | retire |
 | `tests/test_pane_busy.py` | keep |
+| `tests/test_portable.py` | keep |
 | `tests/test_plugin_skill_entry.py` | keep |
 | `tests/test_pr_report.py` | keep |
 | `tests/test_pr_test_selection.py` | keep |

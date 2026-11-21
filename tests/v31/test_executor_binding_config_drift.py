@@ -3,6 +3,7 @@ config edits that cannot reach a running run are named instead of ignored."""
 from __future__ import annotations
 
 import json
+import shlex
 import re
 import sys
 from pathlib import Path
@@ -28,7 +29,7 @@ def _dispatch_external(env):
 
 def _agent_env_command(env, d):
     ddir = env.state / "runs" / d["run_id"] / "dispatches" / d["id"]
-    return f". {ddir}/agent.env && cd {d['worktree']} && office submit"
+    return f". {shlex.quote(str(ddir / 'agent.env'))} && cd {shlex.quote(str(d['worktree']))} && office submit"
 
 
 def _bindings(env):

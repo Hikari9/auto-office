@@ -168,7 +168,7 @@ def _idle_before_busy(reads) -> list:
 
 def _fake(env, monkeypatch, gets=(), reads=(), *, launch=True) -> Path:
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
+    herdr.write_text(FAKE_HERDR.format(python=sys.executable), encoding="utf-8")
     herdr.chmod(0o755)
     state = env.tmp / "herdr-state.json"
     reads = _idle_before_busy(reads) if launch else list(reads)
@@ -302,8 +302,11 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
     monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
-    from office import dispatch, paths
+    from office import dispatch, paths, read_scope, review_submit
     monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    # The shell-granting deny list below is the sandboxed one; a host without Claude's sandbox (Windows, or Linux
+    # without bwrap) keeps the submit-only shell (#1186), which test_issue_1186_reviewer_shell.py covers.
+    monkeypatch.setattr(read_scope, "claude_sandbox_available", lambda: True)
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "brief.md").write_text("You are a code reviewer\n")
@@ -330,8 +333,8 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
             runners = ("pytest", "python -m pytest", "python3 -m pytest", ".venv/bin/python -m pytest", ".venv/bin/pytest",
                        "pnpm test", "npm test", "node --test")
             assert args[args.index("--allowedTools") + 1] == ",".join([
-                "Read", "Grep", "Glob", f"Edit(/{out.parent}/**)",
-                f"Bash(office review submit --file {out.parent}/review-submit.txt)",
+                "Read", "Grep", "Glob", f"Edit(/{read_scope.claude_path(out.parent)}/**)",
+                f"Bash({review_submit.submit_command(out)})",  # shell-quoted: a Windows path has backslashes
                 *(f"Bash({r}{tail})" for r in runners for tail in ("", " *"))])
             assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
@@ -340,7 +343,7 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         prompt = [c for c in calls if c[:2] == ["agent", "prompt"]][-1]
         assert str(out) in prompt[3] and "office submit" not in prompt[3]
         assert not any(c[-1].startswith("sh ") for c in calls)
-    env_text = (ddir / "agent.env").read_text()
+    env_text = (ddir / "agent.env").read_text(encoding="utf-8")
     assert "OFFICE_ROLE=reviewer" in env_text and "OFFICE_DISPATCH_ID" not in env_text
 
 
@@ -394,7 +397,7 @@ def launch_in_herdr(env, monkeypatch, *, gets=(), reads=(), adapter="agy", model
         monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / "brief.md").write_text(brief)
+    (ddir / "brief.md").write_text(brief, encoding="utf-8")
     if callable(reads):
         data = json.loads(state_file.read_text())
         data["reads"] = reads(ddir / "brief.md")

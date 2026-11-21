@@ -731,9 +731,13 @@ def main(argv: list[str] | None = None) -> int:
     from office.state import OfficeError
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)
-    if unknown and args.cmd not in ("amend",):
-        run_like = [u for u in unknown if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]+)*", u)]
-        if args.cmd and len(run_like) == 1 and len(unknown) == 1:
+    # Before Python 3.13, argparse leaves the words after `--` unparsed instead of giving them to the trailing
+    # `nargs="*"` text; these commands read that text from `unknown`, so only what precedes `--` is stray.
+    stray = (unknown[:unknown.index("--")] if "--" in unknown and args.cmd in ("disposition", "prompt", "answer")
+             else unknown)
+    if stray and args.cmd not in ("amend",):
+        run_like = [u for u in stray if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]+)*", u)]
+        if args.cmd and len(run_like) == 1 and len(stray) == 1:
             # `office close <run>`: the run is a flag on every command, not a positional.
             parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
                          f"office --run {run_like[0]} {args.cmd} ...)")

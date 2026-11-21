@@ -53,11 +53,14 @@ start_tree=""
 # A user-site install is not enough: some tests point HOME at a temp dir, which hides it.
 # pip is configured for --user installs on some hosts, which a venv (and build's isolated env) rejects.
 export PIP_USER=0
-if [ -x .venv/bin/python3 ] && ! .venv/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+# A Windows (Git Bash) venv keeps its executables in Scripts/ as python.exe.
+VBIN=.venv/bin VPY=.venv/bin/python3
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) VBIN=.venv/Scripts VPY=.venv/Scripts/python.exe ;; esac
+if [ -x "$VPY" ] && ! "$VPY" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
   echo "== Recreating .venv with a supported Python"
   rm -rf .venv
 fi
-if [ ! -x .venv/bin/python3 ]; then
+if [ ! -x "$VPY" ]; then
   echo "== Creating .venv"
   if command -v uv >/dev/null 2>&1; then
     uv venv --python '>=3.11' .venv
@@ -65,24 +68,26 @@ if [ ! -x .venv/bin/python3 ]; then
     python3 -m venv .venv
   fi
 fi
-if ! .venv/bin/python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+if ! "$VPY" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
   echo "[VALIDATE] Python 3.11 or newer is required" >&2
   exit 2
 fi
 # Reinstall only when the dependency declaration changed, so an existing .venv picks up new
 # test deps (e.g. pytest-xdist) without being rebuilt on every run.
-stamp="$(.venv/bin/python3 -c 'import hashlib; print(hashlib.sha256(open("pyproject.toml", "rb").read()).hexdigest())')"
+stamp="$("$VPY" -c 'import hashlib; print(hashlib.sha256(open("pyproject.toml", "rb").read()).hexdigest())')"
 if [ "$(cat .venv/.validate-stamp 2>/dev/null)" != "$stamp" ]; then
   echo "== Installing package and test deps"
   # Use uv for the Hatchling/PEP 660 editable install and host pip configuration.
   if command -v uv >/dev/null 2>&1; then
-    uv pip install -q --python .venv/bin/python3 -e '.[test]' build
+    uv pip install -q --python "$VPY" -e '.[test]' build
   else
-    .venv/bin/python3 -m pip install -q -e '.[test]' build
+    "$VPY" -m pip install -q -e '.[test]' build
   fi
   echo "$stamp" > .venv/.validate-stamp
 fi
-export PATH="$PWD/.venv/bin:$PATH"
+export PATH="$PWD/$VBIN:$PATH"
+# There, python3 may be missing or the Store stub: run the venv interpreter by absolute path.
+[ "$VBIN" = .venv/bin ] || { VPY="$PWD/$VPY"; python3() { "$VPY" "$@"; }; }
 
 # scripts/ is the retained 3.0 helper surface; its own tests run as that pinned helper.
 export OFFICE_PINNED_LEGACY=1
@@ -101,7 +106,7 @@ if [ "$mode" = "pr" ]; then
   python3 scripts/select_pr_tests.py --output "$selection_file"
   selected_tests=()
   while IFS= read -r selected_test; do
-    selected_tests+=("$selected_test")
+    selected_tests+=("${selected_test%$'\r'}")  # a Windows Python writes CRLF
   done < "$selection_file"
   if [ "${#selected_tests[@]}" -eq 0 ]; then
     echo "[PR GATE] No tests selected; refusing empty scoped validation" >&2

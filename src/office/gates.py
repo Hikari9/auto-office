@@ -840,18 +840,33 @@ class _TimedOut(str):
     prints the timeout text and exits 124 itself still reads as a plain str, not a kill."""
 
 
+# cmd.exe's (English) "command not found": it is the only sign, since cmd.exe /c then exits 1 like a failing check.
+_CMD_NOT_FOUND = re.compile(r"^'[^'\r\n]+' is not recognized as an internal or external command", re.M)
+
+
 def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
     """(exit code, output) of one check command. It runs in its own process
     group, which inherits the job's execution lock (#403): no replacement
     attempt of this job can start its checks while any process of this one
     lives, and a timeout stops the whole group, not just the shell."""
-    proc = subprocess.Popen(command, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, env=env, **portable.session_kwargs(),
-                            pass_fds=jobs.attempt_lock_fds())
+    # popen_group: on Windows a job object holds every process the check starts, so a timeout reaches a grandchild
+    # whose parent already exited (Git Bash's processes do not keep a Windows parent chain for `taskkill /T`).
+    proc = portable.popen_group(**portable.shell_run_args(command, env), cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                pass_fds=jobs.attempt_lock_fds())
     jobs.register_child(proc.pid)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-        return proc.returncode, (stdout or "") + (stderr or "")
+        code = proc.returncode
+        try:
+            portable.killpg(proc.pid, 0)  # something the check started still runs: Office's exit ends it
+        except ProcessLookupError:
+            portable.release_group(proc.pid)  # empty: close the Windows job handle (a no-op elsewhere)
+        except OSError:
+            pass
+        if portable.IS_WINDOWS and code == 1 and _CMD_NOT_FOUND.search(stderr or ""):
+            code = 127  # cmd.exe exits 1 for a missing command; a POSIX shell's 127 is what every caller classifies
+        return code, (stdout or "") + (stderr or "")
     except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
             portable.killpg(proc.pid, portable.SIGKILL)
@@ -1701,7 +1716,7 @@ def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
         if dest.exists():
             _drop_review_snapshot(cwd, dest)
         proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8")
     except OSError:
         return None
     return dest if proc.returncode == 0 else None
@@ -1712,13 +1727,13 @@ def _evidence_copy(cwd: Path, dest: Path) -> Path | None:
     else None: a checkout whose snapshot could not be made is never copied around the failure."""
     try:
         if not Path(cwd).is_dir() or subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
-                                                     capture_output=True, text=True).returncode == 0:
+                                                     capture_output=True, text=True, encoding="utf-8").returncode == 0:
             return None
-        shutil.rmtree(dest, ignore_errors=True)
+        portable.rmtree(dest, ignore_errors=True)
         shutil.copytree(cwd, dest)
         return dest
     except OSError:
-        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
+        portable.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
         return None
 
 
@@ -1745,10 +1760,10 @@ def _snapshot_paths(brief: str, include_dirs: list[Path] | None, cwd: Path, snap
 def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
     with contextlib.suppress(OSError):
         subprocess.run(["git", "-C", str(cwd), "worktree", "remove", "--force", str(snapshot)],
-                       capture_output=True, text=True)
-    shutil.rmtree(snapshot, ignore_errors=True)
+                       capture_output=True, text=True, encoding="utf-8")
+    portable.rmtree(snapshot, ignore_errors=True)
     with contextlib.suppress(OSError):
-        subprocess.run(["git", "-C", str(cwd), "worktree", "prune"], capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(cwd), "worktree", "prune"], capture_output=True, text=True, encoding="utf-8")
 
 
 def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
@@ -1767,7 +1782,7 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
 
     def git(*args: str) -> str:
         try:
-            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8")
         except OSError as exc:
             return f"unverifiable: {exc}"
         return f"unverifiable: git exited {proc.returncode}" if proc.returncode else proc.stdout
@@ -2376,7 +2391,7 @@ def detached_checkout(run: dict, commit: str, name: str, *, purpose: str) -> Pat
 
 def remove_checkout(run: dict, path: Path) -> None:
     subprocess.run(["git", "-C", run["repo_root"], "worktree", "remove", "--force", str(path)], capture_output=True)
-    shutil.rmtree(path, ignore_errors=True)
+    portable.rmtree(path, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ ingest
@@ -3320,7 +3335,7 @@ def landing_state(con, run: dict, handoff: str | None) -> dict:
                     f"accepted integration {commit[:12]}: office land --preview", "commit": commit}
         return {"status": "landed", "detail": recorded["delivered"], "commit": commit}
     for target in ("origin/main", "main", "origin/master", "master"):
-        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", target], capture_output=True, text=True)
+        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", target], capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0:
             continue
         if _is_ancestor(run, commit, proc.stdout.strip()):

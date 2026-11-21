@@ -18,16 +18,16 @@ GOLDEN = {
          "--output-format", "text"],
     ("codex", "gpt-6-astra", "high"):
         ["codex", "exec", "--yolo", "--skip-git-repo-check", "-m", "gpt-6-astra", "-c", 'model_reasoning_effort="high"',
-         "--cd", "/w", "-"],
+         "--cd", str(CWD), "-"],
     ("agy", "Claude Sonnet 5.5 (High)", "high"):
         ["agy", "--dangerously-skip-permissions", "--print-timeout", "45m", "--model", "Claude Sonnet 5.5 (High)",
-         "--add-dir", "/w"],
+         "--add-dir", str(CWD)],
     ("pi", "anthropic/claude-sonnet-5-5", "high"):
         ["pi", "--print", "--no-approve", "--no-extensions", "--no-mcp", "--model", "anthropic/claude-sonnet-5-5",
          "--thinking", "high", "--no-session"],
     ("hermes", "anthropic:claude-sonnet-5-5", "high"):
         ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5", "--reasoning", "high",
-         "--yolo", "--usage-file", "/w/usage.json"],
+         "--yolo", "--usage-file", str(CWD / "usage.json")],
 }
 
 

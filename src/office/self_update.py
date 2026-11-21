@@ -44,7 +44,7 @@ def _upstream_distance(source: Path) -> tuple[int, int] | None:
     """Return (upstream-ahead, local-ahead), or None without a usable upstream."""
     upstream = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        capture_output=True, text=True, timeout=10)
+        capture_output=True, text=True, encoding="utf-8", timeout=10)
     if upstream.returncode:
         return None
     remote_branch = upstream.stdout.strip()
@@ -52,11 +52,11 @@ def _upstream_distance(source: Path) -> tuple[int, int] | None:
     if not remote or not branch:
         return None
     fetched = subprocess.run(["git", "-C", str(source), "fetch", "--quiet", remote, branch],
-                             capture_output=True, text=True, timeout=20)
+                             capture_output=True, text=True, encoding="utf-8", timeout=20)
     if fetched.returncode:
         raise RuntimeError(fetched.stderr.strip() or "git fetch failed")
     distance = subprocess.run(["git", "-C", str(source), "rev-list", "--left-right", "--count",
-                               "HEAD...FETCH_HEAD"], capture_output=True, text=True, timeout=10)
+                               "HEAD...FETCH_HEAD"], capture_output=True, text=True, encoding="utf-8", timeout=10)
     if distance.returncode:
         raise RuntimeError(distance.stderr.strip() or "could not compare source with its upstream")
     local_ahead, upstream_ahead = (int(value) for value in distance.stdout.split())
@@ -126,7 +126,7 @@ def update() -> Result:
 
     if source_checkout:
         dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, encoding="utf-8")
         if dirty.returncode:
             return Result(lines=["could not inspect the Auto Office checkout", dirty.stderr.strip()], exit_code=1,
                           next="resolve the git error, then run office update")
@@ -134,7 +134,7 @@ def update() -> Result:
             return Result(lines=["Auto Office checkout has uncommitted changes; update stopped"], exit_code=1,
                           next="commit or stash those changes, then run office update")
         pull = subprocess.run(["git", "-C", str(source), "pull", "--ff-only"],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8")
         if pull.returncode:
             return Result(lines=["could not pull the latest Auto Office checkout", pull.stderr.strip()], exit_code=1,
                           next="resolve the git error, then run office update")

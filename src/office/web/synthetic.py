@@ -41,7 +41,8 @@ def insert_run(con, run_id: str, *, git_common_dir: str, goal: str = "goal", pha
     con.execute("INSERT INTO runs(id, family_id, created_at, status, office_version, repo_root, git_common_dir, goal, "
                 "phase, gear, state_dir, requirements_version, plan_version, updated_at, landing_json, terminal_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (run_id, run_id, ts(at), phase, office_version, git_common_dir.removesuffix("/.git"), git_common_dir,
+                (run_id, run_id, ts(at), phase, office_version,
+                 git_common_dir.removesuffix("/.git").removesuffix("\\.git"), git_common_dir,
                  goal, phase, gear, state_dir, 1, 1, ts(at), dumps(landing) if landing else None,
                  ts(at + 1) if phase in ("closed", "abandoned") else None))
     frozen = {"goal": goal, **({"end_state": end_state} if end_state else {})}

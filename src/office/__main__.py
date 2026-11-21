@@ -11,11 +11,30 @@ def entry() -> int:
     starts, or its files are damaged: exit 75 with one line naming the cause. A failure whose origin is outside the office
     package does not heal by retrying: exit 1 with the cause and a reinstall hint. A command that fails after it has
     started is not converted: its side effects may already have happened, so a retry could repeat them."""
+    if sys.platform == "win32" and not sys.flags.utf8_mode:
+        return _rerun_in_utf8_mode()
     try:
         from office.cli import main
     except (ImportError, OSError, SyntaxError, ValueError) as exc:
         return _startup_failure(exc)
     return main()
+
+
+def _rerun_in_utf8_mode() -> int:
+    """Windows: run this same command again in Python's UTF-8 mode, and return its exit code.
+
+    Office reads and writes text as UTF-8 and decodes git's and the harnesses' output as UTF-8, as every POSIX
+    Python does by default. A Windows Python defaults to the ANSI code page instead, which garbles or rejects
+    non-ASCII paths and output. UTF-8 mode can only be chosen when an interpreter starts, so the command restarts
+    once; PYTHONUTF8 makes every Office process it starts (jobs, hooks) begin in that mode directly."""
+    import os
+    import subprocess
+    os.environ["PYTHONUTF8"] = "1"
+    argv = [sys.executable, "-X", "utf8", "-m", "office", *sys.argv[1:]]
+    try:
+        return subprocess.call(argv)
+    except KeyboardInterrupt:
+        return 130
 
 
 def _startup_failure(exc: Exception) -> int:

@@ -167,7 +167,7 @@ def main() -> int:
     except SelectionError as exc:
         print(f"[PR GATE] BLOCKED: {exc}", file=sys.stderr)
         return 2
-    args.output.write_text("\n".join(tests) + "\n")
+    args.output.write_text("\n".join(tests) + "\n", newline="\n")  # validate.sh reads it with bash
     print(f"[PR GATE] HEAD {git(root, 'rev-parse', 'HEAD')}; merge base {base}")
     print(f"[PR GATE] {len(changed)} changed files: {', '.join(changed)}")
     print(f"[PR GATE] named safety-smoke set: {', '.join(SAFETY_SMOKE)}")

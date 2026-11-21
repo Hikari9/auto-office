@@ -99,7 +99,7 @@ def test_a_headless_executor_finds_agent_env_when_it_starts(world, monkeypatch, 
     ddir, expected = _expected(env, overrides, seen["dispatch_id"])
     assert seen["exists"], f"{launcher}: the agent started with no {ddir / 'agent.env'}"
     assert seen["text"] == expected
-    assert seen["mode"] == 0o600
+    assert os.name == "nt" or seen["mode"] == 0o600  # no mode bits on Windows
     _check_env_text(seen["text"])
 
 

@@ -9,6 +9,7 @@ Every id and free-text value carries the sentinel `zq9x`; the aggregate-only tes
 """
 from __future__ import annotations
 
+import os
 import hashlib
 import json
 import re
@@ -1004,6 +1005,7 @@ def test_a_database_without_the_receipt_column_reports_unknown_not_missing(tmp_p
     assert receipts == [{"kind": "unknown", "exempt_type": None, "revisions": 1, "accepted_revisions": 1}]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a leading // is a POSIX path spelling; on Windows it names a UNC share")
 def test_a_path_with_a_leading_double_slash_opens(new_db):
     report = rer.build_report(Path("/" + str(new_db)))
     assert report["source"]["hash_unchanged"] is True and report["source"]["integrity_check"] == "ok"

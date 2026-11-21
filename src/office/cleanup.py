@@ -22,7 +22,7 @@ from office.util import now_iso, pid_alive, short
 
 
 def _git(repo: Path, *argv: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, text=True,
+    return subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, text=True, encoding="utf-8",
                           timeout=45, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 

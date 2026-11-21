@@ -223,7 +223,7 @@ def test_kilo_auth_list_timeout_uses_argv_and_bounded_no_shell_run(kilo_on_path,
 
     monkeypatch.setattr(onboarding.subprocess, "run", timeout)
     assert onboarding.credentials("kilo") == ("missing", "kilo auth list timed out")
-    assert calls[0][0] == ["kilo", "auth", "list"]
+    assert [Path(calls[0][0][0]).stem, *calls[0][0][1:]] == ["kilo", "auth", "list"]  # Windows: the resolved path
     assert calls[0][1]["timeout"] == 10 and calls[0][1]["stdin"] is subprocess.DEVNULL
     assert "shell" not in calls[0][1]
 

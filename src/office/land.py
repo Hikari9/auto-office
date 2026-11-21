@@ -496,7 +496,7 @@ def _rebase_locked(con, run: dict, tasks: list[dict]) -> Result:
         for t in tasks:
             commit = con.execute("SELECT commit_sha FROM revisions WHERE id=?", (t["accepted_revision_id"],)).fetchone()[0]
             proc = subprocess.run(["git", "-C", str(checkout), "merge", "--no-ff", "--no-edit", commit],
-                                  capture_output=True, text=True, env=genv)
+                                  capture_output=True, text=True, encoding="utf-8", env=genv)
             if proc.returncode != 0:
                 files = paths.git(checkout, "diff", "--name-only", "--diff-filter=U", check=False).replace("\n", ", ")
                 raise Refused("rebase-conflict", f"{t['id']} conflicts with origin/{base} {new[:12]} on {files or 'files'}",
@@ -583,7 +583,7 @@ def _gh(run: dict, *args: str, timeout: int = 120) -> subprocess.CompletedProces
 
 
 def _git(cwd, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, env=env)
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", env=env)
 
 
 def _accepted_commit(con, task: dict) -> str:
@@ -985,7 +985,7 @@ def _verify_main(con, run: dict, integrated: str, res: Result) -> str:
                     raise Refused("unsafe-check-command", "unowned manual Git push in main verification",
                                   preserved="no verification command was executed",
                                   next_step="amend the plan and run integration checks again")
-                proc = subprocess.run(cmd, shell=True, cwd=checkout, capture_output=True, text=True, timeout=1800)
+                proc = subprocess.run(**portable.shell_run_args(cmd), cwd=checkout, capture_output=True, text=True, timeout=1800)
                 if proc.returncode != 0:
                     raise Refused("main-checks-failed", f"`{cmd}` fails on merged {s['base_branch']} {main[:12]}",
                                   preserved="the merges; nothing was deployed",
@@ -1024,7 +1024,7 @@ def _deploy(con, run: dict, target: str, deploy: dict, cwd: Path, res: Result, r
             raise Refused("unsafe-deploy-command", "unowned manual Git push in deploy command",
                           preserved="no deploy/verify command was executed",
                           next_step="amend the plan to use an authorized deploy command")
-        proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600)
+        proc = subprocess.run(**portable.shell_run_args(cmd), cwd=cwd, capture_output=True, text=True, timeout=3600)
         header = f"# office land {target} {step}\n# cwd: {cwd}\n# commit: {commit}\n# command: {cmd}\n\n"
         (log_dir / f"{target}-{step}.log").write_text(header + proc.stdout + proc.stderr, encoding="utf-8")
         with db.transaction(con):
@@ -1058,7 +1058,7 @@ def copy_env_files(repo: Path, checkout: Path, entries: list[str]) -> list[str]:
     copied = []
     for entry in entries:
         rel = Path(entry)
-        if not entry.strip() or rel.is_absolute() or ".." in rel.parts:
+        if not entry.strip() or rel.is_absolute() or rel.anchor or ".." in rel.parts:  # anchor: Windows "/x", "C:x"
             raise refuse(entry, "must be a path inside the repo")
         src, dest = root / rel, dest_root / rel
         if not src.is_file():

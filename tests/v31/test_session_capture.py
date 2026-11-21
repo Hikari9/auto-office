@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from host_tools import host_tool_dirs
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -193,7 +197,7 @@ def test_headless_supervisor_starts_claude_with_the_recorded_id(ledger, monkeypa
     fake.write_text(f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
                     f"open({str(ledger.tmp / 'argv.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
     fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bindir), "/usr/bin", "/bin", *host_tool_dirs()]))
     did = ledger.dispatch(role="code_reviewer", kind="code_reviewer", worktree=str(ledger.tmp))
     ddir = dispatch_mod.paths.run_dir("R1") / "dispatches" / did
     ddir.mkdir(parents=True)
@@ -218,7 +222,7 @@ def _fake_codex(ledger, monkeypatch, stderr: str, stdout: str = "done\n") -> Non
     fake.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n"
                     f"sys.stderr.write({stderr!r}); sys.stderr.flush()\nsys.stdout.write({stdout!r})\n")
     fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bindir), "/usr/bin", "/bin", *host_tool_dirs()]))
 
 
 def _supervise_codex(ledger, monkeypatch, role, kind, **cols) -> str:
@@ -485,7 +489,7 @@ def test_a_resumed_reviewer_launch_still_has_its_reply_dir(ledger, monkeypatch, 
     bare = {"parent": "D0", "session_id": "rev-sess-1", "argv": ["x", *resume_form], "herdr_kind": harness}
     dispatch_mod.launch(ledger.run, _row(ledger, did), "reviewer", ddir, cwd=ledger.tmp, output=ddir / "reply.txt", resume=bare)
     notice = next(e["summary"] for e in ledger.events("launch") if "resume needs a herdr session" in e["summary"])
-    args = notice.split("Start it by hand: ", 1)[1].split()[1:]
+    args = shlex.split(notice.split("Start it by hand: ", 1)[1])[1:]
     assert args[-2:] == resume_form, notice
     assert str(ddir) in args[args.index(reply_flag) + 1:], notice
 
@@ -496,7 +500,7 @@ def test_reviewer_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(l
     herdr.parent.mkdir(exist_ok=True)
     herdr.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('{{\"error\": {{\"code\": \"agent_not_found\"}}}}')\nsys.exit(1)\n")
     herdr.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{herdr.parent}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(herdr.parent), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setattr(dispatch_mod, "herdr_usable", lambda: True)
     parent = ledger.dispatch(role="code_reviewer", kind="code_reviewer", status="exited", launcher="herdr", pane_id="w1:p5",
                              pane_closed_at="then", session_id="rev-sess-1", triple="claude:m:high")

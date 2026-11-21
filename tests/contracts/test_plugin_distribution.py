@@ -324,11 +324,21 @@ def _installed_skills(root: Path) -> set[str]:
     return {p.parent.name for p in root.rglob("SKILL.md") if p.parent.parent.name == "skills"}
 
 
+def _windows_binary_under_wsl(name: str) -> bool:
+    """WSL puts the Windows PATH on its own, so `claude` there may be the Windows install (under /mnt/<drive>/),
+    which sees a Linux checkout as a network drive and refuses it as a marketplace."""
+    found = shutil.which(name)
+    return sys.platform.startswith("linux") and bool(found) and found.startswith("/mnt/")
+
+
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+@pytest.mark.skipif(_windows_binary_under_wsl("claude"), reason="WSL found the Windows claude, which cannot read Linux paths")
 def test_real_claude_install_exposes_exactly_the_public_skills(tmp_path):
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)}
     for args in (["marketplace", "add", str(ROOT)], ["install", "auto-office@auto-office"]):
-        done = subprocess.run(["claude", "plugin", *args], env=env, capture_output=True, text=True, timeout=180)
+        # by full path: on Windows the npm install is a `claude.cmd` shim, which a bare name cannot launch
+        done = subprocess.run([shutil.which("claude"), "plugin", *args], env=env, capture_output=True, text=True,
+                              timeout=180)
         assert done.returncode == 0, done.stdout + done.stderr
     installed = _installed_skills(tmp_path / "plugins")
     assert installed == set(CFG["public_skills"])
@@ -344,7 +354,7 @@ def _assert_host_exposes_namespaced_skills(env, cwd: Path) -> None:
     emit other system events (e.g. `ui_invalidate`, Claude Code 2.1.326) first.
     """
     proc = subprocess.Popen(
-        ["claude", "-p", "x", "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
+        [shutil.which("claude"), "-p", "x", "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
         env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     try:
@@ -357,6 +367,8 @@ def _assert_host_exposes_namespaced_skills(env, cwd: Path) -> None:
             if init.get("type") != "system" or init.get("subtype") == "init":
                 break
     finally:
+        if sys.platform == "win32":  # the `.cmd` shim's node child outlives a kill of the shim itself
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
         proc.kill()
         proc.wait()
     assert init.get("subtype") == "init", init.get("type")
@@ -368,10 +380,12 @@ def _assert_host_exposes_namespaced_skills(env, cwd: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("codex") is None, reason="codex CLI not installed")
+@pytest.mark.skipif(_windows_binary_under_wsl("codex"), reason="WSL found the Windows codex, which cannot read Linux paths")
 def test_codex_validates_and_installs_the_plugin_manifest(tmp_path):
     env = {**os.environ, "CODEX_HOME": str(tmp_path)}
     for args in (["marketplace", "add", str(ROOT)], ["add", "auto-office@auto-office"]):
-        done = subprocess.run(["codex", "plugin", *args], env=env, capture_output=True, text=True, timeout=180)
+        done = subprocess.run([shutil.which("codex"), "plugin", *args], env=env, capture_output=True, text=True,
+                              timeout=180)
         assert done.returncode == 0, done.stdout + done.stderr
     assert _installed_skills(tmp_path / "plugins") == set(CFG["public_skills"])
 

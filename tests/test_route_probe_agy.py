@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from office import adapters, route_probe  # noqa: E402
+from tests.v31.host_tools import host_tool_dirs  # noqa: E402
 
 MODEL = "gemini-4-hydrogen-medium"
 
@@ -47,7 +48,7 @@ def agy(tmp_path, monkeypatch):
     script = bin_dir / "agy"
     script.write_text(FAKE_AGY.format(python=sys.executable))
     script.chmod(0o755)
-    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
     argv_log = tmp_path / "argv.json"
@@ -156,7 +157,7 @@ def test_real_agy_dispatch_argv_is_unchanged():
     adapter = adapters.load_all()["agy"]
     argv, prof = adapters.build_argv(adapter, "worker", model=MODEL, effort="medium", cwd=Path("/w"))
     assert argv == [adapters.executable(adapter), "--dangerously-skip-permissions", "--print-timeout", "45m",
-                    "--model", MODEL, "--add-dir", "/w"]
+                    "--model", MODEL, "--add-dir", str(Path("/w"))]
     assert prof["prompt_flag"] == "--print="
     assert "--effort" not in argv and "--output-format" not in argv
     vision, _ = adapters.build_argv(adapter, "vision", model=MODEL, effort="medium", cwd=Path("/w"))

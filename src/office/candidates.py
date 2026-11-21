@@ -347,8 +347,8 @@ def _run_probe(argv: list[str], unknown) -> dict:
     for attempt in (1, 2):
         try:
             # stdin is closed, so a probe that reads it gets EOF rather than blocking (#941).
-            proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                                  timeout=PROBE_TIMEOUT_S)
+            proc = subprocess.run(portable.resolve_argv(argv), capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
@@ -568,7 +568,7 @@ def _shared_cache_put(harness: str, result: dict) -> None:
             data[harness] = entry
             tmp = path.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data))
-            os.replace(tmp, path)
+            portable.replace(tmp, path)
     except OSError:
         pass
 

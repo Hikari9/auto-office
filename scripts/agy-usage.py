@@ -83,7 +83,7 @@ TOKEN_LOCATIONS = (
 
 def token_paths():
     """Expanded at call time so HOME is read when the probe runs, not at import."""
-    return [os.path.expanduser(p) for p in TOKEN_LOCATIONS]
+    return [os.path.normpath(os.path.expanduser(p)) for p in TOKEN_LOCATIONS]
 
 # ---------------------------------------------------------------------------
 # OAuth client credentials are DISCOVERED from the installed Antigravity CLI,

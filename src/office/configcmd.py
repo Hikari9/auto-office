@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import yaml
 
-from office import adapters, candidates, db, paths, route_policy, state
+from office import adapters, candidates, db, paths, portable, route_policy, state
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError, Refused
@@ -190,7 +190,7 @@ def _write(path: Path, data: dict) -> str | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False) if data else "{}\n", encoding="utf-8")
-    os.replace(tmp, path)
+    portable.replace(tmp, path)
     return backup
 
 

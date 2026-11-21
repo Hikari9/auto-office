@@ -23,6 +23,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -612,7 +613,7 @@ def preflight(con, run: dict, cwd: Path) -> Result:
     # 1. Role and identity. A shell env cannot be repaired from a child process,
     # so the repair is the line to prefix to office submit in the same shell.
     role = os.environ.get("OFFICE_ROLE")
-    source = f". {ddir / 'agent.env'}"
+    source = f". {shlex.quote(str(ddir / 'agent.env'))}"  # a bare C:\... loses its backslashes in Git Bash
     if role != "executor" or (env_dispatch and env_dispatch != d["id"]):
         fix.append(f"role: OFFICE_ROLE={role or 'unset'}, dispatch={env_dispatch or 'unset'}; "
                    f"submit in one command: {source} && office submit")

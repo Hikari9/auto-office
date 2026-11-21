@@ -356,7 +356,7 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             for dep, rev_id, sha in pending:
                 proc = subprocess.run(["git", "-C", str(scratch), "merge", "--no-edit", "-m",
                                        f"office: restack {task['id']} onto {dep} {rev_id}", sha],
-                                      capture_output=True, text=True, env=env)
+                                      capture_output=True, text=True, encoding="utf-8", env=env)
                 if proc.returncode != 0:
                     subprocess.run(["git", "-C", str(scratch), "merge", "--abort"], capture_output=True)
                     if rebased and dep == "rebased default branch":
@@ -385,7 +385,7 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             candidate = paths.git(scratch, "rev-parse", "HEAD")
             if candidate != head:
                 proc = subprocess.run(["git", "-C", str(wt), "merge", "--ff-only", candidate],
-                                      capture_output=True, text=True, env=env)
+                                      capture_output=True, text=True, encoding="utf-8", env=env)
                 if proc.returncode != 0:
                     raise Refused("restack-publish-failed", f"cannot advance task branch: {proc.stderr[:180]}",
                                   preserved="task HEAD unchanged", next_step="inspect worktree and retry")
@@ -429,7 +429,7 @@ def _save_wip(wt: Path, tid: str, token: str) -> str:
         paths.git(wt, "add", "--update", env=tracked)
         work_tree = paths.git(wt, "write-tree", env=tracked)
         listed = subprocess.run(["git", "-C", str(wt), "ls-files", "-z", "--others", "--exclude-standard"],
-                                capture_output=True, text=True, check=True)
+                                capture_output=True, text=True, encoding="utf-8", check=True)
         names = [n for n in listed.stdout.split("\0") if n]
         parents = [head, index_commit]
         if names:
@@ -470,13 +470,13 @@ def _stash_wip(wt: Path, tid: str):
         with contextlib.suppress(Exception):
             stored = subprocess.run(["git", "-C", str(wt), "stash", "store", "-m",
                                      f"office: preserve {tid} WIP before restack [{token}]", saved],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, encoding="utf-8")
             if stored.returncode == 0:
                 paths.git(wt, "update-ref", "-d", ref, check=False)
 
     def restore() -> Refused | None:
         applied = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", saved],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8")
         if applied.returncode:
             retain()
             return Refused("restack-wip-restore-conflict",

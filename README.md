@@ -107,7 +107,7 @@ Verify after install: `claude plugin details auto-office@auto-office` lists 16 s
 
 ### 1. Install the CLI
 
-Install from this repository. The `auto-office` name on PyPI is a different project that provides no `office` executable, so `uv tool install auto-office` does not install this CLI.
+Install from this repository. The `auto-office` name on PyPI belongs to an unrelated project that provides no `office` executable.
 
 ```bash
 uv tool install git+https://github.com/Hikari9/auto-office
@@ -123,9 +123,10 @@ uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-offic
 
 Platforms: macOS, Linux and native Windows (PowerShell or cmd.exe; WSL also works). Windows notes:
 
-- Install [Git for Windows](https://gitforwindows.org/). Office drives `git`, and plan checks written as shell strings run through `cmd.exe` unless the command names `bash` explicitly.
+- Install [Git for Windows](https://gitforwindows.org/). Office drives `git`, and plan checks, deploy commands and setup commands (POSIX shell strings such as `scripts/validate.sh --pr`) run under its bash with Git's tools on PATH, as a Git Bash prompt does. Without Git for Windows they fall back to `cmd.exe`. Write paths in those commands with forward slashes (`C:/work/x`) or quote them: bash drops unquoted backslashes. A check that runs `python3` gets one standing in for your `python` when PATH has none.
+- Windows has no load average, so a check that times out under heavy host load is reported as a check failure rather than as unavailable host capacity.
 - If `uv` picks a Python that has no `pyyaml` wheel and needs a C compiler, pin one: `uv tool install --python 3.12 git+https://github.com/Hikari9/auto-office`.
-- A Windows process cannot see another process's environment or working directory, so Office cannot prove a failed worker's process tree is gone. When a discovery-trial route fails, the automatic fallback to a known-working route therefore stays blocked on Windows; Office stops with the `office rerun`/`--reroute` hint instead.
+- When a discovery-trial route fails, Office confirms the failed worker's process tree is gone (Windows: from the process table and each process's working directory) before it falls back to a known-working route. A process it is denied reading is skipped; one it cannot read for another reason keeps the fallback blocked, and Office stops with the `office rerun`/`--reroute` hint.
 
 The visual extra installs Playwright support and uses the local Chrome. Without it, a visual gate that requires capture reports `CAPTURE_BLOCKED`; it does not quietly pass.
 

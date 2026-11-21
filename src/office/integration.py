@@ -328,7 +328,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
             previous.append(t)
             continue
         proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m", f"office: land {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
-                              capture_output=True, text=True, env=genv)
+                              capture_output=True, text=True, encoding="utf-8", env=genv)
         if proc.returncode != 0 and not finish_shared_append_merge(wt, t, previous, env=genv):
             conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
             subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
@@ -848,7 +848,7 @@ class CombineConflict(Exception):
 def _merge_tree(repo: str, a: str, b: str) -> tuple[str, list[str]]:
     """(tree, conflicting paths) of merging commits `a` and `b` without touching a checkout."""
     proc = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     if proc.returncode == 129:  # git before 2.38 has no --write-tree: merge in a throwaway worktree
         return _merge_in_scratch(repo, a, b)
     if proc.returncode not in (0, 1):
@@ -863,7 +863,7 @@ def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
         paths.git(repo, "worktree", "add", "-q", "--detach", scratch, a)
         try:
             proc = subprocess.run(["git", "-C", scratch, "merge", "--no-edit", "-q", "-m", "office: combine", b],
-                                  capture_output=True, text=True, env={**os.environ, **paths.commit_identity_env(repo)})
+                                  capture_output=True, text=True, encoding="utf-8", env={**os.environ, **paths.commit_identity_env(repo)})
             if proc.returncode == 0:
                 return paths.git(scratch, "rev-parse", "HEAD^{tree}"), []
             return "", paths.git(scratch, "diff", "--name-only", "--diff-filter=U", check=False).splitlines() or ["(unknown)"]

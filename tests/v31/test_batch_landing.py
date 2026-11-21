@@ -482,7 +482,7 @@ def test_suite_runs_with_an_allowlisted_environment_only(tmp_path, monkeypatch):
     names = {line.split("=", 1)[0] for line in dump.read_text().splitlines() if "=" in line}
     assert not (names & set(planted))
     assert {"PATH", "HOME"} <= names
-    assert f"HOME={Path.home()}" not in dump.read_text()
+    assert f"HOME={Path.home()}" not in dump.read_text().splitlines()
 
 
 def test_suite_timeout_kills_its_whole_process_group(tmp_path):
@@ -763,12 +763,12 @@ def test_version_must_increase_from_the_starting_version(tmp_path, monkeypatch):
 
 
 def test_second_concurrent_batch_is_refused_by_the_repository_lock(tmp_path, monkeypatch):
-    import fcntl
+    from office import portable
     repo, prs, events, m = setup_two(tmp_path, monkeypatch)
     lock_path = batch._state_path(repo, "release-a").parent.parent / "landing.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(held, blocking=False)
         with pytest.raises(Refused, match="another batch landing is active"):
             batch.land_batch(str(m), cwd=repo)
     assert events == []
@@ -1203,4 +1203,4 @@ def test_suite_log_and_run_snapshot_survive_a_real_red_then_retry(tmp_path):
     script.write_text("echo red\nexit 1\n")
     manifest = {"id": "logs2", "timeout_seconds": 60, "full_suite": ["sh", str(script)]}
     _, log = batch._run_full(repo, sha, manifest, tmp_path / "batches")
-    assert log.read_text().endswith("red\n") and log.stat().st_mode & 0o777 == 0o600
+    assert log.read_text().endswith("red\n") and (os.name == "nt" or log.stat().st_mode & 0o777 == 0o600)  # Windows has no mode bits

@@ -48,8 +48,8 @@ def _visual_capture_status() -> tuple[str, bool]:
 
 
 def _playwright_fix_hint() -> str:
-    deps = " --with-deps" if sys.platform.startswith("linux") else ""
-    return f"fix: {shlex.quote(sys.executable)} -m playwright install{deps} chromium-headless-shell"
+    from office import visual
+    return f"fix: {visual.playwright_install_command()}"
 
 
 def _visual_review_enabled(config: dict | None) -> bool:
@@ -332,7 +332,7 @@ def claude_import_warnings(root: Path | None) -> list[str]:
             target = Path(os.path.expanduser(raw))
             target = (target if target.is_absolute() else f.parent / target).resolve()
             if target != root and root not in target.parents:
-                outside.append((f.name if f == start else str(f.relative_to(root)), raw))
+                outside.append((f.name if f == start else f.relative_to(root).as_posix(), raw))
             elif target.is_file():
                 queue.append((target, depth + 1))
     if not outside:

@@ -18,6 +18,8 @@ import pytest
 import fake_agent
 from conftest import GOOD_ADD, Env, _activate, approved_run, self_reviewed, task_row
 
+_HUP = [signal.SIGHUP] if hasattr(signal, "SIGHUP") else []  # Windows has no SIGHUP
+
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PASS = {"reply": "VERDICT: APPROVED\nNEXT proceed"}  # the lane reviewer (#337)
 
@@ -130,7 +132,7 @@ def test_supervisor_gets_the_subprocess_environment_and_hands_it_back(env, monke
     from office import dispatch, frontdoor
     calls = []
     real = dispatch.supervise
-    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, *_HUP, signal.SIGINT)}
 
     def spy(dispatch_id):
         seen = {"hops": os.environ.get(frontdoor.HOP_ENV, "absent"), "cwd": Path(os.getcwd()).resolve(),
@@ -162,7 +164,14 @@ def test_supervisor_gets_the_subprocess_environment_and_hands_it_back(env, monke
     assert reviewer["handlers_before"] == during[0] == reviewer["handlers_after"]
 
 
-@pytest.mark.parametrize("action", [{"exit": 0}, {"exit": 3}, {"signal": "TERM"}, {"signal": "KILL"}, {"signal": "HUP"},
+# A Windows process cannot die by a signal (os.kill terminates it with the signal number as its exit code), so a real
+# harness's signal ending has no POSIX return code to match there.
+_POSIX_SIGNAL_DEATH = pytest.mark.skipif(sys.platform == "win32", reason="Windows processes do not die by signals")
+
+
+@pytest.mark.parametrize("action", [{"exit": 0}, {"exit": 3}, pytest.param({"signal": "TERM"}, marks=_POSIX_SIGNAL_DEATH),
+                                    pytest.param({"signal": "KILL"}, marks=_POSIX_SIGNAL_DEATH),
+                                    pytest.param({"signal": "HUP"}, marks=_POSIX_SIGNAL_DEATH),
                                     {"reply": "hello", "stderr": "warn\n", "raw": "raw line"},
                                     {"write": {"sub/x.txt": "x"}, "exit": 7}],
                          ids=["exit0", "exit3", "term", "kill", "hup", "stream-order", "write-exit7"])
@@ -233,17 +242,18 @@ def test_the_seam_only_replaces_the_unmodified_fake_harness(env):
 
 
 @pytest.mark.approved
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, *_HUP])
 def test_a_signal_during_an_in_process_agent_stops_it_like_a_killed_child(env, monkeypatch, signum):
     after = []
 
     def agent(argv, prompt, child_env, cwd):
-        os.kill(os.getpid(), signum)
+        # raise_signal, not os.kill(getpid()): on Windows os.kill terminates the process outright, the pytest worker with it.
+        signal.raise_signal(signum)
         after.append("kept running")  # a killed child never gets here
         return 0, b""
 
     monkeypatch.setattr(fake_agent, "run", agent)
-    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, *_HUP, signal.SIGINT)}
     approved_run(env, executor=[{}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
@@ -262,7 +272,7 @@ def test_a_signal_before_the_in_process_agent_starts_keeps_it_from_running(env, 
     def identity(run_id, dispatch_id, which, pid):
         real_identity(run_id, dispatch_id, which, pid)
         if which == "agent":
-            os.kill(os.getpid(), signal.SIGTERM)  # after the spawn, before the agent's first read
+            signal.raise_signal(signal.SIGTERM)  # after the spawn, before the agent's first read
 
     monkeypatch.setattr(dispatch, "_record_identity", identity)
     monkeypatch.setattr(fake_agent, "run", lambda *a: ran.append(a) or (0, b""))

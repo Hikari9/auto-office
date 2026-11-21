@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,8 @@ def _assert_backups(run):
     archive = Path(record["archive"])
     assert (archive / "files/findings/backup.json").read_text() == "rollback"
     assert (archive / "files/private-backups/schema.sql").read_text() == "ignored"
-    assert not (archive.stat().st_mode & 0o077)
+    # Windows has no POSIX mode bits; the archive is private through the user profile's ACL.
+    assert sys.platform == "win32" or not (archive.stat().st_mode & 0o077)
     assert not Path(record["checkout"]).exists()
     return record
 
@@ -110,14 +112,15 @@ def test_archive_copies_symlinks_without_reading_their_targets(env, monkeypatch)
     secret.write_text("do not copy this")
     with land._deploy_checkout(run, run["base_sha"], "deploy-prod") as (checkout, _, _):
         (checkout / "link").symlink_to(secret)
-        (checkout / "name\nwith-newline").write_text("exact name")
+        if sys.platform != "win32":  # Windows names cannot hold a newline
+            (checkout / "name\nwith-newline").write_text("exact name")
     records = [r for r in _archives(run) if "link" in r["files"]]
     assert len(records) == 1
     archive = Path(records[0]["archive"])
     assert (archive / "files/link").is_symlink()
-    assert os.readlink(archive / "files/link") == str(secret)
+    assert os.readlink(archive / "files/link").removeprefix("\\\\?\\") == str(secret)  # Windows stores \\?\C:\...
     assert records[0]["files"]["link"]["kind"] == "symlink"
-    assert (archive / "files/name\nwith-newline").read_text() == "exact name"
+    assert sys.platform == "win32" or (archive / "files/name\nwith-newline").read_text() == "exact name"
 
 
 def test_git_inventory_warnings_refuse_cleanup_even_with_exit_zero(env, monkeypatch):

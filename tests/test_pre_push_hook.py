@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+# .githooks/pre-push is the POSIX pre-push gate (bash); on Windows a bare `bash` is WSL's, not this checkout's shell.
+pytestmark = pytest.mark.skipif(os.name == "nt", reason=".githooks/pre-push is a POSIX bash gate")
+
 
 @pytest.mark.parametrize("case, expected", [
     ("head", 0), ("different", 2), ("multiple", 2),

@@ -1,6 +1,8 @@
 """#939: an executor at its context cap is signalled; rotation waits for the orchestrator."""
 from __future__ import annotations
 
+import os
+
 import json
 import sqlite3
 import subprocess
@@ -177,7 +179,7 @@ def test_orchestrator_rotation_writes_durable_handoff_and_relaunches(monkeypatch
     assert _outbox_kinds(con) == ["rotate_executor"]
     path = cap.handoff_path(_run(con), "DOLD")
     assert json.loads(path.read_text())["phase"] == cap.REQUESTED
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert os.name == "nt" or stat.S_IMODE(path.stat().st_mode) == 0o600  # Windows has no mode bits
 
     calls = []
 

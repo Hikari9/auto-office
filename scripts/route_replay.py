@@ -388,7 +388,8 @@ def self_test() -> int:
         if not ok:
             failures.append(what)
 
-    with tempfile.TemporaryDirectory(prefix="route-replay-selftest-") as tmp:
+    # the working directory is restored before the temporary tree goes: Windows cannot remove a process's cwd
+    with tempfile.TemporaryDirectory(prefix="route-replay-selftest-") as tmp, contextlib.ExitStack() as stack:
         tmp = Path(tmp).resolve()
         for name in ("bin", "data", "state", "repo"):
             (tmp / name).mkdir()
@@ -404,14 +405,14 @@ def self_test() -> int:
         user_config = ("routing:\n  discovery:\n    max_trial_percent_rolling_20: 100\n  adaptive:\n    exploration:\n"
                        "      {rate: 0.0, margin: 1.0, max_cost_vs_primary_percent: 100000}\n")
         (tmp / "user-config.yaml").write_text(user_config)
-        os.chdir(tmp / "repo")
+        stack.enter_context(contextlib.chdir(tmp / "repo"))
         live = build_fixture(tmp / "repo")
         before = (sha(live), live.stat().st_mtime_ns)
         check(refuse_live(live) is not None, "the live runs.db is refused")
         copy_path = snapshot(live, tmp)
         check(copy_path != live and sha(copy_path) != "", "a snapshot is a separate file")
         check(refuse_live(copy_path) is None, "a copy is accepted")
-        odd = tmp / "odd name?#%.db"
+        odd = tmp / ("odd name#%.db" if os.name == "nt" else "odd name?#%.db")  # Windows forbids "?" in a name
         sqlite3.connect(str(odd)).close()
         (tmp / "odd").mkdir()
         check(snapshot(odd, tmp / "odd").is_file(), "a path with URI characters can still be snapshotted")

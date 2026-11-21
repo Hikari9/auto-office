@@ -5,12 +5,14 @@ A fake `hermes` on PATH stands in for the CLI; nothing here calls a model.
 from __future__ import annotations
 
 import csv
+import os
 import stat
 import textwrap
 
 import pytest
 
 from office import adapters, candidates, route_policy, routecmd, shipped_catalog
+from tests.v31.host_tools import host_tool_dirs
 
 AUTH_WITHOUT_OPENAI = textwrap.dedent("""\
     anthropic (1 credentials):
@@ -27,7 +29,7 @@ def _fake_hermes(tmp_path, monkeypatch, auth: str):
     exe.parent.mkdir(exist_ok=True)
     exe.write_text(f"#!/bin/sh\nif [ \"$1\" = auth ]; then cat <<'EOF'\n{auth}EOF\nelse echo 'Hermes Agent v0.23.3'; fi\n")
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{exe.parent}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(exe.parent), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setenv("OFFICE_USER_ADAPTERS", str(tmp_path / "no-user-adapters"))
     route_policy.reset_provider_cache()
     yield

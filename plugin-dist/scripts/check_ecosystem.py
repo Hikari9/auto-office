@@ -225,7 +225,7 @@ def main():
         ok,msg,fm,txt=frontmatter(p)
         if not ok: errors.append(f'{p.relative_to(ROOT)}: {msg}')
         elif fm:
-            named.append((p.relative_to(ROOT), fm['name']))
+            named.append((p.relative_to(ROOT).as_posix(), fm['name']))
             
         for marker in INIT_MARKERS:
             if marker in txt: errors.append(f'{p.relative_to(ROOT)}: initializer marker {marker!r}')

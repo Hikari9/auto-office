@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from office import paths
+from office import paths, portable
 
 
 def path() -> Path:
@@ -60,7 +60,7 @@ def save(data: dict) -> Path:
     body = {"kind": "user-catalog-overlay", "models": data.get("models") or [], "disabled": data.get("disabled") or []}
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(body, sort_keys=False, allow_unicode=True), encoding="utf-8")
-    os.replace(tmp, target)
+    portable.replace(tmp, target)
     return target
 
 

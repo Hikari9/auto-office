@@ -129,7 +129,11 @@ class TestAdapterConformance(unittest.TestCase):
             )
         self.assertEqual(res.returncode, 2)
         self.assertIn('Token not found', res.stderr)
-        self.assertIn('keychain gemini/antigravity', res.stderr)
+        # The keychain is a macOS source only; elsewhere the probe never claims to have tried it.
+        if _sys.platform == 'darwin':
+            self.assertIn('keychain gemini/antigravity', res.stderr)
+        else:
+            self.assertNotIn('keychain', res.stderr)
 
     def test_agy_family_quota_routes_each_model_family_independently(self):
         from unittest.mock import patch

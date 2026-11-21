@@ -6,6 +6,7 @@ mutates the shipped catalog, the maintainer's preferences, or trust records.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 import yaml
@@ -241,6 +242,7 @@ def test_change_to_technical_provenance_marks_projection_stale(isolated, monkeyp
     assert next(s for s in cli_runtimes.statuses()[0] if s["key"] == "claude")["models"] == "ok"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod(0) cannot make a file unreadable on Windows")
 def test_unreadable_skill_never_reports_configured(isolated):
     assert harnesscmd.manifest_sync().exit_code == 0
     path = isolated / "unreadable-skill.md"

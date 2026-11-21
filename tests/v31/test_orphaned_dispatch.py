@@ -143,6 +143,7 @@ def test_a_supervisor_pid_reused_by_another_process_is_gone(env, monkeypatch):
     assert _dispatch(con)["terminal_classification"] == "lost"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no zombie processes (or ps)")
 @pytest.mark.approved
 def test_a_zombie_supervisor_is_a_dead_supervisor(env, monkeypatch):
     """#830: the job that started the supervisor outlives it, so the pid stays a zombie and still answers a signal."""
@@ -285,7 +286,7 @@ def test_revoking_a_stale_or_ended_executor_dispatch_changes_nothing(env, monkey
 
 def test_a_second_land_skips_the_prod_deploy_of_the_same_tree(env, monkeypatch):
     marker = env.tmp / "deploys"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker.as_posix()}','a').write('x')\"", verify=f"test -f {marker.as_posix()}")
     _run(env, monkeypatch, plan)
     code, out = env.office("land")
     assert code == 0 and "prod deploy ok" in out, out
@@ -308,7 +309,7 @@ def _strip_deployed(env):
 
 def test_a_merge_only_land_does_not_count_as_a_prod_deploy(env, monkeypatch):
     marker = env.tmp / "deploys"
-    plan = _plan("merge", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    plan = _plan("merge", prod=f"python3 -c \"open('{marker.as_posix()}','a').write('x')\"", verify=f"test -f {marker.as_posix()}")
     _run(env, monkeypatch, plan)
     assert env.office("land")[0] == 0 and not marker.exists()
     code, out = env.office("land", "--e2e", "--quote", "now deploy it")
@@ -336,7 +337,7 @@ def _legacy(env):
 def _ambiguous(env, monkeypatch):
     """An old-runtime e2e land: merged, deployed, verified, recorded in the old shape."""
     marker = env.tmp / "deploys"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker.as_posix()}','a').write('x')\"", verify=f"test -f {marker.as_posix()}")
     _run(env, monkeypatch, plan)
     assert env.office("land")[0] == 0
     _legacy(env)
@@ -383,7 +384,7 @@ def test_the_deploy_flags_need_an_e2e_land(env, monkeypatch):
 
 def test_preview_deploys_from_an_isolated_checkout_not_the_integration_worktree(env, monkeypatch):
     seen = env.tmp / "cwd"
-    plan = _plan("preview", preview=f"python3 -c \"import os; open('{seen}','w').write(os.getcwd())\"")
+    plan = _plan("preview", preview=f"python3 -c \"import os; open('{seen.as_posix()}','w').write(os.getcwd())\"")
     _run(env, monkeypatch, plan)
     code, out = env.office("land")
     assert code == 0 and "preview deploy ok" in out, out
@@ -502,7 +503,7 @@ def test_each_deploy_uses_its_own_checkout_and_records_what_it_checked_out(env, 
     checkout, and the marker names the commit and tree actually checked out."""
     from office import land
     seen = env.tmp / "cwd"
-    plan = _plan("preview", preview=f"python3 -c \"import os; open('{seen}','w').write(os.getcwd())\"")
+    plan = _plan("preview", preview=f"python3 -c \"import os; open('{seen.as_posix()}','w').write(os.getcwd())\"")
     _run(env, monkeypatch, plan)
     con = env.con()
     run = _run_row(con)
@@ -534,7 +535,7 @@ def test_a_second_concurrent_land_refuses(env, monkeypatch):
 def test_a_land_killed_mid_deploy_refuses_instead_of_deploying_again(env, monkeypatch):
     """Crash window: a start with no result for this tree is unknown, not undeployed."""
     marker = env.tmp / "deploys"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker.as_posix()}','a').write('x')\"", verify=f"test -f {marker.as_posix()}")
     _run(env, monkeypatch, plan)
     assert env.office("land")[0] == 0
     _strip_deployed(env)
@@ -558,7 +559,7 @@ def test_a_task_accepted_while_land_waits_for_the_lock_refuses_before_any_merge(
     import contextlib
     from office import land
     marker = env.tmp / "deploys"
-    plan = _plan("e2e", prod=f"python3 -c \"open('{marker}','a').write('x')\"", verify=f"test -f {marker}")
+    plan = _plan("e2e", prod=f"python3 -c \"open('{marker.as_posix()}','a').write('x')\"", verify=f"test -f {marker.as_posix()}")
     _run(env, monkeypatch, plan)
     con = env.con()
     real_lock = land._land_lock
