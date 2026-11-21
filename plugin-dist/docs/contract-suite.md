@@ -187,6 +187,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_integrated_review.py` | keep |
 | `tests/v31/test_intelligence_floor.py` | keep |
 | `tests/v31/test_issue1297_fastlane.py` | keep |
+| `tests/v31/test_issue1300_greenfield_detection.py` | keep |
 | `tests/v31/test_issue502_strategy_efficiency.py` | keep |
 | `tests/v31/test_issue809_executor_slates.py` | retire |
 | `tests/v31/test_issue809_inline_dispatch.py` | keep |

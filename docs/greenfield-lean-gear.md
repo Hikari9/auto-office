@@ -1,6 +1,15 @@
 # Greenfield / lean gear (#936)
 
-Use `office start "<goal>" --gear greenfield --blast-radius repo` **only when intentionally starting a new or near-empty repository**. This is an **explicit opt-in**, not an auto-fit from a file-count heuristic: the planner/orchestrator must inspect the repo before using it. A mature, multi-owner or independently parallelizable codebase should use the normal XS–XL gears.
+Use `office start "<goal>" --gear greenfield --blast-radius repo` **only for new work**: a new project, or a new component with nothing it must fit into. This is an **explicit opt-in**, not an auto-fit: Office counts nothing and has no detection threshold or config. A mature, multi-owner or independently parallelizable codebase should use the normal XS–XL gears.
+
+## Intake judgement (#1300)
+
+The orchestrator decides whether the job is new work, by that loose definition, after looking at the repository. It always passes its judgement to `office start` as `--new-work yes|no "<why>"`. Office records it in the run's gates as `gates.greenfield_detection = {"judged_by": "orchestrator", "new_work": true|false, "why": "<why>"}`, and `office inspect run` shows it. A value other than `yes` or `no`, or an empty why, is a usage error (`bad-new-work`) and creates no run.
+
+- **New work, no `--gear` (G4):** `office start` refuses with `greenfield-candidate` and creates no run. Its `next:` line names `--gear greenfield` and `--gear XS|S|M|L|XL`. The orchestrator asks the invoker which one, then starts again with that gear. `--size-class` alone does not count as a choice.
+- **`--gear greenfield` with `--new-work no` (G2):** Office prints one warning line, records the judgement and starts the run. The invoker's explicit gear wins.
+- **`--new-work no`, or no flag, without `--gear`:** Office picks the default gear as before.
+- **`--gear greenfield --fastlane` (G3):** allowed. The run pins `gates.fastlane` `on`, the orchestrator leads the one cohesive build with its own strategy at the XL floor, and the convergence review stays required. The one-task, 2-3 phase plan contract and the phase brief are unchanged. Without `--fastlane` (or with `--no-fastlane`) greenfield pins no fastlane gate and keeps its dedicated XL executor.
 
 ## Runtime contract
 

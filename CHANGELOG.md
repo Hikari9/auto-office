@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.3
+
+- The orchestrator judges new work at intake (#1300). `office start --new-work yes|no "<why>"` records `gates.greenfield_detection` (`judged_by: orchestrator`, `new_work`, `why`), shown by `office inspect run`; Office counts nothing and has no detection config. New work with no `--gear` is refused as `greenfield-candidate` with no run created, and `next:` names `--gear greenfield` and `--gear XS|S|M|L|XL`. `--gear greenfield --new-work no` warns once, records and starts. `--gear greenfield --fastlane` is now allowed: the orchestrator leads the one cohesive build at the XL floor and the convergence review stays required. A greenfield fastlane overflow hands off with `office rerun` only, since its one-task plan cannot be split. SKILL.md Start step 3 tells the orchestrator to always pass `--new-work`.
+
 ## 3.31.2
 
 - Herdr landing test pins its reviewer harness: the reviewer re-prompt Enter test now asserts the configured retry count for a non-Codex reviewer, and a new test keeps the Codex one-Enter cap (#790). Routing drift had moved the fixture onto codex, failing main.

@@ -259,6 +259,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("goal", nargs="?")
     s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "greenfield"], metavar="{XS,S,M,L,XL}",
                    help="New run gear (XS-XL); greenfield is explicit opt-in for one cohesive build")
+    s.add_argument("--new-work", nargs=2, metavar=("yes|no", "WHY"),
+                   help="the orchestrator's intake judgement: is this new work (a new project, or a new component "
+                        "with nothing it must fit into), and why; new work with no --gear is refused until the "
+                        "invoker picks greenfield or XS-XL")
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
     s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])
@@ -874,6 +878,7 @@ def _run(args, unknown) -> int:
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
                               card=args.card, no_card=args.no_card, fastlane=args.fastlane,
+                              new_work=args.new_work,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)

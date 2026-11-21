@@ -77,6 +77,19 @@ def _safe_start_base(repo: Path, explicit: str | None) -> str:
     return remote_base
 
 
+def greenfield_detection(new_work) -> dict | None:
+    """#1300: the orchestrator's intake judgement from `--new-work yes|no "<why>"`, or None when not given."""
+    if new_work is None:
+        return None
+    parts = list(new_work)
+    value, why = (" ".join(str(p).split()) for p in parts) if len(parts) == 2 else ("", "")
+    value = value.lower()  # the why is one line: it is echoed in start, refusal and inspect output
+    if value not in ("yes", "no") or not why:
+        raise Usage("bad-new-work", f"--new-work takes yes or no and a nonempty reason, got {list(new_work)!r}",
+                    next_step='office start --new-work yes|no "<why>" ...')
+    return {"judged_by": "orchestrator", "new_work": value == "yes", "why": why}
+
+
 def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbook: str = "Change",
           blast_radius: str | None = None, size_class: str | None = None, irreversible: bool = False,
           volume: bool = False, interview: bool = False, adversarial: bool = False,
@@ -85,7 +98,15 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
           benchmark_refresh: bool = False, from_run: str | None = None,
           plan_review_rounds: int | None = None, review_rounds: int | None = None,
-          card: str | None = None, no_card: bool = False, fastlane: bool | None = None) -> Result:
+          card: str | None = None, no_card: bool = False, fastlane: bool | None = None,
+          new_work: tuple[str, str] | list[str] | None = None) -> Result:
+    detection = greenfield_detection(new_work)
+    if detection and detection["new_work"] and gear is None:
+        # #1300 G4: new work with no gear is the invoker's choice, never an Office default.
+        raise Refused("greenfield-candidate", "the orchestrator judged this new work, so the invoker picks the gear "
+                      f"before the run starts ({detection['why']})",
+                      next_step="ask the invoker, then office start --gear greenfield (one cohesive build) or "
+                                "--gear XS|S|M|L|XL, keeping --new-work yes")
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -139,6 +160,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
     if fastlane_gate is not None:
         gates["fastlane"] = fastlane_gate  # #1297: pinned for the run's life
+    if detection:
+        gates["greenfield_detection"] = detection  # #1300: the orchestrator's intake judgement
     gates["run_gear_rationale"] = cfg.gear_rationale(gear, risk, volume=volume,
                                                       interview=interview, adversarial=adversarial)
     if plan_review_rounds is not None:
@@ -288,6 +311,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             from office import land
             res.notices += [f"warning: {w}" for w in land.deploy_path_warnings(
                 top, {f"deploy_{k}": v for k, v in deploy.items()}, land.env_files(config))]
+        if detection and gear == "greenfield" and not detection["new_work"]:
+            # #1300 G2: the invoker's explicit gear wins; the judgement is recorded beside it.
+            res.notices.append(f"warning: --gear greenfield, but the orchestrator judged this is not new work "
+                               f"({detection['why']}); recorded in gates.greenfield_detection, starting anyway")
         if risk["classification"] == "unknown":
             res.notices.append("risk is unclassified: independent code review is required until the plan declares "
                                "`blast_radius` (or `office start --blast-radius ...`); unknown risk is never low")
