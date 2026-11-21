@@ -652,7 +652,7 @@ def test_an_integration_review_launches_once_then_settles_and_accepts_without_a_
 def test_a_lane_visual_review_settles_from_the_launch_without_capturing_or_launching_again(env, monkeypatch):
     from office import convergence, visual
     _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     con = env.con()
     try:
         run = state.get_run(con, _lane(env)["run_id"])

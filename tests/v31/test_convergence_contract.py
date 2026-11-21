@@ -939,7 +939,7 @@ def test_visual_review_is_a_lane_gate_with_its_own_round_cap(env, monkeypatch, t
     vis = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + recheck(finding("U1", where="header @ desktop", what="clipped"))
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": vis}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the capture patch reaches only the in-process claude supervisor
     code_gate, vis_gate = _gates(env, "convergence_review")[0], _gates(env, "visual")[0]
     assert code_gate["input_key"] == vis_gate["input_key"], "both review the same composed revision"
     assert vis_gate["verdict"] == "RECHECK" and vis_gate["evidence_status"] == "COMPARABLE", (vis_gate["review_status"], vis_gate["summary"])
@@ -954,7 +954,7 @@ def test_visual_fallback_cannot_approve_uninspected_evidence(env, monkeypatch, t
     shot = _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     report = tmp_path / "vis.txt"
     report.write_text("EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED)

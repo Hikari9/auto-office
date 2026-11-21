@@ -518,7 +518,7 @@ def test_a_visual_review_only_takes_the_next_fallback_route_without_a_user_pin(e
     env.office("route", "neutral", "agy/gemini-3.8-flash", "--wildcard", "--role", "visual_reviewer")
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
            visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     # Review attempts only: a vision conformance probe (kind='conformance') is not a failed review of this revision.
     tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer'")}
@@ -545,7 +545,7 @@ def test_a_declared_visual_reviewer_is_the_users_own_allow_and_runs_the_rerun(en
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}],
            visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     code, out = env.office("review", "L-T1:visual", "--as", _reviewer(env))
     assert code == 0 and f"reviewer {_reviewer(env)}" in out, out
