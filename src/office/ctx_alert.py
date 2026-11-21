@@ -13,7 +13,7 @@ from pathlib import Path
 from office import db, discovery, paths, state as office_state
 from office.util import atomic_write_text
 
-DEFAULT_THRESHOLD = 272_000
+DEFAULT_THRESHOLD = 250_000
 CHECK_INTERVAL_SECONDS = 60
 TAIL_BYTES = 256 * 1024
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -110,7 +110,14 @@ def _save_state(path: Path, state: dict) -> None:
 
 
 def notice(con, run: dict, *, now: float | None = None) -> str | None:
-    """Return a compact notice for the caller's bound root session, when due."""
+    """Return a compact notice for the caller's bound root session, when due. A fastlane run (#1297) also
+    checks its orchestrator-led task's file trigger here, on the same throttle and the same ctx.high path."""
+    line = _notice(con, run, now=now)
+    from office import fastlane
+    return line or fastlane.watch_files(con, run, now=now)
+
+
+def _notice(con, run: dict, *, now: float | None = None) -> str | None:
     policy = run.get("policy") or {}
     settings = policy.get("orchestrator_context") or {}
     if settings.get("enabled", True) is False:
@@ -160,10 +167,15 @@ def notice(con, run: dict, *, now: float | None = None) -> str | None:
             state["high"], line = tick(state["high"], tokens, threshold)
             state["checked_at"] = checked_at
             if line:
+                from office import fastlane
                 with db.transaction(con):
+                    # #1297: with a live orchestrator-led task the same line carries the fastlane handoff.
+                    line, overflow = fastlane.on_context_high(con, run, line, tokens, threshold)
                     office_state.emit(con, run, "ctx.high", line, payload={"session_id": session_id,
                                                                             "tokens": tokens,
-                                                                            "threshold": threshold})
+                                                                            "threshold": threshold,
+                                                                            **({"fastlane_overflow": overflow}
+                                                                               if overflow else {})})
             _save_state(path, state)
             return line
     except OSError:

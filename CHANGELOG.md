@@ -2,6 +2,20 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.19
+
+Fastlane (#1297). The orchestrator can lead a task itself, inline or with its own cheaper subagents, instead of Office routing an executor. An independent code review is always required.
+- **Flag:** `office start --fastlane` forces it at any size or risk, and `--no-fastlane` turns it off. The choice is pinned in `gates.fastlane`.
+- **Default:** without a flag, Office uses fastlane for XS tasks at low risk. Otherwise it needs all three checks to pass:
+  - quality: `inline_quality:` names the orchestrator's route, and that route meets the task size's executor floor
+  - time: no tasks could run in parallel
+  - cost: a measured `inline_advantage`
+  
+  If Office is not sure, it delegates. It never chooses fastlane on unknown or elevated risk.
+- **Overflow:** the orchestrator context passes `orchestrator_context.threshold_tokens` (now 250k), or the task touches files outside its scope plan. Either one rides the existing `ctx.high` notice and makes every later task delegate. The handoff tells the orchestrator to compact inside Herdr. Elsewhere it only suggests compacting.
+- **No executor route:** a task the orchestrator leads does not need an executor route to qualify. In that case Office records the orchestrator's own `inline_quality` route, which is also where work goes if fastlane overflows. If that route is missing too, dispatch refuses and says why.
+- **Cost:** the economics ledger reads Claude subagent transcripts as `root-subagent` and counts them toward the led task. Inline route records say whether cost is measured.
+
 ## 3.28.17
 
 Gemini 3.8 Flash is retired (Rico, 2026-11-19): a shipped deny covers every effort in all nine policy roles, and its catalog rows stay as history. A user can still lift it with `office route neutral`. The shipped visual reviewer seed is Hydrogen@high > Terra low > claude Opus low > agy Sonnet medium (claude Sonnet medium fails the visual role floor). Hydrogen still needs the user's exact allow, so without it Terra low judges. Tests that used Flash as a generic agy route now use live routes.

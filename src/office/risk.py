@@ -136,7 +136,8 @@ def apply_lightweight(gates: dict, gear: str, config: dict, declaration: dict, p
     preset = (config.get("gear_presets") or {}).get(gear, {})
     dropped = []
     out = {**gates}
-    if preset.get("independent_code_review") in _TUNABLE and out.get("code_review"):
+    # #1297: a fastlane run's independent code review is mandatory, never tuned away.
+    if preset.get("independent_code_review") in _TUNABLE and out.get("code_review") and not out.get("fastlane"):
         out["code_review"], out["code_review_depth"] = False, "none"
         dropped.append("independent code review")
     if preset.get("plan_review") in _TUNABLE and out.get("plan_review") and not plan_review_started:

@@ -358,7 +358,7 @@ def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bo
             "no reliable task-size evidence at intake: conservative M pending planning")
 
 
-def resolve_gates(gear: str, risk, config: dict) -> dict:
+def resolve_gates(gear: str, risk, config: dict, fastlane: dict | None = None) -> dict:
     """`risk` is the run's risk record (a bare bool is the pre-#420 high flag: no floor applies).
     Gear tunes ceremony; it never drops independent code review below what the risk classification implies."""
     from office import risk as risk_mod
@@ -376,6 +376,9 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         # classifies itself, keep one independent review: a planner may not exempt its own plan (#936).
         plan_review = True
     code_review = value(preset.get("independent_code_review", False))
+    if fastlane is not None:
+        # #1297: fastlane always gets one independent code review, at every gear (XS's preset funds it only on risk).
+        code_review = True
     code_review, floor = risk_mod.floor_gates(record, code_review)
     plan_rounds = preset.get("plan_review_max_rounds")
     code_rounds = preset.get("code_review_max_rounds")
