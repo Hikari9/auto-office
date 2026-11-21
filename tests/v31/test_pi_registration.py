@@ -452,7 +452,7 @@ def test_worktree_guard_sees_an_edit_to_an_already_untracked_file(tmp_path):
     assert "untracked files" in guard(before)
 
 
-@pytest.mark.parametrize("cache", ["__pycache__/a.cpython-315.pyc", "pkg/__pycache__/b.cpython-315.pyc", "c.pyc",
+@pytest.mark.parametrize("cache", ["__pycache__/a.cpython-315.pyc", "pkg/__pycache__/b.cpython-315.opt-1.pyc",
                                    ".pytest_cache/v/cache/lastfailed", "pkg/.mypy_cache/x.json", ".ruff_cache/y",
                                    ".hypothesis/examples/z"])
 def test_worktree_guard_ignores_untracked_interpreter_caches(tmp_path, cache):
@@ -466,7 +466,8 @@ def test_worktree_guard_ignores_untracked_interpreter_caches(tmp_path, cache):
     assert guard(before) is None
 
 
-@pytest.mark.parametrize("name", ["pycache.txt", "__pycache__.py", "src/notes_pyc.md"])
+@pytest.mark.parametrize("name", ["pycache.txt", "__pycache__.py", "src/notes_pyc.md", "evil.pyc", "pkg/evil.pyc",
+                                  "__pycache__/notes.txt", "__pycache__/sub/x.pyc"])
 def test_worktree_guard_still_sees_files_that_only_look_like_caches(tmp_path, name):
     from office import gates
     repo = _git_repo(tmp_path)

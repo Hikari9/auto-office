@@ -1759,9 +1759,9 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
     tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
     or None. Returns None when the profile does not ask for the check. Gitignored files and `.git/` are
     not fingerprinted (caches and build outputs change outside the reviewer); the harness's read-only
-    mode is the write barrier for them. Untracked interpreter and tool caches (`__pycache__`, `*.pyc`,
-    `.pytest_cache`, ...) are skipped too, gitignored or not: a reviewer that imports a module leaves bytecode
-    behind without editing the code under review (#1182)."""
+    mode is the write barrier for them. Untracked bytecode under `__pycache__/` and untracked files under tool
+    caches (`.pytest_cache`, ...) are skipped too, gitignored or not: a reviewer that imports a module leaves
+    bytecode behind without editing the code under review (#1182). A sourceless `*.pyc` elsewhere still counts."""
     from office import adapters
     adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
     if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):
@@ -1796,14 +1796,17 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
     return guard
 
 
-# Untracked interpreter and tool caches the reviewer guard ignores (#1182). Tracked files are always fingerprinted.
-_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
-_CACHE_SUFFIXES = (".pyc", ".pyo")
+# Untracked caches the reviewer guard ignores (#1182); tracked files are always fingerprinted. Bytecode counts only
+# as `__pycache__/<module>.<tag>.pyc` (PEP 3147): a sourceless `evil.pyc` beside the code is importable and counts.
+# The tool caches hold data no import path reaches (their names start with a dot).
+_TOOL_CACHE_DIRS = frozenset({".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
 
 
 def _is_cache_path(name: str) -> bool:
     parts = name.split("/")
-    return bool(_CACHE_DIRS.intersection(parts[:-1])) or name.endswith(_CACHE_SUFFIXES)
+    if _TOOL_CACHE_DIRS.intersection(parts[:-1]):
+        return True
+    return len(parts) >= 2 and parts[-2] == "__pycache__" and parts[-1].endswith(".pyc")
 
 
 def _file_digest(path: Path) -> str:
