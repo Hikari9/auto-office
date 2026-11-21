@@ -271,6 +271,10 @@ def _requirements(req: dict, plan: ParsedPlan) -> dict:
         plan.warnings.append("requirements `run_gear_why:` without `run_gear:` is ignored")
     checks = req.get("checks") if isinstance(req.get("checks"), list) else []
     plan.run_checks.extend(c for c in checks if not _is_no_check(c))
+    from office import verification_coverage
+    for command in verification_coverage.uncredited_validate(plan.run_checks):
+        plan.warnings.append(f"run-level check {command!r} is not credited by the land coverage audit; "
+                             + verification_coverage.RUN_CHECK_ADVICE)
     return {
         "goal": req.get("goal"),
         "done_criteria": req.get("done") if isinstance(req.get("done"), list) else [],

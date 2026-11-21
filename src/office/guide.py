@@ -462,6 +462,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     detail = ((run.get("landing") or {}).get("integration") or {}).get("detail") or ""
     if "FULL SUITE NOT VERIFIED" in detail:
         res.add(f"verification warning: {detail}")
+        from office import verification_coverage
+        res.add(f"to land: {verification_coverage.RUN_CHECK_ADVICE}")
     res.next = next_action(con, run)
     held_next = next((line.rsplit("; next: ", 1)[1] for line in held if "; next: " in line), None)
     if episodes:

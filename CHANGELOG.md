@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.28.20
+
+Land recommends `scripts/validate.sh --pr` first (#1302). The `integration-coverage-incomplete` refusal, the status warning and the docs now say to declare exactly `checks: scripts/validate.sh --pr` per merge, and to use the full suite only before the last merge of a batch, for a release, or for test infrastructure changes. The refusal names run-level checks the audit cannot credit, such as `uv sync && scripts/validate.sh --pr`, and the plan parser warns about them at plan time.
+
 ## 3.28.19
 
 Fastlane (#1297). The orchestrator can lead a task itself, inline or with its own cheaper subagents, instead of Office routing an executor. An independent code review is always required.

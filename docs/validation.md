@@ -8,6 +8,8 @@ The contract directory must exist and contain at least one `test_*.py` module. A
 
 Scoped validation is a change-relevant check, not a full-suite pass. The pre-push hook runs the same gate on every push. The gate writes scoped and full-suite receipts separately; no landing check reads them. Landing attestation binds the committed validation script, selector, safety-smoke and integrity tests, and pre-push hook by digest. Changing one requires reviewing the attestation and updating the digest set together.
 
+In an Office plan, declare the run-level check as exactly `checks: scripts/validate.sh --pr` on its own line under `## Requirements`. Office credits only that exact form (or `./scripts/validate.sh --pr`) as scoped landing proof. A compound or prefixed command such as `uv sync --frozen && scripts/validate.sh --pr` is not credited: land refuses with `integration-coverage-incomplete`, and the plan parser warns. Put setup such as `uv sync` on a separate `checks:` line or in `worktree.setup`. Use `--pr` for every merge. Switch the run-level check to the full `scripts/validate.sh` only before the last merge of a batch, for a release, or when tests or test infrastructure are changed, deleted or renamed.
+
 ## Full validation
 
 Run `scripts/validate.sh --full` for release validation, test infrastructure changes, deleted or renamed tests, or when a task explicitly requires the full regression suite. The full command runs all tests under `tests/` with `--all`; it records a full-suite result only when the checked tree remains unchanged.
