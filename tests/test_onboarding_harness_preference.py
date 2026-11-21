@@ -297,7 +297,7 @@ def test_a_zero_budget_provider_gets_no_weights_and_is_reported(h):
 
 def test_budgets_are_onboarding_input_only_and_routing_never_reads_them():
     root = Path(onboarding.__file__).resolve().parent
-    readers = {p.name for p in root.glob("*.py") if "harness_budgets" in p.read_text()}
+    readers = {p.name for p in root.glob("*.py") if "harness_budgets" in p.read_text() or "BUDGETS_KEY" in p.read_text()}
     assert readers <= {"onboarding.py", "cli.py"}  # cli.py only forwards the flag
     for routing_module in ("routing.py", "candidates.py", "config.py", "route_policy.py", "harness_preference.py"):
         assert routing_module not in readers
