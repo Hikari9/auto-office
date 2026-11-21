@@ -1099,6 +1099,8 @@ def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeyp
     assert route_probe._running({os.getpid()}, {os.getpid(): mine}) == {os.getpid()}
     # the same pid with another start time is a reused pid: not ours to wait for or signal
     assert route_probe._running({os.getpid()}, {os.getpid(): "Sat Jan  1 00:00:00 2000"}) == set()
+    # a pid the tracker recorded no start time for has no identity to check: fail closed
+    assert route_probe._running({os.getpid()}, {}) is None
     monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
     assert route_probe._running({os.getpid()}) is None
 

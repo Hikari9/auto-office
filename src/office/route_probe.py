@@ -576,7 +576,13 @@ class _Tracker:
             held = _workspace_pids(self.base)
             if held is None:
                 return None
-            found |= held
+            for pid in held:
+                # A holder of the workspace is the probe's now, so its start time is what
+                # identifies it from here on, even when its pid was seen before as another process.
+                start = process_start(pid)
+                if start:
+                    self.seen[pid] = start
+                    found.add(pid)
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
 
 
@@ -597,7 +603,6 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
         return None
     if listing.returncode not in (0, 1):  # 1: none of the pids is listed any more
         return None
-    starts = starts or {}
     alive = set()
     for line in listing.stdout.splitlines():
         m = re.match(r"^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s*$", line)
@@ -608,8 +613,11 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
         if m.group(2).startswith("Z"):
             continue
         pid = int(m.group(1))
-        if pid in starts and " ".join(starts[pid].split()) != " ".join(m.group(3).split()):
-            continue
+        if starts is not None and pid in pids:
+            if pid not in starts:
+                return None  # no recorded identity: whether it is still ours cannot be told
+            if " ".join(starts[pid].split()) != " ".join(m.group(3).split()):
+                continue
         alive.add(pid)
     return alive & pids
 
