@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.30.0
 
-Hermes is a reviewer again (requirement r3, accepted risk): `adapters/seed/hermes.yaml` restores the reviewer profile with `--yolo --accept-hooks` and no `--in`, and a post-run fingerprint detects, but cannot prevent, worktree writes. The completed=true readback from 7b2a3ffc stays. No vision profile.
+Hermes is a reviewer again (requirement r3, accepted risk): `adapters/seed/hermes.yaml` restores the reviewer profile with `--yolo --accept-hooks` and no `--in`, and a post-run fingerprint detects, but cannot prevent, worktree writes. The vision profile returns too (7b2a3ffc^ form: `--toolsets file,terminal,vision --in {sandbox_dir}`, headless and pane); capabilities stay [builder, review], so vision needs its conformance proof. The completed=true readback from 7b2a3ffc stays.
 
 ## 3.29.0
 

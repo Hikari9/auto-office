@@ -94,12 +94,45 @@ def test_reviewer_interactive_argv_pins_the_provider_and_ignores_user_config(her
     assert argv[argv.index("--in") + 1] == str(CWD)  # the pane starts in the reviewed worktree, as the worker's does
 
 
-def test_hermes_has_no_vision_profile(hermes):
-    """Vision stays off: Hermes reads images only through its vision toolset, which is not restored here."""
-    assert adapters.profile(hermes, "vision") is None
-    assert adapters.interactive_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD) is None
-    with pytest.raises(adapters.AdapterError):
-        adapters.build_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY)
+@pytest.mark.parametrize("kind", ["worker", "reviewer", "vision"])
+def test_every_profile_has_headless_and_interactive_forms_pinning_the_provider(hermes, kind):
+    """Requirement r3: worker, reviewer and vision each launch headless and in a Herdr pane, both pinned to the route's
+    provider and skipping config.yaml's fallback_providers."""
+    prof = adapters.profile(hermes, kind)
+    assert prof and prof["herdr_kind"] == "hermes" and prof["interactive"]["argv"]
+    headless, _ = adapters.build_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY,
+                                      usage_file=Path("/d/usage.json"))
+    pane, kind_ = adapters.interactive_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY)
+    assert kind_ == "hermes"
+    for argv in (headless, pane):
+        assert "--ignore-user-config" in argv
+        assert argv[argv.index("--provider") + 1] == "anthropic"
+
+
+def test_vision_profile_is_restored_with_the_vision_toolset_and_dispatch_directory(hermes):
+    """Restored from 7b2a3ffc^: images reach Hermes as paths in the prompt and are read with its vision tool; the
+    agent works from the dispatch directory, and the worktree fingerprint still applies. Capability stays
+    [builder, review]: vision is earned only by the image-sensitive conformance proof."""
+    assert hermes["capabilities"] == ["builder", "review"]
+    prof = adapters.profile(hermes, "vision")
+    assert prof["image_transport"] == "prompt-path" and prof["verify_worktree_unchanged"] is True
+    assert prof["submit"] == "shell" and prof["prompt_flag"] == "--oneshot=" and prof["readback"] == "hermes-usage"
+    argv, _ = adapters.build_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY,
+                                  usage_file=Path("/d/usage.json"))
+    assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "medium", "--yolo", "--toolsets", "file,terminal,vision", "--in", "/d",
+                    "--usage-file", "/d/usage.json"]
+    pane, kind = adapters.interactive_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY)
+    assert kind == "hermes"
+    assert pane == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "medium", "--yolo", "--accept-hooks", "--toolsets", "file,terminal,vision",
+                    "--in", "/d"]
+
+
+def test_vision_profile_drops_the_provider_flag_for_a_bare_model_id(hermes):
+    """A bare model id pins only the model; the vision toolset stays on the argv."""
+    argv, _ = adapters.build_argv(hermes, "vision", model="claude-sonnet-5-5", effort="medium", cwd=CWD, output=REPLY)
+    assert "--provider" not in argv and "file,terminal,vision" in argv
 
 
 @pytest.mark.parametrize("effort,flag", [("none", "none"), ("low", "low"), ("medium", "medium"), ("high", "high"),
