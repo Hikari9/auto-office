@@ -82,7 +82,15 @@ def test_reviewer_headless_argv_keeps_the_usage_readback(hermes):
 def test_reviewer_interactive_argv_is_pinned(hermes):
     argv, kind = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
     assert kind == "hermes"
-    assert argv == ["--yolo", "--accept-hooks", "-m", SLUG, "--reasoning", "high"]
+    assert argv == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
+                    "--reasoning", "high", "--yolo", "--accept-hooks"]
+
+
+def test_reviewer_interactive_argv_pins_the_provider_and_ignores_user_config(hermes):
+    """The pane reviewer must pin the route's provider and skip config.yaml's fallback_providers, as the executor does."""
+    argv, _ = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
+    assert "--ignore-user-config" in argv
+    assert argv[argv.index("--provider") + 1] == "anthropic"
 
 
 def test_hermes_has_no_vision_profile(hermes):
