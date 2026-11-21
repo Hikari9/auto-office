@@ -615,6 +615,7 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
 
 
 def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | None = None, seed: bool = True,
+                    start: str | None = None,
                     term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
     """Stop the probe's process group and every process the tracker attributes to
     it, including ones that left the group, and confirm none is left."""
@@ -623,14 +624,19 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         if proc is not None:
             proc.poll()  # reap the leader so a zombie does not count as alive
         # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
-        pids = tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+        pids = tracker.scan(pgid if group_ours() else None)
         return _running(pids, tracker.seen) if pids else pids
 
     def group_ours() -> bool:
-        # The group id is ours to signal only while its leader is: once the leader is reaped
-        # (or was never verified) an emptied group's id can be reused by an unrelated process,
-        # so stragglers are then signalled one by one through the tracker instead.
-        return pgid > 1 and seed and (proc is None or proc.returncode is None)
+        # The group id is ours to seed from and signal only while its leader is: our own
+        # unreaped child, or a recovered pid that still has its recorded start time, checked
+        # again on every call. Once the leader is gone an emptied group's id can be reused by
+        # an unrelated process, so stragglers are then signalled one by one through the tracker.
+        if not (pgid > 1 and seed):
+            return False
+        if proc is not None:
+            return proc.returncode is None
+        return start is not None and process_is(pgid, start)
 
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
         pids = left()
@@ -687,7 +693,7 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
         return None
     base = _probe_base(rec.get("base"))
     ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
-    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours)
+    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours, start=rec.get("start"))
     if base is not None:  # a claude probe keeps its session record in the user's config dir, not under base
         shutil.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
     if not ours and pid:
