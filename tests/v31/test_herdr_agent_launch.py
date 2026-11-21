@@ -307,6 +307,8 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "brief.md").write_text("You are a code reviewer\n")
+    # The fake pane never shows the prompt land; without this each launch sleeps out the landing deadline (#1302).
+    monkeypatch.setattr(dispatch, "_prompt_landed", lambda *a, **kw: "landed")
     out = ddir / "reply.txt"
     for adapter_id, kind in (("claude", "claude"), ("codex", "codex")):
         rd = {**d, "adapter_id": adapter_id, "model": "fake-model", "effort": "high"}

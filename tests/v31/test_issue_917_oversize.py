@@ -144,8 +144,12 @@ def test_finished_task_is_not_flagged(env):
 
 def test_wait_prints_the_same_line(env):
     _setup(env, "XS", started_at="2000-01-01T00:00:00+00:00")
-    out = env.office("wait", "--timeout", "1", check=124)[1]
-    assert "oversize: T1 (XS) wall" in out, out
+    from office import guide, state
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    # In process with poll=0: the CLI's fixed 10 s poll would make this test sleep (#1302).
+    out = guide.wait(con, run, timeout=0, poll=0)
+    assert any("oversize: T1 (XS) wall" in ln for ln in out.lines), out.lines
 
 
 def test_cost_over_budget_counts_known_cost_only():

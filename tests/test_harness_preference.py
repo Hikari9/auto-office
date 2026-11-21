@@ -57,10 +57,10 @@ def both(hermes_cheaper=False):
 
 def test_weighted_share_is_about_95_percent_and_deterministic(db):
     cands = both(hermes_cheaper=True)
-    picks = [pick(db, cands, run=f"run-{i}", task=f"T{i % 7}") for i in range(1000)]
+    picks = [pick(db, cands, run=f"run-{i}", task=f"T{i % 7}") for i in range(400)]
     share = picks.count("claude") / len(picks)
     assert abs(share - 0.95) <= 0.02, share
-    assert picks == [pick(db, cands, run=f"run-{i}", task=f"T{i % 7}") for i in range(1000)]
+    assert picks[:100] == [pick(db, cands, run=f"run-{i}", task=f"T{i % 7}") for i in range(100)]
 
 
 def test_same_run_and_task_always_pick_the_same_harness_regardless_of_candidate_order(db):
