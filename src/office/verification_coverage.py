@@ -125,15 +125,15 @@ def is_full_suite(command: str) -> bool:
 
 
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "24c65e6e3cd90eb81d7ce777d5dc7798b05ae76714c3e618c925d7f693304157",
-    "scripts/select_pr_tests.py": "e6d9ddb1cc84b7e72a94d508983279dfb0fc180d6e144e8686c2321be952145b",
-    "tests/test_pr_test_selection.py": "4524bbc79a1dcd613bc68ac6778713b6a92adb248ac9d721952a69235f4b6997",
+    "scripts/validate.sh": "d4a2a80240af41596cd4a66abf36731753e5feef9a90c5c0d13096beb98617d6",
+    "scripts/select_pr_tests.py": "96e3fe6686dba9887976007c27b54ef9d5458c7ac6edfd26248f0a15c1101bf9",
+    "tests/test_pr_test_selection.py": "cfe11f97a9ab9066a95e3044b0a7c5355bef84ef5d0d9e4ef57dab565c7b75c5",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
-    "tests/v31/test_verification_coverage.py": "93955393b7dadd87ff0c5408c832e74d4c700a0b048f2a0dd8f6a1e1941742ed",
+    "tests/v31/test_verification_coverage.py": "b3d477501a5eb200ed7e8ed7d7b41ecb02b2d777ff7a3867e8eeaa96018f1927",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
-    "tests/contracts/test_plugin_distribution.py": "afdf9f3df90550970c9a48d1ea432ea85e74625a2b45bfa44439d5a12a6d9dff",
+    "tests/contracts/test_plugin_distribution.py": "0d3178f088e954a59a1b8de9fb2b4e7a2117324ce74dcd0ce00a27875034d7b4",
     "tests/contracts/test_route_parity.py": "68470936786223ba23971cb1c714220e67e9dad9c0f141b3c293ce36df0d219d",
     "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",

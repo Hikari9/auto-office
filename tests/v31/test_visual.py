@@ -97,7 +97,7 @@ def _setup(env, page: str, *, port: int, reference: str | None = "design/prototy
     env.git("commit", "-qm", "reference")
     env.script(probe=[{"reply": probe}],
                visual_reviewer=[{"reply": visual_reply or "EVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS"}])
-    code, out = env.office("start", "header", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "header", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan(port, reference, extra))
     env.office("submit", check=0)
@@ -500,7 +500,7 @@ def test_navigate_resolves_relative_url_and_records_frame_url(env):
     env.git("commit", "-qm", "reference")
     env.script(probe=[{"reply": "auto"}],
                visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS"}])
-    code, out = env.office("start", "nav", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "nav", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan(port, None, extra))
     env.office("submit", check=0)
@@ -540,7 +540,7 @@ def test_identical_non_default_screenshot_reported_as_cause_capture(env):
     (env.repo / "design" / "prototype.html").write_text(PAGE)
     env.git("add", "-A")
     env.git("commit", "-qm", "reference")
-    code, out = env.office("start", "identical-test", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "identical-test", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     env.office("submit", check=0)
@@ -575,7 +575,7 @@ def test_absent_selector_reported_as_cause_spec(env):
     (env.repo / "design" / "prototype.html").write_text(PAGE)
     env.git("add", "-A")
     env.git("commit", "-qm", "reference")
-    code, out = env.office("start", "absent-selector-test", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "absent-selector-test", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     env.office("submit", check=0)

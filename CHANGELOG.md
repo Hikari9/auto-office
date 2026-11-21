@@ -2,6 +2,14 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.1
+
+Removes the Auto Office 3.0 runtime and the six old gear presets, with no backward compatibility.
+- **Gears:** `direct`, `direct+review`, `light`, `quick`, `express` and `full` are gone from config, code, docs and skills. `office start --gear direct` is now an invalid choice. A run still pinned to one fails on resume, status and dispatch with the `gear-removed` error (`config.require_supported_gear`), which says to start a new run with `--gear XS|S|M|L|XL`. `office close --abandon` and `office inspect` still work on it.
+- **3.0 runtime:** `office raw`, `legacy.py`, `compat.py`, 3.0 run discovery in `office list` and `office resume`, and the doctor and install lines about it are removed. `runtime.new_runs: "3.0"` now errors that 3.0 was removed. The `compat_calls` table stays in the schema, unused.
+- **Scripts:** `office_runtime.py` and the 3.0 helper scripts are deleted, along with the root tests that only exercised them. `validate.sh` now validates seed adapters with `office harness validate --file`.
+- **Faster tests:** Tests start from a dispatched-run snapshot (#1302). A test marked `@pytest.mark.dispatched("builder")` restores the state the module function `builder(env)` leaves (trust, start, approve, dispatch), built once per module, instead of driving the lifecycle itself. Applied to the revoke and review-only cases in `test_lane_gate_revoke.py` and `test_review_reroute.py`. `scripts/validate.sh` accepts `VALIDATE_WORKERS` up to 4 as an opt-in for an idle host; the default stays 2 (`docs/validation.md`). The validate.sh digest in `verification_coverage.py` is updated.
+
 ## 3.31.0
 
 Executor routing follows the Artificial Analysis Engineering Index (2026-11) table: size floors XS 31, S 37, M 40, L 45, XL 52 and Haiku 5.5 / Sonnet 5.5 / Opus 5.5 first rungs, with conditional Hydrogen at XS low, S medium and M high only, a frontend bias that moves the size's agy gemini-* rung to rung 1, and Hydrogen no longer a code reviewer (Luna high then Opus low).

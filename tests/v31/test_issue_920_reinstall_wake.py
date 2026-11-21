@@ -286,43 +286,37 @@ def test_the_wake_supervisor_skips_the_startup_probe(monkeypatch):
     assert probed == []
 
 
-@pytest.mark.parametrize("argv", [["raw", "status"], ["hook", "PreToolUse"]])
-def test_raw_and_hook_fail_fast_during_a_rebuild_before_their_fast_path(monkeypatch, capsys, argv):
-    """The fast paths skip the command parser, so the rebuild probe runs before them: a hook must not act mid-rebuild (#920)."""
-    from office import compat, hooks
+def test_hook_fails_fast_during_a_rebuild_before_its_fast_path(monkeypatch, capsys):
+    """The fast path skips the command parser, so the rebuild probe runs before it: a hook must not act mid-rebuild (#920)."""
+    from office import hooks
 
     monkeypatch.setattr(version, "current", _broken)
-    monkeypatch.setattr(compat, "raw", _broken)  # the fast path itself must never start
-    monkeypatch.setattr(hooks, "main", _broken)
+    monkeypatch.setattr(hooks, "main", _broken)  # the fast path itself must never start
 
-    assert cli.main(argv) == version.REBUILD_EXIT_CODE
+    assert cli.main(["hook", "PreToolUse"]) == version.REBUILD_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.err.strip() == retry_line("ImportError: office")
     assert "Traceback" not in captured.err and captured.out == ""
 
 
-def test_raw_and_hook_still_take_their_fast_paths_when_the_install_is_healthy(monkeypatch):
-    from office import compat, hooks
+def test_hook_still_takes_its_fast_path_when_the_install_is_healthy(monkeypatch):
+    from office import hooks
 
     monkeypatch.setattr(version, "current", lambda: "3.2.0")
-    monkeypatch.setattr(compat, "raw", lambda argv: ("raw", argv))
     monkeypatch.setattr(hooks, "main", lambda argv: ("hook", argv))
 
-    assert cli.main(["raw", "status"]) == ("raw", ["status"])
     assert cli.main(["hook", "PreToolUse"]) == ("hook", ["PreToolUse"])
 
 
-def test_raw_and_hook_keep_their_fast_path_under_a_bad_version_override(monkeypatch):
+def test_hook_keeps_its_fast_path_under_a_bad_version_override(monkeypatch):
     """A bad OFFICE_VERSION_OVERRIDE is configuration, not a rebuild: hooks keep running as they did before (#920)."""
-    from office import compat, hooks
+    from office import hooks
 
     def bad():
         raise RuntimeError("OFFICE_VERSION_OVERRIDE='dev' is not an exact PEP 440 version")
     monkeypatch.setattr(version, "current", bad)
-    monkeypatch.setattr(compat, "raw", lambda argv: ("raw", argv))
     monkeypatch.setattr(hooks, "main", lambda argv: ("hook", argv))
 
-    assert cli.main(["raw", "status"]) == ("raw", ["status"])
     assert cli.main(["hook", "PreToolUse"]) == ("hook", ["PreToolUse"])
 
 

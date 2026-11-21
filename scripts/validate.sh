@@ -15,8 +15,9 @@ if [ "$#" -ne 0 ]; then
   echo "Unexpected validate arguments: $*" >&2
   exit 2
 fi
-if [ "${VALIDATE_WORKERS:-2}" -gt 2 ] || [ "${VALIDATE_WORKERS:-2}" -lt 1 ]; then
-  echo "[VALIDATE] VALIDATE_WORKERS must be 1 or 2" >&2
+# Default 2. VALIDATE_WORKERS=4 is opt-in for an otherwise idle host (docs/validation.md).
+if [ "${VALIDATE_WORKERS:-2}" -gt 4 ] || [ "${VALIDATE_WORKERS:-2}" -lt 1 ]; then
+  echo "[VALIDATE] VALIDATE_WORKERS must be 1 to 4 (default 2; 3-4 only on an idle host)" >&2
   exit 2
 fi
 cd "$(git rev-parse --show-toplevel)"
@@ -92,7 +93,7 @@ unset PYTEST_ADDOPTS PYTEST_PLUGINS
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
-# Two workers maximum. PR selection still uses --all so selected integration,
+# Default two workers (VALIDATE_WORKERS, 1-4). PR selection still uses --all so selected integration,
 # legacy, and slow tests are never hidden by the default tier filter.
 if [ "$mode" = "pr" ]; then
   selection_file="$(mktemp)"
@@ -115,7 +116,7 @@ fi
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do
-  python3 scripts/office_runtime.py validate-adapter "$f"
+  python3 -c 'import sys; from office.cli import main; sys.exit(main(["harness", "validate", "--file", sys.argv[1]]))' "$f"
 done
 
 if [ "${VALIDATE_BUILD:-0}" = "1" ]; then

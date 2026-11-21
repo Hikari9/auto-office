@@ -132,13 +132,7 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
         direct = [test for test in tests if Path(test).stem == f"test_{stem}"
                   or Path(test).stem.startswith(f"test_{stem}_")]
         for test in direct:
-            if source == "src/office/integration.py" and test == "tests/test_integration.py":
-                # This is a legacy 3.0 integration module with many unrelated
-                # end-to-end tests; its single v3.1 source import is in #577.
-                include("tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log",
-                        "direct legacy regression: office.integration")
-            else:
-                include(test, f"direct test: {source}")
+            include(test, f"direct test: {source}")
         # Unrelated imports must not turn a PR gate back into a nearly full
         # suite. Keep one cross-module test if there is direct/mapped coverage,
         # or two fallback importers if this module has no explicit tests.

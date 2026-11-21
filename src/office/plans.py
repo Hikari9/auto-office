@@ -243,10 +243,6 @@ def _apply_risk(con, run: dict, proposed: dict | None, declaration: dict | None,
     config = state.pinned_config(run)
     gear = run["gear"]
     raised = bool(new.get("high")) and not cur.get("high")
-    if raised and gear == "direct":
-        # The pre-809 direct preset had a pinned risk-driven upgrade. Do not
-        # reinterpret that historical rule through XS-XL complexity fitting.
-        gear = "full" if new.get("irreversible") else "express"
     base = cfg.resolve_gates(gear, new, config, fastlane=old.get("fastlane"))
     keys = list(risk.FLOOR_KEYS)
     started = (bool(plan_gates(con, run["id"])) or bool((run.get("plan_review") or {}).get("ended"))

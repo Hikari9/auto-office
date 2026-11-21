@@ -27,7 +27,7 @@ def _set(env, **cols):
 
 
 def _low_risk(env):
-    _set(env, gear="direct", risk_json=json.dumps({"blast_radius": "local"}))
+    _set(env, gear="XS", risk_json=json.dumps({"blast_radius": "local"}))
 
 
 @pytest.mark.integration
@@ -157,7 +157,7 @@ def test_an_exemption_without_a_reason_is_refused(env, args, why):
 @pytest.mark.approved
 def test_an_exemption_is_refused_above_the_inline_tier(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     code, out = env.office("submit", "--self-review-exempt", "trivial", "--", "tiny", cwd=wt, env=wenv)
     assert code != 0 and "allows no exemption" in out, out
     assert _rev(env) is None
@@ -167,7 +167,7 @@ def test_an_exemption_is_refused_above_the_inline_tier(env):
 @pytest.mark.approved
 def test_the_missing_ledger_message_offers_the_exemption_only_on_the_inline_tier(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     assert "--self-review-exempt" not in env.office("submit", cwd=wt, env=wenv)[1]
     _low_risk(env)
     assert "--self-review-exempt" in env.office("submit", cwd=wt, env=wenv)[1]
@@ -212,7 +212,7 @@ def test_a_missing_ledger_is_for_the_worker_and_does_not_signal_the_orchestrator
 @pytest.mark.approved
 def test_an_exemption_flag_is_ignored_where_no_ledger_is_owed(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full", gates_json=json.dumps({"review_contract": "v3.1"}))  # v3.1 needs no ledger
+    _set(env, gear="L", gates_json=json.dumps({"review_contract": "v3.1"}))  # v3.1 needs no ledger
     code, out = env.office("submit", "--self-review-exempt", "mechanical", "--", "x", cwd=wt, env=wenv)
     assert code == 0 and "allows no exemption" not in out, out
 
@@ -221,7 +221,7 @@ def test_an_exemption_flag_is_ignored_where_no_ledger_is_owed(env):
 @pytest.mark.approved
 def test_an_exemption_flag_on_empty_work_is_not_refused(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     _git(wt, "reset", "-q", "--hard", d["base_commit"])
     code, out = env.office("submit", "--self-review-exempt", "mechanical", "--no-change", "--", "x", cwd=wt, env=wenv)
     assert code == 0 and "self-review exempt (empty" in out, out
@@ -260,7 +260,7 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     from office import briefs
     ledger = "FINDING medium test-strength tests/test_guard.py:2 | guard | fixed tests/test_guard.py mutation=failed"
     brief = briefs.convergence_review_brief(
-        {"gear": "direct"}, {"id": "L-T1"},
+        {"gear": "XS"}, {"id": "L-T1"},
         [{"id": "T1", "title": "guard", "scope": ["src/"], "accept": ["mutation evidence available"],
           "depends": [], "interfaces": []}],
         {"id": "R1", "commit_sha": "a" * 40}, "diff", "T1 APPROVED", [], "/tmp/check", 1,

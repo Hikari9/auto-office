@@ -34,11 +34,39 @@ def _reviewer(env):
 
 
 def _blocked(env, review):
-    approved_run(env, executor=EXECUTOR, code_reviewer=[review])
-    env.office("dispatch", "T1", check=0)
+    if {_blocked_garbage: GARBAGE, _blocked_unavailable: UNAVAILABLE}.get(env.restored_from) != review:
+        approved_run(env, executor=EXECUTOR, code_reviewer=[review])
+        env.office("dispatch", "T1", check=0)
     t = task_row(env)
     assert t["status"] == "blocked", t
     return t
+
+
+UNAVAILABLE = {"reply": "", "exit": 1}
+
+
+def _blocked_garbage(env):
+    """Builder for `@pytest.mark.dispatched("_blocked_garbage")`: T1 blocked on an unparseable review."""
+    _blocked(env, GARBAGE)
+
+
+def _blocked_unavailable(env):
+    """Builder for `@pytest.mark.dispatched("_blocked_unavailable")`: T1 blocked on an UNAVAILABLE review."""
+    _blocked(env, UNAVAILABLE)
+
+
+def _lane_unavailable(env):
+    """Builder for `@pytest.mark.dispatched("_lane_unavailable")`: T1 accepted, its lane review UNAVAILABLE."""
+    if env.restored_from is not _lane_unavailable:
+        _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
+        env.office("dispatch", "T1", check=0)
+
+
+def _lane_garbage(env):
+    """Builder for `@pytest.mark.dispatched("_lane_garbage")`: T1 accepted, its lane review unparseable."""
+    if env.restored_from is not _lane_garbage:
+        _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
+        env.office("dispatch", "T1", check=0)
 
 
 def _code_gates(env):
@@ -83,6 +111,7 @@ def test_review_only_reruns_the_review_of_the_same_revision_for_every_unreviewed
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_no_unavailable_or_attention_attempt_spends_a_round(env):
     _blocked(env, {"reply": "", "exit": 1})
     env.script(code_reviewer=[GARBAGE])
@@ -95,6 +124,7 @@ def test_no_unavailable_or_attention_attempt_spends_a_round(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_review_only_without_as_starts_on_a_route_the_earlier_attempts_did_not_use(env):
     _blocked(env, {"reply": "", "exit": 1})
     tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")}
@@ -140,6 +170,7 @@ def test_review_only_refuses_a_task_that_is_not_blocked_on_its_review(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_dispatch_of_a_review_only_block_never_launches_an_executor_and_points_to_review(env):
     _blocked(env, GARBAGE)
     executors = _executor_calls(env)
@@ -154,6 +185,7 @@ def test_dispatch_of_a_review_only_block_never_launches_an_executor_and_points_t
 
 @V31
 @pytest.mark.parametrize("flags", [[], ["--fresh"], ["--resume"]])
+@pytest.mark.dispatched("_blocked_garbage")
 def test_rerun_review_as_on_a_review_only_block_reruns_the_review_only(env, flags):
     t = _blocked(env, GARBAGE)
     executors = _executor_calls(env)
@@ -168,6 +200,7 @@ def test_rerun_review_as_on_a_review_only_block_reruns_the_review_only(env, flag
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_rerun_fresh_without_review_as_is_still_an_executor_rerun(env):
     _blocked(env, GARBAGE)
     before = len(_executor_calls(env))
@@ -178,6 +211,7 @@ def test_rerun_fresh_without_review_as_is_still_an_executor_rerun(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_rerun_without_review_as_still_needs_a_mode(env):
     _blocked(env, GARBAGE)
     code, out = env.office("rerun", "T1")
@@ -199,6 +233,7 @@ def test_resume_retries_an_unavailable_or_attention_task_review_on_the_same_revi
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_the_unavailable_next_text_names_the_fallback_reviewer_and_the_orchestrator_before_any_waiver(env):
     _blocked(env, GARBAGE)
     nxt = _status(env)["next"]
@@ -215,6 +250,7 @@ def _set_producer_session(env, session):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_orchestrator_task_review_is_degraded_and_never_a_waiver(env, tmp_path):
     t = _blocked(env, {"reply": "", "exit": 1})
     report = tmp_path / "review.txt"
@@ -236,6 +272,7 @@ def test_orchestrator_task_review_is_degraded_and_never_a_waiver(env, tmp_path):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_the_producing_session_cannot_review_its_own_task(env, tmp_path):
     _blocked(env, {"reply": "", "exit": 1})
     report = tmp_path / "review.txt"
@@ -248,6 +285,7 @@ def test_the_producing_session_cannot_review_its_own_task(env, tmp_path):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_orchestrator_task_review_refuses_a_worker_a_bad_report_and_a_healthy_task(env, tmp_path):
     _blocked(env, {"reply": "", "exit": 1})
     report = tmp_path / "review.txt"
@@ -281,9 +319,9 @@ def test_lane_review_only_reruns_the_lane_review_on_the_named_route(env, review,
     assert _pin(env)["as"] == reviewer and _triples(env)[-1] == reviewer
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_lane_review_only_without_as_excludes_the_routes_already_tried(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     tried = {r["triple"] for r in _q(env, "SELECT triple FROM dispatches WHERE role='code_reviewer'")}
     assert tried
     env.script(convergence_reviewer=[{"reply": APPROVED}])
@@ -295,9 +333,9 @@ def test_lane_review_only_without_as_excludes_the_routes_already_tried(env):
     assert _last_triple(env) not in tried and _scope(env, "L-T1")["status"] == "approved", _triples(env)
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_lane_review_only_keeps_a_pinned_reviewer_until_as_re_pins_it(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     first = _reviewer(env)
     con = env.con()
     con.execute("UPDATE tasks SET review_override_json=? WHERE id='T1'",
@@ -315,9 +353,9 @@ def test_lane_review_only_keeps_a_pinned_reviewer_until_as_re_pins_it(env):
     assert _pin(env)["as"] == other and _triples(env)[-1] == other and _scope(env, "L-T1")["status"] == "approved"
 
 
+@pytest.mark.dispatched("_lane_garbage")
 def test_lane_review_only_spends_no_round_when_the_rerun_is_a_recheck(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
-    env.office("dispatch", "T1", check=0)
+    _lane_garbage(env)
     env.script(convergence_reviewer=[{"reply": recheck(finding("F1"))}])
     env.office("review", "L-T1", "--as", _reviewer(env), check=0)
     gates = _gates(env, "convergence_review")
@@ -342,9 +380,9 @@ def test_lane_review_only_refusals(env):
     assert code == 4 and "worker-cannot-review" in out, out
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_lane_next_text_names_the_fallback_reviewer_and_the_orchestrator_before_any_waiver(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     nxt = _status(env)["next"]
     assert nxt.index("office review L-T1:convergence [--as") < nxt.index("--report") < nxt.index("waiver"), nxt
 
@@ -355,6 +393,7 @@ MANUAL = {"OFFICE_JOBS": "manual"}  # queue the review, do not run it
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_the_same_review_only_command_twice_queues_one_review(env):
     _blocked(env, GARBAGE)
     code, out = env.office("review", "T1", "--as", _reviewer(env), env=MANUAL)
@@ -364,9 +403,9 @@ def test_the_same_review_only_command_twice_queues_one_review(env):
     assert len(_code_gates(env)) == 2
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_the_same_lane_review_only_command_twice_queues_one_review(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     code, out = env.office("review", "L-T1", "--as", _reviewer(env), env=MANUAL)
     assert code == 0, out
     code, out = env.office("review", "L-T1", "--as", _reviewer(env), env=MANUAL)
@@ -375,6 +414,7 @@ def test_the_same_lane_review_only_command_twice_queues_one_review(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_review_only_validates_the_route_before_it_pins_anything(env):
     _blocked(env, GARBAGE)
     for flags in (["--as", "not-a-route"], ["--cli", "echo hi"], ["--external"],
@@ -389,6 +429,7 @@ def test_review_only_validates_the_route_before_it_pins_anything(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_review_only_pins_an_external_reviewer(env):
     _blocked(env, GARBAGE)
     env.office("review", "T1", "--as", _reviewer(env), "--external", env=MANUAL, check=0)
@@ -396,6 +437,7 @@ def test_review_only_pins_an_external_reviewer(env):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_review_only_refuses_a_terminal_run(env):
     from office import gates, state
     _blocked(env, GARBAGE)
@@ -421,6 +463,7 @@ def test_a_task_id_under_convergence_points_to_its_lane(env):
 
 @V31
 @pytest.mark.parametrize("role_env", [{"OFFICE_ROLE": "reviewer"}, {"OFFICE_DISPATCH_ID": "D123"}])
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_a_reviewer_or_worker_session_cannot_record_the_orchestrators_review(env, tmp_path, role_env):
     _blocked(env, {"reply": "", "exit": 1})
     report = tmp_path / "review.txt"
@@ -431,9 +474,9 @@ def test_a_reviewer_or_worker_session_cannot_record_the_orchestrators_review(env
 
 
 @pytest.mark.parametrize("role_env", [{"OFFICE_ROLE": "reviewer"}, {"OFFICE_DISPATCH_ID": "D123"}])
+@pytest.mark.dispatched("_lane_unavailable")
 def test_a_reviewer_or_worker_session_cannot_review_a_lane_for_the_orchestrator(env, tmp_path, role_env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     report = tmp_path / "review.txt"
     report.write_text(APPROVED)
     code, out = env.office("review", "L-T1:convergence", "--report", str(report), env=role_env)
@@ -467,6 +510,7 @@ def test_an_orchestrator_changes_required_review_is_recorded_degraded_and_does_n
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_an_orchestrator_pass_after_an_attention_review_is_degraded(env, tmp_path):
     _blocked(env, GARBAGE)
     report = tmp_path / "review.txt"
@@ -476,6 +520,7 @@ def test_an_orchestrator_pass_after_an_attention_review_is_degraded(env, tmp_pat
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_resume_re_runs_the_review_on_the_pinned_reviewer_and_excludes_no_route(env):
     _blocked(env, GARBAGE)
     first = _reviewer(env)
@@ -563,6 +608,7 @@ def test_the_builder_only_example_has_no_reviewer_profile():
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(env):
     _blocked(env, GARBAGE)
     # kilo has a worker profile only. pi was the example until #993 gave it a read-only reviewer profile.
@@ -571,17 +617,17 @@ def test_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(
     assert _pin(env) is None and len(_code_gates(env)) == 1
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_a_lane_review_only_refuses_a_route_that_cannot_review_before_it_pins_anything(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     code, out = env.office("review", "L-T1", "--as", BUILDER_ONLY)
     assert code == 4 and "capability-missing" in out, out
     assert _pin(env) is None and len(_gates(env, "convergence_review")) == 1
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_a_lane_id_in_any_case_records_the_orchestrators_review(env, tmp_path):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     report = tmp_path / "r.txt"
     report.write_text(APPROVED)
     env.office("review", "l-t1:convergence", "--report", str(report), check=0)
@@ -589,6 +635,7 @@ def test_a_lane_id_in_any_case_records_the_orchestrators_review(env, tmp_path):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_unavailable")
 def test_review_only_reuses_a_tried_route_only_when_no_other_route_qualifies(env, monkeypatch):
     from office import candidates
     _blocked(env, {"reply": "", "exit": 1})
@@ -617,15 +664,16 @@ def _hint(env, gate_id):
 
 
 @V31
+@pytest.mark.dispatched("_blocked_garbage")
 def test_the_reprompt_failure_hint_names_the_task_to_re_review(env):
     _blocked(env, GARBAGE)
     assert _hint(env, _code_gates(env)[0]["id"]).startswith("office review T1 --as <harness>/<model>")
     assert _hint(env, None) == "office resume"
 
 
+@pytest.mark.dispatched("_lane_garbage")
 def test_the_reprompt_failure_hint_names_the_lane_gate_to_re_review(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
-    env.office("dispatch", "T1", check=0)
+    _lane_garbage(env)
     gid = _gates(env, "convergence_review")[0]["id"]
     assert _hint(env, gid).startswith("office review L-T1:convergence --as <harness>/<model>")
 
@@ -720,10 +768,10 @@ def test_every_review_only_path_refuses_a_terminal_run(env, tmp_path, stale):
     assert len(_code_gates(env)) == 1 and task_row(env)["status"] == "blocked"
 
 
+@pytest.mark.dispatched("_lane_unavailable")
 def test_a_lane_fallback_and_review_only_refuse_a_terminal_run(env, tmp_path):
     from office import convergence, gates, state
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"exit": 1}])
-    env.office("dispatch", "T1", check=0)
+    _lane_unavailable(env)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
     con.execute("UPDATE runs SET phase='abandoned'")
@@ -828,9 +876,9 @@ def _fenced(run, d):
     return fence()
 
 
+@pytest.mark.dispatched("_lane_garbage")
 def test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command(env, monkeypatch):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
-    env.office("dispatch", "T1", check=0)
+    _lane_garbage(env)
     gid = _gates(env, "convergence_review")[0]["id"]
     sent, (_, _, reason), _ = _reprompt(env, monkeypatch, _fenced, gate_id=gid, landed="held")
     assert len(sent) == 1 and "typed but unsubmitted" in reason, reason
@@ -838,10 +886,10 @@ def test_a_reprompt_that_stays_unsubmitted_names_the_review_only_command(env, mo
     assert "office review L-T1:convergence --as <harness>/<model>" in reason and "waive" not in reason, reason
 
 
+@pytest.mark.dispatched("_lane_garbage")
 def test_a_pane_mismatch_names_the_review_only_command_for_its_gate(env, monkeypatch):
     from office import dispatch
-    _start(env, executor=EXECUTOR, convergence_reviewer=[GARBAGE])
-    env.office("dispatch", "T1", check=0)
+    _lane_garbage(env)
     gid = _gates(env, "convergence_review")[0]["id"]
 
     def refuse(run, d):

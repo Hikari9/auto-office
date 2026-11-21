@@ -6,7 +6,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 # Auto Verification
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+> role briefs; the `office_runtime.py` helpers it names were removed with the 3.0 runtime. Follow `office status` and its `next:` line.
 
 Every mutable run self-verifies. Add independent verification when risk, gear, playbook, repository policy, or acceptance path requires it. Under `convergence-v1` a task is accepted on its own checks, and independent and visual review judge each lane's composed result (`docs/review-convergence.md`).
 

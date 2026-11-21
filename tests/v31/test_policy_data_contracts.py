@@ -145,7 +145,7 @@ def test_a_planner_follows_its_gear_table_in_data_order(gear):
         (row["model_id"], row["effort"], row.get("harness")) for row in POLICY["planner_preferred"][gear]]
 
 
-@pytest.mark.parametrize("gear", [None, *config.LEGACY_GEARS,
+@pytest.mark.parametrize("gear", [None, "retired-preset",
                                   *[g for g in config.RUN_GEARS if g not in POLICY["planner_preferred"]]])
 def test_a_gear_without_a_planner_table_keeps_the_flat_seed(gear):
     flat = [{"model_id": "synthetic-flat", "effort": "medium", "harness": "claude"}]
@@ -231,8 +231,8 @@ def test_run_gears_hand_their_task_size_to_the_size_policy(gear):
         assert slates.new_gear_size({"context": {"gear": gear, "size_class": size}}) == size
 
 
-@pytest.mark.parametrize("gear", [None, "", *config.LEGACY_GEARS])
-def test_historical_gears_and_a_missing_gear_never_inherit_a_size_policy(gear):
+@pytest.mark.parametrize("gear", [None, "", "retired-preset"])
+def test_an_unknown_gear_and_a_missing_gear_never_inherit_a_size_policy(gear):
     assert slates.new_gear_size({"context": {"gear": gear, "size_class": "S"}}) is None
     assert slates.new_gear_size({"context": {"gear": gear, "size_class": "XL"}}) is None
     assert slates.new_gear_size({"context": {"size_class": "L"}}) is None

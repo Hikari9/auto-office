@@ -36,7 +36,7 @@ function ledgerPath() {
   if (!stateDir) {
     console.error(
       "herdr-ledger: no ledger scope. Set OFFICE_STATE_DIR to the current run's " +
-      "state directory (office_runtime.py start returns it as state_dir), or set " +
+      "state directory (the run's state directory), or set " +
       "HERDR_LEDGER explicitly. A pane ledger belongs to one run; there is no global one."
     );
     process.exit(2);
@@ -119,7 +119,7 @@ function cmdAdd(flags) {
     session_id: flags.session || null,
     worktree: flags.worktree || process.cwd(),
     spawned_at: nowIso(),
-    // close_finished_panes.mjs reads recorded_at; office_spawn.sh writes it.
+    // close_finished_panes.mjs reads recorded_at; the pane launcher writes it.
     recorded_at: nowIso(),
     orchestrator_pane_id: flags["orchestrator-pane"] || process.env.HERDR_PANE_ID || null,
     orchestrator_session_id: flags["orchestrator-session"] || process.env.HERDR_SESSION_ID || null,

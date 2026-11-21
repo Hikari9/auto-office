@@ -119,7 +119,7 @@ def test_e2e_without_a_prod_command_is_a_plan_error(env):
 def test_intake_flags_reach_the_diagram_when_the_plan_omits_them(env, monkeypatch):
     github(env, monkeypatch)
     env.trust()
-    code, out = env.office("start", "g", "--gear", "direct+review", "--planner", "inline", "--end-state", "e2e",
+    code, out = env.office("start", "g", "--gear", "S", "--planner", "inline", "--end-state", "e2e",
                            "--deploy-prod", "make ship", "--deploy-verify", "make smoke")
     assert code == 0, out
     env.write_plan(PLAN_STACKED)

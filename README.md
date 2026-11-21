@@ -844,6 +844,6 @@ The README is the developer entrypoint; the detailed contracts live here:
 
 ## Migrating from 3.0
 
-Runs started by 3.0 stay on 3.0. `office list` marks them as legacy and `office resume <id>` routes them through the exact retained runtime. The `scripts/` helper surface remains available through `office raw <subcommand>` with deprecation tracking; it cannot write a 3.1+ run.
+The 3.0 runtime and `office raw` were removed with the 3.0 runtime. The old gear presets (`direct` to `full`) were removed with it: a run pinned to one fails with `gear-removed`, so start a new run with `--gear XS|S|M|L|XL`.
 
 New runs use the installed current runtime by default. A configured rollback changes **future** runs; it does not rewrite runs that already exist.

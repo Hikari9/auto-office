@@ -351,10 +351,19 @@ def test_revision_ids_are_unique_across_runs(env):
 PLAN_NO_GATES = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', "checks: none")
 
 
+def _fund_no_code_review(env):
+    """Every XS-XL run funds one independent code review (#1297); pin the gate off to reach the no-review path."""
+    con = env.con()
+    gates = json.loads(con.execute("SELECT gates_json FROM runs").fetchone()[0])
+    con.execute("UPDATE runs SET gates_json=?", (json.dumps({**gates, "code_review": False}),))
+    con.commit()
+
+
 def test_no_gate_revision_is_accepted_on_submit(env):
     # Direct gear funds no review and the task declares checks: none, so no gate
     # exists to finish; acceptance must be evaluated on submit (it hung "submitted").
-    approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, plan=PLAN_NO_GATES, gear="XS", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    _fund_no_code_review(env)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     _change(wt)
@@ -364,7 +373,8 @@ def test_no_gate_revision_is_accepted_on_submit(env):
 
 
 def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
-    approved_run(env, plan=PLAN_NO_GATES, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, plan=PLAN_NO_GATES, gear="XS", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    _fund_no_code_review(env)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     _change(wt)
@@ -380,7 +390,7 @@ def test_stuck_no_gate_revision_is_accepted_by_reconcile(env):
 
 def test_revision_with_checks_is_not_accepted_without_them(env):
     # The no-gate path must not accept a task whose checks never ran.
-    approved_run(env, gear="direct", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
+    approved_run(env, gear="XS", executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     wenv, wt = _worker(env)
     _change(wt)

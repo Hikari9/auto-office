@@ -17,6 +17,8 @@ WAIVE = ("approve", "waive", "L-T1:convergence", "--quote", "ship it", "--reason
 
 
 def _unavailable_lane(env, kind="convergence_review", **script):
+    if env.restored_from is _unavailable_lane and kind == "convergence_review" and not script:
+        return  # the `dispatched` marker restored this state
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}], **script)
     env.office("dispatch", "T1", check=0)
     assert _gates(env, kind)[0]["review_status"] == "UNAVAILABLE"
@@ -51,6 +53,7 @@ def _gate(env, gid):
     return _q(env, "SELECT * FROM gates WHERE id=?", (gid,))[0]
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_revoking_a_lane_review_ends_its_reviewer_and_job_and_closes_the_gate_unavailable(env, tmp_path):
     """#453: revoke the reviewer, waive, fall back: the whole sequence, with no gate-busy."""
     _unavailable_lane(env)
@@ -81,6 +84,7 @@ def test_revoking_a_lane_review_ends_its_reviewer_and_job_and_closes_the_gate_un
     assert "no specialist reviewer returned a verdict" not in (_status(env).get("next") or "")
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_revoked_lane_review_can_be_reviewed_by_the_orchestrator_instead(env, tmp_path):
     _unavailable_lane(env)
     _rewind_to_running(env)
@@ -91,6 +95,7 @@ def test_a_revoked_lane_review_can_be_reviewed_by_the_orchestrator_instead(env, 
     assert _scope(env, "L-T1")["status"] == "approved"
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_lane_gate_whose_reviewer_ended_is_reaped_unavailable_and_is_not_gate_busy_for_waive(env):
     _unavailable_lane(env)
     gid = _rewind_to_running(env, live_reviewer=False, queued_job=False)
@@ -100,6 +105,7 @@ def test_a_lane_gate_whose_reviewer_ended_is_reaped_unavailable_and_is_not_gate_
     assert _scope(env, "L-T1")["status"] == "waived"
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_an_orphaned_lane_gate_is_closed_unavailable_and_settles_the_scope(env):
     """The reaper path (dispatch._close_orphaned_gate -> gates.mark_unavailable) sets review_status too."""
     _unavailable_lane(env)
@@ -114,6 +120,7 @@ def test_an_orphaned_lane_gate_is_closed_unavailable_and_settles_the_scope(env):
     assert st["status"] == "unavailable" and st["fallback_available"] is True, st
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_revoke_of_a_closed_or_unknown_lane_gate_changes_nothing(env):
     _unavailable_lane(env)
     code, out = env.office("revoke", "L-T1:convergence")
@@ -127,12 +134,14 @@ def test_revoke_of_a_closed_or_unknown_lane_gate_changes_nothing(env):
     assert code == 2 and "bad-revoke-target" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_task_id_still_routes_to_the_task_revoke(env):
     _unavailable_lane(env)
     code, out = env.office("revoke", "T1")
     assert code == 0 and "stays accepted" in out and "lease released" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     """One predicate: a gate of an earlier cycle is neither hinted nor accepted by `office review`."""
     _unavailable_lane(env)
@@ -154,6 +163,7 @@ def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     assert code != 0 and "fallback-not-allowed" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_the_fallback_flag_is_cleared_on_recompose_and_on_decide(env, monkeypatch):
     from office import convergence, jobs
     _unavailable_lane(env)
@@ -301,6 +311,7 @@ def test_an_invalid_frame_with_no_cause_is_still_recaptured(env, monkeypatch, tm
     assert int(gate["recaptures"]) == 1
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_worker_cannot_revoke_a_lane_review(env):
     """A dispatched producer or reviewer must not cancel the review that judges it: refused before any write."""
     _unavailable_lane(env)
@@ -409,6 +420,7 @@ def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env,
     assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 @pytest.mark.parametrize("job_status", ["failed", "done"])
 def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, job_status):
     """#1022: the lane review's job failed (or finished without settling it) while the gate stayed queued, with no
@@ -446,6 +458,7 @@ def _queue_subagent_gate(env, gid, commit, key_commit=None):
     con.commit()
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_revoking_a_lane_review_closes_its_unsupervised_self_review_subagent_gate(env):
     """#1202: a subagent gate queued but not yet supervised has no supervise job naming it. Revoke closes it, ends
     its dispatch, and close is not blocked by it; a subagent gate of another composition is left alone."""

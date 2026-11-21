@@ -63,7 +63,7 @@ def test_a_per_size_seed_still_wins_and_a_legacy_run_keeps_the_flat_seed():
     run = {"gear": "S"}
     assert candidates._preferred_seed({"preferred_seed_by_size": by_size, "preferred_seed": FLAT_SEED},
                                       run, "S") == by_size["S"]
-    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "express"}, "S") == FLAT_SEED
+    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": None}, "S") == FLAT_SEED
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "S"}, None) == FLAT_SEED
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "S"}, "S", role="code_reviewer") \
         == FLAT_SEED
@@ -77,7 +77,7 @@ def test_the_size_slate_anchors_routing_but_a_users_own_seed_does_not():
     copied = {"preferred_seed_by_size": {"S": executor_slates.ideal_seed("S")}}
     assert not candidates._uses_size_slate(copied, run, "S", "executor")
     assert candidates._uses_size_slate(copied, run, "M", "executor")
-    assert not candidates._uses_size_slate({}, {"gear": "express"}, "S", "executor")
+    assert not candidates._uses_size_slate({}, {"gear": None}, "S", "executor")
     assert not candidates._uses_size_slate({}, run, "S", "code_reviewer")
     assert not candidates._uses_size_slate({}, run, None, "executor")
 

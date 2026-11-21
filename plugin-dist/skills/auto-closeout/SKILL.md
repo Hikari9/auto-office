@@ -11,7 +11,7 @@ description: >-
 
 `office close` is the closeout. The runtime owns the mechanics (archive receipt, base sync, worktree removal,
 pane reclamation, the report line); this spoke owns the order and the judgment around it. Follow `office status`
-and its `next:` line; never run the 3.0 `office_runtime.py` helpers for a 3.x run.
+and its `next:` line.
 
 ## The Process
 

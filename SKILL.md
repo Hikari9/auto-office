@@ -25,7 +25,7 @@ it never investigates or files. Issues only: never fix the bug or open a PR as p
 - Only the user changes requirements or authorizes irreversible or external actions. Record their words verbatim with `--quote`; never paraphrase consent into existence.
 - Self-review before each phase advances: re-read the goal and done criteria against current state, then proceed, amend, or stop. This is judgement, not paperwork; there is nothing to record.
 - Raw evidence stays private. Public artifacts get summaries only.
-- A run stays on the Office version that created it. If a command says a run is pinned to another runtime (including a 3.0 run), follow the instruction it prints. For ordinary PR checks, use the repository's contract suite, named safety smoke and changed-file affected tests. Require full-suite validation for test-infrastructure changes, deleted or renamed tests, release work, or an explicit task requirement; do not prescribe a fixed test roster for every PR.
+- A run stays on the Office version that created it. If a command says a run is pinned to another runtime, follow the instruction it prints. For ordinary PR checks, use the repository's contract suite, named safety smoke and changed-file affected tests. Require full-suite validation for test-infrastructure changes, deleted or renamed tests, release work, or an explicit task requirement; do not prescribe a fixed test roster for every PR.
 
 ## Asking the user
 
@@ -117,7 +117,7 @@ For an intentionally new or near-empty repository, the explicit `--gear greenfie
 - Root wake is on by default: `office resume` from a bound, verified Claude Herdr root pane arms it; `--wake-off` disables it until `office resume --auto-wake` (still accepted) re-arms it. A verified non-Herdr Claude root arms native wake (above); an unverified pane or a host without the Stop hook gets a notice and no wake. `office status` prints `wake: armed|off|unavailable`. Also arm `office wait` instead of ending the turn on an event-dependent step; `next: office wait` means work runs with no wake. `office status` prints a `blocker:` line for a live pane herdr reports `blocked` with no recorded question (`office wait` records it). Review gates past a bound print one event each (`review.queued_too_long`, `review.stalled`, `review.closed_unread`); its `next:` is `office revoke <task>` then `office review <task>` on the same revision, or `office context` for a verdict.
 - Executors push their task branch as they work and submit; the runtime pushes the accepted revision to the task's draft PR (stacked on its parent's),
   posts review results, and marks it ready on acceptance. Reviewers are read only from their reply files, never pane text. A bad reply re-prompts
-  the same reviewer (no round spent); after three it needs you.
+  the same reviewer (no round spent); after three it needs you. Fastlane changes only who executes: its independent review still runs, through this same gate, the reviewer in its own Herdr pane when Herdr is detected.
 - Never run commands inside a task worktree yourself; reproduce a check in a scratch copy. Stalls, quota walls, host-load timeouts and headless
   workers: `docs/orchestrator-reference.md`, via `office wait`, `office prompt` and the printed `next:`.
 - Idle-only outcome QA (#904): only while work is in flight and `next:` names no action, check one recently returned task's outcome against the user's goal and its acceptance evidence in a small slice, then re-check `office status`. P0 (dispatch, answers, findings, recoveries) and P1 (integration, required gates, landing) always come first. QA is never a gate, a second code review or a test run; with no idle window it is skipped and not claimed. Detail: `docs/orchestrator-reference.md` (Idle-only outcome QA).
@@ -198,14 +198,14 @@ Executor routing (AA v5, `catalog/executor-policy.yaml`): size floors use the Ar
 ### Risk floor and the lightweight path
 
 - A run gear (`XS` to `XL`, pinned at intake) funds planning and review ceremony from complexity; `office start`, `office inspect plan` and every dispatch print it with its
-  funded gates. Risk is separate: a gear never lowers the floor below. Legacy names (`direct` to `full`) remain explicit compatibility presets with historic gates. New integrations use XS-XL; existing pinned runs resume unchanged. Task sizes, size floors and planner gear recommendations: `docs/xs-xl-run-gear.md`.
+  funded gates. Risk is separate: a gear never lowers the floor below. The old preset names (`direct` to `full`) were removed; a run pinned to one fails with `gear-removed`. Use XS-XL. Task sizes, size floors and planner gear recommendations: `docs/xs-xl-run-gear.md`.
 - Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high), `elevated` (irreversible, production
-  blast radius, or size L/XL on a legacy-pinned run; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
+  blast radius; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
   `unknown` and `elevated` imply.
 - The plan classifies it in Requirements (`blast_radius: local|repo|production|production-data`, optional `irreversible: yes`,
   `size_class: XS|S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
-- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, legacy gear `full`,
-  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review; XS-XL gears fund their own).
+- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk
+  and after plan authorization. It drops only review the gear tunes (XS funds review only when risk forces it; other gears fund their own).
   Scope, `checks:`, self-review, the evidence receipt and human landing authority all stay. Runs from before this keep their gates.
 
 ## Herdr agents

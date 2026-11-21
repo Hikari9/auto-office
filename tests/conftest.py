@@ -1,8 +1,6 @@
 """Shared pytest setup.
 
-Tests outside tests/v31 exercise the retained Auto Office 3.0 helper surface
-(scripts/). They run as that pinned runtime, which is what the 3.1 guard in
-scripts/office_runtime.py expects of a 3.0 run's own helper process.
+Tests outside tests/v31 exercise the helper scripts under scripts/ (hooks, monitor, reports).
 """
 import os
 import sys

@@ -140,7 +140,7 @@ def test_elevated_greenfield_build_gets_one_plan_review_and_one_convergence_revi
     ("greenfield", (), PLAN, True),
     ("greenfield", (), PLAN.replace("blast_radius: repo", "blast_radius: production"), True),
     # Other gears: an intake-required plan review survives a plan that classifies low.
-    ("direct", ("--blast-radius", "production"), PLAN, True),
+    ("XS", ("--blast-radius", "production"), PLAN, True),
 ])
 def test_plan_review_exemption_needs_intake_declared_low_risk_on_greenfield(env, gear, extra, plan_text, expected):
     env.trust()

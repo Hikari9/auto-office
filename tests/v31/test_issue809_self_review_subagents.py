@@ -65,7 +65,7 @@ def test_l_and_xl_add_specialists_for_what_the_task_touches_up_to_four():
 
 @pytest.mark.parametrize("run", [
     {"gear": "S", "gates": {"gear_model_version": "legacy-pinned"}},
-    {"gear": "express", "gates": {}}, {"gear": "direct+review", "gates": {}}, {"gear": None, "gates": {}},
+    {"gear": None, "gates": {}},
 ])
 def test_legacy_pinned_runs_keep_their_contract(run):
     assert srs.rubrics(run, {"scope": ["calc.py"]}) == ()
@@ -110,11 +110,6 @@ def test_an_l_run_launches_one_combined_subagent_and_keeps_the_initial_plan_revi
     roles = _roles(env)
     assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 1
     assert roles.count("convergence_reviewer") == 1
-
-
-def test_a_run_with_the_legacy_gear_launches_no_subagent(env):
-    _s_run(env, gear="direct+review")
-    assert _subagent_gates(env) == [] and _roles(env).count("code_reviewer") == 0
 
 
 def test_a_failed_subagent_blocks_convergence_and_spends_no_round(env, monkeypatch):

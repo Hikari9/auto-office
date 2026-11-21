@@ -21,9 +21,11 @@ def _quota(env, **remaining):
     return {**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps(remaining)}
 
 
-def _approve(env, plan=PLANNED):
+def _approve(env, plan=PLANNED, gear=None):
+    """Start and approve a run. With no gear the run is the unmarked (pre-gear) state these planner-slate and
+    reroute mechanics were written against; pass an XS-XL gear to get a run-gear-1 run."""
     env.trust()
-    out = start_inline(env, plan=plan)
+    out = start_inline(env, plan=plan, **({"gear": gear} if gear else {"unmarked": True}))
     env.office("approve", "plan", "--quote", "approved", check=0)
     return out
 

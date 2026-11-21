@@ -26,7 +26,7 @@ def test_detached_stale_checkout_dispatches_from_fetched_default(env):
     old, new = fetched_default(env)
     env.trust()
     env.script(executor=[{}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline", check=0)
+    env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline", check=0)
     run = dict(env.con().execute("SELECT * FROM runs").fetchone())
     assert run["base_sha"] == new
     assert env.git("rev-parse", "HEAD").strip() == old, "starting must not move the caller's checkout"

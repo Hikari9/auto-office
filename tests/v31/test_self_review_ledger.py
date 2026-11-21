@@ -761,8 +761,8 @@ RULES = ("OFFICE_SELF_REVIEW.md", "severity as found", "do not trigger a re-revi
 
 def _brief(tier: str) -> str:
     from office import briefs
-    gear, risk = {"inline": ("direct", '{"blast_radius": "local"}'), "single": ("quick", '{"blast_radius": "local"}'),
-                  "deep": ("full", '{"blast_radius": "production"}')}[tier]
+    gear, risk = {"inline": ("XS", '{"blast_radius": "local"}'), "single": ("M", '{"blast_radius": "local"}'),
+                  "deep": ("L", '{"blast_radius": "production"}')}[tier]
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
               "base_commit": "abc123"}
     return briefs.executor_brief(None, {"gear": gear, "risk_json": risk}, packet)
@@ -796,7 +796,7 @@ def test_fix_round_brief_carries_the_same_ledger_block():
                     return []
             return _R()
 
-    brief = briefs.executor_brief(_Con(), {"id": "r", "gear": "full", "risk_json": None}, packet)
+    brief = briefs.executor_brief(_Con(), {"id": "r", "gear": "L", "risk_json": None}, packet)
     assert "FIX ROUND for revision R1" in brief
     for rule in RULES:
         assert rule in brief, rule

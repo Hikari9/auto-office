@@ -62,7 +62,7 @@ PLAN_SHARED = PLAN_TWO.replace("depends: none\nchecks: python3 -c \"import calc"
 PLAN_UI = PLAN_ONE.replace("- calc.add(2, 3) == 5\nvisual: none", "- the add button shows the sum on screen")
 
 
-def _start(env, plan=PLAN_ONE, gear="direct+review", extra=(), approve=True, **script):
+def _start(env, plan=PLAN_ONE, gear="S", extra=(), approve=True, **script):
     env.trust()
     env.script(**script)
     start_inline(env, plan=plan, gear=gear, extra=extra)
@@ -499,7 +499,7 @@ def test_convergence_intake_gap_surfaces_at_round_one(env):
 
 # ------------------------------------------------------------------ plan review (1, 3, 4, 5, 6)
 
-PLAN_GEAR = "express"
+PLAN_GEAR = "L"
 
 
 def test_plan_approved_with_findings_dispatches_and_tracks_them(env):
@@ -1005,7 +1005,7 @@ def test_rollback_changes_only_future_runs(env, tmp_path):
     _start(env)
     first = _run_row(env)["id"]
     Path(env.tmp / "user-config.yaml").write_text("review:\n  contract: v3.1\n")
-    code, out = env.office("start", "second goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "second goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out
     second = _run_row(env)["id"]
     assert second != first and _run_row(env, second)["gates"]["review_contract"] == "v3.1"
@@ -1020,7 +1020,7 @@ def test_explicit_new_run_moves_old_work_without_touching_it(env):
     the old run's records stay as they were, with an appended successor event."""
     old = _legacy_run(env)
     before = _q(env, "SELECT id, verdict, status FROM gates WHERE run_id=? ORDER BY id", (old,))
-    code, out = env.office("start", "--from-run", old[:8], "--planner", "inline", "--gear", "direct+review")
+    code, out = env.office("start", "--from-run", old[:8], "--planner", "inline", "--gear", "S")
     assert code == 0 and "derived from" in out, out
     new = _run_row(env)
     assert new["id"] != old and new["gates"]["review_contract"] == "convergence-v1"
@@ -1103,14 +1103,14 @@ def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, ex
 
 def test_issue_542_plan_reviewer_persists_model_and_effort(env):
     # Guard plan review route evidence, which is essential for #526-#528.
-    _start(env, gear="express", approve=False, plan_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="L", approve=False, plan_reviewer=[{"reply": APPROVED}])
     rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
     assert rows, "a plan review must record a reviewer dispatch"
     assert all(r["model"] and r["effort"] for r in rows), rows
 
 
 
-@pytest.mark.parametrize("gear", ["express", "full"])
+@pytest.mark.parametrize("gear", ["L", "XL"])
 def test_issue_542_alternate_plan_review_routes_persist_model_effort(env, gear):
     _start(env, gear=gear, approve=False, plan_reviewer=[{"reply": APPROVED}])
     rows = _q(env, "SELECT triple, model, effort, route_json FROM dispatches WHERE role='plan_reviewer'")

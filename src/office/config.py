@@ -22,14 +22,20 @@ NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants
 RUN_GEARS = ("XS", "S", "M", "L", "XL")
 # Explicit opt-in for a new or near-empty repository. Never selected by size auto-fit.
 SPECIAL_GEARS = ("greenfield",)
-# Existing runs pin the old representation and its gates; never rewrite their stored gear.
-LEGACY_GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
-# The XS-XL gear whose funding each legacy name is closest to, shown when a legacy name starts a run.
-LEGACY_EQUIVALENT = {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M", "express": "M", "full": "XL"}
-GEARS = (*RUN_GEARS, *SPECIAL_GEARS, *LEGACY_GEARS)
+GEARS = (*RUN_GEARS, *SPECIAL_GEARS)
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
 SIZE_CLASSES = RUN_GEARS
+
+
+def require_supported_gear(gear: str | None) -> None:
+    """Refuse a gear this release no longer has (a run pinned before the old presets were removed)."""
+    if gear and gear not in GEARS:
+        from office.state import Usage
+        raise Usage("gear-removed",
+                    f"this run is pinned to gear {gear!r}, which Office no longer has; pick XS/S/M/L/XL",
+                    next_step="start a new run with --gear XS|S|M|L|XL, and end this one with "
+                              "office close --abandon '<reason>'")
 
 
 def default_config_path() -> Path:
@@ -328,8 +334,7 @@ def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview:
              adversarial: bool = False) -> str:
     """Pin complexity gear independently of blast-radius and irreversibility risk.
 
-    Old names remain explicit compatibility presets for existing pinned runs; no
-    new auto-fit silently chooses one. Unknown complexity is M, not guessed XS.
+    Unknown complexity is M, not guessed XS.
     """
     if requested:
         return requested
@@ -347,9 +352,6 @@ def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bo
     if gear == "greenfield":
         return ("explicit greenfield build: one strong executor owns 2-3 large phases in one task; "
                 "one independent end-of-build convergence review, with risk and release gates intact")
-    if gear in LEGACY_GEARS:
-        return (f"explicit legacy preset {gear} (closest to {LEGACY_EQUIVALENT[gear]}): "
-                "its pinned review and release semantics are preserved")
     if risk.get("size_class") in RUN_GEARS:
         return (f"intake complexity {risk['size_class']}: scope, coupling and coordination are "
                 "funded at this gear; safety review floors remain independent")
@@ -398,7 +400,7 @@ def resolve_gates(gear: str, risk, config: dict, fastlane: dict | None = None) -
         plan_rounds = code_rounds = contract.MAX_ROUNDS
     gates = {
         "run_gear": gear,
-        "gear_model_version": "run-gear-1" if gear in (*RUN_GEARS, *SPECIAL_GEARS) else "legacy-pinned",
+        "gear_model_version": "run-gear-1",
         # Pinned per run (#337): the review contract this run keeps for its life.
         "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they

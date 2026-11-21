@@ -2,18 +2,16 @@
 the harness-major identity trust keys on, and preferred-seed ranking.
 
 These hold for any input, so they are stated as properties instead of example tables. The capability
-floor and the reward tie-break are one contract shared by the packaged runtime (`office.scoring`) and the
-retained 3.0 helper (`scripts/office_scoring.py`); both run the same properties.
+floor and the reward tie-break are the contract of the packaged runtime (`office.scoring`).
 """
 from __future__ import annotations
 
 import pytest
 from hypothesis import example, given, strategies as st
 
-import office_scoring
 from office import routing, scoring
 
-IMPLEMENTATIONS = pytest.mark.parametrize("impl", [scoring, office_scoring], ids=["office", "scripts"])
+IMPLEMENTATIONS = pytest.mark.parametrize("impl", [scoring], ids=["office"])
 
 # Weakest to strongest. `none` is a floor that asks for nothing.
 EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]

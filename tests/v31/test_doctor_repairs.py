@@ -6,43 +6,12 @@ import subprocess
 
 import yaml
 
-from office import config_repairs, legacy
+from office import config_repairs
 
 
 import pytest as _pytest  # noqa: E402
 
 pytestmark = _pytest.mark.integration
-
-
-def test_packaged_install_restores_exact_legacy_commit(tmp_path, monkeypatch):
-    source = tmp_path / "source"
-    source.mkdir()
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    runtime = source / "scripts" / "office_runtime.py"
-    runtime.parent.mkdir()
-    runtime.write_text("# original pinned runtime\n")
-    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(source), "-c", "user.name=test", "-c", "user.email=test@test",
-                    "commit", "-qm", "pinned"], check=True)
-    commit = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    runtime.write_text("# later checkout code must not be retained\n")
-    monkeypatch.setattr(legacy, "SOURCE_ROOT", tmp_path / "venv")
-    monkeypatch.setattr(legacy, "install_source", lambda: source)
-    monkeypatch.setattr(legacy.paths, "runtimes_dir", lambda: tmp_path / "retained")
-    assert legacy.retained_runtime(commit, materialize=False) is None
-    target = legacy.retained_runtime(commit)
-    assert target is not None
-    assert (target / "scripts" / "office_runtime.py").read_text() == "# original pinned runtime\n"
-    assert legacy.retained_runtime(commit, materialize=False) == target
-    assert runtime.read_text() == "# later checkout code must not be retained\n"
-
-
-def test_missing_install_source_leaves_runtime_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(legacy, "SOURCE_ROOT", tmp_path / "venv")
-    monkeypatch.setattr(legacy, "install_source", lambda: None)
-    monkeypatch.setattr(legacy.paths, "runtimes_dir", lambda: tmp_path / "retained")
-    assert legacy.retained_runtime("a" * 40) is None
-    assert not (tmp_path / "retained").exists()
 
 
 def test_gemini_retires_only_obsolete_office_entries(env, monkeypatch):

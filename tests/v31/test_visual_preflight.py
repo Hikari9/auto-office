@@ -19,7 +19,7 @@ def _plan(visual: str) -> str:
 
 def test_unreachable_url_without_start_is_refused_at_submit(env):
     port = _closed_port()
-    code, out = env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan(f"visual:\n  url: http://localhost:{port}/\n"))
     code, out = env.office("submit")
@@ -29,7 +29,7 @@ def test_unreachable_url_without_start_is_refused_at_submit(env):
 
 
 def test_remote_url_is_refused_and_start_makes_a_local_url_acceptable(env):
-    code, out = env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan("visual:\n  url: https://example.com/\n"))
     code, out = env.office("submit")

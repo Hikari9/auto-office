@@ -532,7 +532,7 @@ def _q(env, sql, args=()):
 def _start(env, plan=PLAN_ONE, **script):
     env.trust()
     env.script(**script)
-    start_inline(env, plan=plan, gear="direct+review")
+    start_inline(env, plan=plan, gear="S")
     env.office("approve", "plan", "--quote", "approved", check=0)
 
 
@@ -664,7 +664,7 @@ def test_plan_review_brief_lists_the_codes_the_plan_review_already_used(env, mon
     env.trust()
     env.script(plan_reviewer=[{"reply": recheck("FINDING P1 | medium | blocking | T1 | the contract is unclear | fix it")},
                               {"reply": APPROVED}])
-    start_inline(env, plan=PLAN_ONE, gear="express")
+    start_inline(env, plan=PLAN_ONE, gear="L")
     env.write_plan(PLAN_ONE.replace("- calc.add(2, 3) == 5", "- calc.add(2, 3) == 5\n- calc.add(0, 0) == 0"))
     env.office("amend", "T1", "--contract", "--", "revision", check=0)
     assert seen and seen[0] == [] and seen[-1] == ["P1"], seen

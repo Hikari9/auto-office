@@ -10,7 +10,7 @@ Inside routed execution, before `office submit`, the executor runs a behavior-pr
 
 Intent capture is two-phase, not one freeze: the orchestrator captures only provisional intent at kickoff, and the planner interacts directly with the user, may reshape that intent with repository evidence, and freezes the five execution fields at the end of its own discovery — not before planning starts. See `protocol/roles-and-authority.md`.
 
-Gears are funding/intensity presets over this order, never alternate lifecycles. Built-in seeds are `direct`, `direct+review`, `light`, `quick`, `express`, and `full`. A gear can waive an advisory quality anchor but never absolute competence/safety floors, packet validation, no-self-approval, policy pinning, fixed lifecycle order, or human merge-to-main.
+Gears are funding/intensity presets over this order, never alternate lifecycles. Built-in seeds are `XS`, `S`, `M`, `L`, `XL`, and `greenfield`. A gear can waive an advisory quality anchor but never absolute competence/safety floors, packet validation, no-self-approval, policy pinning, fixed lifecycle order, or human merge-to-main.
 
 Task playbooks are independent from gear and route: `Change`, `Restructure`, `Investigate`, `Prototype`, `Visual`. The runtime decision is `gear × playbook × route`.
 

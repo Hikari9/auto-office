@@ -121,47 +121,51 @@ def test_unknown_size_is_conservative_m_and_never_guessed_xs(env):
 def test_new_cli_help_promotes_canonical_xs_xl_gear_names(env):
     code, out = env.office("start", "--help")
     assert code == 0 and "--gear {XS,S,M,L,XL}" in out, out
-    assert "historical aliases" in out
 
 
-def test_legacy_name_starts_an_explicit_preset_and_names_its_closest_gear(env):
+REMOVED_GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
+
+
+@pytest.mark.parametrize("name", REMOVED_GEARS)
+def test_a_removed_gear_name_is_not_a_start_choice(env, name):
+    code, out = env.office("start", "fixture goal", "--gear", name, "--planner", "inline")
+    assert code == 2 and "invalid choice" in out, out
+    assert not hasattr(config, "LEGACY_GEARS")
+
+
+def test_a_run_pinned_to_a_removed_gear_fails_with_gear_removed_and_can_still_be_abandoned(env):
     env.trust()
-    code, out = env.office("start", "fixture goal", "--gear", "full", "--planner", "inline")
-    assert code == 0 and "closest to XL" in out, out
-    assert "compatibility notice: full is a historical preset" in out, out
-    assert config.LEGACY_EQUIVALENT == {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M",
-                                        "express": "M", "full": "XL"}
-    _, run = _run(env)
-    assert run["gear"] == "full" and run["gates"]["gear_model_version"] == "legacy-pinned"
-    assert not run["risk"].get("complexity_only"), "a legacy start keeps its historical size and risk reading"
-
-
-# (plan_review, code_review, dedicated_planner) each historical preset funded before XS-XL, by blast radius
-LEGACY_GATES = {
-    "direct": {"repo": (False, False, False), "production": (True, True, False)},
-    "direct+review": {"repo": (False, True, False), "production": (False, True, False)},
-    "light": {"repo": (False, True, False), "production": (False, True, False)},
-    "quick": {"repo": (False, True, False), "production": (False, True, False)},
-    "express": {"repo": (True, True, False), "production": (True, True, False)},
-    "full": {"repo": (True, True, True), "production": (True, True, True)},
-}
-
-
-@pytest.mark.parametrize("blast", ["repo", "production"])
-@pytest.mark.parametrize("alias", config.LEGACY_GEARS)
-def test_every_legacy_alias_starts_with_its_historical_gates_and_a_compatibility_notice(env, alias, blast):
-    env.trust()
-    code, out = env.office("start", "fixture goal", "--gear", alias, "--blast-radius", blast, "--planner", "inline")
+    start_inline(env, plan=PLAN_ONE, gear="M")
+    con, run = _run(env)
+    state.update_run(con, run["id"], gear="express")
+    con.commit()
+    for cmd in (("status",), ("resume",), ("dispatch",)):
+        code, out = env.office(*cmd)
+        assert code == 2 and "gear-removed" in out and "'express'" in out and "XS/S/M/L/XL" in out, (cmd, out)
+    code, out = env.office("close", "--abandon", "removed gear")
     assert code == 0, out
-    assert f"compatibility notice: {alias} is a historical preset, not an XS-XL run gear" in out, out
-    assert f"closest to {config.LEGACY_EQUIVALENT[alias]}" in out and "use --gear XS|S|M|L|XL" in out
-    _, run = _run(env)
-    gates = run["gates"]
-    assert run["gear"] == alias and gates["gear_model_version"] == "legacy-pinned"
-    assert f"explicit legacy preset {alias}" in gates["run_gear_rationale"]
-    assert (bool(gates["plan_review"]), bool(gates["code_review"]), bool(gates["dedicated_planner"])) == (
-        LEGACY_GATES[alias][blast])
-    assert not run["risk"].get("complexity_only")
+
+
+def test_a_removed_gear_run_refuses_upgrade_repins_and_queued_jobs(env):
+    from office import db, jobs
+    env.trust()
+    start_inline(env, plan=PLAN_ONE, gear="M")
+    con, run = _run(env)
+    state.update_run(con, run["id"], gear="express")
+    con.commit()
+    for cmd in (("upgrade", run["id"][:8], "--apply"),
+                ("config", "--apply-routing", "--run", run["id"][:8], "--quote", "re-pin it"),
+                ("config", "--apply-verification", "--run", run["id"][:8], "--quote", "re-pin it"),
+                ("config", "--run", run["id"][:8], "verification")):
+        code, out = env.office(*cmd)
+        assert code == 2 and "gear-removed" in out, (cmd, out)
+    run = state.get_run(con, run["id"])
+    with db.transaction(con):
+        jid = state.enqueue(con, run, "integrate", {"key": "k"}, dedup_key="gear-removed", max_attempts=3)
+        con.execute("UPDATE outbox SET status='claimed', claim_token='tok', attempts=1 WHERE id=?", (jid,))
+    jobs._run_attempt(con, jid, "tok")
+    job = state.get_job(con, jid)
+    assert job["status"] == "failed" and "no longer has" in job["error"], dict(job)
 
 
 @pytest.mark.parametrize("gear", config.RUN_GEARS)
@@ -169,38 +173,6 @@ def test_a_canonical_gear_prints_no_compatibility_notice(env, gear):
     env.trust()
     code, out = env.office("start", "fixture goal", "--gear", gear, "--planner", "inline")
     assert code == 0 and "compatibility notice" not in out and "historical preset" not in out, out
-
-
-def _strip_gear_model(con, rid):
-    """A run pinned before XS-XL existed: its gates JSON has none of the gear-model keys."""
-    run = state.get_run(con, rid)
-    gates = {k: v for k, v in run["gates"].items()
-             if k not in ("gear_model_version", "run_gear", "run_gear_rationale")}
-    state.update_run(con, rid, gates=gates)
-    con.commit()
-    return state.get_run(con, rid)["gates"]
-
-
-def test_legacy_pinned_run_resumes_with_its_original_gear_and_gates(env):
-    env.trust()
-    start_inline(env, plan=PLAN_ONE, gear="express")
-    env.office("approve", "plan", "--quote", "approved", check=0)
-    con, run = _run(env)
-    before = _strip_gear_model(con, run["id"])
-    env.office("resume", check=0)
-    code, out = env.office("inspect", "plan")
-    _, after = _run(env)
-    assert code == 0 and after["gear"] == "express" and after["gates"] == before
-    assert "gear_model_version" not in after["gates"]
-    from office import plan_view
-    pv = plan_view.preview(env.con(), after, state.current_plan(env.con(), after["id"])["tasks"])
-    assert pv["gear_model_version"] == "legacy-pinned", "a run with no gear-model key is never treated as XS-XL"
-    assert plan_view.render(after, 1, pv)[3].endswith("legacy pinned run; no new gear fit applied")
-    # A plan revision on that run must not give its tasks an XS-XL size or profile.
-    env.write_plan(PLAN_ONE.replace("done:\n", "done:\n- legacy run revised after the XS-XL upgrade\n", 1))
-    env.office("amend", "plan", "--contract", "--", "revise the plan", check=0)
-    desc = state.get_task(env.con(), after["id"], "T1")["descriptor"]
-    assert not {"task_size", "profile", "profile_version", "task_size_source"} & set(desc), desc
 
 
 # ---------------------------------------------------------------- R2: planner run-gear recommendation
@@ -273,7 +245,6 @@ def test_risk_module_run_gear_problem_is_order_and_risk_aware():
     unknown = {"classification": "unknown"}
     assert "floor" in risk.run_gear_problem("XS", unknown, "XS") and risk.run_gear_problem("XS", unknown, "S") is None
     assert risk.run_gear_problem("XS", low, "XS") is None
-    assert risk.run_gear_problem("full", low, "XS") is None  # a legacy pin has no gear order to undercut
     assert risk.run_gear_problem("S", low, "XXL")
 
 
@@ -461,11 +432,10 @@ def test_sonnet_fallback_can_be_truncated_at_slate_boundary():
     assert "The displayed slate can truncate agy when Claude Code occupies its last position." in doc
 
 
-def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
+def test_sonnet_claude_to_agy_self_fallback_applies_to_every_xs_xl_gear_run():
     """Sonnet 5.5 Claude Code -> agy is a same-model, same-effort harness fallback on new XS-XL gear runs.
 
     docs/xs-xl-run-gear.md:74-85 defines it on the M and L rows; XS and XL runs are covered too.
-    Legacy presets (gear='express') keep their order.
     """
     from test_issue809_real_routes import candidate, decide
     pool = [candidate("claude-sonnet-5-5", "medium", 45, harness="claude"),
@@ -496,11 +466,6 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     assert [(f["from"], f["to"]) for f in m_new["routing"]["sonnet_self_fallbacks"]] == \
         [(SONNET_CLAUDE_HIGH, SONNET_AGY_HIGH)], m_new["routing"]
     assert [e["route"] for e in m_new["selection_disclosure"]["slate"][:2]] == [SONNET_CLAUDE_HIGH, SONNET_AGY_HIGH]
-    # Legacy express keeps the agy route where utility put it, with no fallback record.
-    legacy = decide("M", m_pool, gear="express")
-    assert "sonnet_self_fallbacks" not in legacy["routing"]
-    assert [e["route"] for e in legacy["selection_disclosure"]["slate"]] == \
-        [SONNET_CLAUDE_HIGH, "codex@1/gpt-6.1-terra@high", SONNET_AGY_HIGH]
     # Same effort only: a Sonnet agy route at medium is not the fallback for claude high; the high route is.
     mixed = decide("M", m_pool + [candidate("claude-sonnet-5-5", "medium", 47, harness="agy", remaining=60)], gear="M")
     assert [(f["from"], f["to"]) for f in mixed["routing"]["sonnet_self_fallbacks"]] == \
@@ -517,7 +482,6 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     assert [(f["from"], f["to"]) for f in xs["routing"]["sonnet_self_fallbacks"]] == \
         [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xs["routing"]
     assert [e["route"].split("@")[0] for e in xs["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
-    assert "sonnet_self_fallbacks" not in decide("XS", pool, gear="express")["routing"]
     # The XL subtask floor is an Engineering Index of 52 (T2), so the fixture scores clear it in the same order.
     xl_pool = [candidate("claude-sonnet-5-5", "medium", 55, harness="claude"),
                candidate("gpt-6.1-terra", "medium", 54),
@@ -526,10 +490,6 @@ def test_sonnet_claude_to_agy_self_fallback_applies_only_to_new_gear_runs():
     assert [(f["from"], f["to"]) for f in xl["routing"]["sonnet_self_fallbacks"]] == \
         [(SONNET_CLAUDE_MEDIUM, SONNET_AGY_MEDIUM)], xl["routing"]
     assert [e["route"].split("@")[0] for e in xl["selection_disclosure"]["slate"][:2]] == ["claude", "agy"]
-    legacy_xl = decide("XL", xl_pool, gear="express")
-    assert "sonnet_self_fallbacks" not in legacy_xl["routing"]
-    assert [e["route"] for e in legacy_xl["selection_disclosure"]["slate"]][:2] == \
-        [SONNET_CLAUDE_MEDIUM, "codex@1/gpt-6.1-terra@medium"]
 
 
 def test_planner_free_text_rejects_control_characters():
@@ -577,7 +537,7 @@ def test_intake_fit_uses_declared_size_then_signals_and_never_guesses_xs():
     assert config.fit_gear(None, {}, volume=True) == "M"
     assert config.fit_gear(None, {}, volume=True, interview=True) == "L"
     assert config.fit_gear(None, {}, adversarial=True, interview=True, volume=True) == "L"
-    assert config.fit_gear("full", {"size_class": "S"}) == "full"
+    assert config.fit_gear("XL", {"size_class": "S"}) == "XL"
     assert "multiwave volume and discovery/interview" in config.gear_rationale("L", {}, volume=True, interview=True)
     assert "conservative M" in config.gear_rationale("M", {})
     assert config.gear_rationale("S", {"size_class": "S"}).startswith("intake complexity S")

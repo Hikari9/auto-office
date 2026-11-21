@@ -173,7 +173,7 @@ def test_prompt_reports_the_cwd_and_agent_herdr_reports_not_only_the_recorded_wo
 @pytest.mark.parametrize("pane,why", [
     (dict(name="office-dsomebodyelse"), "does not report agent"),
     (dict(name=None), "does not report agent"),
-    (dict(kind="codex"), "runs codex"),
+    (dict(kind="other-harness"), "runs other-harness"),
     (dict(session="someone-elses-session"), "session does not match"),
 ], ids=["other-agent", "unnamed-agent", "other-kind", "other-session"])
 def test_prompt_refuses_a_pane_whose_real_herdr_identity_is_not_this_dispatchs(env, monkeypatch, pane, why):

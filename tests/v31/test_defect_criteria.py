@@ -24,7 +24,7 @@ PLAN_NOTE = PLAN_TWO.replace("- calc.add(2, 3) == 5\n", "- calc.add(2, 3) == 5\n
 def _start(env, plan=PLAN_TWO, approve=True, **script):
     env.trust()
     env.script(**script)
-    code, out = env.office("start", "fixture", "--gear", "express", "--planner", "inline")
+    code, out = env.office("start", "fixture", "--gear", "L", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     code, out = env.office("submit")

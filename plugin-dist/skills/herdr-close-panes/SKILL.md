@@ -22,7 +22,7 @@ which owns dispatch; see its spawn recipe. One JSON object per line, one line pe
 $HERDR_LEDGER, else $OFFICE_STATE_DIR/panes.jsonl
 ```
 
-This is the same ledger `scripts/office_spawn.sh` writes and
+This is the same pane ledger that
 `scripts/hooks/close_finished_panes.mjs` sweeps — one file, not a private copy, and one per office
 run. It is not worktree-local, because a run's agents sit in several worktrees and each would
 otherwise see only its own spawns. It is not a single global file either: a shared path

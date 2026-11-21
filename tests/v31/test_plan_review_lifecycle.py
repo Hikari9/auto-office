@@ -19,7 +19,7 @@ import pytest
 from conftest import PLAN_ONE, PLAN_TWO
 
 MANUAL = {"OFFICE_JOBS": "manual"}
-GEAR = "express"
+GEAR = "L"
 APPROVED = "VERDICT: APPROVED\nNEXT proceed"
 
 
@@ -169,7 +169,7 @@ def test_user_round_override_is_pinned_and_survives_resume(env):
     env.trust()
     code, out = _o(env, "start", "fixture goal", "--gear", GEAR, "--planner", "inline", "--plan-review-rounds", "0")
     assert code == 2 and "1 to 10" in out, out
-    code, out = _o(env, "start", "fixture goal", "--gear", "direct+review", "--planner", "inline",
+    code, out = _o(env, "start", "fixture goal", "--gear", "S", "--planner", "inline",
                    "--plan-review-rounds", "2")
     assert code == 2 and "funds no plan review" in out, out
     _start(env, extra=("--plan-review-rounds", "2"))
@@ -252,7 +252,7 @@ def test_dedicated_planner_revision_after_approval_is_not_reviewed(env):
     revised = PLAN_ONE.replace("scope: calc.py", "scope: calc.py, calc_helpers.py")
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}, {"plan": revised, "submit": True}],
                plan_reviewer=[{"reply": APPROVED}])
-    env.office("start", "add numbers", "--gear", "full", check=0)
+    env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated", check=0)
     assert _run(env)["plan_review"]["status"] == "approved"
     env.office("approve", "plan", "--quote", "go", check=0)
     env.office("amend", "T1", "--contract", "--", "widen the envelope", check=0)
@@ -455,7 +455,7 @@ def test_review_plan_without_as_still_refuses_while_open(env):
 def test_the_pinned_plan_reviewer_is_the_route_the_review_runs_on(env):
     env.trust()
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"exit": 1}])
-    env.office("start", "add numbers", "--gear", "full", check=0)
+    env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated", check=0)
     assert _run(env)["plan_review"]["status"] == "unavailable"
     fallbacks = [n for n in _route_notices(env) if n["kind"] == "reviewer-fallback"]
     assert fallbacks and fallbacks[0]["stage"] == "plan_reviewer" and fallbacks[0]["before"] != fallbacks[0]["after"]

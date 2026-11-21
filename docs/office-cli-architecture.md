@@ -12,7 +12,7 @@
 >   `submit`, `amend`, `ack`, `close`, plus `list`, `inspect`, `doctor`, `prune [-f]`. `office events`, `office spoke`
 >   and `office route` are not user commands (routing, spokes and events are runtime-internal; `office inspect`
 >   shows them). `dispatch` takes task ids, not a role. There is no `office next`; every command ends with `next:`.
-> - **`office approve` and `office raw` (§2.7)** are compatibility surfaces through 3.1.x and are removed in 3.2.0.
+> - **`office approve`** was a compatibility surface through 3.1.x and was removed in 3.2.0. `office raw` (§2.7) was removed in 3.28.20 with the 3.0 runtime.
 > - **Version pinning**: every run and packet carries `office_version`; the front door runs the pinned runtime and
 >   fails with an actionable blocker when it is not installed.
 
@@ -109,7 +109,7 @@ Semantic commands replace direct calls to `office_runtime.py` subcommands:
 **Accepted Spoke Weakening**: `office spoke --mark <name>` accepts a single spoke name per call and computes the file digest internally. It weakens the check by no longer proving the agent located the file manually, but strictly blocks batch-marking across multiple spokes.
 
 ### 2.7 Raw Escape Hatch (D138-6)
-Existing `office_runtime.py` subcommands remain accessible via `office raw <sub> [args...]`. This ensures backward compatibility for legacy workflows while semantic commands stabilize.
+Removed in 3.28.20 together with the retained 3.0 runtime (`office_runtime.py`). `office raw` now fails with a message that it was removed.
 
 ### 2.8 Dispatch Environment Export (D138-7)
 When `office dispatch` launches a child executor, it injects `OFFICE_STATE_DIR` and `OFFICE_RUN_ID` directly into the child process environment. Child processes never run run-discovery logic; they operate strictly on their injected state pointers.

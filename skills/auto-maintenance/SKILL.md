@@ -6,7 +6,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 # Auto Maintenance
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+> role briefs; the `office_runtime.py` helpers it names were removed with the 3.0 runtime. Follow `office status` and its `next:` line.
 
 Maintenance is event-driven by future Auto Office invocations; no daemon is required.
 

@@ -371,7 +371,7 @@ def test_answers_reach_the_existing_routing_inputs_unchanged(h):
     assert config["routing"]["adaptive"]["weights"]["balanced"]["preference"] == 0.10  # weights untouched
     con = db.connect()
     try:
-        run = {"id": None, "gear": "full"}
+        run = {"id": None, "gear": None}
         planner = candidates.route_role(con, config, run, "planner", probe=False)
         assert planner["request"]["preferred_seed"] == [{"model_id": "opus", "harness": "claude", "effort": "medium"}]
         assert planner["selected"].endswith("/opus@medium")  # planner keeps its stronger advisory seed
@@ -517,7 +517,7 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
     assert data["data"]["harness"]["integration"]["state"] == "installed"
     assert not (env.home / ".gemini").exists()
     # The pending request continues: intake runs with no second invocation and pins the answers.
-    code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
@@ -528,7 +528,7 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
 def test_intake_is_not_blocked_while_onboarding_is_due_and_running_runs_keep_their_pin(env, monkeypatch):
     from office import state
     _onboarding_env(env, monkeypatch)
-    code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out  # headless or not-yet-onboarded: intake proceeds on current defaults
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]

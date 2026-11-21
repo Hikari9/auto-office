@@ -50,5 +50,3 @@ Quota-wall cooldowns block only the exact route that hit the wall, across runs a
   record (`../../schemas/routing-decision.schema.json`), including immutable attempt evidence, reason classes, freshness, caps, preference source and recovered launches. `office inspect learner` shows quality learning, never trust promotion.
 - Publish `selection_disclosure` before any executor or reviewer launch and keep it in the dispatch record. The reason must name the deciding evidence; "best model" is not a reason.
 
-**Legacy:** runs pinned to Auto Office 3.0 use the `scripts/office_runtime.py` router
-(`references/legacy-3.0-router.md`); never use it for a 3.1+ run.

@@ -172,7 +172,7 @@ def test_v31_a_test_runner_timeout_is_never_preexisting(env):
 def test_v31_a_revision_that_changes_no_file_is_never_preexisting(env):
     # The failing check is the work this task owes; an empty revision did none of it. An empty tree with
     # accept criteria is submitted only as an acknowledged no-change (#1138).
-    approved_run(env, gear="direct+review",
+    approved_run(env, gear="S",
                  executor=[{"write": {}, "office": [["submit", "--no-change", "--", "calc.add already holds"]]}],
                  code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)

@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from office import legacy, paths
+from office import paths
 from office.state import NoRun, Refused, Usage, find_run, get_dispatch, get_run, get_task, TERMINAL_PHASES
 from office.util import now_iso, short
 
@@ -27,7 +27,6 @@ def harness_names() -> set[str]:
 @dataclass
 class Target:
     run: dict | None = None
-    legacy: legacy.LegacyRun | None = None
     source: str = ""
     dispatch: dict | None = None  # the executor dispatch a task-worktree cwd names
     note: str = ""  # shown with the command's output when resolution skipped or crossed a binding
@@ -222,13 +221,11 @@ def bind(con, run: dict, keys: list[tuple[str, str]], bound_by: str) -> list[tup
     return made
 
 
-def active_in_repo(con, common_dir: Path) -> tuple[list[dict], list[legacy.LegacyRun]]:
+def active_in_repo(con, common_dir: Path) -> list[dict]:
     rows = con.execute(
         "SELECT id FROM runs WHERE git_common_dir=? AND office_version IS NOT NULL AND phase NOT IN ('closed','abandoned') "
         "ORDER BY created_at", (str(common_dir),)).fetchall()
-    runs = [get_run(con, r[0]) for r in rows]
-    legacy_active = [r for r in legacy.legacy_runs(paths.primary_checkout(common_dir)) if r.active]
-    return runs, legacy_active
+    return [get_run(con, r[0]) for r in rows]
 
 
 def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
@@ -239,9 +236,6 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
         run = find_run(con, run_arg)
         if run and run.get("office_version"):
             return Target(run=run, source="flag")
-        leg = _legacy_by_id(con, run_arg, cwd)
-        if leg:
-            return Target(legacy=leg, source="flag")
         raise NoRun("no-such-run", f"no Office run matches {run_arg!r}", next_step="office list")
     if state_dir:
         return _from_state_dir(con, Path(state_dir).expanduser(), "flag")
@@ -293,18 +287,16 @@ def resolve(con, *, run_arg: str | None = None, state_dir: str | None = None,
     if ident is None:
         raise NoRun("no-repository", "not inside a git repository and no run was named",
                     next_step="office list, then office resume <run>")
-    runs, legacy_active = active_in_repo(con, ident[1])
-    total = len(runs) + len(legacy_active)
+    runs = active_in_repo(con, ident[1])
+    total = len(runs)
     note = (f"note: this session's run {short(skipped['id'])} is in another repository; using this repository's "
             f"run (office resume {short(skipped['id'])} or --run to choose)") if skipped else ""
     if total == 1:
-        return (Target(run=runs[0], source="sole-active", note=note) if runs
-                else Target(legacy=legacy_active[0], source="sole-active", note=note))
+        return Target(run=runs[0], source="sole-active", note=note)
     if total == 0:
         raise NoRun("no-active-run", "no active Office run in this repository",
                     next_step='office start "<goal>"')
     listing = [f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}" for r in runs]
-    listing += [f"{short(r.run_id)}  {r.phase:<10} {r.goal[:60]} (3.0 legacy)" for r in legacy_active]
     why = (f"this session's run {short(skipped['id'])} is in another repository" if skipped
            else "none is bound to this session")
     raise NoRun("ambiguous-run", f"{total} active Office runs in this repository; {why}",
@@ -337,27 +329,10 @@ def _binding_crosses_repo(con, run: dict, ident) -> bool:
     cwd's repository has an active run of its own. Same string rule as active_in_repo."""
     if ident is None or not run.get("git_common_dir") or str(run["git_common_dir"]) == str(ident[1]):
         return False
-    runs, legacy_active = active_in_repo(con, ident[1])
-    return bool(runs or legacy_active)
-
-
-def _legacy_by_id(con, run_arg: str, cwd) -> legacy.LegacyRun | None:
-    candidate = paths.runs_dir() / run_arg
-    found = legacy.read_legacy_state(candidate)
-    if found:
-        return found
-    ident = paths.repo_identity(cwd)
-    if ident:
-        for r in legacy.legacy_runs(paths.primary_checkout(ident[1])):
-            if r.run_id.startswith(run_arg):
-                return r
-    return None
+    return bool(active_in_repo(con, ident[1]))
 
 
 def _from_state_dir(con, path: Path, source: str) -> Target:
-    leg = legacy.read_legacy_state(path)
-    if leg:
-        return Target(legacy=leg, source=source)
     run = get_run(con, path.name) if path.name else None
     if run is None:
         raise NoRun("no-such-run", f"{path} is not an Office run directory", next_step="office list")

@@ -241,9 +241,10 @@ def test_repeated_usage_limits_with_no_known_reset_escalate_the_cooldown(env):
     """#860 (553f1ddc on 3.15.29): a free pool with an unknown reset lapsed after its base TTL, was re-picked and
     walled again within seconds, four times an afternoon. Each repeat today doubles the cooldown, capped at the next
     local midnight; yesterday's hits do not count."""
-    from conftest import approved_run
+    from conftest import PLAN_ONE, approved_run, strip_gear_model
     from office import guide
     approved_run(env)
+    strip_gear_model(env, resubmit_plan=PLAN_ONE)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     now = datetime.now(timezone.utc)

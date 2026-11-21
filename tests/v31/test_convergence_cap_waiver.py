@@ -145,7 +145,7 @@ def test_cap_is_configurable_by_flag_and_config_and_validated(env):
     code, out = env.office("start", "other", "--planner", "inline", "--review-rounds", "11")
     assert code == 2 and "bad-rounds" in out or "1 to 10" in out, out
     Path(env.tmp / "user-config.yaml").write_text("review:\n  max_rounds: 4\n")
-    env.office("start", "third", "--gear", "direct+review", "--planner", "inline", check=0)
+    env.office("start", "third", "--gear", "S", "--planner", "inline", check=0)
     assert _gates_json(env)["convergence_max_rounds"] == 4
 
 

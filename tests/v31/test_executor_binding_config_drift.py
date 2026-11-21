@@ -166,7 +166,7 @@ def test_protected_quota_plan_gate_gives_quota_guidance_not_review_as(env, monke
     monkeypatch.setattr(candidates, "route_role", route)
     env.trust()
     env.script()
-    code, out = env.office("start", "g", "--gear", "express", "--planner", "inline")
+    code, out = env.office("start", "g", "--gear", "L", "--planner", "inline")
     assert code == 0, out
     env.write_plan(PLAN_ONE)
     env.office("submit", check=0)

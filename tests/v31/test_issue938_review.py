@@ -30,14 +30,14 @@ def _check(text: str, changed=("calc.py",), tmp=Path(".")):
 # ------------------------------------------------------------------ briefs and tiers
 
 def test_new_runs_take_the_focused_tier_whatever_the_gear_or_risk():
-    for gear in ("XS", "M", "XL", "full", "direct"):
+    for gear in ("XS", "M", "XL"):
         assert briefs.run_self_review_tier({**NEW_RUN, "gear": gear,
                                             "risk_json": '{"irreversible": true}'}) == briefs.FOCUSED
 
 
 def test_a_v31_run_keeps_the_gear_and_risk_tiers():
     assert briefs.run_self_review_tier({**OLD_RUN, "gear": "XL"}) == "deep"
-    assert briefs.run_self_review_tier({**OLD_RUN, "gear": "direct", "risk_json": '{"blast_radius": "local"}'}) == "inline"
+    assert briefs.run_self_review_tier({**OLD_RUN, "gear": "XS", "risk_json": '{"blast_radius": "local"}'}) == "inline"
 
 
 def test_the_focused_brief_is_one_subagent_one_round_and_leaves_security_out():
