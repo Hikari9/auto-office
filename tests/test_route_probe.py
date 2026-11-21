@@ -1062,6 +1062,10 @@ def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
 
 def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
     assert route_probe._running({os.getpid()}) == {os.getpid()}
+    mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()
+    assert route_probe._running({os.getpid()}, {os.getpid(): mine}) == {os.getpid()}
+    # the same pid with another start time is a reused pid: not ours to wait for or signal
+    assert route_probe._running({os.getpid()}, {os.getpid(): "Sat Jan  1 00:00:00 2000"}) == set()
     monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
     assert route_probe._running({os.getpid()}) is None
 
