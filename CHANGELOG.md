@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.30.1
+
+Cheaper per-command lifecycle polls (#1302). An Office process reads its own start time from `ps` once and reuses it (claims, supervisor identity); start times of other pids are still read live on every check. `repo_identity` asks Git for the toplevel and common dir in one `rev-parse`. A lane-gate test that made 467 subprocess calls now makes 242.
+
 ## 3.30.0
 
 Hermes is a reviewer again (requirement r3, accepted risk): `adapters/seed/hermes.yaml` restores the reviewer profile with `--yolo --accept-hooks` and no `--in`, and a post-run fingerprint detects, but cannot prevent, worktree writes. The vision profile returns too (7b2a3ffc^ form: `--toolsets file,terminal,vision --in {sandbox_dir}`, headless and pane); capabilities stay [builder, review], so vision needs its conformance proof. The completed=true readback from 7b2a3ffc stays.
