@@ -491,6 +491,17 @@ def test_worktree_guard_still_sees_an_edit_to_a_tracked_pyc(tmp_path):
     assert "tracked diff" in guard(before)
 
 
+def test_reviewer_env_keeps_python_bytecode_outside_the_checkout(tmp_path, monkeypatch):
+    # #1182: a reviewer's Python neither writes nor reads `__pycache__` in the reviewed checkout.
+    from office import dispatch
+    monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    run, d = {"id": "r1"}, {"id": "D1", "task_id": "T1"}
+    prefix = Path(dispatch.worker_env(run, d, "reviewer")["PYTHONPYCACHEPREFIX"])
+    assert prefix.name == "D1" and prefix.parent.name == "pycache"
+    assert "PYTHONPYCACHEPREFIX" not in dispatch.worker_env(run, d, "executor")
+
+
 def test_worktree_guard_is_off_for_harnesses_with_their_own_sandbox(tmp_path):
     from office import gates
     repo = _git_repo(tmp_path)

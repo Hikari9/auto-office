@@ -2358,6 +2358,10 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
+    if role == "reviewer":
+        # Python the reviewer starts keeps bytecode outside the checkout: it neither leaves `__pycache__` for
+        # the worktree guard to trip on nor loads a planted one in place of the source under review (#1182).
+        env["PYTHONPYCACHEPREFIX"] = str(paths.run_dir(run["id"]) / "pycache" / dispatch["id"])
     argv, extra = frontdoor.current_argv()
     env.update(extra)
     shim = paths.data_home() / "bin"
