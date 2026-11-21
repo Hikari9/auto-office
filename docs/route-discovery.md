@@ -187,6 +187,6 @@ Executor routing (AA v5, policy `owner-xs-xl-engineering-index-2026-11-20`, `cat
 | L | claude Opus 5.5 medium | codex Sol medium | agy Neon medium |
 | XL | claude Opus 5.5 high | codex Sol high | agy Neon high |
 
-Dispatchability follows `catalog/routes.tsv`: codex Sol medium and high passed their exact probes on 2026-11-21 and are dispatchable, while claude Opus 5.5 high is `dispatchable:false` after its exact probe failed on 2026-11-20 (`isolation-missing`), so XL rung 1 is skipped until a probe passes.
+Dispatchability follows `catalog/routes.tsv`: codex Sol medium and high passed their exact probes on 2026-11-21, and claude Opus 5.5 high passed on 2026-11-22. Its 2026-11-20 `isolation-missing` failure came from an unreaped zombie child of a Claude hook daemon outside the probe, which probe cleanup now ignores because a zombie runs nothing (#1296). All three XL rungs are dispatchable.
 
 Hydrogen is conditional: it dispatches only through the Hydrogen gate, at exactly one effort per size (XS low, S medium, M high) and none for L or XL, and it is not a code reviewer (code review is Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only (the frontend bias rule); no route is added. Argon stays executor-eligible through the argon-medium-l floor exception but sits in no slate.

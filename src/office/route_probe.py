@@ -576,11 +576,76 @@ class _Tracker:
             held = _workspace_pids(self.base)
             if held is None:
                 return None
-            found |= held
+            starts = {}
+            for pid in held:
+                start = process_start(pid)
+                if start:
+                    starts[pid] = start
+                elif not _pid_gone(pid):
+                    return None  # a holder that runs on with no readable identity: never confirm cleanup
+            if starts:
+                # The start time read after lsof names the holder only if that pid still holds the
+                # workspace afterwards: a pid reused in between by an unrelated process does not
+                # know the random workspace path. A holder is the probe's, so its start time is
+                # what identifies it from here on, even when its pid was seen before as another process.
+                again = _workspace_pids(self.base)
+                if again is None:
+                    return None
+                for pid in starts.keys() & again:
+                    self.seen[pid] = starts[pid]
+                    found.add(pid)
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
 
 
+def _pid_gone(pid: int) -> bool:
+    """True only when no process has this pid any more."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] | None:
+    """The pids that still run as the same process. A zombie (an exited child its
+    parent has not reaped) runs no code and writes nothing, so it is not left over
+    (#1296: a long-lived Claude hook daemon outside the probe never reaps the child it
+    started for the probe's session). A pid no longer listed is gone, and one whose
+    start time differs from the one the tracker saw was reused by another process, so
+    it is not ours to wait for or signal (ps shows start times to the second; reusing a
+    pid within the same second would take a full wrap of the pid space). None when the
+    states cannot be read, so the caller fails closed."""
+    try:
+        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=,lstart=", "-p",
+                                  ",".join(str(p) for p in sorted(pids))],
+                                 capture_output=True, text=True, timeout=10)  # same locale as _process_table, so starts compare
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode not in (0, 1):  # 1: none of the pids is listed any more
+        return None
+    alive = set()
+    for line in listing.stdout.splitlines():
+        m = re.match(r"^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s*$", line)
+        if not m:
+            if line.strip():
+                return None  # a row we cannot read may be a live process: never confirm cleanup on it
+            continue
+        if m.group(2).startswith("Z"):
+            continue
+        pid = int(m.group(1))
+        if starts is not None and pid in pids:
+            if pid not in starts:
+                return None  # no recorded identity: whether it is still ours cannot be told
+            if " ".join(starts[pid].split()) != " ".join(m.group(3).split()):
+                continue
+        alive.add(pid)
+    return alive & pids
+
+
 def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | None = None, seed: bool = True,
+                    start: str | None = None,
                     term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
     """Stop the probe's process group and every process the tracker attributes to
     it, including ones that left the group, and confirm none is left."""
@@ -589,7 +654,19 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         if proc is not None:
             proc.poll()  # reap the leader so a zombie does not count as alive
         # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
-        return tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+        pids = tracker.scan(pgid if group_ours() else None)
+        return _running(pids, tracker.seen) if pids else pids
+
+    def group_ours() -> bool:
+        # The group id is ours to seed from and signal only while its leader is: our own
+        # unreaped child, or a recovered pid that still has its recorded start time, checked
+        # again on every call. Once the leader is gone an emptied group's id can be reused by
+        # an unrelated process, so stragglers are then signalled one by one through the tracker.
+        if not (pgid > 1 and seed):
+            return False
+        if proc is not None:
+            return proc.returncode is None
+        return start is not None and process_is(pgid, start)
 
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
         pids = left()
@@ -597,7 +674,7 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
             return False
         if not pids and not _group_alive(pgid):
             return True
-        if pgid > 1:
+        if group_ours():
             try:
                 os.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):
@@ -646,7 +723,7 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
         return None
     base = _probe_base(rec.get("base"))
     ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
-    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours)
+    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours, start=rec.get("start"))
     if base is not None:  # a claude probe keeps its session record in the user's config dir, not under base
         shutil.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
     if not ours and pid:

@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.4
+
+Route probes no longer fail `isolation-missing` on a zombie they do not own (#1296). A long-lived Claude hook daemon outside the probe (TokenEconomizer's te-hookd) starts a child for the probe's Claude session and never reaps it. The exited child stayed a zombie in the probe's lineage, and cleanup counted it as a live process, so every claude probe made while the daemon ran failed. Cleanup now confirms only processes that still run, and fails closed when process states cannot be read. With the fix, `claude/claude-opus-5-5@high` passed its exact probe (attempt e1e142e6) and is dispatchable again, so XL executor rung 1 is back.
+
 ## 3.31.3
 
 - The orchestrator judges new work at intake (#1300). `office start --new-work yes|no "<why>"` records `gates.greenfield_detection` (`judged_by: orchestrator`, `new_work`, `why`), shown by `office inspect run`; Office counts nothing and has no detection config. New work with no `--gear` is refused as `greenfield-candidate` with no run created, and `next:` names `--gear greenfield` and `--gear XS|S|M|L|XL`. `--gear greenfield --new-work no` warns once, records and starts. `--gear greenfield --fastlane` is now allowed: the orchestrator leads the one cohesive build at the XL floor and the convergence review stays required. A greenfield fastlane overflow hands off with `office rerun` only, since its one-task plan cannot be split. SKILL.md Start step 3 tells the orchestrator to always pass `--new-work`.

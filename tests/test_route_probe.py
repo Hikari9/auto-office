@@ -1032,6 +1032,96 @@ def test_a_cleanup_that_cannot_be_observed_is_never_reported_clean(world, monkey
     assert route_probe._terminate_tree(proc.pid, tracker, proc=proc) is False
 
 
+def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
+    """#1296: a long-lived Claude hook daemon outside the probe starts a child for the
+    probe's session and never reaps it. The exited child stays a zombie that carries
+    the probe's lineage, but it runs nothing, so cleanup is still confirmed."""
+    nonce = "nonce-zombie-" + uuid.uuid4().hex
+    env = {**os.environ, route_probe.NONCE_ENV: nonce}
+    zombie = route_probe.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"],
+                                          env=env, start_new_session=True)
+    try:
+        leader = route_probe.subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        leader.wait()
+        tracker = route_probe._Tracker(nonce, None)
+        assert zombie.pid in tracker.observe(None)
+        deadline = time.time() + 10
+        while time.time() < deadline:  # exited but not reaped: this test process is its parent
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(zombie.pid)], capture_output=True, text=True).stdout
+            if state.strip().startswith("Z"):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the child never became a zombie")
+        assert zombie.pid in tracker.scan(None)
+        assert route_probe._running({zombie.pid}) == set()
+        assert route_probe._terminate_tree(leader.pid, tracker, proc=leader, term_wait=0.2, kill_wait=0.2) is True
+    finally:
+        zombie.wait()
+
+
+def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeypatch, tmp_path):
+    """A live holder whose identity cannot be read is never dropped (#1296 review)."""
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {os.getpid()})
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: None)
+    tracker = route_probe._Tracker("n-holder", tmp_path)
+    assert tracker.scan(None) is None
+    gone = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    gone.wait()
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {gone.pid})
+    assert tracker.scan(None) == set()
+    # a holder is recorded only when the pid still holds the workspace after its start was read
+    calls = iter([{os.getpid() + 1_000_000}, set()])
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: next(calls))
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: "Sat Jan  1 00:00:00 2000")
+    assert tracker.scan(None) == set() and os.getpid() + 1_000_000 not in tracker.seen
+
+
+def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
+    """An unreadable ps row may be a live process, so cleanup fails closed (#1296 review)."""
+    garbled = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()} S+ not-a-start-time\n", stderr="")
+    monkeypatch.setattr(route_probe.subprocess, "run", lambda *a, **k: garbled)
+    assert route_probe._running({os.getpid()}) is None
+
+
+def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, monkeypatch):
+    """A recovered pid whose start time no longer matches is not ours (#1296 review)."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    sent = []
+    real = os.killpg
+    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)
+    route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-recovered", None), seed=True,
+                                start="Sat Jan  1 00:00:00 2000", term_wait=0.2, kill_wait=0.2)
+    assert sent == []
+
+
+def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
+    """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    sent = []
+    real = os.killpg
+    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
+    route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
+                                term_wait=0.2, kill_wait=0.2)
+    assert sent == []
+
+
+def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
+    assert route_probe._running({os.getpid()}) == {os.getpid()}
+    mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()
+    assert route_probe._running({os.getpid()}, {os.getpid(): mine}) == {os.getpid()}
+    # the same pid with another start time is a reused pid: not ours to wait for or signal
+    assert route_probe._running({os.getpid()}, {os.getpid(): "Sat Jan  1 00:00:00 2000"}) == set()
+    # a pid the tracker recorded no start time for has no identity to check: fail closed
+    assert route_probe._running({os.getpid()}, {}) is None
+    monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
+    assert route_probe._running({os.getpid()}) is None
+
+
 # ------------------------------------------------------------------ concurrent database setup (C3)
 
 def test_a_lock_that_outlasts_the_wait_is_a_refusal_not_a_crash_or_a_launch(world, monkeypatch):
