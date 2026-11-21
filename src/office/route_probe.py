@@ -583,7 +583,20 @@ class _Tracker:
                 if start:
                     self.seen[pid] = start
                     found.add(pid)
+                elif not _pid_gone(pid):
+                    return None  # a holder that runs on with no readable identity: never confirm cleanup
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
+
+
+def _pid_gone(pid: int) -> bool:
+    """True only when no process has this pid any more."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] | None:

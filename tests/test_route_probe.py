@@ -1060,6 +1060,18 @@ def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
         zombie.wait()
 
 
+def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeypatch, tmp_path):
+    """A live holder whose identity cannot be read is never dropped (#1296 review)."""
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {os.getpid()})
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: None)
+    tracker = route_probe._Tracker("n-holder", tmp_path)
+    assert tracker.scan(None) is None
+    gone = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    gone.wait()
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {gone.pid})
+    assert tracker.scan(None) == set()
+
+
 def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
     """An unreadable ps row may be a live process, so cleanup fails closed (#1296 review)."""
     garbled = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()} S+ not-a-start-time\n", stderr="")
