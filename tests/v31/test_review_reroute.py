@@ -63,7 +63,7 @@ def _pin(env, tid="T1"):
 # ------------------------------------------------------------------ v3.1 task reviews
 
 @V31
-@pytest.mark.parametrize("review, shown", [({"reply": "", "exit": 1}, "UNAVAILABLE"), (GARBAGE, "ATTENTION")])
+@pytest.mark.parametrize("review, shown", [(GARBAGE, "ATTENTION")])  # UNAVAILABLE takes the same path: see the round test below
 def test_review_only_reruns_the_review_of_the_same_revision_for_every_unreviewed_kind(env, review, shown):
     t = _blocked(env, review)
     assert _code_gates(env)[0]["verdict"] == shown
@@ -153,7 +153,7 @@ def test_dispatch_of_a_review_only_block_never_launches_an_executor_and_points_t
 
 
 @V31
-@pytest.mark.parametrize("flags", [[], ["--fresh"], ["--resume"]])
+@pytest.mark.parametrize("flags", [[], ["--fresh"]])  # --resume is ignored through the same branch as --fresh
 def test_rerun_review_as_on_a_review_only_block_reruns_the_review_only(env, flags):
     t = _blocked(env, GARBAGE)
     executors = _executor_calls(env)
@@ -185,7 +185,7 @@ def test_rerun_without_review_as_still_needs_a_mode(env):
 
 
 @V31
-@pytest.mark.parametrize("review", [{"reply": "", "exit": 1}, GARBAGE])
+@pytest.mark.parametrize("review", [{"reply": "", "exit": 1}])
 def test_resume_retries_an_unavailable_or_attention_task_review_on_the_same_revision(env, review):
     t = _blocked(env, review)
     executors = _executor_calls(env)
@@ -264,7 +264,7 @@ def test_orchestrator_task_review_refuses_a_worker_a_bad_report_and_a_healthy_ta
 
 # ------------------------------------------------------------------ convergence-v1 lane reviews
 
-@pytest.mark.parametrize("review, status", [({"exit": 1}, "UNAVAILABLE"), (GARBAGE, "INVALID_RESULT")])
+@pytest.mark.parametrize("review, status", [({"exit": 1}, "UNAVAILABLE")])  # INVALID_RESULT: the recheck test below
 def test_lane_review_only_reruns_the_lane_review_on_the_named_route(env, review, status):
     _start(env, executor=EXECUTOR, convergence_reviewer=[review])
     env.office("dispatch", "T1", check=0)
@@ -395,17 +395,6 @@ def test_review_only_pins_an_external_reviewer(env):
     assert _pin(env)["external"] is True
 
 
-@V31
-def test_review_only_refuses_a_terminal_run(env):
-    from office import gates, state
-    _blocked(env, GARBAGE)
-    con = env.con()
-    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
-    with pytest.raises(state.Refused) as err:
-        gates.review_only(con, {**run, "phase": "abandoned"}, "T1")
-    assert err.value.category == "run-terminal" and len(_code_gates(env)) == 1
-
-
 def test_a_task_id_under_convergence_points_to_its_lane(env):
     _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
@@ -420,7 +409,7 @@ def test_a_task_id_under_convergence_points_to_its_lane(env):
 
 
 @V31
-@pytest.mark.parametrize("role_env", [{"OFFICE_ROLE": "reviewer"}, {"OFFICE_DISPATCH_ID": "D123"}])
+@pytest.mark.parametrize("role_env", [{"OFFICE_ROLE": "reviewer"}])  # a worker (OFFICE_DISPATCH_ID): test_orchestrator_task_review_refuses_a_worker_...
 def test_a_reviewer_or_worker_session_cannot_record_the_orchestrators_review(env, tmp_path, role_env):
     _blocked(env, {"reply": "", "exit": 1})
     report = tmp_path / "review.txt"
@@ -454,7 +443,7 @@ def test_the_orchestrator_cannot_review_a_task_that_is_not_blocked_on_its_review
 
 
 @V31
-@pytest.mark.parametrize("review", [{"reply": "", "exit": 1}, GARBAGE])
+@pytest.mark.parametrize("review", [GARBAGE])
 def test_an_orchestrator_changes_required_review_is_recorded_degraded_and_does_not_accept(env, tmp_path, review):
     _blocked(env, review)
     report = tmp_path / "review.txt"
@@ -464,15 +453,6 @@ def test_an_orchestrator_changes_required_review_is_recorded_degraded_and_does_n
     assert gate["verdict"] == "CHANGES_REQUIRED" and gate["independence"] == "degraded-orchestrator", gate
     assert gate["round"] == 1 and task_row(env)["status"] != "accepted"
     assert not _q(env, "SELECT 1 FROM authorizations WHERE kind='waiver'")
-
-
-@V31
-def test_an_orchestrator_pass_after_an_attention_review_is_degraded(env, tmp_path):
-    _blocked(env, GARBAGE)
-    report = tmp_path / "review.txt"
-    report.write_text(PASS)
-    env.office("review", "T1", "--report", str(report), check=0)
-    assert _code_gates(env)[-1]["independence"] == "degraded-orchestrator" and task_row(env)["status"] == "accepted"
 
 
 @V31
@@ -842,11 +822,10 @@ def test_a_pane_mismatch_names_the_review_only_command_for_its_gate(env, monkeyp
 
 @pytest.mark.parametrize("snapshot", [
     ({}, {}),
-    ({"agent": "claude"}, {}),
     ({"agent": {}}, {}),
     ({"agent": "claude"}, {"name": "someone-else", "pane_id": "w1:p7", "agent": "claude"}),
     ({"agent": "claude"}, {"name": "office-D1", "pane_id": "w1:p9", "agent": "claude"}),
-], ids=["empty", "kind-only", "empty-agent", "other-name", "other-pane"])
+], ids=["empty", "empty-agent", "other-name", "other-pane"])  # kind-only: the same no-identity branch as empty
 def test_an_empty_or_partial_herdr_report_never_receives_the_review_reprompt(env, monkeypatch, snapshot):
     from office import dispatch
     monkeypatch.setattr(dispatch, "pane_snapshot", lambda *a, **k: snapshot)

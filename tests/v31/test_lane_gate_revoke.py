@@ -408,7 +408,7 @@ def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env,
     assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
 
 
-@pytest.mark.parametrize("job_status", ["failed", "done"])
+@pytest.mark.parametrize("job_status", ["failed"])  # "done" settles through the same reconcile branch
 def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, job_status):
     """#1022: the lane review's job failed (or finished without settling it) while the gate stayed queued, with no
     reviewer and no job left. Reconcile settles it UNAVAILABLE, so the scope's fallback and office resume apply."""
