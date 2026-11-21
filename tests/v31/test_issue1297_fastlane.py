@@ -45,12 +45,13 @@ def test_pin_defaults_to_auto_and_the_flag_sets_on_or_off():
     assert fastlane.pin("M", False)["policy"] == "off"
 
 
-def test_a_gear_with_its_own_execution_contract_pins_no_fastlane_and_refuses_the_flag():
+def test_greenfield_pins_fastlane_only_for_the_flag_and_keeps_its_contract_otherwise():
+    # #1300 G3: --fastlane on greenfield pins on; no flag or --no-fastlane keeps the executor contract.
     assert fastlane.pin("greenfield", None) is None
+    assert fastlane.pin("greenfield", True) == ON
+    assert fastlane.pin("greenfield", False) is None
     with pytest.raises(ValueError, match="XS-XL"):
-        fastlane.pin("greenfield", True)
-    with pytest.raises(ValueError, match="no-fastlane"):
-        fastlane.pin("greenfield", False)
+        fastlane.pin("legacy-preset", True)
 
 
 def test_a_malformed_or_missing_gate_reads_as_no_fastlane():
@@ -81,8 +82,9 @@ def test_the_invokers_flag_always_wins(gear, risk):
     assert task_sizing.execution_mode(gear, _desc("XS"), LOW, fastlane=OFF)["mode"] == "delegated"
 
 
-def test_fastlane_never_applies_to_a_gear_outside_xs_xl():
-    assert task_sizing.execution_mode("greenfield", _desc("XL"), LOW, fastlane=ON)["mode"] == "delegated"
+def test_fastlane_never_applies_to_a_gear_outside_xs_xl_or_greenfield():
+    assert task_sizing.execution_mode("legacy-preset", _desc("XL"), LOW, fastlane=ON)["mode"] == "delegated"
+    assert task_sizing.execution_mode("greenfield", _desc("XL"), LOW, fastlane=ON)["mode"] == "inline"  # #1300 G3
 
 
 def test_xs_defaults_to_fastlane_on_low_risk_bounded_work():
@@ -180,12 +182,14 @@ def test_start_pins_the_policy_and_xs_reviews_by_default(env):
     assert run["gates"]["fastlane"] == AUTO and run["gates"]["code_review"] is True
 
 
-def test_start_records_the_flag_and_refuses_it_on_greenfield(env):
+def test_start_records_the_flag_including_on_greenfield(env):
     code, out = env.office("start", "fixture goal", "--gear", "L", "--fastlane", "--planner", "inline")
     assert code == 0, out
     assert _run_row(env)["gates"]["fastlane"]["policy"] == "on"
     code, out = env.office("start", "another goal", "--gear", "greenfield", "--blast-radius", "repo", "--fastlane")
-    assert code != 0 and "fastlane" in out
+    assert code == 0, out  # #1300 G3: allowed, the convergence review stays required
+    run = _run_row(env)
+    assert run["gates"]["fastlane"]["policy"] == "on" and run["gates"]["code_review"] is True
 
 
 def test_the_plan_keeps_the_fastlane_review_when_it_reclassifies_risk(env):
