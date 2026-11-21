@@ -29,7 +29,7 @@ def test_uncredited_validate_flags_compound_and_prefixed_forms():
                                    "scripts/validate.sh --pr > log"]) == [
         "uv sync --frozen && scripts/validate.sh --pr", "scripts/validate.sh --pr > log"]
     assert vc.uncredited_validate(["scripts/validate.sh --pr", "./scripts/validate.sh --pr", "scripts/validate.sh",
-                                   "bash scripts/validate.sh --full", "uv sync --frozen", "pytest --all"]) == []
+                                   "uv sync --frozen", "pytest --all"]) == []
 
 
 def test_coverage_refusal_names_uncredited_check_and_recommends_pr_first(tiered_repo):

@@ -172,13 +172,16 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
 
 _ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"
 
-_CREDITED_VALIDATE_ARGV = (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"], *_FULL_SUITE_ARGV)
+# Land credits the bare script as full proof, not `--full` (see _is_validate_script).
+_CREDITED_VALIDATE_ARGV = (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"],
+                           ["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 RUN_CHECK_ADVICE = ("declare the run-level check as exactly `checks: scripts/validate.sh --pr` on its own line "
                     "(the per-merge proof; put setup such as `uv sync` on a separate checks: line or in worktree.setup, "
                     "since a compound command like `uv sync && scripts/validate.sh --pr` is not credited). "
                     "Use the full `scripts/validate.sh` only before the last merge of a batch, for a release, "
-                    "or when tests or test infrastructure are changed, deleted or renamed")
+                    "when tests or test infrastructure are changed, deleted or renamed, "
+                    "or when the task explicitly requires the full regression suite")
 
 
 def uncredited_validate(commands: list[str]) -> list[str]:
