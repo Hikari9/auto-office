@@ -349,6 +349,9 @@ def get_current_trust_state(db_path, triple: str) -> str:
 # §7.2 -- per-role capability floor.
 # ---------------------------------------------------------------------------
 
+ENGINEERING_INDEX_PREFIX = "Artificial Analysis Engineering Index"
+
+
 def evaluate_capability_floor(candidate: dict, floor: dict | None, *,
                               unbenchmarked_ok: bool = False) -> tuple[bool, str | None]:
     """Evaluates `candidate` against a `roles.<role>.floor` block (§7.2). Returns
@@ -390,7 +393,9 @@ def evaluate_capability_floor(candidate: dict, floor: dict | None, *,
         benchmarks = candidate.get("benchmark_indexes")
         score = benchmarks.get(index_name) if isinstance(benchmarks, dict) else None
         if score is None:
-            if unbenchmarked_ok:
+            # A route with no Engineering Index score keeps it null: no sibling-effort
+            # substitution and no invented value, and the missing score alone is not a failure.
+            if unbenchmarked_ok or str(index_name).startswith(ENGINEERING_INDEX_PREFIX):
                 return True, None
             return False, f"missing required catalog field 'benchmark_indexes.{index_name}'"
         if float(score) < float(min_score):

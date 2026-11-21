@@ -11,7 +11,8 @@ from office import adaptive, route_learning
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PRIMARY, FB1, FB2 = "claude/claude-opus-5-5@medium", "codex/gpt-6-astra@low", "claude/claude-opus-5-5@high"
-PLANNED = PLAN_ONE.replace("visual: none", f"visual: none\nroute: {PRIMARY}, {FB1}, {FB2}", 1)
+PLANNED = PLAN_ONE.replace(
+    "visual: none", f"visual: none\nroute: {PRIMARY}, {FB1}, {FB2}\nroute_why: the fixture pins its declared primary", 1)
 
 
 def _quota(env, **remaining):
