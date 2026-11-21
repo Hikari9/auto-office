@@ -8,7 +8,9 @@ executor routing.
 The policy is pinned per run at `office start` (`gates["fastlane"]`): `on` (the invoker's --fastlane, which
 always wins), `off` (--no-fastlane) or `auto` (XS defaults to it; other sizes only when quality, time and cost
 all favour it, see `task_sizing.execution_mode`). A run without the gate (every run started before #1297, a
-greenfield run, a legacy preset) keeps its original execution semantics.
+greenfield run without --fastlane, a legacy preset) keeps its original execution semantics. A greenfield run with
+--fastlane (#1300) pins `on`: the orchestrator leads the one cohesive build at the XL floor and the convergence
+review stays required.
 
 When an orchestrator-led task grows too big (the orchestrator's context crosses the `orchestrator_context`
 threshold, or the task touches far more files than its scope planned), the run records an overflow: the rest of
@@ -31,8 +33,11 @@ FILE_FACTOR = 2  # touched files past this multiple of the files the scope plann
 
 def pin(gear: str, flag: bool | None) -> dict | None:
     """The fastlane gate a new run pins at start, or None for a gear with its own execution contract.
-    `flag` is the invoker's choice: True (--fastlane), False (--no-fastlane) or None (no flag)."""
+    `flag` is the invoker's choice: True (--fastlane), False (--no-fastlane) or None (no flag).
+    Greenfield (#1300 G3) pins `on` only for --fastlane; otherwise it keeps its executor contract (None)."""
     from office import config as cfg
+    if gear == "greenfield":
+        return {"version": VERSION, "policy": "on", "by": "flag"} if flag else None
     if gear not in cfg.RUN_GEARS:
         if flag is not None:
             raise ValueError(f"--{'fastlane' if flag else 'no-fastlane'} applies to the XS-XL run gears; "

@@ -99,6 +99,9 @@ def _run(con, run) -> Result:
     integ = (run.get("landing") or {}).get("integration")
     if integ:
         lines.append(f"integration {integ.get('status')} {integ.get('branch', '')} {integ.get('detail', '')}")
+    if judged := (run.get("gates") or {}).get("greenfield_detection"):
+        lines.append(f"new work (judged by {judged.get('judged_by')}): {'yes' if judged.get('new_work') else 'no'}, "
+                     f"{judged.get('why')}")
     return Result(lines=lines, data={"run": {k: v for k, v in run.items() if not k.endswith("_json")},
                                      "requirements": req["frozen"], "plan_review": rs, "risk": risk_mod.summary(run)})
 

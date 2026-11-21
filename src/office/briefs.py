@@ -218,8 +218,8 @@ def planner_brief(con, run: dict, packet: dict) -> str:
         out += ["", f"CURRENT PLAN p{plan['version']} (revise it; do not start over):", plan["body"]]
     if greenfield.enabled(run):
         guidance = [
-            "GREENFIELD GEAR (explicit opt-in): use only for a new or near-empty repository. Inspect the ",
-            "existing files and do not silently use this mode for a mature, multi-owner codebase.",
+            "GREENFIELD GEAR (explicit opt-in): use only for new work (a new project, or a new component with nothing ",
+            "it must fit into). Inspect the existing files and do not silently use this mode for a mature, multi-owner codebase.",
             "Plan exactly ONE T1 task with one broad but explicit ownership scope and 2-3 distinct large",
             "`phases:` list items, covering foundation, working core, and end-to-end verification as appropriate.",
             "Each phase is a checkpoint within the SAME strong executor session, not a task handoff or lane review.",

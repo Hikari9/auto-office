@@ -65,15 +65,15 @@ and `--harness-budget PROVIDER:HARNESS=USD` per pair. A refused answer writes no
 
 ## Start
 
-For an intentionally new or near-empty repository, the explicit `--gear greenfield` build contract is documented in [`docs/greenfield-lean-gear.md`](docs/greenfield-lean-gear.md): one strong executor owns 2-3 internal phases, followed by one independent convergence review.
+For new work (a new project, or a new component with nothing it must fit into), the explicit `--gear greenfield` build contract is documented in [`docs/greenfield-lean-gear.md`](docs/greenfield-lean-gear.md): one strong executor owns 2-3 internal phases, followed by one independent convergence review.
 
 1. Check for an Auto Office update as described above, then create or reuse exactly one tracking GitHub issue for the request (search for duplicates first;
    do not ask for a draft or routine approval). Stop if you cannot file it safely.
 2. Ask how far to go after the task PRs: stop and ask after (`ask`), preview deploy only (`preview`),
    merge only (`merge`), or merge + prod deploy (`e2e`, which is merge and deploy authority). For a
    deploy, show `office land --detect`'s proposed commands and have the user confirm them.
-3. `office start "<goal>" --issue <n> --end-state <answer>` (`--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
-   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for near-empty repos only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read; `--fastlane`/`--no-fastlane` (orchestrator-led with its own strategy, inline or own subagents, independent review always; XS defaults to it, `docs/xs-xl-run-gear.md`);
+3. `office start "<goal>" --issue <n> --end-state <answer> --new-work yes|no "<why>"` (always pass your judgement of new work; new work with no gear: ask the invoker greenfield or XS-XL before starting; `--deploy-preview|prod|verify "<cmd>"` as confirmed; `--blast-radius local|repo|production|production-data`,
+   `--gear XS|S|M|L|XL|greenfield` (complexity and coordination, never risk; an unknown size is M; `greenfield` is explicit for new work only, 2-3 phases within one strong XL-routed task and one end-of-build convergence), `--size-class XS|S|M|L|XL`, `--irreversible` from your provisional read; `--fastlane`/`--no-fastlane` (orchestrator-led with its own strategy, inline or own subagents, independent review always; XS defaults to it, `docs/xs-xl-run-gear.md`);
    unset risk is unknown, never low: an unknown run keeps independent code review under every gear until the plan classifies it, see "Risk floor and the lightweight path").
    Never ask about benchmark refreshes; benchmark refreshes are maintainer-only and are not available in the installed plugin.
 4. If a planner was queued, wait (`office wait`). Otherwise you plan inline: interview for anything you would guess, then write the exact plan path `office start` prints.

@@ -4,7 +4,7 @@ This is the normative runtime boundary for **new runs**. It complements—not re
 
 ## Pinned run gears (complexity is not risk)
 
-For a **new or near-empty repo** that benefits from one continuous strong builder instead of many handoffs, the separately selected `--gear greenfield` provides **2-3 internal phases inside one XL-routed executor task, with one end-of-build convergence review**. It is never auto-fitted, and the risk/authorization/checks floors remain. See [greenfield / lean gear](greenfield-lean-gear.md).
+For **new work** (a new project, or a new component with nothing it must fit into) that benefits from one continuous strong builder instead of many handoffs, the separately selected `--gear greenfield` provides **2-3 internal phases inside one XL-routed executor task, with one end-of-build convergence review**. It is never auto-fitted, and the risk/authorization/checks floors remain. See [greenfield / lean gear](greenfield-lean-gear.md).
 
 | Run gear | Planner | Producer mode | Producer self-review | Independent plan review | Independent convergence | Verification |
 | --- | --- | --- | --- | --- | --- | --- |
