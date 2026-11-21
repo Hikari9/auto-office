@@ -201,6 +201,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_derived_routing.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_dogfood.py` | keep |  |
 | `tests/test_families.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_frontend_bias.py` | keep |  |
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |  |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |  |
 | `tests/test_h5_hydrogen_plan_reviewer.py` | keep |  |
@@ -212,6 +213,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_issue_1163_hydrogen_user_allow.py` | keep |  |
 | `tests/test_issue_1166_hydrogen_user_allow_candidates.py` | keep |  |
 | `tests/test_issue_1168_hydrogen_canary.py` | keep |  |
+| `tests/test_issue_1282_hydrogen_gate.py` | keep |  |
 | `tests/test_issue_927_onboarding_wording.py` | keep |  |
 | `tests/test_landings.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_monitor.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
@@ -291,6 +293,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_e2e_flow.py` | keep |  |
 | `tests/v31/test_economics.py` | keep |  |
 | `tests/v31/test_economics_efficiency.py` | keep |  |
+| `tests/v31/test_engineering_index_null_score.py` | keep |  |
 | `tests/v31/test_executor_binding_config_drift.py` | keep |  |
 | `tests/v31/test_executor_context.py` | keep |  |
 | `tests/v31/test_external_visual.py` | keep |  |
@@ -584,7 +587,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 
-Totals: {'keep': 367, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 370, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 

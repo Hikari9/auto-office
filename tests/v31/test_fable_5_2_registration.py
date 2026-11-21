@@ -12,7 +12,7 @@ EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 def test_fable_52_is_registered_but_not_routable_or_scored_in_v4():
     shipped = shipped_catalog.load()
-    assert shipped["benchmark_index_version"] == PINNED
+    assert shipped["benchmark_index_version"] == "Artificial Analysis Engineering Index (2026-11)"
     rows = [r for r in shipped["models"] if r["model_id"] == MODEL]
     assert len(rows) == 5
     assert {r["effort"] for r in rows} == EFFORTS
@@ -22,7 +22,9 @@ def test_fable_52_is_registered_but_not_routable_or_scored_in_v4():
         assert row["dispatchable"] is False
         assert row["discovery"] == "eligible"
         assert not row.get("alias_family")
-        assert row["benchmark_indexes"] == {PINNED: None}
+        # Intelligence Index v4.3.2 stays unscored; the Engineering Index carries the only score.
+        assert row["benchmark_indexes"][PINNED] is None
+        assert set(row["benchmark_indexes"]) <= {PINNED, "Artificial Analysis Engineering Index (2026-11)"}
         assert row["price_fields"]["input_per_mtok"] == 8.0
         assert row["price_fields"]["output_per_mtok"] == 40.0
         source = row["source_snapshot_metadata"]

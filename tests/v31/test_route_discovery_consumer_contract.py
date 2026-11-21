@@ -68,10 +68,19 @@ class World:
         self.codex.chmod(0o755)
         # Discovery fixtures model one fake codex. Do not enlist real host CLIs.
         monkeypatch.setattr(adapters, "installed", lambda adapter: adapters.executable(adapter) == "codex")
-        # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) stays out of this world.
+        # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) and 6.2 Sol stay out of this world.
         rows = candidates.catalog_rows
+        # The executor floor now reads the Engineering Index, which AA scored for only some routes. These scenarios
+        # exercise discovery, not scoring, so a route without an Engineering Index score borrows its v4.3.2 score and
+        # the fixture's floor decisions stay what they were before the cutover.
+        def scored(row):
+            have = row.get("benchmark_indexes")
+            if not isinstance(have, dict) or have.get(EI) is not None or have.get(IDX) is None:
+                return row
+            return {**row, "benchmark_indexes": {**have, EI: have[IDX]}}
+
         monkeypatch.setattr(candidates, "catalog_rows",
-                            lambda: [r for r in rows() if r.get("model_id") != "gpt-6.1-terra"])
+                            lambda: [scored(r) for r in rows() if r.get("model_id") not in ("gpt-6.1-terra", "gpt-6.2-sol")])
         if route_probe.write_boundary_reason() is not None:
             # No OS write boundary here: the launch path still runs, only the sandbox wrapper is dropped.
             monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
@@ -457,13 +466,14 @@ def test_the_budget_ceiling_and_its_source_tier_are_disclosed_and_shipped_sets_n
 # ------------------------------------------------------------------ S12: decision_hash is unchanged
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
+EI = "Artificial Analysis Engineering Index (2026-11)"
 
 
 def cand(harness, model, effort="medium", *, out=2.0, inp=0.5, idx=45, tps=100.0, ttft=1000, quota=60,
          caps=("builder",)):
     return {
         "harness": harness, "harness_version": "2.0", "model_id": model, "invocation_model_id": model,
-        "invocation_source": "documented:test", "effort": effort, "benchmark_indexes": {IDX: idx} if idx else {},
+        "invocation_source": "documented:test", "effort": effort, "benchmark_indexes": {IDX: idx, EI: idx} if idx else {},
         "capabilities": list(caps), "price_fields": {"output_per_mtok": out, "input_per_mtok": inp},
         "speed_fields": {"output_tok_per_s": tps, "ttft_ms": ttft}, "cost": {"money_estimate": out},
         "quota": {"status": "ok", "tightest_remaining_percent": quota},
@@ -495,8 +505,9 @@ def recorded_requests():
     proven_ev = evidence({"a/m1@medium": (20, 4, 1.1)})
     cheap, pricey = cand("codex", "luna", out=0.5, inp=0.1), cand("claude", "opus", out=20, inp=4, effort="xhigh")
     reviewers = [cand("codex", "luna", out=0.5), cand("claude", "opus", out=20)]
-    for c in reviewers:
+    for c in reviewers:  # reviewer floors keep the v4.3.2 index byte-identical, so no Engineering Index score
         c["capabilities"] = ["review"]
+        c["benchmark_indexes"] = {IDX: c["benchmark_indexes"][IDX]}
     return {
         "worker-three-strong": request(trio),
         "worker-local-evidence": request([smart, plain], ev=warm, adaptive={"competitive_band": 0.0}),
@@ -709,7 +720,7 @@ route_why: the planner wants this route for this task
 visual: none
 """
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
-CLI_DENIED = "codex/gpt-6-astra@low"
+CLI_DENIED = "codex/gpt-6.1-terra@high"
 
 
 def cli_authority(env):

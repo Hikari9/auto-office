@@ -71,7 +71,10 @@ def test_terra_and_sol_generations_share_a_lineage_and_order_numerically():
         assert a["lineage_key"] == b["lineage_key"] and a["release_status"] == b["release_status"] == "released"
         assert model_lineages.version_parts(b["generation_version"]) > model_lineages.version_parts(a["generation_version"])
     active = {r["model_id"] for r in model_lineages.partition(candidates.catalog_rows())["active"]}
-    assert {m for pair in LINEAGES.values() for m in pair} <= active
+    # gpt-6.2-sol takes the second slot, so gpt-5.6-sol leaves the latest-two window (it stays in the catalog as archived).
+    assert {"gpt-6.1-sol", "gpt-6.2-sol", "gpt-5.6-terra", "gpt-6.1-terra"} <= active
+    assert "gpt-5.6-sol" not in active
+    assert model_lineages.identify("gpt-6.2-sol")["lineage_key"] == model_lineages.identify("gpt-5.6-sol")["lineage_key"]
 
 
 def _effort_of(source_effort):

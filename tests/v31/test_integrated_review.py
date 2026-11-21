@@ -15,10 +15,11 @@ from test_convergence_contract import (APPROVED, _events, _gates, _q, _run_row, 
 WORK = {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}}
 
 
-def _two(env, plan, *reviews, **extra):
+def _two(env, plan, *reviews, pin_claude=False, **extra):
     _start(env, plan=plan, executor=[{"write_by_task": WORK, "submit": True}],
            convergence_reviewer=[{"reply": r} for r in reviews or [APPROVED]], **extra)
-    env.office("dispatch", "T1", "T2", "--parallel", check=0)
+    # A test that patches convergence in this process needs the in-process claude supervisor (the ranker no longer picks it).
+    env.office("dispatch", "T1", "T2", "--parallel", *(["--as", "claude/claude-opus-5-5@medium"] if pin_claude else []), check=0)
 
 
 def _scopes(env):
@@ -138,7 +139,7 @@ def test_covered_shared_scope_converges_without_a_second_review(env, monkeypatch
     monkeypatch.setattr(convergence, "_covered_by", lambda *a, **k: "L-X")
     plan = PLAN_TWO.replace("scope: calc.py\n", "scope: calc.py\ninterfaces: provides add\n").replace(
         "scope: mul.py\n", "scope: mul.py\ninterfaces: consumes add\n")
-    _two(env, plan)
+    _two(env, plan, pin_claude=True)
     assert _scopes(env) == ["L-T1", "L-T2"], "no shared-scope review ran"
     st = _scope(env, "S-T1+T2")
     assert st["status"] == "not_required" and st["covered_by"] == "L-X" and "already covered" in st["basis"]

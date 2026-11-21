@@ -188,6 +188,8 @@ New runs pin the `convergence-v1` review contract; `docs/review-convergence.md` 
   per-task review and `--redirect`: follow their `next:` lines and `docs/v31-rolling-review-gates.md`. Runs started before #423 and #418 keep
   their older cap, waiver and plan-review behavior until `office upgrade`.
 
+Executor routing (AA v5, `catalog/executor-policy.yaml`): size floors use the Artificial Analysis Engineering Index (2026-11), XS 31, S 37, M 40, L 45, XL 52. Rung 1 is Haiku 5.5 high (XS), Sonnet 5.5 medium (S) and high (M), Opus 5.5 medium (L) and high (XL). Conditional agy Hydrogen is rung 2 at XS low, S medium and M high only, none for L or XL, and it is not a code reviewer (Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only. Full table: `docs/route-discovery.md`.
+
 ### Risk floor and the lightweight path
 
 - A run gear (`XS` to `XL`, pinned at intake) funds planning and review ceremony from complexity; `office start`, `office inspect plan` and every dispatch print it with its

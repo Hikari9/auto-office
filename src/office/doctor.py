@@ -417,7 +417,7 @@ def _probe_all(con) -> list[str]:
     out = []
     all_adapters = adapters.load_all()
     cands, _ = candidates.build_candidates(con, "visual_reviewer", probe=False,
-                                           family_floors=config.get("model_family_floors"))
+                                           family_floors=config.get("model_family_floors"), vision_probe=True)
     # Preferred routes first; a route with a current proof is not re-probed.
     seed = candidates.role_policy(config, "visual_reviewer").get("preferred_seed")
     rank = {id(c): routing.preferred_rank(c, seed) for c in cands}

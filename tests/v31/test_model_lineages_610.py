@@ -48,10 +48,12 @@ def test_alias_in_concrete_partition_does_not_take_slot():
     manifest = lineage.load()
     rows = candidates.catalog_rows()
     part = lineage.partition(rows)
-    assert {r["model_id"] for r in part["active"]} >= {"gpt-5.6-sol", "gpt-6.1-sol"}
+    assert {r["model_id"] for r in part["active"]} >= {"gpt-6.1-sol", "gpt-6.2-sol"}
+    assert "gpt-5.6-sol" in {r["model_id"] for r in part["archived"]}
     assert "sol" not in {r["model_id"] for r in part["active"]}
     assert part["aliases"]
-    assert not part["archived"]  # shipped source has at most two released versions per lineage
+    # gpt-6.2-sol pushes gpt-5.6-sol out of the two-generation window; nothing else archives
+    assert {r["model_id"] for r in part["archived"]} == {"gpt-5.6-sol"}
     assert all(r["lineage_key"] == "openai/gpt-sol" for r in part["active"]
                if r["model_id"] in ("gpt-5.6-sol", "gpt-6.1-sol"))
     assert manifest["gpt-6.1-sol"]["provenance"] == "shipped-catalog"
@@ -136,6 +138,6 @@ def test_cli_registry_and_policy_surface(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "config.yaml"))
     rows = harnesscmd.model_registry().data
     assert rows["counts"]["active"] >= 25
-    assert rows["counts"]["archived"] == 0
+    assert rows["counts"]["archived"] == 6  # gpt-5.6-sol (6 efforts) left the latest-two window for gpt-6.2-sol
     assert {"lineage": "openai/gpt-luna", "version": "6"} in rows["generations"]
     assert "ceilings" in harnesscmd.model_policy().data["policy"]

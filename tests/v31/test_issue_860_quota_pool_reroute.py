@@ -150,7 +150,13 @@ def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
 
 
-def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env):
+def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env, monkeypatch):
+    # The first dispatch must land on the planned Claude route, or the Claude-quota rerun below can only fall back
+    # onto the same route: the size slate's Neon (agy) and Sol 6.2 (codex) rungs are dispatchable in this env too.
+    from office import candidates
+    seed_rows = candidates.catalog_rows
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+        {**r, "dispatchable": False} if r.get("model_id") in ("gemini-4-neon", "gpt-6.2-sol") else r for r in seed_rows()])
     _approve_slate(env, plan=PLANNED)
     code, out = env.office("dispatch", "T1", env=_quota(env))
     assert code == 0, out

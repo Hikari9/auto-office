@@ -185,6 +185,9 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
             reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
+    if bias := next((row for row in preferred_seed or [] if row.get("frontend_bias")), None):
+        reasons.append(f"frontend-heavy task ({bias['frontend_bias']}): {bias.get('harness')}/{bias['model_id']}"
+                       f"@{bias.get('effort')} moved to rung 1 for this task only; no route added, no gate lifted")
     invocation = chosen.get("invocation_model_id")
     prov = invocation_provenance(chosen)
     if not invocation or prov == "none":
