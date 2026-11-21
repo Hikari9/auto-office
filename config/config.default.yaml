@@ -91,6 +91,12 @@ routing:
     # e.g. openai/gpt-sol: "5.6" denies Sol 5.6 and older, not Sol 6.1.
     version_ceilings: {}
     overkill_rules: []
+  # Unset by default (routing is unchanged). Weights pick between harnesses that launch the same model and
+  # effort, one draw per (run, task), pinned with the run's routing (re-pinned by --apply-routing).
+  # A model key beats its vendor key; weight 0 or an unlisted harness is only a fallback.
+  # harness_preference:
+  #   anthropic: {claude: 95, hermes: 5}
+  #   claude-sonnet-5-5: {claude: 50, hermes: 50}
   adaptive:
     competitive_band: 0.05
     # Cost ranks routes. Only a user ceiling is hard; the scale is ranking only.

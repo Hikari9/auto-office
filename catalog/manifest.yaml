@@ -26,7 +26,11 @@ notes: 'The active routing catalog contains version-following spec aliases and c
   and ''unverified:*'' (with null invocation_model_id, canonical name unverified). Maintainer decision 2026-10-08: superseded
   inactive models were moved to catalog/archive/legacy-nonrouting-2026-10-08.yaml outside the router''s seed. A successful
   model-level CLI report is not proof for every effort setting. Benchmark-only routes remain disabled until exact model/effort
-  conformance.'
+  conformance.
+
+  Hermes rows (`invocation_model_id` = `provider:model`) exist only for models that already have a benchmark under another
+  harness; their scores are inherited at load from that canonical model and effort, never duplicated in benchmarks.tsv. A
+  Hermes route whose provider `hermes auth list` does not show with a usable credential is ineligible (provider-unreachable).'
 benchmark_index_version: Artificial Analysis Intelligence Index v4.3.2
 benchmark_index_notes: Scores use index version v4.3.2 (September 2026); the initial seed snapshot was current as of 2026-09-27,
   and per-row source metadata records later refreshes. Scores are NOT comparable to v4.3, v4.3.1, v4.2 or v4.1.1. v4.3.1 refreshed

@@ -204,6 +204,9 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |  |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |  |
 | `tests/test_h5_hydrogen_plan_reviewer.py` | keep |  |
+| `tests/test_harness_preference.py` | keep |  |
+| `tests/test_hermes_adapter.py` | keep |  |
+| `tests/test_hermes_catalog.py` | keep |  |
 | `tests/test_hooks.py` | keep |  |
 | `tests/test_hydrogen_shadow_scorecard.py` | keep |  |
 | `tests/test_instruction_conformance.py` | keep |  |
@@ -215,6 +218,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_issue_927_onboarding_wording.py` | keep |  |
 | `tests/test_landings.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
 | `tests/test_monitor.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_onboarding_harness_preference.py` | keep |  |
 | `tests/test_packet_delivery_channel.py` | keep |  |
 | `tests/test_pane_busy.py` | keep |  |
 | `tests/test_plugin_skill_entry.py` | keep |  |
@@ -569,6 +573,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue1239_add_dir_trust.py` | keep |  |
 | `tests/v31/test_issue1260_add_dir_blank_line.py` | keep |  |
 | `tests/v31/test_issue1268_claude_submit_wording.py` | keep |  |
+| `tests/v31/test_issue1297_fastlane.py` | keep |  |
 | `tests/v31/test_issue_1113_combine_deterministic.py` | keep |  |
 | `tests/v31/test_issue_1115_review_pin_actor.py` | keep |  |
 | `tests/v31/test_issue_1116_reserve_display.py` | keep |  |
@@ -584,7 +589,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 
-Totals: {'keep': 367, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 372, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
 
 ## Left alone on purpose
 

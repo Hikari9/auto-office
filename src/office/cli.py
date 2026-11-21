@@ -117,6 +117,8 @@ Auto Office {ver}
                                     record onboarding answers as user-level preferences (or keep them all)
   office onboard [--enable-free-models | --disable-free-models]
                                     opt in to catalog models marked free (default off)
+  office onboard --harness-preference office|keep|recommended [--harness-budget PROVIDER:HARNESS=USD ...]
+                                    answer which harness to prefer where harnesses share a model (budgets derive weights)
   office doctor                     check the installation, hooks, and runtimes
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -509,6 +511,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--executor", help="office | keep | harness/model@effort")
     s.add_argument("--reviewer", help="office | keep | harness/model@effort (plan and code review)")
     s.add_argument("--skip", action="store_true", help="keep every preference and mark onboarding complete")
+    s.add_argument("--harness-preference", dest="harness_preference", metavar="office|keep|recommended",
+                   help="answer the harness overlap question: office clears its weights, keep leaves them, "
+                        "recommended derives them from --harness-budget")
+    s.add_argument("--harness-budget", dest="harness_budget", action="append", metavar="PROVIDER:HARNESS=USD",
+                   help="monthly USD a harness may spend on a provider in an overlap (repeat per pair; with recommended)")
     free_models = s.add_mutually_exclusive_group()
     free_models.add_argument("--enable-free-models", dest="enable_free_models", action="store_const", const=True,
                              help="explicitly allow catalog models marked free; default is off")
@@ -1017,8 +1024,11 @@ def _run(args, unknown) -> int:
     if cmd == "onboard":
         from office import onboarding
         answers = {"planner": args.planner, "executor": args.executor, "reviewer": args.reviewer}
-        if args.skip or any(answers.values()) or args.enable_free_models is not None:
-            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models, cwd=cwd), args)
+        if (args.skip or any(answers.values()) or args.enable_free_models is not None
+                or args.harness_preference is not None or args.harness_budget):
+            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models,
+                                         harness_answer=args.harness_preference, harness_budgets=args.harness_budget,
+                                         cwd=cwd), args)
         return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor

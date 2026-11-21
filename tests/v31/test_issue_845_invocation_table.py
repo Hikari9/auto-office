@@ -25,6 +25,9 @@ GOLDEN = {
     ("pi", "anthropic/claude-sonnet-5-5", "high"):
         ["pi", "--print", "--no-approve", "--no-extensions", "--no-mcp", "--model", "anthropic/claude-sonnet-5-5",
          "--thinking", "high", "--no-session"],
+    ("hermes", "anthropic:claude-sonnet-5-5", "high"):
+        ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5", "--reasoning", "high",
+         "--yolo", "--usage-file", "/w/usage.json"],
 }
 
 
@@ -60,7 +63,8 @@ def test_every_catalog_route_has_a_well_formed_command_even_when_not_proven():
             continue
         assert slug(row).strip(), f"{harness}/{row['model_id']}@{row['effort']} has no slug"
         argv = argv_for(row)
-        assert argv[0] and any(slug(row) in a or row["model_id"] in a for a in argv), (row["model_id"], argv)
+        # hermes pins `provider:model` as --provider and --model; the rest pass the slug whole.
+        assert argv[0] and any(slug(row) in a or row["model_id"] in a or slug(row).split(":", 1)[-1] in a for a in argv), (row["model_id"], argv)
         assert not any(a in ("None", "") for a in argv), (row["model_id"], argv)
         checked += 1
     assert checked >= 40
