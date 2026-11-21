@@ -178,7 +178,7 @@ def _next_lines(env) -> dict:
 def test_status_resume_and_wait_agree_while_t1_checks_then_has_findings_then_is_accepted(env, monkeypatch):
     approved_run(env, plan=PLAN_STACK, executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}])
     monkeypatch.setenv("OFFICE_JOBS", "manual")
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the test resumes T1: the fake harness resumes claude only
     from office import db, gates, jobs, review_parse, state
     con = env.con()
     jobs.execute(con, con.execute("SELECT id FROM outbox WHERE kind='launch_agent' AND status='queued'").fetchone()[0])
