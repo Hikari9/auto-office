@@ -353,3 +353,58 @@ def test_budget_shares_sum_to_about_one_hundred_for_awkward_splits():
     overlap = {"anthropic": {"models": ["m"], "harnesses": ["claude", "hermes", "agy"]}}
     weights, _ = onboarding.derive_weights(overlap, {"anthropic": {"claude": 1, "hermes": 1, "agy": 1}})
     assert math.isclose(sum(weights["anthropic"].values()), 100, abs_tol=0.3)
+
+
+def test_a_budget_above_the_cap_is_refused_and_nothing_is_written(h):
+    answer_schema(h)
+    code, out = h.office("onboard", "--harness-preference", "recommended", "--harness-budget", "anthropic:claude=1e308",
+                         "--harness-budget", "anthropic:hermes=1e308", "--harness-budget", "anthropic:agy=0")
+    assert code == 2 and "from zero to" in out, out
+    assert "routing" not in h.user_data()
+
+
+def test_hermes_without_a_usable_credential_does_not_join_the_overlap(h, monkeypatch):
+    monkeypatch.setattr(hermes_access, "auth_status", lambda **_: {"anthropic": {"credentials": 1, "usable": 0, "exhausted": 1}})
+    hp = h.status()["harness_preference"]
+    assert [o["harnesses"] for o in hp["overlap"]] == [["agy", "claude"]]
+    assert "hermes" not in hp["pending"]
+
+
+def test_skip_with_a_harness_answer_is_refused_and_writes_nothing(h):
+    code, out = h.office("onboard", "--skip", "--harness-preference", "keep")
+    assert code == 2 and "takes no answers" in out, out
+    assert not h.user.exists()
+
+
+def test_answering_without_an_overlap_is_refused_and_writes_nothing(h):
+    h.remove("hermes")
+    h.remove("agy")
+    code, out = h.office("onboard", "--harness-preference", "keep")
+    assert code == 2 and "no installed harness shares a model" in out, out
+    assert not h.user.exists()
+
+
+def test_keep_leaves_existing_overlap_weights_untouched(h):
+    weights = {"anthropic": {"claude": 60.0, "hermes": 40.0}}
+    h.user.write_text(yaml.safe_dump({"routing": {"harness_preference": weights}}))
+    code, out = h.office("onboard", "--harness-preference", "keep")
+    assert code == 0, out
+    assert h.user_data()["routing"]["harness_preference"] == weights
+
+
+def test_recommended_keeps_other_provider_scopes(h):
+    h.user.write_text(yaml.safe_dump({"routing": {"harness_preference": {"openai": {"codex": 100}}}}))
+    code, out = h.office("onboard", "--harness-preference", "recommended", "--harness-budget", "anthropic:claude=60",
+                         "--harness-budget", "anthropic:hermes=40", "--harness-budget", "anthropic:agy=0")
+    assert code == 0, out
+    assert h.user_data()["routing"]["harness_preference"] == {
+        "openai": {"codex": 100}, "anthropic": {"claude": 60.0, "hermes": 40.0, "agy": 0.0}}
+
+
+def test_one_model_under_two_providers_keeps_each_provider_its_own_harnesses(h, monkeypatch):
+    real_rows = candidates.catalog_rows
+    stray = {"invocation_harness": "claude", "model_id": "claude-sonnet-5-5", "lineage_key": "zz/claude-sonnet-5-5"}
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [stray] + real_rows())  # first, so it would win a model-only key
+    hp = pref(h)
+    assert [o["provider"] for o in hp["overlap"]] == ["anthropic"]
+    assert hp["overlap"][0]["harnesses"] == OVERLAP_HARNESSES

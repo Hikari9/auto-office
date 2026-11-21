@@ -36,6 +36,8 @@ FREE_MODELS_KEY = "onboarding.free_models_enabled"
 # Harness preference round: due once per overlapping harness, not a schema bump (the three questions stay as they are).
 OVERLAP_SEEN_KEY = "onboarding.harness_overlap_seen"
 BUDGETS_KEY = "onboarding.harness_budgets"
+# A monthly budget above this is refused as a typo: larger values overflow the share arithmetic to NaN.
+MAX_MONTHLY_USD = 1_000_000_000.0
 PREFERENCE_KEY = f"routing.{harness_preference.KEY}"
 RECOMMENDED = "recommended"
 DISCLAIMER = ("Office favors this route according to its routing policy, but may choose another model or effort "
@@ -496,7 +498,8 @@ def _stored_budgets() -> dict:
 
 def _usd(value) -> float | None:
     """A budget as a non-negative finite number, else None (a hand-edited value never reaches the arithmetic)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or not 0 <= value <= MAX_MONTHLY_USD:
         return None
     return float(value)
 
@@ -557,7 +560,7 @@ def harness_overlap(auth: dict) -> dict[str, dict]:
     with a usable credential (`auth`, from hermes_access.auth_status). Grouped by the model's vendor, which is
     the scope `routing.harness_preference` keys on."""
     installed = {aid for aid, a in adapters.load_all().items() if a.get("office_profiles") and adapters.installed(a)}
-    serving: dict[str, tuple[str, set[str]]] = {}
+    serving: dict[tuple[str, str], set[str]] = {}
     for row in candidates.catalog_rows():
         harness, model = row.get("invocation_harness"), row.get("model_id")
         provider = (row.get("lineage_key") or "").split("/", 1)[0]
@@ -567,9 +570,9 @@ def harness_overlap(auth: dict) -> dict[str, dict]:
             reached, _ = hermes_access.expected_route(row.get("invocation_model_id") or "")
             if not reached or (auth.get(reached) or {}).get("usable", 0) < 1:
                 continue
-        serving.setdefault(model, (provider, set()))[1].add(harness)
+        serving.setdefault((provider, model), set()).add(harness)
     out: dict[str, dict] = {}
-    for model, (provider, harnesses_) in sorted(serving.items()):
+    for (provider, model), harnesses_ in sorted(serving.items()):
         if len(harnesses_) < 2:
             continue
         entry = out.setdefault(provider, {"models": [], "harnesses": set(), "pairs": []})
@@ -622,8 +625,8 @@ def _parse_budgets(specs: list[str] | None, overlap: dict) -> dict[str, dict[str
             usd = float(value)
         except ValueError:
             usd = math.nan
-        if not math.isfinite(usd) or usd < 0:
-            raise _usage(f"--harness-budget {spec!r}: USD must be a finite number, zero or more")
+        if not math.isfinite(usd) or not 0 <= usd <= MAX_MONTHLY_USD:
+            raise _usage(f"--harness-budget {spec!r}: USD must be a number from zero to {MAX_MONTHLY_USD:g}")
         if harness not in (overlap.get(provider) or {}).get("harnesses", []):
             raise _usage(f"--harness-budget {spec!r}: {harness} does not run an overlapping {provider} model here",
                          next_step="office onboard --harness <h> --json lists the pairs to answer")

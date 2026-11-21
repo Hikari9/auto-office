@@ -274,9 +274,9 @@ def test_skip_takes_no_answers_and_apply_needs_one(h):
 
 def test_schema_bump_reprompts_with_current_values_but_a_package_bump_does_not(h, monkeypatch):
     h.office("onboard", "--executor", "agy/claude-sonnet-5-5@medium")
-    assert "onboarding schema" not in h.status()["reason"]  # only the harness round is owed
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # the schema is current; only the round is owed
     monkeypatch.setattr(version, "current", lambda: "9.9.9")
-    assert "onboarding schema" not in h.status()["reason"]  # a new package version alone never re-onboards
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # a new package version alone never re-onboards
     monkeypatch.setattr(onboarding, "SCHEMA_VERSION", onboarding.SCHEMA_VERSION + 1)
     data = h.status()
     assert data["due"] is True and "newer than the one completed" in data["reason"]

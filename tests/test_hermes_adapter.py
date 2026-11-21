@@ -83,7 +83,7 @@ def test_reviewer_interactive_argv_is_pinned(hermes):
     argv, kind = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
     assert kind == "hermes"
     assert argv == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "high", "--yolo", "--accept-hooks"]
+                    "--reasoning", "high", "--yolo", "--accept-hooks", "--in", str(CWD)]
 
 
 def test_reviewer_interactive_argv_pins_the_provider_and_ignores_user_config(hermes):
@@ -91,6 +91,7 @@ def test_reviewer_interactive_argv_pins_the_provider_and_ignores_user_config(her
     argv, _ = adapters.interactive_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD)
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--provider") + 1] == "anthropic"
+    assert argv[argv.index("--in") + 1] == str(CWD)  # the pane starts in the reviewed worktree, as the worker's does
 
 
 def test_hermes_has_no_vision_profile(hermes):

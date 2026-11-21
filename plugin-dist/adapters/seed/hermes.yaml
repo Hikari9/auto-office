@@ -99,7 +99,7 @@ office_profiles:
     readback: hermes-usage
     verify_worktree_unchanged: true
     interactive:
-      argv: [--cli, --ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --accept-hooks]
+      argv: [--cli, --ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --accept-hooks, --in, "{cwd}"]
     max_minutes: 60
 source_notes: >-
   Hermes adapter for hermes 0.23.3 (git install). Headless: `hermes -z` (one-shot, prints only the final response,
