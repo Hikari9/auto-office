@@ -452,6 +452,44 @@ def test_worktree_guard_sees_an_edit_to_an_already_untracked_file(tmp_path):
     assert "untracked files" in guard(before)
 
 
+@pytest.mark.parametrize("cache", ["__pycache__/a.cpython-315.pyc", "pkg/__pycache__/b.cpython-315.pyc", "c.pyc",
+                                   ".pytest_cache/v/cache/lastfailed", "pkg/.mypy_cache/x.json", ".ruff_cache/y",
+                                   ".hypothesis/examples/z"])
+def test_worktree_guard_ignores_untracked_interpreter_caches(tmp_path, cache):
+    # #1182: a reviewer that imports a module leaves bytecode behind in a repo with no .gitignore.
+    from office import gates
+    repo = _git_repo(tmp_path)
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", repo)
+    before = guard(None)
+    (repo / cache).parent.mkdir(parents=True, exist_ok=True)
+    (repo / cache).write_bytes(b"\x00")
+    assert guard(before) is None
+
+
+@pytest.mark.parametrize("name", ["pycache.txt", "__pycache__.py", "src/notes_pyc.md"])
+def test_worktree_guard_still_sees_files_that_only_look_like_caches(tmp_path, name):
+    from office import gates
+    repo = _git_repo(tmp_path)
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", repo)
+    before = guard(None)
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / name).write_text("x")
+    assert "untracked files" in guard(before)
+
+
+def test_worktree_guard_still_sees_an_edit_to_a_tracked_pyc(tmp_path):
+    import subprocess
+    from office import gates
+    repo = _git_repo(tmp_path)
+    (repo / "kept.pyc").write_bytes(b"a")
+    subprocess.run(["git", "-C", str(repo), "add", "-f", "kept.pyc"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pyc"], check=True)
+    guard = gates._worktree_guard({"harness": "pi"}, "reviewer", repo)
+    before = guard(None)
+    (repo / "kept.pyc").write_bytes(b"b")
+    assert "tracked diff" in guard(before)
+
+
 def test_worktree_guard_is_off_for_harnesses_with_their_own_sandbox(tmp_path):
     from office import gates
     repo = _git_repo(tmp_path)

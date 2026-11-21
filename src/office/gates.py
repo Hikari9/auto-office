@@ -1759,7 +1759,9 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
     tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
     or None. Returns None when the profile does not ask for the check. Gitignored files and `.git/` are
     not fingerprinted (caches and build outputs change outside the reviewer); the harness's read-only
-    mode is the write barrier for them."""
+    mode is the write barrier for them. Untracked interpreter and tool caches (`__pycache__`, `*.pyc`,
+    `.pytest_cache`, ...) are skipped too, gitignored or not: a reviewer that imports a module leaves bytecode
+    behind without editing the code under review (#1182)."""
     from office import adapters
     adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
     if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):
@@ -1775,10 +1777,13 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
     def fingerprint() -> dict:
         untracked = sha256_bytes(b"".join(
             name.encode() + b"\0" + _file_digest(Path(cwd) / name).encode()
-            for name in sorted(git("ls-files", "--others", "--exclude-standard", "-z").split("\0")) if name))
+            for name in sorted(git("ls-files", "--others", "--exclude-standard", "-z").split("\0"))
+            if name and not _is_cache_path(name)))
+        status = "\0".join(entry for entry in git("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
+                           if not (entry.startswith("?? ") and _is_cache_path(entry[3:])))
         return {"HEAD": git("rev-parse", "HEAD").strip(),
                 "tracked diff": sha256_bytes(git("diff", "HEAD", "--binary").encode()),
-                "status": sha256_bytes(git("status", "--porcelain=v1", "--untracked-files=all").encode()),
+                "status": sha256_bytes(status.encode()),
                 "untracked files": untracked}
 
     def guard(before: dict | None):
@@ -1789,6 +1794,16 @@ def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
             return "the worktree could not be fingerprinted (not a git checkout or git failed), so the review cannot be trusted"
         return ", ".join(k for k in now if now[k] != before[k]) or None
     return guard
+
+
+# Untracked interpreter and tool caches the reviewer guard ignores (#1182). Tracked files are always fingerprinted.
+_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
+_CACHE_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_cache_path(name: str) -> bool:
+    parts = name.split("/")
+    return bool(_CACHE_DIRS.intersection(parts[:-1])) or name.endswith(_CACHE_SUFFIXES)
 
 
 def _file_digest(path: Path) -> str:
