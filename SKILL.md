@@ -219,6 +219,8 @@ recovered once when its head is one Office reviewed or pushed and folding the op
 early; `--landed-externally <merged-pr-url>` verifies external or owned squash landing, then closes. Rebase, `--no-prs`, recovery and PR-body detail:
 `docs/orchestrator-reference.md`.
 
+Run-level checks: declare exactly `checks: scripts/validate.sh --pr` on its own line for each merge (compound forms like `uv sync && ...` are not credited and land refuses `integration-coverage-incomplete`). Use the full `scripts/validate.sh` only before the last merge of a batch, for a release, or for changed, deleted or renamed tests or test infrastructure. See `docs/validation.md`.
+
 ## Batch landing
 
 For a multi-run or multi-PR release, use `office land --batch <manifest.json>` from the target repo, first with `--dry-run`. Each run or PR lane declares `land_after` dependencies; exactly one lane owns the version bump. The batch composes the pinned PR heads, runs the full suite once on that composed SHA, and merges nothing unless the suite passes. Each merge pins the validated head, and the default branch tree must equal the composed tree at the end. A red batch resumes after an appended fix PR (or an explicit `--retry-full` for a transient failure). See `docs/batch-landing.md`. Do not confuse this cross-run release operation with a single-run `office land` or deploy.

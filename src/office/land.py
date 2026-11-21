@@ -541,7 +541,8 @@ def _ask(con, run: dict) -> Result:
     if coverage and coverage[0] == verification_coverage.SCOPED:
         lines.append("SCOPED PR TESTS VERIFIED; full suite not run (see #854).")
     if coverage and coverage[0] == verification_coverage.PARTIAL:
-        lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until full-tier integration checks pass.")
+        lines.append(f"FULL SUITE NOT VERIFIED: {coverage[1]}. Office will refuse merge until scripts/validate.sh --pr "
+                     "(scoped) or full-tier integration checks pass.")
     for t in integration._topo(integration.accepted_set(con, run) or []):
         if not prs.has_pr(t):
             continue
@@ -616,13 +617,14 @@ def _require_run_coverage(run: dict, commit: str, *, con=None) -> None:
                                             verified_commands=verification_coverage.attested_checks(con, run, commit)
                                             if con is not None else None)
     if coverage and coverage[0] == verification_coverage.PARTIAL:
+        uncredited = verification_coverage.uncredited_validate(checks)
         raise Refused("integration-coverage-incomplete",
                       f"integration checks are insufficient for landing: {coverage[1]}; "
                       f"declared run-level checks: {checks or ['none']}",
                       preserved="no additional task PRs were merged by this attempt",
-                      next_step="amend the plan's run-level checks: to scripts/validate.sh --pr "
-                                "(targeted) or scripts/validate.sh (full), re-run integration verification "
-                                "against the same composed commit, then office land")
+                      next_step=(f"uncredited run-level checks {uncredited}; " if uncredited else "")
+                      + "amend the plan: " + verification_coverage.RUN_CHECK_ADVICE
+                      + ". Integration verification re-runs on the composed commit, then office land")
 
 
 def _merge_all(con, run: dict, res: Result) -> str:

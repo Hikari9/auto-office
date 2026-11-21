@@ -172,6 +172,29 @@ def _scoped_validate(repo: Path, commit: str, command: str) -> bool:
 
 _ATTEST_PYTEST = ".venv/bin/python3 -m pytest tests/ -q -n 2 --all"
 
+_CREDITED_VALIDATE_ARGV = (["scripts/validate.sh", "--pr"], ["./scripts/validate.sh", "--pr"], *_FULL_SUITE_ARGV)
+
+RUN_CHECK_ADVICE = ("declare the run-level check as exactly `checks: scripts/validate.sh --pr` on its own line "
+                    "(the per-merge proof; put setup such as `uv sync` on a separate checks: line or in worktree.setup, "
+                    "since a compound command like `uv sync && scripts/validate.sh --pr` is not credited). "
+                    "Use the full `scripts/validate.sh` only before the last merge of a batch, for a release, "
+                    "or when tests or test infrastructure are changed, deleted or renamed")
+
+
+def uncredited_validate(commands: list[str]) -> list[str]:
+    """Run-level checks that mention validate.sh in a form the coverage audit never credits
+    (compound, prefixed or redirected), so the plan author learns before land refuses."""
+    out = []
+    for command in commands:
+        if "validate.sh" not in command:
+            continue
+        words = _tokens(command)
+        if words[:1] in (["bash"], ["sh"]):
+            words = words[1:]
+        if words not in _CREDITED_VALIDATE_ARGV:
+            out.append(command)
+    return out
+
 
 def supplemental_checks(repo: Path, commit: str, commands: list[str]) -> list[str]:
     if (_tiered_repo(repo, commit) and any(_is_validate_script(c) for c in commands)
