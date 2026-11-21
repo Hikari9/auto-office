@@ -204,7 +204,7 @@ def test_a_retry_after_a_blocked_attempt_is_still_the_initial_review(env):
 
 # ------------------------------------------------------------------ never for any other gear or sizing
 
-@pytest.mark.parametrize("gear, plan_reviews", [("XS", 0), ("S", 0), ("M", 0), ("L", 1), ("express", 1)])
+@pytest.mark.parametrize("gear, plan_reviews", [("XS", 0), ("S", 0), ("M", 0), ("L", 1)])
 def test_no_other_gear_gets_goldfish(env, gear, plan_reviews):
     env.trust()
     env.script(plan_reviewer=[{"reply": APPROVED}])
@@ -340,7 +340,7 @@ def test_hazard_specialists_are_bounded_at_two_and_carry_their_trigger():
 def test_pinned_xl_needs_the_run_gear_not_a_task_size():
     base = {"gates": {"gear_model_version": "run-gear-1", "review_contract": contract.CONVERGENCE}}
     assert xl_review.pinned_xl({**base, "gear": "XL"})
-    for gear in ("XS", "S", "M", "L", "express", None):
+    for gear in ("XS", "S", "M", "L", None):
         assert not xl_review.pinned_xl({**base, "gear": gear})
     assert not xl_review.pinned_xl({"gear": "XL", "gates": {"gear_model_version": "legacy-pinned"}})
     assert not xl_review.pinned_xl({**base, "gear": "L", "task_size": "XL"})

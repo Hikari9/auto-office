@@ -87,6 +87,9 @@ def test_tags_alone_produce_no_routing_dimensions():
 PLAN_TAGGED = PLAN_ONE + "\n".join(f"{k}: {v}" for k, v in TAGS.items()) + "\n"
 
 
+TAG_KEYS = ("evidence_domain", "intent", "difficulty_estimate", "brief_shape", "verification_shape")
+
+
 def _db(env, sql, *args):
     con = env.con()
     try:
@@ -96,8 +99,10 @@ def _db(env, sql, *args):
 
 
 def _desc(env, table="tasks", **where):
+    """The routing-evidence tags of one descriptor (an XS-XL run also records its task size and profile beside them)."""
     sql = f"SELECT descriptor_json FROM {table} WHERE " + " AND ".join(f"{k}=?" for k in where)
-    return json.loads(_db(env, sql, *where.values())[0]["descriptor_json"])
+    desc = json.loads(_db(env, sql, *where.values())[0]["descriptor_json"])
+    return {k: v for k, v in desc.items() if k in TAG_KEYS}
 
 
 def test_tags_persist_through_submit_amendment_and_dispatch_snapshot(env):
@@ -117,7 +122,7 @@ def test_tags_persist_through_submit_amendment_and_dispatch_snapshot(env):
 def test_an_invalid_tag_is_refused_at_submit(env):
     env.trust()
     env.script()
-    code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out
     env.write_plan(PLAN_ONE + "intent: wishful\n")
     code, out = env.office("submit")

@@ -77,7 +77,7 @@ def test_installed_resources_byte_match_source():
 
 
 def test_generated_distribution_preserves_executable_support_scripts():
-    for path in ("scripts/validate.sh", "scripts/office_spawn.sh", "scripts/office_runtime.py"):
+    for path in ("scripts/validate.sh", "scripts/verify.sh", "scripts/office_liveness.sh"):
         source = ROOT / path
         shipped = ROOT / "plugin-dist" / path
         assert bool(source.stat().st_mode & 0o100) == bool(shipped.stat().st_mode & 0o100)

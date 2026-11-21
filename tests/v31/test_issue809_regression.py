@@ -59,7 +59,7 @@ def test_l_and_xl_fund_up_to_four_specialists(gear):
 
 
 def test_legacy_pinned_runs_fund_no_subagents():
-    legacy = {"gear": "quick", "gates": {"gear_model_version": "legacy-pinned"}, "risk": {}}
+    legacy = {"gear": "M", "gates": {"gear_model_version": "legacy-pinned"}, "risk": {}}
     assert sub.rubrics(legacy, {"scope": []}) == ()
     assert not sub.funded({"gear": "L", "gates": {}})
 
@@ -115,19 +115,3 @@ def test_a_contract_amendment_keeps_the_pinned_gear_and_task_size(env):
     assert after["gear"] == "M" and after["gates"]["gear_model_version"] == "run-gear-1"
     assert after["gates"]["run_gear"] == "M"
     assert state.get_task(con, after["id"], "T1")["descriptor"].get("task_size") == size
-
-
-def test_legacy_pinned_run_resumes_without_xs_xl_gear_or_size(env):
-    env.trust()
-    start_inline(env, plan=PLAN_ONE, gear="express")
-    env.office("approve", "plan", "--quote", "approved", check=0)
-    con, run = _run(env)
-    gates = {k: v for k, v in run["gates"].items() if k not in ("gear_model_version", "run_gear", "run_gear_rationale")}
-    state.update_run(con, run["id"], gates=gates)
-    con.commit()
-    env.office("resume", check=0)
-    _, resumed = _run(env)
-    assert resumed["gear"] == "express" and resumed["gates"] == gates
-    assert slates.new_gear_size({"context": {"gear": resumed["gear"], "size_class": "L"}}) is None
-    assert sub.rubrics(resumed, {"scope": ["src/a.py"]}) == ()
-    assert task_sizing.execution_mode(resumed["gear"], {"task_size": "XS"}, LOW)["mode"] == "delegated"

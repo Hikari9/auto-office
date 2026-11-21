@@ -25,7 +25,7 @@ it never investigates or files. Issues only: never fix the bug or open a PR as p
 - Only the user changes requirements or authorizes irreversible or external actions. Record their words verbatim with `--quote`; never paraphrase consent into existence.
 - Self-review before each phase advances: re-read the goal and done criteria against current state, then proceed, amend, or stop. This is judgement, not paperwork; there is nothing to record.
 - Raw evidence stays private. Public artifacts get summaries only.
-- A run stays on the Office version that created it. If a command says a run is pinned to another runtime (including a 3.0 run), follow the instruction it prints. For ordinary PR checks, use the repository's contract suite, named safety smoke and changed-file affected tests. Require full-suite validation for test-infrastructure changes, deleted or renamed tests, release work, or an explicit task requirement; do not prescribe a fixed test roster for every PR.
+- A run stays on the Office version that created it. If a command says a run is pinned to another runtime, follow the instruction it prints. For ordinary PR checks, use the repository's contract suite, named safety smoke and changed-file affected tests. Require full-suite validation for test-infrastructure changes, deleted or renamed tests, release work, or an explicit task requirement; do not prescribe a fixed test roster for every PR.
 
 ## Asking the user
 
@@ -198,14 +198,14 @@ Executor routing (AA v5, `catalog/executor-policy.yaml`): size floors use the Ar
 ### Risk floor and the lightweight path
 
 - A run gear (`XS` to `XL`, pinned at intake) funds planning and review ceremony from complexity; `office start`, `office inspect plan` and every dispatch print it with its
-  funded gates. Risk is separate: a gear never lowers the floor below. Legacy names (`direct` to `full`) remain explicit compatibility presets with historic gates. New integrations use XS-XL; existing pinned runs resume unchanged. Task sizes, size floors and planner gear recommendations: `docs/xs-xl-run-gear.md`.
+  funded gates. Risk is separate: a gear never lowers the floor below. The old preset names (`direct` to `full`) were removed; a run pinned to one fails with `gear-removed`. Use XS-XL. Task sizes, size floors and planner gear recommendations: `docs/xs-xl-run-gear.md`.
 - Every run records a risk classification: `low` (explicit `local`/`repo` blast radius, nothing high), `elevated` (irreversible, production
-  blast radius, or size L/XL on a legacy-pinned run; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
+  blast radius; XS-XL runs keep size separate from risk) or `unknown` (nothing declared). Unknown is never low. No gear or mode drops independent code review below the floor
   `unknown` and `elevated` imply.
 - The plan classifies it in Requirements (`blast_radius: local|repo|production|production-data`, optional `irreversible: yes`,
   `size_class: XS|S|M|L|XL`). It may classify an unknown run or raise any run, never lower what the user declared. Stored once, restored on resume.
-- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk, legacy gear `full`,
-  and after plan authorization. It drops only review the gear tunes (`light`/`quick`/`direct` independent review, `express` plan review; XS-XL gears fund their own).
+- Trivial low-risk work may declare `lightweight: <why trivial and low risk>`. The runtime refuses it for unknown or elevated risk
+  and after plan authorization. It drops only review the gear tunes (XS funds review only when risk forces it; other gears fund their own).
   Scope, `checks:`, self-review, the evidence receipt and human landing authority all stay. Runs from before this keep their gates.
 
 ## Herdr agents

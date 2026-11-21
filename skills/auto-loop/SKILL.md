@@ -6,7 +6,7 @@ description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use t
 # Auto Loop
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+> role briefs; the `office_runtime.py` helpers it names were removed with the 3.0 runtime. Follow `office status` and its `next:` line.
 
 Dispatch every task in the wave before waiting on any of them. One worktree per dispatch, cut from the run's pinned base SHA — regardless of executor count or gear. A single-dispatch run is not exempt: it is the case most tempting to skip the worktree for ("just one quick executor," work directly in the main checkout), and exactly the case where that shortcut is wrong. The orchestrator can never assume exclusive ownership of the repo's main working tree; another human or another agent/session may be concurrently editing it, independent of how many dispatches this orchestrator itself is running. Each executor commits its own work locally to its own dispatch branch — never pushes, never touches any other branch — as a checkpoint immediately before reporting done, so a finished dispatch survives an orchestrator mistake made later during post-dispatch verification or integration. The orchestrator still owns final integration and merge, and may amend, squash, or rewrite that commit while landing it. Two tasks in one wave never share a write scope — a wave is only real if it draws as disjoint. Every brief's completion criterion is a command whose output settles it, not a target — "under 120 lines" is a wish, "`wc -l` reports under 120" is a receipt (spec §4).
 
@@ -26,4 +26,4 @@ Report blockers, then carry out the authorized action — a defect exit pauses a
 
 It stops for exactly two things: an external send, and a user-owned decision the plan didn't anticipate. Everything the plan named — production applies included — it executes without asking again. Send a mid-run contract amendment only to dispatches whose base contains its producer (`references/contract-amendments.md`).
 
-Reusing an executor or plan_reviewer whose context exceeds 272,000 tokens: send `/compact` and queue the next brief pointer back to back, then move on — no wait, no poll, no replacement worker. `scripts/office_runtime.py reuse-plan` is the pinned, pure decision (`compact_then_queue` vs `normal_reuse`); call it before reusing, don't hand-roll the threshold check.
+Reusing an executor or plan_reviewer whose context exceeds 272,000 tokens: send `/compact` and queue the next brief pointer back to back, then move on — no wait, no poll, no replacement worker. Above the threshold the decision is `compact_then_queue`, below it `normal_reuse`; check it before reusing.

@@ -13,7 +13,7 @@ def _dedicated_existing_plan(env):
     env.trust()
     env.script(planner=[{"plan": PLAN_TWO, "submit": True}],
                plan_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    env.office("start", "fixture goal", "--gear", "full", check=0)
+    env.office("start", "fixture goal", "--gear", "L", "--planner", "dedicated", check=0)
     con = env.con()
     run_id = con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
     return con, state.get_run(con, run_id)

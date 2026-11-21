@@ -23,7 +23,7 @@ DEFECT = ("VERDICT: PLAN_DEFECT\n"
 def _start(env, plan=PLAN_ONE, **script):
     env.trust()
     env.script(**script)
-    code, out = env.office("start", "fixture", "--gear", "express", "--planner", "inline")
+    code, out = env.office("start", "fixture", "--gear", "L", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     return env.office("submit")

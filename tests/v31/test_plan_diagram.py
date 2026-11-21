@@ -42,8 +42,8 @@ def test_submit_shows_parallel_lanes_routes_and_checkpoints(env):
 
 def test_depends_become_stacked_waves(env):
     env.trust()
-    out = start_inline(env, plan=PLAN_STACKED, gear="direct")
-    assert "review: " not in out and "wave 2 {T2 accepted [checks]}" in out, out
+    out = start_inline(env, plan=PLAN_STACKED, gear="XS")
+    assert "wave 2 {T2 accepted [checks" in out, out
     assert "wave 2" in out and "stacked on T1" in out, out
     code, out = env.office("inspect", "plan")
     assert code == 0 and "stacked on T1" in out, out

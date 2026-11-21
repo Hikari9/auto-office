@@ -16,7 +16,7 @@ def _run(env):
 
 def _start(env, *extra):
     env.trust()
-    code, out = env.office("start", "fixture", "--gear", "direct+review", "--planner", "inline", *extra)
+    code, out = env.office("start", "fixture", "--gear", "S", "--planner", "inline", *extra)
     assert code == 0, out
     return _run(env)
 

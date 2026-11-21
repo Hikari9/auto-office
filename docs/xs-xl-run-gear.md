@@ -193,7 +193,7 @@ Every Office-launched Herdr pane for a task, executor or reviewer, shows the tas
 
 ## Legacy migration and pin safety
 
-The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) continue to parse and retain their prior gating. Their `gear_model_version` is `legacy-pinned`; they are never silently mapped to XS–XL, and `direct` risk-raising amendments retain their old `express`/`full` upgrade contract. The new `run-gear-1` is only for a newly selected XS–XL run. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
+The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) were removed with the 3.0 runtime without a compatibility path: `office start --gear direct` is an invalid choice, and a run still pinned to one fails on resume, status and dispatch with the `gear-removed` error (pick XS/S/M/L/XL and start a new run). `run-gear-1` is the only gear model. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
 
 
 ## M executor Haiku High transition (#861, October 28, 2026)

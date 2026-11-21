@@ -25,3 +25,11 @@ def test_nonsense_is_rejected(monkeypatch):
     monkeypatch.setenv("OFFICE_NEW_RUNS", "banana")
     with pytest.raises(OfficeError):
         runtime_default.require_new_run_runtime()
+
+
+@pytest.mark.parametrize("value", ["3.0", "3.0.9"])
+def test_the_removed_3_0_rollback_is_refused_with_a_clear_message(monkeypatch, value):
+    monkeypatch.setenv("OFFICE_NEW_RUNS", value)
+    with pytest.raises(OfficeError) as err:
+        runtime_default.require_new_run_runtime()
+    assert err.value.category == "new-runs-on-3.0" and "3.0 runtime was removed" in err.value.message

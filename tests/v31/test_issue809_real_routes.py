@@ -155,21 +155,6 @@ def test_issue861_persisted_route_audit_retains_exact_haiku_receipt_and_fallback
     con.close()
 
 
-def test_issue861_legacy_pinned_routing_is_independent_of_new_m_policy():
-    haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude")
-    sonnet = candidate("claude-sonnet-5-5", "medium", 41, harness="claude")
-    historical_preference = [{"model_id": "claude-sonnet-5-5", "harness": "claude",
-                              "effort": "medium"}]
-    original = decide("M", [haiku, sonnet], gear="direct",
-                      preference=historical_preference)
-    replay = decide("XL", [haiku, sonnet], gear="direct",
-                    preference=historical_preference)
-    assert original["selected"] == replay["selected"], (original, replay)
-    assert original["decision_hash"] == replay["decision_hash"]
-    assert "floor_exceptions" not in original["routing"]
-    assert original["candidate"]["model_id"] == "claude-sonnet-5-5"
-
-
 def test_issue861_discovery_candidates_are_never_ordinary_dispatches():
     haiku = candidate("claude-haiku-5-5", "high", 38, harness="claude",
                       available=False)

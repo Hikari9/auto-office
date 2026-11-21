@@ -46,7 +46,7 @@
  * guard below is kept regardless — Herdr being present at install time does not
  * mean it is present at run time, and v3 dispatches are not all pane-hosted.
  *
- * The ledger is written by `scripts/office_spawn.sh --pane-id`. A dispatch that
+ * The ledger is written by the pane launcher (herdr-ledger.mjs add). A dispatch that
  * does not name a pane never appears here and is never closed, even if the
  * agent list later reports that pane as finished.
  *

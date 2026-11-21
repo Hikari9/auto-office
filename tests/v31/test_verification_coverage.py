@@ -451,9 +451,8 @@ def pytest_collection_modifyitems(config, items):
     })
     # Keep the gate's surrounding ecosystem checks lightweight in this fixture.
     (scripts / "check_ecosystem.py").write_text("print('fixture ecosystem')\n")
-    (scripts / "office_runtime.py").write_text("print('fixture adapter')\n")
     (env.repo / "adapters/seed").mkdir(parents=True)
-    (env.repo / "adapters/seed/fixture.yaml").write_text("id: fixture\n")
+    shutil.copy2(source / "adapters/seed/agy.yaml", env.repo / "adapters/seed/fixture.yaml")  # a real, valid adapter file
     shutil.copy2(source / "pyproject.toml", env.repo / "pyproject.toml")
     fixture_venv = env.tmp / "gate-venv"
     fixture_venv.mkdir()

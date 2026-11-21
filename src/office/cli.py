@@ -257,8 +257,8 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("start", parents=[common], add_help=True)
     s.add_argument("goal", nargs="?")
-    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "greenfield", "direct", "direct+review", "light", "quick", "express", "full"], metavar="{XS,S,M,L,XL}",
-                   help="New run gear (XS-XL); greenfield is explicit opt-in for one cohesive build; historical aliases are compatibility presets")
+    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "greenfield"], metavar="{XS,S,M,L,XL}",
+                   help="New run gear (XS-XL); greenfield is explicit opt-in for one cohesive build")
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
     s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])
@@ -625,8 +625,6 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("dismiss", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("--all", dest="dismiss_all", action="store_true")
-    s = sp.add_parser("raw", add_help=False)
-    s.add_argument("rest", nargs=argparse.REMAINDER)
     s = sp.add_parser("hook", add_help=False)
     s.add_argument("event")
     s.add_argument("--harness", dest="hook_harness", default="claude")
@@ -706,26 +704,23 @@ def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> in
 # ------------------------------------------------------------------ dispatch
 
 def _rebuilding_reason(argv: list[str]) -> str | None:
-    """A bad OFFICE_VERSION_OVERRIDE is configuration: `raw` and `hook` keep their fast path instead of raising (#920)."""
+    """A bad OFFICE_VERSION_OVERRIDE is configuration: `hook` keeps its fast path instead of raising (#920)."""
     try:
         return version.rebuilding_reason()
     except RuntimeError:
-        if argv[:1] in (["raw"], ["hook"]):
+        if argv[:1] == ["hook"]:
             return None
         raise
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Before the fast paths, so `raw` and `hook` fail fast during a rebuild too (#920). The root-wake supervisor skips
+    # Before the fast paths, so `hook` fails fast during a rebuild too (#920). The root-wake supervisor skips
     # the probe: it is a background process whose ticks already classify a failed import, and the probe would delay
     # its first wake.
     if argv[:1] != ["_wake_supervise"] and (reason := _rebuilding_reason(argv)):
         print(version.rebuild_line(reason), file=sys.stderr)
         return version.REBUILD_EXIT_CODE
-    if argv and argv[0] == "raw":
-        from office import compat
-        return compat.raw(argv[1:])
     if argv and argv[0] == "hook":
         from office import hooks
         return hooks.main(argv[1:])
@@ -843,13 +838,6 @@ def _target(con, args, require_run=True):
     return target
 
 
-def _legacy_result(target) -> Result:
-    from office import legacy
-    msg, nxt = legacy.guidance(target.legacy)
-    res = Result(lines=[msg], next=nxt, exit_code=0)
-    return res
-
-
 # Commands that never read runs.db, so they never sweep it either.
 _NO_SWEEP = ("route", "config", "setup", "onboard", "update", "install", "uninstall", "web")
 
@@ -903,9 +891,6 @@ def _run(args, unknown) -> int:
         try:
             target = discovery.resolve(con, run_arg=args.target or args.run_arg, state_dir=args.state_dir,
                                        harness=args.harness, session=args.session)
-            if target.legacy is not None:
-                raise OfficeError("legacy-run", f"run {target.legacy.run_id[:8]} is a 3.0 run pinned to its plugin_commit; "
-                                  "it is not upgraded", next_step="finish it on its pinned runtime (office resume)")
             return emit(upgrade.upgrade(con, target.run, to=args.to, apply=args.apply), args)
         finally:
             con.close()
@@ -1077,12 +1062,10 @@ def _run(args, unknown) -> int:
     con = _con()
     try:
         target = _target(con, args)
-        if target.legacy is not None:
-            res = _legacy_result(target)
-            if target.note:
-                res.notices.append(target.note)
-            return emit(res, args)
         run = target.run
+        from office import config as cfg
+        if not (cmd == "inspect" or (cmd == "close" and args.abandon)):
+            cfg.require_supported_gear(run.get("gear"))
         args._run_id = run["id"]
         from office import root_wake, state
         before_seq = con.execute("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]

@@ -115,7 +115,7 @@ fi
 
 echo "== Adapter validation"
 for f in adapters/seed/*.yaml; do
-  python3 scripts/office_runtime.py validate-adapter "$f"
+  python3 -c 'import sys; from office.cli import main; sys.exit(main(["harness", "validate", "--file", sys.argv[1]]))' "$f"
 done
 
 if [ "${VALIDATE_BUILD:-0}" = "1" ]; then

@@ -71,7 +71,7 @@ def _plan_review_status(env, outcome_status: str) -> tuple[dict, str]:
     from office import db, plans, state
     manual = {"OFFICE_JOBS": "manual"}
     env.trust()
-    env.office("start", "fixture goal", "--gear", "express", "--planner", "inline", check=0, env=manual)
+    env.office("start", "fixture goal", "--gear", "L", "--planner", "inline", check=0, env=manual)
     env.write_plan(PLAN_ONE)
     env.office("submit", check=0, env=manual)
     con = env.con()

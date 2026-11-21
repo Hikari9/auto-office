@@ -18,6 +18,7 @@ EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
 FAKE_HERDR = r'''#!{python}
 import json, os, sys
+
 args = sys.argv[1:]
 mode = os.environ.get("FAKE_HERDR_AGENT", "gone")
 if args[:2] == ["agent", "get"]:
@@ -34,7 +35,7 @@ def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route="cla
     # These tests stub the claude adapter; the ranker's default executor is no longer a claude route.
     if route:
         env.office("route", "allow", route, "--role", "executor", check=0)
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
     env.office("dispatch", "T1", *(["--as", route] if route else []), env=EXTERNAL, check=0)
     herdr = env.bin / "herdr"
     herdr.write_text(FAKE_HERDR.format(python=sys.executable))
@@ -73,7 +74,6 @@ def test_resume_argv_appends_the_session_or_says_none():
     assert adapters.resume_argv(NO_RESUME, "worker", session_id="S1", model="m", effort="high", cwd=Path(".")) is None
 
 
-@pytest.mark.approved
 def test_rerun_needs_exactly_one_mode(env, monkeypatch):
     _setup(env, monkeypatch)
     code, out = env.office("rerun", "T1", env=EXTERNAL)
@@ -82,7 +82,6 @@ def test_rerun_needs_exactly_one_mode(env, monkeypatch):
     assert code == 2, out
 
 
-@pytest.mark.approved
 def test_fresh_starts_a_new_executor_on_the_same_worktree(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     code, out = env.office("rerun", "T1", "--fresh", env=EXTERNAL)
@@ -92,14 +91,12 @@ def test_fresh_starts_a_new_executor_on_the_same_worktree(env, monkeypatch):
     assert len(rows) == 2 and rows[0]["worktree"] == rows[1]["worktree"] and rows[1]["id"] != parent
 
 
-@pytest.mark.approved
 def test_resume_refuses_without_a_session_id(env, monkeypatch):
     _setup(env, monkeypatch, session=None)
     code, out = env.office("rerun", "T1", "--resume", env=EXTERNAL)
     assert code == 4 and "no stored harness session id" in out and "office rerun T1 --fresh" in out, out
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("mode,reason", [("alive", "still running"), ("down", "herdr unreachable")])
 def test_resume_refuses_a_live_or_unknown_parent(env, monkeypatch, mode, reason):
     _setup(env, monkeypatch)
@@ -112,7 +109,6 @@ def test_resume_refuses_a_live_or_unknown_parent(env, monkeypatch, mode, reason)
     assert reason in err.value.message and err.value.next_step == "office rerun T1 --fresh"
 
 
-@pytest.mark.approved
 def test_resume_refuses_an_adapter_without_a_resume_form(env, monkeypatch):
     _setup(env, monkeypatch)
     from office import adapters, rerun
@@ -123,7 +119,6 @@ def test_resume_refuses_an_adapter_without_a_resume_form(env, monkeypatch):
     assert "declares no resume form" in err.value.message
 
 
-@pytest.mark.approved
 def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     monkeypatch.setenv("FAKE_HERDR_AGENT", "gone")
@@ -142,7 +137,6 @@ def test_resume_launches_a_linked_dispatch_carrying_the_resume_argv(env, monkeyp
     assert f"resumed from {parent}" in out, out
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("adapter,form", [("claude", ["--resume"]), ("codex", ["resume"])])
 def test_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(env, monkeypatch, adapter, form):
     sid = "6f1c2a9e-3b7d-4c55-9a41-0d2e8b7a1f33"
@@ -160,7 +154,6 @@ def test_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(env, monke
     assert "--session-id" not in resume["argv"]
 
 
-@pytest.mark.approved
 def test_inspect_task_names_the_harness_that_gave_no_session_id(env, monkeypatch):
     parent = _setup(env, monkeypatch, session=None)
     con = env.con()
@@ -174,7 +167,6 @@ def test_inspect_task_names_the_harness_that_gave_no_session_id(env, monkeypatch
     assert "| session sess-7" in out and "unavailable" not in out, out
 
 
-@pytest.mark.approved
 def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     parent = _setup(env, monkeypatch)
     from office import dispatch, rerun
@@ -191,7 +183,6 @@ def test_dismiss_closes_ended_panes_and_refuses_live_ones(env, monkeypatch):
     assert rerun.dismiss(con, _run(con), None, all_=True).lines[-1].startswith("left running")
 
 
-@pytest.mark.approved
 def test_rerun_keeps_its_route_unless_rerouted_and_refuses_on_live_quota(env, monkeypatch):
     """#300: replay is sticky; fresh quota can refuse it; --reroute routes from current evidence."""
     parent = _setup(env, monkeypatch, route=None)  # the label is "original route" only for an unpinned dispatch
@@ -221,7 +212,6 @@ def _launching(env, monkeypatch):
     return con, run, did
 
 
-@pytest.mark.approved
 def test_rerun_refuses_while_a_launch_for_the_task_is_pending(env, monkeypatch):
     # Run 330605a8: amend --contract launched an ack session; rerun --resume started a
     # second one beside it in the same worktree because the first had no pid yet.
@@ -238,7 +228,6 @@ def test_rerun_refuses_while_a_launch_for_the_task_is_pending(env, monkeypatch):
     assert not gates.worker_live(con, did)
 
 
-@pytest.mark.approved
 def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
     # Run 330605a8: `office revoke <dispatch>` also killed the task's other live session.
     _setup(env, monkeypatch, session=None)
@@ -258,7 +247,6 @@ def test_revoking_one_dispatch_stops_only_that_dispatch(env, monkeypatch):
     assert any(first in ln and "left running" in ln for ln in res.lines), res.lines
 
 
-@pytest.mark.approved
 def test_rerun_refuses_while_a_non_current_session_of_the_task_is_live(env, monkeypatch):
     # Review F1/F9: revoking the current dispatch can leave an older one running; rerun must not
     # start a third session beside it.
@@ -279,7 +267,6 @@ def test_rerun_refuses_while_a_non_current_session_of_the_task_is_live(env, monk
     assert older in err.value.message
 
 
-@pytest.mark.approved
 def test_revoking_a_task_cancels_a_launch_that_has_not_started(env, monkeypatch):
     # Review F2: the remedy rerun names (office revoke) must be able to end a pending launch.
     _setup(env, monkeypatch, session=None)
@@ -292,7 +279,6 @@ def test_revoking_a_task_cancels_a_launch_that_has_not_started(env, monkeypatch)
     assert job["status"] == "failed"
 
 
-@pytest.mark.approved
 def test_a_launch_revoked_during_setup_starts_no_agent(env, monkeypatch):
     # Review F2: a claimed launch job re-checks the dispatch before it starts the agent.
     _setup(env, monkeypatch, session=None)
@@ -311,7 +297,6 @@ def test_a_launch_revoked_during_setup_starts_no_agent(env, monkeypatch):
     assert out.get("skipped") == "cancelled" and not launched, out
 
 
-@pytest.mark.approved
 def test_an_amendment_made_while_launching_is_confirmed_from_the_brief(env, monkeypatch):
     # Review F7: a delivery created after the dispatch started but carried by its brief is confirmed.
     import json as _json
@@ -330,7 +315,6 @@ def test_an_amendment_made_while_launching_is_confirmed_from_the_brief(env, monk
     assert amend.confirm_launch_deliveries(con, run) == 1
 
 
-@pytest.mark.approved
 def test_revoke_leaves_a_claimed_launch_to_finish_instead_of_orphaning_its_agent(env, monkeypatch):
     # Review #446 F2/F3: cancelling under a launch job that is already starting the agent left
     # an agent nothing tracked.
@@ -344,7 +328,6 @@ def test_revoke_leaves_a_claimed_launch_to_finish_instead_of_orphaning_its_agent
     assert any(did in ln and "starting its agent" in ln for ln in res.lines), res.lines
 
 
-@pytest.mark.approved
 def test_cancel_never_ends_a_dispatch_that_recorded_its_launch_since_the_snapshot(env, monkeypatch):
     _setup(env, monkeypatch, session=None)
     con, run, did = _launching(env, monkeypatch)
@@ -357,7 +340,6 @@ def test_cancel_never_ends_a_dispatch_that_recorded_its_launch_since_the_snapsho
     assert con.execute("SELECT status FROM outbox WHERE dedup_key=?", (f"launch:{did}",)).fetchone()[0] == "queued"
 
 
-@pytest.mark.approved
 def test_request_launch_refuses_a_second_executor_session(env, monkeypatch):
     # Review #446 F4: amend and auto-relaunch reach request_launch directly.
     _setup(env, monkeypatch, session=None)
@@ -563,7 +545,6 @@ def test_external_without_a_route_to_carry_it_is_refused(env):
     assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == before
 
 
-@pytest.mark.approved
 def test_an_internal_relaunch_refused_by_a_live_session_blocks_instead_of_rolling_back(env, monkeypatch):
     # R3-3: after_worker_exit's auto-relaunch must not raise out of the end transaction.
     _setup(env, monkeypatch, session=None)
@@ -584,7 +565,6 @@ def test_an_internal_relaunch_refused_by_a_live_session_blocks_instead_of_rollin
     assert t["status"] == "blocked" and "relaunch refused" in t["pause_reason"], t
 
 
-@pytest.mark.approved
 def test_a_launch_whose_lease_was_revoked_during_setup_ends_itself(env, monkeypatch):
     # R3-4: revoke leaves a claimed launch alone; the job checks the lease before launching.
     _setup(env, monkeypatch, session=None)

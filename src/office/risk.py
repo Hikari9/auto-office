@@ -124,8 +124,6 @@ def lightweight_problem(run: dict, risk: dict, declaration: dict | None) -> str 
     if cls != LOW:
         return (f"risk is {cls} ({risk.get('classification_basis')}): the lightweight path needs an explicit low "
                 "classification (`blast_radius: local` or `repo` in Requirements, nothing irreversible, size below L)")
-    if run.get("gear") == "full":
-        return "gear full is the full-ceremony path; pick a lighter gear or drop `lightweight:`"
     return None
 
 

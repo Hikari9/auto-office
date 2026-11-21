@@ -52,4 +52,4 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
 Setting `herdr_kind` promises a pane-hosted form: add `interactive.argv` with the same trust flags and pinned model/effort,
 or Herdr launches silently degrade (#479). A harness with no timeout of its own adds `interactive.wall_cap: true` (the pane gets `max_minutes`).
 
-3.0 runs keep `office raw scaffold-adapter`/`validate-adapter`; never use them for 3.1+.
+Adapters are validated with `office harness validate <id>` (or `--file <path>`); the 3.0 `office raw scaffold-adapter`/`validate-adapter` helpers were removed.

@@ -500,7 +500,6 @@ def simplify_lines(base: str) -> list[str]:
 
 SELF_REVIEW_TIERS = ("inline", "single", "deep")
 FOCUSED = "focused"  # the only tier of a new run: one subagent, one round, edge-cases + test-strength (#938)
-_LOW_RISK_GEARS = ("direct", "direct+review", "light")
 _INLINE_BLAST = ("local", "repo")
 _HIGH_SIZES = ("L", "XL")
 
@@ -509,7 +508,7 @@ def self_review_tier(gear, risk_json) -> str:
     """How much self-review an executor does, from the run's stored gear and risk record only.
     Nothing in a packet or executor input reaches this. Every doubt resolves to more review:
     an unknown gear, an unparsable or missing risk record, or an unset blast radius is never `inline`."""
-    if gear in ("L", "XL", "full"):
+    if gear in ("L", "XL"):
         return "deep"
     # Greenfield is one cohesive task, not a safety exemption: it takes the same
     # tiers as any other gear, so low risk gets `single` and elevated risk gets `deep`.
@@ -524,8 +523,6 @@ def self_review_tier(gear, risk_json) -> str:
             or (not risk.get("complexity_only") and risk.get("size_class") in _HIGH_SIZES)):
         return "deep"
     if gear == "XS" and not risk.get("high") and blast in _INLINE_BLAST:
-        return "inline"
-    if gear in _LOW_RISK_GEARS and blast in _INLINE_BLAST:
         return "inline"
     return "single"
 

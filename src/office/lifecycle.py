@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from office import config as cfg
-from office import db, discovery, jobs, legacy, paths, planpath, root_wake, scoring, state, version
+from office import db, discovery, jobs, paths, planpath, root_wake, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, new_run_id, now_iso, pid_alive, sha256_obj, short
@@ -119,15 +119,12 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("bad-config", f"config is invalid: {exc}",
                     next_step="fix ~/.config/auto-office/config.yaml or .auto-office/config.yaml, then retry")
     pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(caller_top, files)}
-    # For new XS-XL runs complexity is not a risk signal. Existing explicit
-    # legacy presets retain their exact historical size/risk interpretation.
-    legacy = gear in cfg.LEGACY_GEARS
-    risk = cfg.resolve_risk(config, blast_radius, size_class if legacy else None, irreversible)
-    if not legacy:
-        risk["size_class"] = size_class
-        risk["complexity_only"] = True
-        if size_class and not risk.get("classified_by"):
-            risk["classified_by"] = "intake"
+    # Complexity is not a risk signal: the size class is recorded beside the risk, not inside it.
+    risk = cfg.resolve_risk(config, blast_radius, None, irreversible)
+    risk["size_class"] = size_class
+    risk["complexity_only"] = True
+    if size_class and not risk.get("classified_by"):
+        risk["classified_by"] = "intake"
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
@@ -269,9 +266,6 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res.add(f"run gear why: {gates['run_gear_rationale']}")
         if card_line:
             res.add(card_line)
-        if gear in cfg.LEGACY_GEARS:
-            res.add(f"compatibility notice: {gear} is a historical preset, not an XS-XL run gear; "
-                    "use --gear XS|S|M|L|XL for new work; original review/risk gates remain pinned")
         if fastlane_line := fastlane_mod.summary({"gates": gates}):
             res.add(fastlane_line)
         res.add(f"funded gates: plan review={bool(gates['plan_review'])}, independent convergence="
@@ -314,10 +308,6 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
            cwd: Path | None = None, wake=None) -> Result:
     """`wake(con, run) -> str | None` runs after the session is bound, before the status is built, so the
     status reports the wake state as it now is."""
-    if target.legacy is not None:
-        msg, nxt = legacy.guidance(target.legacy)
-        return Result(lines=[msg], next=nxt, data={"legacy": True, "run_id": target.legacy.run_id,
-                                                   "office_version": target.legacy.office_version})
     run = target.run
     if state.is_terminal(run):
         raise Refused("run-terminal", f"{short(run['id'])} is {run['phase']}; a terminal run cannot resume",
@@ -827,19 +817,11 @@ def list_runs(con, *, all_runs: bool = False, cwd: Path | None = None) -> Result
         tag = "" if version.serves(r["office_version"], version.current()) else f"  [on {version.release_line(r['office_version'])}]"
         pr = " pruned" if r.get("pruned_at") else ""
         lines.append(f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}{tag}{pr}")
-    legacy_rows = []
-    if ident is not None:
-        for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
-            if all_runs or leg.active:
-                legacy_rows.append(leg)
-                lines.append(f"{short(leg.run_id)}  {leg.phase:<10} {leg.goal[:60]}  [3.0 legacy]")
     if not lines:
         lines = ["no active Office runs here" if not all_runs else "no Office runs recorded"]
-    return Result(lines=lines, next="office resume <id> to bind one" if len(runs) + len(legacy_rows) > 1 else None,
+    return Result(lines=lines, next="office resume <id> to bind one" if len(runs) > 1 else None,
                   data={"runs": [{"id": r["id"], "phase": r["phase"], "goal": r["goal"],
-                                  "office_version": r["office_version"], "pruned_at": r.get("pruned_at")} for r in runs],
-                        "legacy": [{"id": l.run_id, "phase": l.phase, "office_version": l.office_version}
-                                   for l in legacy_rows]})
+                                  "office_version": r["office_version"], "pruned_at": r.get("pruned_at")} for r in runs]})
 
 
 def _learn(con, run: dict) -> None:

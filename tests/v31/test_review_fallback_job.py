@@ -57,7 +57,7 @@ def _set_gates(env, **fields):
 # ------------------------------------------------------------------ one attempt, one dispatch, one fallback job
 
 def test_a_failed_attempt_queues_one_fallback_job_and_the_failure_is_recorded_on_its_dispatch(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     first, second = _attempts(env, gate["id"])
@@ -78,7 +78,7 @@ def test_a_failed_attempt_queues_one_fallback_job_and_the_failure_is_recorded_on
 
 def test_exclusions_come_from_the_recorded_failed_dispatches_not_from_memory(env):
     from office import gates
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     attempts = _attempts(env, gate["id"])
@@ -100,7 +100,7 @@ def test_exclusions_come_from_the_recorded_failed_dispatches_not_from_memory(env
 
 def test_a_launch_failure_queues_a_fallback_job_and_excludes_only_that_route(env):
     from office import gates
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": "", "exit": 3}, {"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": "", "exit": 3}, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     first, second = _attempts(env, gate["id"])
@@ -131,7 +131,7 @@ def test_a_pointer_that_never_landed_is_retried_through_the_job_without_counting
         return {**real(ddir), "retry_same_route": "held-pointer"}
 
     monkeypatch.setattr(gates, "_launch_spec", spec)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
     # The patch above reaches only the in-process claude supervisor (the ranker no longer picks claude by default).
     env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     gate = _lane(env)
@@ -155,7 +155,7 @@ def test_a_worktree_guard_degrade_moves_to_the_next_route_through_the_job(env, m
 
     monkeypatch.setattr(gates, "_worktree_guard", guard_for)
     env.hide_agy = True  # the patch only reaches review jobs that run in this process
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     first, second = _attempts(env, gate["id"])
@@ -175,7 +175,7 @@ def _redispatches(env):
 
 
 def test_a_review_no_route_answered_is_redispatched_up_to_the_bound_then_status_names_the_manual_step(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     assert gate["review_status"] == "UNAVAILABLE" and gate["verdict"] is None, gate
@@ -199,7 +199,7 @@ def test_a_review_no_route_answered_is_redispatched_up_to_the_bound_then_status_
 
 @pytest.mark.parametrize("bound", [0, 2])
 def test_the_redispatch_bound_is_configurable_per_gate(env, bound):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY])
     # the run pinned no bound: set it on the stored run, then re-run the review (a manual re-run is a new gate)
     _set_gates(env, review_redispatch_max=bound)
     env.office("dispatch", "T1", check=0)
@@ -222,7 +222,7 @@ def test_a_redispatch_that_finds_a_working_route_settles_the_review(env, monkeyp
         return real(con, run, gate, role, brief, **kw)
 
     monkeypatch.setattr(gates, "_review_attempt", flaky)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     # The patch above reaches only the in-process claude supervisor (the ranker no longer picks claude by default).
     env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     gate = _lane(env)
@@ -253,7 +253,7 @@ def test_a_revoked_reviewer_is_never_redispatched_never_counted_and_its_route_st
 
     env.hide_agy = True
     monkeypatch.setattr(dispatch, "launch", launch)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}] * 3)
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}] * 3)
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     assert gate["review_status"] == "REVOKED"
@@ -278,7 +278,7 @@ WRONG = "REVIEWED_COMMIT deadbeefdeadbeef\nVERDICT: APPROVED\nNEXT proceed"
 
 
 def test_a_wrong_reviewed_commit_is_rerun_through_the_job_resuming_the_same_reviewer(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": WRONG, "stamp": False}, {"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": WRONG, "stamp": False}, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (job,) = _jobs(env)
@@ -465,7 +465,7 @@ def test_a_call_outside_the_job_flow_starts_a_fresh_chain(monkeypatch):
 
 def test_only_the_current_chains_failures_are_excluded(env, monkeypatch):
     from office import gates
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     con, run, _ = _subagent_ctx(env)
@@ -493,7 +493,7 @@ def test_only_the_current_chains_failures_are_excluded(env, monkeypatch):
 
 def test_an_integration_review_with_no_verdict_queues_the_bounded_fallback_instead_of_finalizing(env, monkeypatch):
     from office import db, gates, integration, state
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])

@@ -35,7 +35,7 @@ path = "src/office/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/office"]
 
-# Runtime resources live at the repository root so the legacy v3 helpers and the
+# Runtime resources live at the repository root so the repository helpers and the
 # packaged runtime read the same files. A wheel carries them under office/_resources.
 [tool.hatch.build.targets.wheel.force-include]
 "config" = "office/_resources/config"
@@ -64,7 +64,7 @@ markers = [
     "review_contract(name): runs the test's Office runs under that review contract (v3.1 suites keep testing pinned pre-#337 runs)",
     "slow: minutes-long real-gate tests (dogfood); deselected by default, run with --all or -m slow",
     "integration: needs a repo, subprocess, fake harness or browser; deselected by default, run with --all or -m integration",
-    "legacy: tests the 3.0 scripts/ surface; deselected by default, run with --all or -m legacy",
+    "legacy: tests the older scripts/ helpers (monitor, pr report, hooks); deselected by default, run with --all or -m legacy",
 ]
 
 # Mutation testing (mutmut 3) audits whether the core-logic tests notice a changed behaviour. It is scoped to

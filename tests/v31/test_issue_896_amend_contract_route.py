@@ -15,6 +15,7 @@ import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
 
+
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 ROUTE = "claude/sonnet@high"
 QUOTE = "switch T1 to sonnet"
@@ -23,7 +24,7 @@ QUOTE = "switch T1 to sonnet"
 @pytest.fixture
 def live(request, monkeypatch):
     env = request.getfixturevalue("env")
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
     # The route-change tests need a claude dispatch; the adaptive ranker no longer picks one by default.
     env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", env=EXTERNAL, check=0)
     for k, v in EXTERNAL.items():
@@ -43,7 +44,6 @@ def _state(con):
     }
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("route_args", [
     ("--as", ROUTE, "--quote", QUOTE),
     ("--as", ROUTE),
@@ -60,7 +60,6 @@ def test_contract_amendment_with_route_is_refused_and_records_nothing(live, rout
     assert _state(con) == before, "a refused amendment records no contract version, amendment, or route"
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("flags,needle", [
     (("--contract",), "--contract"),
     (("--requirements",), "--requirements"),
@@ -112,7 +111,6 @@ def test_every_amend_flag_is_either_route_kept_or_refused_by_amend_route():
     assert amend_specific - {"--as", "--quote", "--restart", "--auto"} == set(cli._ROUTE_AMEND_ONLY_FLAGS.values())
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("route_args,needle", [
     (("--as", ROUTE, "--quote", QUOTE), "--as"),
     (("--restart",), "--restart"),
@@ -126,7 +124,6 @@ def test_ordinary_amendment_with_route_is_refused(live, route_args, needle):
     assert _state(con) == before
 
 
-@pytest.mark.approved
 def test_orchestrator_without_worker_env_can_change_route(live, monkeypatch):
     monkeypatch.delenv("OFFICE_ROLE", raising=False)
     monkeypatch.delenv("OFFICE_DISPATCH_ID", raising=False)
@@ -136,7 +133,6 @@ def test_orchestrator_without_worker_env_can_change_route(live, monkeypatch):
     assert (candidate["harness"], candidate["model_id"], candidate["effort"]) == ("claude", "sonnet", "high")
 
 
-@pytest.mark.approved
 def test_amend_route_with_as_relaunches_on_the_named_route(live):
     # The positive counterpart: `amend route` keeps working and records the named route.
     code, out = live.office("amend", "route", "T1", "--as", ROUTE, "--quote", QUOTE, env=EXTERNAL)
@@ -147,7 +143,6 @@ def test_amend_route_with_as_relaunches_on_the_named_route(live):
     assert json.loads(row["route_json"])["route_change"]["quote"] == QUOTE
 
 
-@pytest.mark.approved
 @pytest.mark.parametrize("route_args", [
     ("--as", ROUTE, "--quote", QUOTE),
     ("--restart", "--as", ROUTE, "--quote", QUOTE),
@@ -172,7 +167,6 @@ def test_a_worker_cannot_change_its_own_route(live, route_args, identity):
     assert _state(con) == before
 
 
-@pytest.mark.approved
 def test_a_restarted_executor_in_its_task_worktree_cannot_change_its_route(live):
     # A restarted executor can lose its dispatch env and still run in its task worktree; submit resolves it from cwd.
     con = live.con()

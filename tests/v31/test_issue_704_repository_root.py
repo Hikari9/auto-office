@@ -27,7 +27,7 @@ def _linked(env):
 
 
 def _start(env, caller, *extra):
-    code, result = env.ojson("start", "survive the caller checkout", "--gear", "direct+review",
+    code, result = env.ojson("start", "survive the caller checkout", "--gear", "S",
                              "--planner", "inline", *extra, cwd=caller)
     assert code == 0, result
     return _run(env), result

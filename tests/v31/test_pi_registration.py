@@ -749,7 +749,7 @@ def _pi_plan_review(env, plan_reviewer):
     code, out = env.office("config", "roles.plan_reviewer.preferred_seed", "pi/gpt-6-luna@high", "--force", check=0)
     assert code == 0, out
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=plan_reviewer)
-    return env.office("start", "add numbers", "--gear", "full", env=PI_LUNA_ENV, check=0)
+    return env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated", env=PI_LUNA_ENV, check=0)
 
 
 @pytest.mark.approved

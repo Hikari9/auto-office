@@ -1,12 +1,12 @@
-"""Which Office version creates new runs (staged cutover and rollback).
+"""Which Office version creates new runs.
 
-Cutover and rollback change only this default. A run keeps the runtime that
-created it until it is terminal; nothing here touches an existing run.
+A run keeps the runtime that created it until it is terminal; nothing here
+touches an existing run. The 3.0 runtime and its `new_runs: "3.0"` rollback
+were removed: that setting is refused.
 
   ~/.config/auto-office/config.yaml:
     runtime:
-      new_runs: "3.0"   # roll new runs back to the retained v3 runtime; unset (or any
-                        # 3.1+ value) means this installed runtime
+      new_runs: "3.2"   # optional pin to a 3.1+ line; unset means this installed runtime
 """
 from __future__ import annotations
 
@@ -15,11 +15,8 @@ import re
 
 import yaml
 
-from office import legacy, paths, version
+from office import paths, version
 from office.state import OfficeError
-
-# The last Auto Office 3.0 commit on main before the 3.1 implementation.
-LEGACY_V3_FINAL = "3bce9b1ae0896d0d8e474d81eb30c7ae11da1e63"
 
 
 def new_runs_setting() -> str:
@@ -41,10 +38,8 @@ def new_runs_setting() -> str:
 def require_new_run_runtime() -> None:
     setting = new_runs_setting()
     if setting.startswith("3.0"):
-        retained = legacy.retained_runtime(LEGACY_V3_FINAL)
-        where = f"python3 {retained}/scripts/office_runtime.py start ..." if retained else "the retained v3 runtime (office doctor)"
         raise OfficeError("new-runs-on-3.0",
-                          f"new runs are configured to use Auto Office 3.0 (rollback); {version.current()} does not create them",
-                          next_step=f"start with {where}, or remove runtime.new_runs", exit_code=4)
+                          f"runtime.new_runs={setting!r}: the Auto Office 3.0 runtime was removed and cannot create runs",
+                          next_step="remove runtime.new_runs (or set it to a 3.1+ line)", exit_code=4)
     if not re.fullmatch(r"(?:3\.[1-9]\d*|(?:[4-9]|[1-9]\d)\.\d+)(\..*)?", setting):
-        raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not 3.0 or 3.1+ (a later MAJOR.MINOR line is accepted)", exit_code=2)
+        raise OfficeError("bad-runtime-setting", f"runtime.new_runs={setting!r} is not a 3.1+ line (a later MAJOR.MINOR line is accepted)", exit_code=2)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, closeout, config_repairs, db, frontdoor, install, legacy, paths, read_scope, runtime_default, state, version
+from office import adapters, closeout, config_repairs, db, frontdoor, install, paths, read_scope, runtime_default, state, version
 from office.result import Result
 
 
@@ -131,14 +131,9 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
             res.add(f"on {line}: {len(ids)} active run(s) {'ok' if ok else 'RUNTIME MISSING — install and register a ' + line + '.x runtime'}")
             if version.release_key(newest) > version.release_key(line):
                 res.add(f"  {newest} is installed; upgrade with: " + "; ".join(f"office upgrade {i}" for i in ids))
-        compat = con.execute("SELECT command, COUNT(*) AS n FROM compat_calls GROUP BY command ORDER BY n DESC LIMIT 5").fetchall()
-        if compat:
-            res.add("compat (removed in 3.2.0): " + ", ".join(f"{c['command']}×{c['n']}" for c in compat))
     finally:
         con.close()
-    retained = legacy.retained_runtime(runtime_default.LEGACY_V3_FINAL, materialize=fix)
-    res.add(f"new runs: Auto Office {runtime_default.new_runs_setting()} | retained 3.0 runtime: "
-            + ("ok" if retained else "not materialized (office doctor --fix)"))
+    res.add(f"new runs: Auto Office {runtime_default.new_runs_setting()}")
     ident = paths.repo_identity()
     if ident:
         from office import config as cfg
@@ -161,13 +156,6 @@ def doctor(fix: bool = False, probe_vision: bool = False, probe_route: str | Non
             res.add(f"worktree setup: `{setup}` runs under /bin/sh, but {', '.join(missing)} "
                     f"{'is' if len(missing) == 1 else 'are'} not on PATH; every new worktree's setup would exit 127 "
                     "(command not found). Install it or fix worktree.setup")
-        for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
-            if leg.active:
-                have = legacy.retained_runtime(leg.plugin_commit, materialize=fix)
-                if not have:
-                    problems += 1
-                res.add(f"legacy run {leg.run_id[:8]} ({leg.phase}) pinned to {leg.plugin_commit[:12]}: "
-                        + ("runtime ok" if have else "RUNTIME MISSING"))
     for harness, path in install.CONFIG.items():
         path = path.expanduser()
         # Claude settings are checked even when the file is absent (the read rules are then

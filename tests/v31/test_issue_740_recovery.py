@@ -180,28 +180,6 @@ def test_recovery_hint_rechecks_a_changed_future_pin_before_offering_fresh(env):
     assert "office rerun T1" not in hint, hint
 
 
-@pytest.mark.review_contract("v3.1")
-def test_709_conflicting_restack_is_in_resumed_prompt_and_updated_brief(env, monkeypatch):
-    from office import adapters, rerun
-    old, accepted, w2, wt = _t2_on_superseded_t1(env)
-    _commit(env, wt, {"calc.py": GOOD_ADD + "# dependent conflicting change\n"}, "conflict")
-    con = env.con()
-    con.execute("UPDATE dispatches SET ended_at=started_at, status='exited', session_id='resumable', adapter_id='claude' WHERE id=?",
-                (w2["OFFICE_DISPATCH_ID"],))
-    con.commit()
-    monkeypatch.setattr(rerun, "agent_alive", lambda d: False)
-    monkeypatch.setattr(rerun, "_sticky_check", lambda *args: None)
-    monkeypatch.setattr(adapters, "resume_argv", lambda *args, **kwargs: (["--resume", "resumable"], "claude"))
-    env.office("rerun", "T2", "--resume", env=EXTERNAL, check=0)
-    did = task_row(env, "T2")["current_dispatch_id"]
-    job = con.execute("SELECT payload_json FROM outbox WHERE kind='launch_agent' ORDER BY created_at DESC LIMIT 1").fetchone()
-    resume = json.loads(job["payload_json"])["resume"]
-    assert "RESTACK FIRST" in resume["findings"] and "resolve conflicts" in resume["findings"]
-    assert _rev_commit(env, accepted) in resume["findings"]
-    brief = next((env.state / "runs").glob(f"*/dispatches/{did}/brief.md")).read_text()
-    assert f"git merge {_rev_commit(env, accepted)}" in brief and "Never rebase or force-push" in brief
-
-
 def test_665_last_recheck_dismissal_uses_remaining_round_without_waiver(env):
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": recheck(finding("F1"))}, {"reply": APPROVED}])

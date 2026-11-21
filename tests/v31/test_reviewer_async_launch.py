@@ -51,7 +51,7 @@ def test_a_job_launched_review_is_not_waited_on_and_a_supervise_job_records_its_
         return real(run, d, kind, ddir, **kw)
 
     monkeypatch.setattr(dispatch, "launch", spy)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (review,) = _q(env, "SELECT id FROM dispatches WHERE gate_id=? AND kind='reviewer'", (gate["id"],))
@@ -74,7 +74,7 @@ def test_a_lane_review_calls_run_reviewer_once_and_the_settling_job_does_not_reb
         return real(con, run, gate, role, brief, **kw)
 
     monkeypatch.setattr(gates, "run_reviewer", spy)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     assert _lane(env)["verdict"] == "APPROVED" and calls == ["code_reviewer"]
 
@@ -221,7 +221,7 @@ def test_the_review_checkout_outlives_the_launching_job(env, monkeypatch):
         return real(con, run, job)
 
     monkeypatch.setattr(gates, "job_review_supervise", spy)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     assert seen == [True], "the launching job left the checkout in place for the reviewer"
     gate = _lane(env)
@@ -231,7 +231,7 @@ def test_the_review_checkout_outlives_the_launching_job(env, monkeypatch):
 # ------------------------------------------------------------------ packet, lease, session
 
 def test_a_reviewer_dispatch_carries_a_packet_and_a_lease_that_settling_releases(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (d,) = _q(env, "SELECT * FROM dispatches WHERE gate_id=? AND kind='reviewer'", (gate["id"],))
@@ -245,7 +245,7 @@ def test_a_reviewer_dispatch_carries_a_packet_and_a_lease_that_settling_releases
 
 
 def test_a_reviewer_lease_never_holds_the_scope_of_a_task(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     try:
@@ -267,7 +267,7 @@ def test_settling_records_a_session_for_a_harness_that_assigns_none_at_launch(en
         return real(con, run, d)
 
     monkeypatch.setattr(dispatch, "backfill_session", spy)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     (d,) = _q(env, "SELECT id FROM dispatches WHERE gate_id=? AND kind='reviewer'", (_lane(env)["id"],))
     assert asked == [d["id"]]
@@ -282,7 +282,7 @@ def _open_review(env, monkeypatch):
 
     monkeypatch.setattr(dispatch, "launch", launch)
     monkeypatch.setattr(dispatch, "_wait_terminal", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parked")))
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=None)
     gate = _lane(env)
     (d,) = _q(env, "SELECT * FROM dispatches WHERE gate_id=? AND kind='reviewer'", (gate["id"],))
@@ -322,7 +322,7 @@ def test_revoking_a_reviewer_dispatch_revokes_its_lease(env, monkeypatch):
 
 
 def test_settling_a_dispatch_that_left_no_launch_record_is_refused(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     con = env.con()
@@ -351,7 +351,7 @@ def _enqueue_supervise(con, run, gid, did):
 
 
 def test_an_integration_gate_is_owned_by_its_supervise_job(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     try:
@@ -366,7 +366,7 @@ def test_an_integration_gate_is_owned_by_its_supervise_job(env):
 
 
 def test_revoking_integration_fences_the_supervise_job_of_its_review(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     try:
@@ -420,7 +420,7 @@ def test_a_supervise_job_whose_gate_went_stale_frees_the_checkout_snapshot_and_l
 
 
 def test_a_reclaimed_supervise_job_runs_again_and_settles_nothing_twice(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (job,) = _supervise_jobs(env)
@@ -445,7 +445,7 @@ def test_a_reclaimed_supervise_job_runs_again_and_settles_nothing_twice(env):
 
 
 def test_a_retried_failed_settle_counts_the_attempts_environment_failure_once(env):
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (d,) = _q(env, "SELECT id FROM dispatches WHERE gate_id=? AND kind='reviewer'", (gate["id"],))
@@ -567,7 +567,7 @@ def test_a_retried_settle_keeps_the_guard_verdict_of_the_snapshot_an_earlier_one
         return lambda before: {} if before is None else ("tracked diff" if not Path(cwd).is_dir() else None)
 
     monkeypatch.setattr(gates, "_worktree_guard", guard_for)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     (d,) = _q(env, "SELECT id, run_id FROM dispatches WHERE gate_id=? AND kind='reviewer'", (gate["id"],))
@@ -610,7 +610,7 @@ def test_a_task_gate_review_launches_once_and_its_supervise_job_settles_it_witho
 
 def test_an_integration_review_launches_once_then_settles_and_accepts_without_a_second_launch(env, monkeypatch):
     from office import integration
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     con = env.con()
     try:
@@ -651,7 +651,7 @@ def test_an_integration_review_launches_once_then_settles_and_accepts_without_a_
 
 def test_a_lane_visual_review_settles_from_the_launch_without_capturing_or_launching_again(env, monkeypatch):
     from office import convergence, visual
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     con = env.con()
     try:
@@ -890,7 +890,7 @@ def test_a_redispatch_launches_a_second_reviewer_on_routes_the_exhausted_chain_f
     actually launch (the first chain's failures no longer exclude every route), while a harness a failure in the
     current chain walled stays excluded for the rest of that chain."""
     from test_review_fallback_job import EMPTY, _attempts, _redispatches
-    _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[EMPTY])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     attempts = _attempts(env, gate["id"])
@@ -979,7 +979,7 @@ def _guard_first_attempt(monkeypatch, *, snapshot_fails):
 
 def test_a_guarded_reviewer_whose_snapshot_cannot_be_made_fails_its_attempt_and_never_runs_in_the_shared_checkout(env, monkeypatch):
     first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=True)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     attempts = gates_attempts(env, gate["id"])
@@ -1011,7 +1011,7 @@ def test_an_edit_to_the_shared_checkout_while_a_guarded_reviewer_runs_is_not_the
         return real_launch(run, d, kind, ddir, **kw)
 
     monkeypatch.setattr(dispatch, "launch", launch)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     assert edited, "the shared checkout was edited while the guarded reviewer ran"
@@ -1153,7 +1153,7 @@ def test_a_guarded_reviewer_is_pointed_only_at_its_snapshot(env, monkeypatch):
     """F15: cwd is the snapshot, so its include dirs and the path its brief names must be the snapshot too."""
     first, launched = _guard_first_attempt(monkeypatch, snapshot_fails=False)
     captured = _launch_kwargs(monkeypatch)
-    _start(env, executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="XS", extra=("--no-fastlane",), executor=EXECUTOR, convergence_reviewer=[{"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
     gate = _lane(env)
     kw = captured[first["dispatch"]]

@@ -15,7 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from office import frontdoor, legacy, paths, read_scope, runtime_default
+from office import frontdoor, paths, read_scope
 from office.result import Result
 
 MARKER = "--office-managed"
@@ -213,8 +213,6 @@ def install(only: list[str] | None = None, dry_run: bool = False, migrate_legacy
         res.add(f"runtime {entry['office_version']} registered")
         if not shutil.which("office"):
             res.add(f"launcher written: {_write_shim()} (add its directory to PATH, or uv tool install git+https://github.com/Hikari9/auto-office)")
-        retained = legacy.retained_runtime(runtime_default.LEGACY_V3_FINAL)
-        res.add("retained Auto Office 3.0 runtime for pinned runs and rollback: " + ("ok" if retained else "unavailable"))
     if not hooks:
         res.add("hooks: none written (--no-hooks); /auto-office onboarding offers the current harness's integration")
         res.next = "office doctor"

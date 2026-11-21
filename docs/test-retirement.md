@@ -192,15 +192,15 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_amend_checks_only.py` | keep |  |
 | `tests/test_amend_contract_edits.py` | keep |  |
 | `tests/test_amend_requirements_delivery.py` | keep |  |
-| `tests/test_amendments.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_amendments.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_budget.py` | keep |  |
 | `tests/test_catalog_archival.py` | keep |  |
 | `tests/test_check_ecosystem.py` | keep |  |
 | `tests/test_checks_stale.py` | keep |  |
 | `tests/test_db_connect.py` | keep |  |
-| `tests/test_derived_routing.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
-| `tests/test_dogfood.py` | keep |  |
-| `tests/test_families.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_derived_routing.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
+| `tests/test_dogfood.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
+| `tests/test_families.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_frontend_bias.py` | keep |  |
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |  |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |  |
@@ -211,45 +211,45 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_hooks.py` | keep |  |
 | `tests/test_hydrogen_shadow_scorecard.py` | keep |  |
 | `tests/test_instruction_conformance.py` | keep |  |
-| `tests/test_integration.py` | keep |  |
+| `tests/test_integration.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_issue_1156_hydrogen_rerun.py` | keep |  |
 | `tests/test_issue_1163_hydrogen_user_allow.py` | keep |  |
 | `tests/test_issue_1166_hydrogen_user_allow_candidates.py` | keep |  |
 | `tests/test_issue_1168_hydrogen_canary.py` | keep |  |
 | `tests/test_issue_1282_hydrogen_gate.py` | keep |  |
 | `tests/test_issue_927_onboarding_wording.py` | keep |  |
-| `tests/test_landings.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
-| `tests/test_monitor.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_landings.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
+| `tests/test_monitor.py` | historical-diagnostic | exercises `scripts/office_monitor.py` and the pane-closer gate it feeds; kept because `scripts/hooks/close_finished_panes.mjs` trusts the events that script writes |
 | `tests/test_onboarding_harness_preference.py` | keep |  |
-| `tests/test_packet_delivery_channel.py` | keep |  |
+| `tests/test_packet_delivery_channel.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_pane_busy.py` | keep |  |
 | `tests/test_plugin_skill_entry.py` | keep |  |
 | `tests/test_pr_report.py` | keep |  |
 | `tests/test_pr_test_selection.py` | keep |  |
 | `tests/test_pre_push_hook.py` | keep |  |
-| `tests/test_propose.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_propose.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_release_identity.py` | keep |  |
-| `tests/test_reuse_compact.py` | keep |  |
-| `tests/test_review.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_reuse_compact.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
+| `tests/test_review.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_review_no_verdict_rate.py` | keep |  |
 | `tests/test_route_policy.py` | consolidate | 1 node pinned the exact set of discovery-eligible shipped routes; the rest stay |
 | `tests/test_route_probe.py` | keep |  |
 | `tests/test_route_probe_agy.py` | keep |  |
 | `tests/test_routecmd_hydrogen.py` | keep |  |
-| `tests/test_runtime.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
+| `tests/test_runtime.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_schemas.py` | keep |  |
-| `tests/test_scoring.py` | historical-diagnostic | exercises the retained 3.0 helper surface (`scripts/office_*`) that only pinned 3.0 runs use; kept for on-demand pinned-run diagnosis |
-| `tests/test_session_end_hook.py` | keep |  |
+| `tests/test_scoring.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
+| `tests/test_session_end_hook.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_shipped_catalog_tables.py` | keep |  |
-| `tests/test_spoke_receipt_integrity.py` | keep |  |
+| `tests/test_spoke_receipt_integrity.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_test_retirement_inventory.py` | keep | added by this change: checks this inventory against the modules that exist |
 | `tests/test_test_retirement_record.py` | keep | added by this change: checks the contract-suite legacy table matches this inventory |
 | `tests/test_trust_alias_625.py` | keep |  |
-| `tests/test_trust_conformance.py` | keep |  |
+| `tests/test_trust_conformance.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_v3_instruction_contract.py` | keep |  |
 | `tests/test_version_serves.py` | keep |  |
 | `tests/test_version_single_source.py` | keep |  |
-| `tests/test_worktree.py` | keep |  |
+| `tests/test_worktree.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/v31/test_adaptive_dispatch.py` | keep |  |
 | `tests/v31/test_adaptive_routing.py` | keep |  |
 | `tests/v31/test_agent_questions.py` | keep |  |
@@ -592,12 +592,11 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 
-Totals: {'keep': 375, 'historical-diagnostic': 21, 'consolidate': 8, 'retire': 3}.
+Totals: {'keep': 367, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
 
 ## Left alone on purpose
 
 - Modules and nodes named in `SAFETY_SMOKE` or `SPECIAL` in `scripts/select_pr_tests.py`, the nodes cited in `docs/contract-suite.md`, and everything in `tests/contracts/`.
-- `tests/test_derived_routing.py` is synthetic (`'m'`, `'fallback'`) and tests the retained 3.0 runtime, so it is classified historical-diagnostic, not retired.
 - `tests/v31/test_issue809_real_routes.py::test_real_sonnet_harness_self_fallback_and_unavailable_first_route`: `adaptive.py` hard-codes the Sonnet claude-to-agy hoist, so this is its only guard.
 - `tests/v31/test_issue809_real_routes.py::test_issue861_unconfirmed_haiku_uses_real_terra_then_sonnet_fallback`: it is the only test of the `Temporary Sonnet Medium M fallback` disclosure.
 - `tests/test_alias_resolution.py` and `tests/v31/test_intelligence_floor.py` still pin some shipped model names. They are `SPECIAL` modules for `catalog/` and `config/` changes, so they stay.

@@ -33,10 +33,10 @@ which closes only panes it finds in the ledger.
 `echo $HERDR_ENV` prints the parent's value and empty under an `env -i` child, where `herdr` is
 also off `PATH` — so such a dispatch never appears in `herdr agent list`.
 
-Carry the environment through instead of discarding it, and prefer the spawner that records the pane:
+Carry the environment through instead of discarding it, and prefer a launch that records the pane in the ledger (`scripts/herdr-ledger.mjs add`):
 
 ```bash
-scripts/office_spawn.sh --pane-id <pane> --agent-name <name> …   # pane-hosted, in the ledger
+herdr agent start <name> --kind codex --pane <pane> -- …           # pane-hosted, then add the ledger row
 env -i HOME="$HOME" PATH="$PATH" TERM=dumb HERDR_ENV="$HERDR_ENV" codex exec …  # bare, if required
 ```
 

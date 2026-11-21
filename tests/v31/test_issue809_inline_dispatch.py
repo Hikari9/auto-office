@@ -107,7 +107,7 @@ def test_the_missing_estimate_reason_names_the_gear():
 def test_execution_gear_acts_only_on_a_run_pinned_to_the_xs_xl_model():
     assert task_sizing.execution_gear({"gear": "S", "gates": {"gear_model_version": "run-gear-1"}}) == "S"
     for run in ({"gear": "S", "gates": {}}, {"gear": "M", "gates": {"gear_model_version": "legacy-pinned"}},
-                {"gear": "express", "gates": {"gear_model_version": "legacy-pinned"}}, {"gear": "M"}):
+                {"gear": "M"}):
         assert task_sizing.execution_gear(run) is None
 
 
@@ -123,8 +123,8 @@ def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
     assert task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=2)["mode"] == "delegated"
 
 
-@pytest.mark.parametrize("gear", ["L", "XL", "express", None])
-def test_l_xl_and_legacy_gears_never_run_inline(gear):
+@pytest.mark.parametrize("gear", ["L", "XL", None])
+def test_l_xl_and_unset_gears_never_run_inline(gear):
     assert task_sizing.execution_mode(gear, _desc("XS", inline_advantage=EST), LOW, task_count=1)["mode"] == "delegated"
 
 

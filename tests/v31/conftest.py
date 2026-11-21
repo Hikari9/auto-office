@@ -497,28 +497,49 @@ def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low")
     user_catalog.save({"models": [{**row, "effort": effort, "dispatchable": True}]})
 
 
-def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):
+def strip_gear_model(env, resubmit_plan=None):
+    """Put a started run in the state of one that predates run gears: no pinned gear and none of the gear-model keys
+    in its gates. Routing then takes the flat-seed path these route and rerun mechanics were written against.
+    The runtime still reads that state defensively; no new run can be in it."""
+    con = env.con()
+    try:
+        for row in con.execute("SELECT id, gates_json FROM runs").fetchall():
+            gates = {k: v for k, v in json.loads(row["gates_json"] or "{}").items()
+                     if k not in ("gear_model_version", "run_gear", "run_gear_rationale")}
+            con.execute("UPDATE runs SET gear=NULL, gates_json=? WHERE id=?", (json.dumps(gates), row["id"]))
+        con.commit()
+    finally:
+        con.close()
+    if resubmit_plan is not None:  # a plan already submitted keeps the sizes it was routed with: submit it again
+        env.write_plan(resubmit_plan)
+        env.office("submit", check=0)
+        env.office("approve", "plan", "--quote", "approved", check=0)
+
+
+def start_inline(env, plan=PLAN_ONE, gear="S", extra=(), unmarked=False):
     code, out = env.office("start", "fixture goal", "--gear", gear, "--planner", "inline", *extra)
     assert code == 0, out
+    if unmarked:
+        strip_gear_model(env)
     env.write_plan(plan)
     code, out = env.office("submit")
     assert code == 0, out
     return out
 
 
-def approved_run(env, plan=PLAN_ONE, gear="direct+review", **script):
+def approved_run(env, plan=PLAN_ONE, gear="S", unmarked=False, **script):
     """Trust the fake routes, script the harnesses by role, start an inline run and approve its plan.
 
     An Env from a test marked `approved` already holds that state for the default
     plan and gear; only the scripting is left to do.
     """
     if env.approved:
-        assert (plan, gear) == (PLAN_ONE, "direct+review"), "an approved Env holds the default plan and gear"
+        assert (plan, gear) == (PLAN_ONE, "S"), "an approved Env holds the default plan and gear"
         env.script(**script)
         return
     env.trust()
     env.script(**script)
-    start_inline(env, plan=plan, gear=gear)
+    start_inline(env, plan=plan, gear=gear, unmarked=unmarked)
     env.office("approve", "plan", "--quote", "approved", check=0)
 
 

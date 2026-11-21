@@ -1297,17 +1297,3 @@ def test_s12_cli_a_v31_run_started_before_discovery_never_discovers_after_it_is_
         assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
     (d,) = [dict(r) for r in con.execute("SELECT triple FROM dispatches WHERE role='executor'")]
     assert SOL not in d["triple"]
-
-
-def test_s12_cli_a_legacy_3_0_run_is_served_by_its_pinned_runtime_with_discovery_enabled(env):
-    from office import runtime_default
-    from test_discovery_pinning import _legacy_run
-    (env.tmp / "user-config.yaml").write_text("routing:\n  discovery:\n    enabled: true\n    max_trial_percent_rolling_20: 100\n")
-    run_id, sdir = _legacy_run(env, runtime_default.LEGACY_V3_FINAL)
-    code, out = env.office("list")
-    assert "3.0 legacy" in out and run_id[:8] in out
-    code, out = env.office("resume", run_id[:8])
-    assert code == 0 and "stays on its pinned runtime" in out, out
-    con = env.con()
-    for table in ("route_probes", "route_probe_reservations", "route_trials", "route_discovery_events"):
-        assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
