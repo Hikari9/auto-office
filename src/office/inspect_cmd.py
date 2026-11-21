@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, paths, plans, route_learning, route_policy, routing, state
+from office import adaptive, candidates, contract, harness_preference, paths, plans, route_learning, route_policy, routing, state
 from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
@@ -294,6 +294,7 @@ def _route_task(con, run, tid) -> Result:
     rows = [dict(r) for r in con.execute("SELECT * FROM route_audit WHERE run_id=? AND task_id=? ORDER BY created_at, rowid",
                                          (run["id"], tid)).fetchall()]
     lines, audits = _effective_route_lines(con, run, tid), []
+    prefs = harness_preference.settings(state.pinned_config(run))
     for row in rows:
         audit = loads(row["disclosure_json"], {})
         audits.append({**{k: v for k, v in row.items() if k != "disclosure_json"}, "disclosure": audit})
@@ -311,6 +312,9 @@ def _route_task(con, run, tid) -> Result:
         if planner.get("planner_notice"):
             lines.append(planner["planner_notice"])
         lines += _matrix(a["disclosure"])
+    if prefs:
+        lines += _preference_lines(prefs, next((p for a in reversed(audits)
+                                                if (p := a["disclosure"].get("harness_preference"))), None))
     for a in (x for x in audits if x["phase"] != "plan"):
         d = a["disclosure"].get("dispatch") or {}
         taken = "; ".join(f"{t['route']}: {t['reason']}" for t in d.get("fallbacks_taken") or [])
@@ -339,6 +343,17 @@ def _route_task(con, run, tid) -> Result:
     if trials or attempts:
         data.update(trials=trials, attempts=attempts)
     return Result(lines=lines, data=data)
+
+
+def _preference_lines(prefs: dict, pick: dict | None) -> list[str]:
+    """The run's pinned harness weights and, for the latest recorded decision, which harness they picked and why."""
+    lines = ["harness preference (pinned): " + "; ".join(
+        f"{scope} " + ", ".join(f"{h}={w:g}" for h, w in weights.items()) for scope, weights in prefs.items())]
+    if pick:
+        lines.append(f"  pick {pick['pick']} for {pick['model']}@{pick['effort']} via {pick['scope']}: {pick['why']}")
+    else:
+        lines.append("  no weights applied to the lead route's model; the ranked order stands")
+    return lines
 
 
 def _effective_route_lines(con, run, tid) -> list[str]:

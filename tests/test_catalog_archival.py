@@ -48,7 +48,7 @@ def test_trust_for_archived_models_is_kept_only_as_nonrouting_history():
 def test_sol_uses_official_invocation_id_without_enabling_unproved_efforts():
     from office import shipped_catalog
     seed = shipped_catalog.load()
-    sol = [r for r in seed["models"] if r["model_id"] == "gpt-6.1-sol"]
+    sol = [r for r in seed["models"] if r["model_id"] == "gpt-6.1-sol" and r["invocation_harness"] == "codex"]
     assert len(sol) == 5
     assert {r["effort"] for r in sol} == {"low", "medium", "high", "xhigh", "max"}
     assert all(r["invocation_model_id"] == "gpt-6.1-sol" for r in sol)

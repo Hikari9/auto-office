@@ -20,7 +20,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-from office import adaptive, executor_slates, hydrogen_trials, route_learning, route_policy, scoring
+from office import adaptive, executor_slates, harness_preference, hydrogen_trials, route_learning, route_policy, scoring
 from office import config as office_config
 from office.util import sha256_obj
 
@@ -822,9 +822,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
             else:
                 stage.sort(key=lambda c: (quota_burn(c), wall(c), reward_key(c), candidate_id(c)))
 
+        preference = None if request.get("manual_route") else harness_preference.decide(request, stage)
+        if preference and preference["route"] is not stage[0]:
+            stage = [preference["route"], *(c for c in stage if c is not preference["route"])]
         chosen = stage[0]
         cid = candidate_id(chosen)
         disclosure = selection_disclosure(role, chosen, preferred_seed, cost_policy)
+        if preference:
+            disclosure["harness_preference"] = harness_preference.public(preference)
+            disclosure["reason"] += f"; harness preference: {preference['why']}"
         for stage_no in (2, 4, 7):
             if override_applies(cid, stage_no):
                 disclosure["override"] = {
@@ -838,6 +844,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             "selected": cid, "status": "selected", "candidate": chosen, "rejected": rejected,
             "selection_disclosure": disclosure,
             "decision_hash": sha256_obj({"role": role, "playbook": playbook, "selected": cid, "policy": policy, "candidate": chosen}),
+            **({"harness_preference": harness_preference.public(preference)} if preference else {}),
         }
     finally:
         if connection is None and con is not None:
@@ -1167,6 +1174,21 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         audit["hydrogen_canary"] = {**canary, "route": canary_id}
     if disc:
         audit["discovery"] = disc
+    preference = None if trial or canary_id or request.get("manual_route") else harness_preference.decide(
+        request, [*(by_id[e["route"]] for e in slate), *(c for rid, c in by_id.items()
+                                                         if rid in ranked and rid not in {e["route"] for e in slate})])
+    if preference:
+        audit["harness_preference"] = harness_preference.public(preference)
+        picked = candidate_id(preference["route"])
+        if picked != slate[0]["route"]:
+            entry = next((e for e in slate if e["route"] == picked), None) or {
+                "route": picked, "label": adaptive.label(preference["route"]), "utility": None,
+                "reason": "harness preference", "strength": "same model and effort as the lead route",
+                "weakness": "ranked below the lead route"}
+            slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(
+                [{**entry, "reason": f"harness preference: {preference['why']}"},
+                 *(e for e in slate if e["route"] != picked)][:max(adaptive.SLATE_SIZE, len(slate))])]
+            audit["slate"] = slate
     for row in audit["candidates"]:
         row["eligibility"] = eligibility.get(row["route"]) or {"source": "factual gates"}
     chosen = by_id[slate[0]["route"]]
@@ -1215,6 +1237,8 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         hashed["discovery"] = disc
     if canary_id:
         hashed["hydrogen_canary"] = audit["hydrogen_canary"]
+    if preference:
+        hashed["harness_preference"] = audit["harness_preference"]
     if audit.get("lineage_supersession"):
         # Likewise only when a predecessor was superseded, so other decisions hash as before.
         hashed["lineage_supersession"] = audit["lineage_supersession"]
@@ -1229,4 +1253,5 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         "routing": audit,
         **({"discovery": disc} if disc else {}),
         **({"hydrogen_canary": audit["hydrogen_canary"]} if canary_id else {}),
+        **({"harness_preference": audit["harness_preference"]} if preference else {}),
     }

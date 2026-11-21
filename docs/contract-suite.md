@@ -69,6 +69,9 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |
 | `tests/test_h5_hydrogen_plan_reviewer.py` | keep |
+| `tests/test_harness_preference.py` | keep |
+| `tests/test_hermes_adapter.py` | keep |
+| `tests/test_hermes_catalog.py` | keep |
 | `tests/test_hooks.py` | keep |
 | `tests/test_hydrogen_shadow_scorecard.py` | keep |
 | `tests/test_instruction_conformance.py` | keep |
@@ -80,6 +83,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_issue_927_onboarding_wording.py` | keep |
 | `tests/test_landings.py` | historical-diagnostic |
 | `tests/test_monitor.py` | historical-diagnostic |
+| `tests/test_onboarding_harness_preference.py` | keep |
 | `tests/test_packet_delivery_channel.py` | keep |
 | `tests/test_pane_busy.py` | keep |
 | `tests/test_plugin_skill_entry.py` | keep |
@@ -448,3 +452,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_752_recheck_next_requalifies.py` | keep |
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |
+| `tests/test_frontend_bias.py` | keep |
+| `tests/test_issue_1282_hydrogen_gate.py` | keep |
+| `tests/v31/test_engineering_index_null_score.py` | keep |
+| `tests/v31/test_issue1297_fastlane.py` | keep |

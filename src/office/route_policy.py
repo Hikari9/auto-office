@@ -10,9 +10,11 @@ from copy import deepcopy
 import json
 import math
 import re
+import shutil
+import time
 
 from office.util import dumps, new_run_id, now_iso, sha256_obj
-from office import model_lineages
+from office import hermes_access, model_lineages
 
 POLICY_VERSION = "route-discovery-3"
 # A route that fails at runtime is demoted for this long, never permanently (#845).
@@ -40,6 +42,38 @@ EVENT_ORIGINS = ("preflight", "manual", "dispatch", "recovery", "job")
 _EVENT_FIELDS = ("run_id", "plan_version", "task_id", "dispatch_id", "role", "fingerprint_json",
                  "candidate_route", "primary_route", "fallback_route", "probe_freshness", "source_attempt_id",
                  "allocation_json", "outcome", "reason_class", "detail")
+
+
+PROVIDER_UNREACHABLE = "provider-unreachable"
+_PROVIDER_TTL_S = 30.0
+_reachable_cache: tuple[float, frozenset[str]] | None = None
+
+
+def reachable_hermes_providers() -> frozenset[str]:
+    """Providers `hermes auth list` shows with a usable credential, read at most once per TTL (policy views ask per row)."""
+    global _reachable_cache
+    now = time.monotonic()
+    if _reachable_cache is None or now - _reachable_cache[0] > _PROVIDER_TTL_S:
+        _reachable_cache = (now, frozenset(hermes_access.reachable_providers()))
+    return _reachable_cache[1]
+
+
+def reset_provider_cache() -> None:
+    global _reachable_cache
+    _reachable_cache = None
+
+
+def provider_unreachable(cand: dict) -> str | None:
+    """Why a Hermes route cannot run here: its pinned provider has no usable credential. None otherwise.
+
+    A bare model id pins no provider, and an absent Hermes is the not-installed case, so neither is blocked here.
+    """
+    if cand.get("harness", cand.get("invocation_harness")) != "hermes" or not shutil.which("hermes"):
+        return None
+    provider, _ = hermes_access.expected_route(cand.get("invocation_model_id") or "")
+    if provider and provider not in reachable_hermes_providers():
+        return f"{PROVIDER_UNREACHABLE}: hermes auth list shows no usable {provider} credential"
+    return None
 
 
 def row_status(row: dict, probe: dict | None = None) -> dict:
@@ -338,6 +372,8 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
     """
     if block := fable_role_block(cand, role):
         return {"state": "deny", "source": "hard-model-role-boundary", "reason": block}
+    if reason := provider_unreachable(cand):
+        return {"state": "deny", "source": PROVIDER_UNREACHABLE, "reason": reason}
     # A preferred_seed allow never lifts a deny, the same refusal dispatch gives (#899).
     seed_outranked = any(is_denied(cand, policy) for policy in policies)
     for policy in reversed(policies):

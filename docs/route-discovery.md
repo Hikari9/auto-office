@@ -147,6 +147,24 @@ So `quota.reserve_percent: 0` alone gives both families a reserve of 0, and `exe
 
 Each run pins the `quota` block at start, so a run's reserves are the values in effect then. The protected-reserve notice names the role and its pinned value. A live run picks up an edit through `--apply-routing`.
 
+## Harness preference
+
+The same model can launch through more than one harness (for example `claude` and `hermes` both run Sonnet). `routing.harness_preference` sets how often each harness wins among routes that already qualified for one model and effort. It is unset by default, and then routing is unchanged.
+
+```yaml
+routing:
+  harness_preference:
+    anthropic: {claude: 95, hermes: 5}           # a vendor (the lineage provider)
+    claude-sonnet-5-5: {claude: 50, hermes: 50}  # one model; beats its vendor key
+```
+
+- Weights are non-negative numbers over known harness ids. A negative, non-numeric or NaN weight, or an unknown harness, is refused when the config resolves.
+- The pick is a deterministic hash of the run id, task id, scope and model, so one (run, task) always lands on the same harness, and many tasks split in proportion to the weights.
+- The pick only chooses among candidates that survived every gate: role deny, quota, cooldown, demotion, missing auth and an uninstalled harness still remove a harness first. A harness weighted 0 or not listed is never drawn first, but serves as the fallback when no weighted harness is left.
+- Effort is never mixed: the pick is among harnesses offering the lead route's model at its effort. A manually named route (`--route`, `--as`) is not re-picked.
+- The weights are pinned with the run's routing; a live run picks up an edit through `--apply-routing`.
+- `office inspect route <task>` shows the pinned weights, the harness picked and the draw. The decision record carries a `harness_preference` entry only when weights applied.
+
 ## Rollback and pinned runs
 
 Set `routing.discovery.enabled: false` at the user tier (`office config routing.discovery.enabled false`) or the repo tier (add `--repo`) to disable discovery for future runs. A repo-tier value wins over the user tier, so read back the effective value and its source with `office config routing.discovery.enabled --show-origin`. This leaves stored evidence and trust state intact and needs no code change.
