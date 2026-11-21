@@ -54,7 +54,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, db, paths, route_policy
+from office import adapters, db, hermes_access, paths, route_policy
 from office import config as office_config
 from office.util import (ALIVE, DEAD, UNKNOWN, atomic_write_json, now_iso, parse_iso, process_is, process_start,
                          sha256_file)
@@ -1256,6 +1256,8 @@ def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, no
                 except OSError:
                     pass
         env["CODEX_HOME"] = str(private)
+    elif harness == "hermes":
+        env = hermes_access.launch_env(env)  # HERMES_* would steer the model and provider the probe pins
     elif harness == "claude":
         # Claude's login lives in the real config directory (its keychain entry is keyed by it), so the
         # probe keeps it and may write only this one working directory's session record.

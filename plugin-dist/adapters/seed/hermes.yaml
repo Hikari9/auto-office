@@ -6,23 +6,28 @@ version_fingerprint:
 model_source:
   type: catalog-plus-probe
   command: null
+# Hermes --reasoning takes none, minimal, low, medium, high, xhigh, max or ultra (hermes 0.23.3 --help);
+# Office's five levels and max map straight across, so no level is dropped.
 effort_mapping:
-  none: null
+  none: none
   low: low
   medium: medium
   high: high
-  xhigh: null
-  max: null
+  xhigh: xhigh
+  max: max
 benchmark_slug_mapping: {}
 invocation:
   executable: hermes
-  argv: [--model, "{model}", --cwd, "{cwd}"]
-  prompt_transport: stdin
-  cwd_transport: flag
+  argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --usage-file, "{usage_file}"]
+  prompt_transport: argv-bound
+  cwd_transport: process-cwd
 safe_prompt_passing:
   shell: false
   supports_prompt_file: false
-  notes: Pipe prompt on stdin. Hermes reads from stdin and uses --model for model selection. Completion detected by exit code 0 plus output markers.
+  notes: >-
+    `hermes -z` takes its prompt as the value of --oneshot, never from stdin, so the headless form passes the prompt as one
+    `--oneshot=<prompt>` argv element (the `=` form keeps a prompt that starts with `-` from being read as an option).
+    Never assemble a shell line.
 dispatch_forms: [cli]
 trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
 quota_probe:
@@ -35,12 +40,55 @@ shallow_review:
 agentic_capability:
   default: unknown
 failure_signatures:
+  - {id: subscription-usage-exhausted, attribution: quota/account, pattern: "subscription usage is exhausted"}
+  - {id: credit-balance-too-low, attribution: quota/account, pattern: "credit balance is too low"}
+  - {id: rate-limit, attribution: quota/account, pattern: "rate limit"}
   - {id: quota-exceeded, attribution: quota/account, pattern: "quota exceeded"}
   - {id: model-unavailable, attribution: harness, pattern: "model not available"}
-  - {id: rate-limit, attribution: quota/account, pattern: "rate limit"}
   - {id: context-overflow, attribution: model, pattern: "context length exceeded"}
   - {id: invalid-key, attribution: environment/network, pattern: "invalid API key"}
 conformance:
   deterministic: pending
   live: pending
-source_notes: Hermes adapter seeded for migration. Hermes records sessions in ~/.hermes/state.db (SQLite) and supports skill detection via skill-md-read inference. Active profile config is at ~/.hermes/profiles/{active}/config.yaml.
+# Launch notes (the schema takes no adapter-level keys for these; office.adapters keys them on the `hermes` executable):
+# every HERMES_* variable but HERMES_HOME is removed from the headless env, the pane shell and preflight, because they
+# steer the model, provider, config and session. The PATH `hermes` of a git install is a shell wrapper that execs
+# `python3 -I -c '<inline script>'`, a process Herdr's hermes agent kind cannot detect, so the pane form puts a shim
+# first on PATH that execs the checkout's launcher script under the same interpreter (hermes_access.resolve_launcher).
+trust_justifications:
+  --yolo: >-
+    Hermes cannot answer approval prompts in a headless run or an unattended pane, so every form passes it. It grants
+    unprompted edits and commands in the Office worktree, which is why only the worker form exists.
+session:
+  id: none
+capabilities: [builder]
+# `{provider}`/`{model_name}` come from the pinned slug: `provider:model` pins both, a bare id only the model (the
+# --provider flag is then dropped). --ignore-user-config removes config.yaml's fallback_providers (and every other
+# customization), so a fallback provider cannot swap the model mid-run; it requires --model, which is always given.
+# --usage-file is the identity readback: Office compares its `model`/`provider` with the pinned route and fails the
+# dispatch as wrong_model on a mismatch. --yolo is redundant for -z (approvals are bypassed) and kept for the pane form.
+office_profiles:
+  worker:
+    argv: [--ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --usage-file, "{usage_file}"]
+    prompt: argv-bound
+    prompt_flag: "--oneshot="
+    output: stdout
+    herdr_kind: hermes
+    readback: hermes-usage
+    interactive:
+      argv: [--cli, --ignore-user-config, --provider, "{provider}", --model, "{model_name}", --reasoning, "{effort}", --yolo, --in, "{cwd}"]
+    # `hermes -z` has no wall clock of its own (--run-budget belongs to `hermes chat`), so the supervisor's cap
+    # bounds every headless launch.
+    max_minutes: 60
+  # No reviewer or vision profile: Hermes has no read-only sandbox. --yolo plus the terminal toolset lets the agent run
+  # any command, so `--in <dir>` only moves the cwd and cannot keep a reviewed worktree unwritten (a post-run
+  # fingerprint detects changes, it cannot prevent them). Hermes review dispatch stays disabled until an OS-enforced
+  # read-only checkout with a narrowly writable submit path exists; no reviewer_readonly_args is declared either.
+source_notes: >-
+  Hermes adapter for hermes 0.23.3 (git install). Headless: `hermes -z` (one-shot, prints only the final response,
+  exit 0 only for a completed turn, 2 for a failed or partial one) with --usage-file for the model/provider/completed
+  readback. Probed 2026-11-20: an unknown model under --ignore-user-config --provider anthropic exits 2, prints the
+  provider's error on stdout and still writes the usage file with the requested model and provider. Credentials
+  (auth.json, .env) still load under --ignore-user-config. Hermes records sessions in ~/.hermes/state.db; the usage
+  report's session_id is not read yet, so session id is none and no resume form exists. Provider reachability comes
+  from `hermes auth list` (office.hermes_access.reachable_providers, names and status only).

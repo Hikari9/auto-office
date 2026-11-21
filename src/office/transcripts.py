@@ -21,6 +21,9 @@ as the reviewer's. Only files modified since the dispatch started are read.
   (type `user`, JSON `data.text`). Only the landing probe and the session id read
   it. There is no opencode `final_reply`: an opencode reviewer writes its reply
   file (its agent may edit that file), and a review is read from that file only.
+- Hermes: $HERMES_HOME (default ~/.hermes)/state.db, opened read-only: `sessions` (id, cwd, started_at) and
+  `messages` (role, content, timestamp). A `user` message naming the marker identifies the session; its last
+  non-empty `assistant` message is the final reply.
 """
 from __future__ import annotations
 
@@ -195,6 +198,46 @@ def _codex_candidates(since: float) -> list[Path]:
     return _recent(files, since)
 
 
+def hermes_db() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "state.db"
+
+
+def _hermes_query(sql: str, params: tuple) -> list[tuple]:
+    """Rows from Hermes' session store, read-only; a store that is missing, locked or of another shape reads as none."""
+    db = hermes_db()
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=2)
+        try:
+            return con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+
+
+def _hermes_sessions(marker: str, cwd, since: float) -> list[str]:
+    """Ids of Hermes sessions, newest first, whose user prompt carries `marker`, started since the dispatch (with
+    the usual slack) and, when `cwd` is given, recorded in that directory."""
+    rows = _hermes_query(
+        "SELECT s.id, s.cwd FROM messages m JOIN sessions s ON s.id = m.session_id "
+        "WHERE m.role = 'user' AND m.timestamp >= ? AND instr(m.content, ?) > 0 ORDER BY m.timestamp DESC",
+        (since - SLACK_SECONDS, marker))
+    found: list[str] = []
+    for sid, directory in rows:
+        if sid not in found and (not cwd or not directory or _same_dir(cwd, directory)):
+            found.append(sid)
+    return found
+
+
+def _hermes_final_text(session_id: str) -> str | None:
+    rows = _hermes_query("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' "
+                         "AND content IS NOT NULL AND trim(content) != '' ORDER BY timestamp DESC, id DESC LIMIT 1",
+                         (session_id,))
+    return rows[0][0] if rows else None
+
+
 def _opencode_sessions(marker: str, cwd, since: float) -> list[str]:
     """Ids of opencode sessions, newest first, whose user prompt carries `marker`.
 
@@ -247,6 +290,11 @@ def final_reply(harness: str | None, *, marker: str, cwd: str | Path | None = No
                 text = read(f)
                 if text and text.strip():
                     return text
+    if h == "hermes":
+        for sid in _hermes_sessions(marker, cwd, t):
+            text = _hermes_final_text(sid)
+            if text and text.strip():
+                return text
     return None
 
 
@@ -283,6 +331,8 @@ def session_id(harness: str | None, *, marker: str, cwd: str | Path | None = Non
     found = {_transcript_session(f) for f in files if _mentions(f, marker) and _prompted(f, marker, cwd)}
     if h == "opencode":
         found.update(_opencode_sessions(marker, cwd, t))
+    if h == "hermes":
+        found.update(_hermes_sessions(marker, cwd, t))
     found.discard(None)
     return found.pop() if len(found) == 1 else None
 
@@ -303,4 +353,5 @@ def prompt_seen(harness: str | None, *, marker: str, cwd: str | Path | None = No
     if h in ("codex", ""):
         files += _codex_candidates(t)
     return (any(_mentions(f, marker) and _prompted(f, marker, cwd) for f in files)
-            or (h == "opencode" and bool(_opencode_sessions(marker, cwd, t))))
+            or (h == "opencode" and bool(_opencode_sessions(marker, cwd, t)))
+            or (h == "hermes" and bool(_hermes_sessions(marker, cwd, t))))
