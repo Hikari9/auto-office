@@ -222,10 +222,12 @@ def test_the_same_overkill_route_stays_skipped_for_an_undeclared_task(env):
     _approve(env)
     _overkill_codex(env)
     code, out = env.office("dispatch", "T1", env=_quota(env, claude=1))
-    # T2's ranked slate now carries runnable fallbacks (gpt-6.2-sol, gemini-4-neon) behind the skipped route, so the
-    # dispatch no longer exhausts the slate: the overkill route is still skipped and never the one that runs.
-    assert code == 0 and f"{CODEX}: overkill by user routing.user_policy.overkill_rules" in out, out
-    assert _triple(env) != CODEX
+    # Every planned route is dispatchable (#1313 restored claude-opus-5-5@high), so with both Opus rungs over the
+    # quota reserve the planned slate is exhausted: dispatch stops on no-route instead of running the overkill route,
+    # and names the overkill rule as the reason that route was skipped.
+    assert code != 0 and "no-route" in out, out
+    assert f"{CODEX}: overkill by user routing.user_policy.overkill_rules" in out, out
+    assert env.con().execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 0
 
 
 def test_a_declared_route_denied_later_is_refused_not_dispatched(env):

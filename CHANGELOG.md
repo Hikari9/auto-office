@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.7
+
+Main is green again: three tests that 3.31.4 broke now pass (stale test expectations, no runtime change). Making `claude/claude-opus-5-5@high` dispatchable moved two routing outcomes the tests assumed. A planned slate whose routes are all dispatchable but out of quota or overkill now stops on `no-route` instead of falling through to ranked fallbacks, and the overkill test asserts that refusal. The automatic executor for the wait tests moved to codex, where Office deliberately ignores herdr's `working` status, so the tests that rely on `working` pin a claude dispatch (the weekly-warning test failed intermittently because the harness pick varies per run).
+
 ## 3.31.5
 
 `office close --landed-externally` no longer fails a run whose run-level check is `scripts/validate.sh --pr` (#1312). The squash-landing proof re-ran every check on the merged default-branch commit, where the PR selector's diff against its merge-base is empty, so the gate always failed closed with `landing-checks-failed`. The PR selector's integrity-checked integration attestation on the reviewed composed commit is now carried instead, recorded under `squash_proof.checks.carried` and labeled scoped. Every other run and task check still re-runs on the merged commit. An unattested scoped check is not carried, and an unmerged PR still refuses.
