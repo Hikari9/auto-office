@@ -1060,6 +1060,19 @@ def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
         zombie.wait()
 
 
+def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
+    """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    sent = []
+    real = os.killpg
+    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
+    route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
+                                term_wait=0.2, kill_wait=0.2)
+    assert sent == []
+
+
 def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
     assert route_probe._running({os.getpid()}) == {os.getpid()}
     mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()

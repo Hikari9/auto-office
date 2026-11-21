@@ -586,8 +586,9 @@ def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] |
     (#1296: a long-lived Claude hook daemon outside the probe never reaps the child it
     started for the probe's session). A pid no longer listed is gone, and one whose
     start time differs from the one the tracker saw was reused by another process, so
-    it is not ours to wait for or signal. None when the states cannot be read, so the
-    caller fails closed."""
+    it is not ours to wait for or signal (ps shows start times to the second; reusing a
+    pid within the same second would take a full wrap of the pid space). None when the
+    states cannot be read, so the caller fails closed."""
     try:
         listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=,lstart=", "-p",
                                   ",".join(str(p) for p in sorted(pids))],
@@ -621,13 +622,19 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         pids = tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
         return _running(pids, tracker.seen) if pids else pids
 
+    def group_ours() -> bool:
+        # The group id is ours to signal only while its leader is: once the leader is reaped
+        # (or was never verified) an emptied group's id can be reused by an unrelated process,
+        # so stragglers are then signalled one by one through the tracker instead.
+        return pgid > 1 and seed and (proc is None or proc.returncode is None)
+
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
         pids = left()
         if pids is None:
             return False
         if not pids and not _group_alive(pgid):
             return True
-        if pgid > 1:
+        if group_ours():
             try:
                 os.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):

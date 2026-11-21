@@ -219,7 +219,7 @@ def test_enter_that_empties_the_composer_counts_as_submitted(env, monkeypatch):
     assert len(prompts) == 1 and len(enters) == 1 and typed == []
 
 
-def _reviewer_reprompt(env, monkeypatch, reads):
+def _reviewer_reprompt(env, monkeypatch, reads, *, harness="claude"):
     state_file = _fake(env, monkeypatch, gets=["idle"], reads=reads)
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
@@ -227,7 +227,10 @@ def _reviewer_reprompt(env, monkeypatch, reads):
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
     from office import dispatch, gates, review_parse
-    d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer"}
+    # Pin the reviewer's harness so routing drift (T1 now routes to codex) cannot change the Enter budget under
+    # test. Codex keeps its one-Enter cap (#790).
+    d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer",
+         "harness": harness, "adapter_id": harness, "triple": f"{harness}/fake-model/high"}
     run = {**run, "gates": {"review_reprompt_max": 1}}
     # Herdr holds this reviewer in its pane: the fail-closed fence types only into a pane it shows to be the dispatch's own.
     data = json.loads(state_file.read_text())
@@ -253,11 +256,22 @@ def test_reviewer_reprompt_left_unsubmitted_gets_enter_not_a_second_prompt(env, 
 
 
 def test_reviewer_reprompt_that_never_submits_stops_with_an_enter_hint(env, monkeypatch):
+    # A non-Codex reviewer gets the configured OFFICE_HERDR_ENTER_TRIES Enters, never a second copy of the prompt.
     monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
     held = "› Office could not read your review (empty reply). Write your complete review again"
     state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held])
     prompts, enters, typed = _sends(_calls(state_file))
     assert len(prompts) == 1 and len(enters) == 2 and typed == []
+    assert "typed but unsubmitted" in reason and "send-keys" in reason
+
+
+def test_codex_reviewer_reprompt_that_never_submits_gets_one_enter(env, monkeypatch):
+    # Codex code reviewers cap recovery at one Enter (#790), whatever OFFICE_HERDR_ENTER_TRIES says.
+    monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
+    held = "› Office could not read your review (empty reply). Write your complete review again"
+    state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held], harness="codex")
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
     assert "typed but unsubmitted" in reason and "send-keys" in reason
 
 
