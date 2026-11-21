@@ -93,7 +93,7 @@ unset PYTEST_ADDOPTS PYTEST_PLUGINS
 echo "== Ecosystem check"
 python3 scripts/check_ecosystem.py
 
-# Two workers maximum. PR selection still uses --all so selected integration,
+# Default two workers (VALIDATE_WORKERS, 1-4). PR selection still uses --all so selected integration,
 # legacy, and slow tests are never hidden by the default tier filter.
 if [ "$mode" = "pr" ]; then
   selection_file="$(mktemp)"
