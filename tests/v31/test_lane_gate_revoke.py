@@ -214,7 +214,8 @@ def _visual_run(env):
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}],
            probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    # The capture patches below only reach the in-process claude supervisor; the ranker no longer picks claude.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
 
 
 def test_a_product_failure_is_still_a_blocking_producer_finding(env, monkeypatch, tmp_path):
