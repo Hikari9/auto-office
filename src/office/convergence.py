@@ -1431,6 +1431,16 @@ def route_repairs(con, run: dict, scope: dict, blocking: list[dict]) -> list[str
         state.emit(con, run, "gate.recheck", f"RECHECK {scope['id']} for {tid}: {text}", audience=f"task:{tid}",
                    task_id=tid)
         if gates.worker_live(con, task.get("current_dispatch_id")):
+            from office import dispatch as dispatch_mod
+            dispatch_mod.relet_released_lease(con, run, task)  # #1318: its repair submit must not be lease-lost
+            cur = state.get_dispatch(con, task["current_dispatch_id"]) or {}
+            if dispatch_mod.live_lease(con, run["id"], cur.get("lease_id")) is None:
+                # No lease to submit under (an overlapping live scope kept it from being re-let): telling the session
+                # to fix and submit would end in lease-lost, so the findings wait for the orchestrator.
+                state.emit(con, run, "task.findings_queued", f"{tid} {scope['id']} findings are waiting for you: its live "
+                           f"session {cur.get('id')} holds no lease; office revoke {tid}, then office rerun {tid} --fresh",
+                           task_id=tid)
+                continue
             state.enqueue(con, run, "notify_worker", {"dispatch_id": task["current_dispatch_id"], "task_id": tid,
                           "text": f"{scope['id']} convergence findings for you: run office status, fix, then office submit."},
                           dedup_key=f"notify:{scope['id']}:{tid}:{uuid.uuid4().hex[:6]}", max_attempts=1)

@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.8
+
+A convergence RECHECK on an orchestrator-inline (fastlane) or other live task session no longer loops on `worker-live` (#1318). Acceptance released the live session's lease, so its repair submit was refused as `lease-lost` and `office revoke` changed nothing. Now the RECHECK re-lets a fresh lease to the live session when no overlapping scope is held, and `office revoke` also fences a live session's released lease and records the end of an orchestrator-inline dispatch, so `office rerun --fresh` and `office dispatch` relaunch it.
+
 ## 3.31.7
 
 Main is green again: three tests that 3.31.4 broke now pass (stale test expectations, no runtime change). Making `claude/claude-opus-5-5@high` dispatchable moved two routing outcomes the tests assumed. A planned slate whose routes are all dispatchable but out of quota or overkill now stops on `no-route` instead of falling through to ranked fallbacks, and the overkill test asserts that refusal. The automatic executor for the wait tests moved to codex, where Office deliberately ignores herdr's `working` status, so the tests that rely on `working` pin a claude dispatch (the weekly-warning test failed intermittently because the harness pick varies per run).
