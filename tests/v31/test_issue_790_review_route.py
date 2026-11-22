@@ -84,6 +84,7 @@ def _mark_unlanded(monkeypatch, *, only_first=True):
 
 
 def test_a_reviewer_whose_pointer_never_landed_runs_once_more_on_the_same_route_before_any_fallback(env, monkeypatch):
+    env.hide_agy = True  # the patch only reaches review jobs that run in this process, never an agy executor's
     _mark_unlanded(monkeypatch)
     _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
@@ -96,6 +97,7 @@ def test_a_reviewer_whose_pointer_never_landed_runs_once_more_on_the_same_route_
 
 
 def test_the_same_route_is_retried_only_once_then_the_next_fallback_is_taken(env, monkeypatch):
+    env.hide_agy = True  # the patch only reaches review jobs that run in this process, never an agy executor's
     _mark_unlanded(monkeypatch, only_first=False)
     _start(env, executor=EXECUTOR, convergence_reviewer=[EMPTY, EMPTY, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)

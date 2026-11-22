@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from office import state
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_ONE, PLAN_TWO, start_inline, task_row
 
 APPROVED = "VERDICT: APPROVED\nNEXT proceed"
@@ -61,7 +62,7 @@ PLAN_SHARED = PLAN_TWO.replace("depends: none\nchecks: python3 -c \"import calc"
 PLAN_UI = PLAN_ONE.replace("- calc.add(2, 3) == 5\nvisual: none", "- the add button shows the sum on screen")
 
 
-def _start(env, plan=PLAN_ONE, gear="direct+review", extra=(), approve=True, **script):
+def _start(env, plan=PLAN_ONE, gear="S", extra=(), approve=True, **script):
     env.trust()
     env.script(**script)
     start_inline(env, plan=plan, gear=gear, extra=extra)
@@ -288,9 +289,10 @@ def test_recheck_guidance_obeys_the_same_scope_lease_as_rerun(env, monkeypatch):
         monkeypatch.setattr(gates, "worker_live", lambda c, did: bool(did == t1["current_dispatch_id"])
                             or real_live(c, did))
         waiting = guide.next_action(con, run)
-        assert waiting.startswith("no action;"), waiting
+        # #913: the live parent is prompted, never rerun; the held dependent is named, never offered.
+        assert waiting.startswith('office prompt T1 -- "fix findings'), waiting
         assert "T2 waits for T1" in waiting and "office rerun T2" not in waiting, waiting
-        assert not guide._needs_orchestrator(con, run), waiting
+        assert guide._needs_orchestrator(con, run), waiting  # the prompt is the orchestrator's to send
 
         # When T1's lease really releases, T2 becomes the one legal repair.
         owner["T2"] = None
@@ -439,6 +441,33 @@ def test_approved_findings_advance_and_cleanup_is_not_rereviewed(env):
     assert code == 0, out
 
 
+def test_approved_records_the_versions_the_review_was_queued_with(env):
+    """#1036: an amendment landing between queueing the lane review and its APPROVED verdict must not be
+    stamped onto the approval; the re-accepted lane is reviewed again, not cleaned up as current."""
+    from office import convergence, db
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}])
+    env.office("dispatch", "T1", check=0)
+    queued = _scope(env, "L-T1")["reviewed_versions"]
+    con = env.con()
+    with db.transaction(con):
+        # the state after queueing round 1, before its verdict
+        run = state.get_run(con, _run_row(env)["id"])
+        convergence._set_scope(con, run, "L-T1", status="reviewing", approved=None)
+        # the amendment (--add-accept) lands before the verdict
+        con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+        run = state.get_run(con, run["id"])
+        scope = next(s for s in convergence.lanes(con, run) if s["id"] == "L-T1")
+        convergence._converge_scope(con, run, scope, basis="approved")
+        current = convergence._contract_versions(con, run, scope)
+    approved = _scope(env, "L-T1")["approved"]["versions"]
+    assert approved == queued and approved != current, "the approval names the reviewed contract"
+    gates_before = len(_gates(env, "convergence_review"))
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.cleanup"), "a pre-amendment approval is not current"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the re-accepted lane is reviewed again"
+
+
 def test_hard_seam_change_after_approval_is_reviewed_again(env):
     """2: a repair that moves a hard seam (here the task's ownership envelope) is not
     APPROVED cleanup: the lane is reviewed again."""
@@ -470,7 +499,7 @@ def test_convergence_intake_gap_surfaces_at_round_one(env):
 
 # ------------------------------------------------------------------ plan review (1, 3, 4, 5, 6)
 
-PLAN_GEAR = "express"
+PLAN_GEAR = "L"
 
 
 def test_plan_approved_with_findings_dispatches_and_tracks_them(env):
@@ -687,6 +716,87 @@ def test_an_identical_tree_recomposition_keeps_the_waiver_and_starts_no_review(e
     assert _run_row(env)["landing"]["integration"]["status"] == "accepted"
 
 
+def _drop_review(env):
+    """#1228: the lane's latest convergence review closed stale with no result while the lane was reviewing
+    (a member changed mid-review, so the job dropped the reviewer's reply)."""
+    con = env.con()
+    gid = con.execute("SELECT id FROM gates WHERE kind='convergence_review' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+    con.execute("UPDATE gates SET status='stale', verdict=NULL, review_status=NULL, stale_reason='scope recomposed' "
+                "WHERE id=?", (gid,))
+    run_id, landing = con.execute("SELECT id, landing_json FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    landing = json.loads(landing)
+    landing["convergence"]["L-T1"]["status"] = "reviewing"
+    con.execute("UPDATE runs SET landing_json=? WHERE id=?", (json.dumps(landing), run_id))
+    con.commit()
+    return gid
+
+
+def test_an_identical_tree_does_not_carry_a_dropped_review(env):
+    """#1228: a same-tree recomposition after the lane's review closed stale with no verdict starts a new
+    review; carrying it left the lane "reviewing" with nothing running and the verdict lost."""
+    _delegated_waiver(env)
+    before = _scope(env, "L-T1")
+    dropped = _drop_review(env)
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    after = _scope(env, "L-T1")
+    assert after["tree"] == before["tree"] and after["commit"] != before["commit"], "same tree, new composed commit"
+    assert not _events(env, "convergence.carried"), "a dropped review has nothing to carry"
+    latest = _gates(env, "convergence_review")[-1]
+    assert latest["id"] != dropped and latest["input_key"] == f"L-T1:{after['commit']}"
+    assert latest["status"] == "done" and latest["verdict"] == "RECHECK", "the new review's verdict is recorded"
+
+
+def test_a_dropped_review_on_the_current_composition_can_be_run_again(env):
+    """#1228: with no recomposition coming, status names the recovery and office review re-runs the dropped
+    review on the same composition instead of refusing nothing-to-review."""
+    _delegated_waiver(env)
+    dropped = _drop_review(env)
+    assert "office review L-T1" in _status(env)["next"]
+    env.script(convergence_reviewer=[{"reply": APPROVED}])
+    code, out = env.office("review", "L-T1:convergence")
+    assert code == 0, out
+    latest = _gates(env, "convergence_review")[-1]
+    assert latest["id"] != dropped and latest["input_key"] == f"L-T1:{_scope(env, 'L-T1')['commit']}"
+    assert latest["verdict"] == "APPROVED"
+
+
+def test_an_identical_tree_after_an_acceptance_change_is_reviewed_again(env):
+    """#768: an amendment changed T1's acceptance criteria; the resubmitted same tree is no proof of the new ones."""
+    _delegated_waiver(env)
+    gates_before = len(_gates(env, "convergence_review"))
+    con = env.con()
+    con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+    con.commit()
+    _resubmit(env, GOOD_ADD + "# r2\n")
+    assert not _events(env, "convergence.carried"), "a changed acceptance contract is not carried"
+    assert len(_gates(env, "convergence_review")) > gates_before, "the recomposition is reviewed again"
+
+
+def test_an_in_flight_review_of_an_amended_contract_is_not_carried(env):
+    """#1036: an amendment lands while the lane review runs; the same-tree re-acceptance must not retarget that
+    review (judged on the old contract) to the amended one. An unamended contract still carries."""
+    from office import convergence, db, state
+    _delegated_waiver(env)
+    run_id = _run_row(env)["id"]
+
+    def carry(amend):
+        con = env.con()
+        with db.transaction(con):
+            run = state.get_run(con, run_id)
+            scope = next(s for s in convergence.lanes(con, run) if s["id"] == "L-T1")
+            convergence._set_scope(con, run, "L-T1", status="reviewing", carry_from="reviewing",
+                                   reviewed_versions=convergence._contract_versions(con, run, scope))
+            if amend:
+                con.execute("UPDATE tasks SET acceptance_version=COALESCE(acceptance_version, 0) + 1 WHERE id='T1'")
+            run = state.get_run(con, run_id)
+            st = convergence.scope_state(run, "L-T1")
+            composed = {"tree": st["tree"], "commit": st["commit"], "branch": st.get("branch")}
+            return convergence._carry_over(con, run, scope, st, composed)
+
+    assert carry(amend=False), "no amendment: the running review is carried"
+    assert not carry(amend=True), "an amendment during the review: a fresh lane review is queued instead"
+
+
 def test_a_waiver_without_a_tree_binds_its_commit_only(env):
     """Legacy rows (recorded before trees were stored) match the commit, never a recomposed one."""
     _delegated_waiver(env)
@@ -826,10 +936,10 @@ def test_visual_review_is_a_lane_gate_with_its_own_round_cap(env, monkeypatch, t
     parallel with the convergence review on the same composed lane; RECHECK x3 escalates."""
     _fake_capture(monkeypatch, tmp_path)
     adds = [GOOD_ADD + f"# r{i}\n" for i in range(4)]
-    vis = "EVIDENCE_STATUS: COMPARABLE\n" + recheck(finding("U1", where="header @ desktop", what="clipped"))
+    vis = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + recheck(finding("U1", where="header @ desktop", what="clipped"))
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": a}, "submit": True} for a in adds],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": vis}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the capture patch reaches only the in-process claude supervisor
     code_gate, vis_gate = _gates(env, "convergence_review")[0], _gates(env, "visual")[0]
     assert code_gate["input_key"] == vis_gate["input_key"], "both review the same composed revision"
     assert vis_gate["verdict"] == "RECHECK" and vis_gate["evidence_status"] == "COMPARABLE", (vis_gate["review_status"], vis_gate["summary"])
@@ -844,10 +954,10 @@ def test_visual_fallback_cannot_approve_uninspected_evidence(env, monkeypatch, t
     shot = _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert _gates(env, "visual")[0]["review_status"] == "UNAVAILABLE"
     report = tmp_path / "vis.txt"
-    report.write_text("EVIDENCE_STATUS: COMPARABLE\n" + APPROVED)
+    report.write_text("EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED)
     code, out = env.office("review", "L-T1:visual", "--report", str(report))
     assert code == 4 and "cannot-inspect-evidence" in out or "inspect every" in out, out
     assert all(g["verdict"] is None for g in _gates(env, "visual"))
@@ -895,7 +1005,7 @@ def test_rollback_changes_only_future_runs(env, tmp_path):
     _start(env)
     first = _run_row(env)["id"]
     Path(env.tmp / "user-config.yaml").write_text("review:\n  contract: v3.1\n")
-    code, out = env.office("start", "second goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "second goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out
     second = _run_row(env)["id"]
     assert second != first and _run_row(env, second)["gates"]["review_contract"] == "v3.1"
@@ -910,7 +1020,7 @@ def test_explicit_new_run_moves_old_work_without_touching_it(env):
     the old run's records stay as they were, with an appended successor event."""
     old = _legacy_run(env)
     before = _q(env, "SELECT id, verdict, status FROM gates WHERE run_id=? ORDER BY id", (old,))
-    code, out = env.office("start", "--from-run", old[:8], "--planner", "inline", "--gear", "direct+review")
+    code, out = env.office("start", "--from-run", old[:8], "--planner", "inline", "--gear", "S")
     assert code == 0 and "derived from" in out, out
     new = _run_row(env)
     assert new["id"] != old and new["gates"]["review_contract"] == "convergence-v1"
@@ -943,17 +1053,20 @@ def test_unrunnable_check_is_status_not_a_verdict(env):
     assert task_row(env)["status"] == "blocked" and not _gates(env, "convergence_review")
 
 
-def test_unreadable_reply_is_invalid_result_and_spends_no_round(env):
-    """6, 11: an unparseable reply is INVALID_RESULT runtime status; the retry is round 1 again."""
+def test_unreadable_reply_is_redispatched_and_spends_no_round(env):
+    """6, 11: an unparseable reply is no verdict. Office re-dispatches the review itself, with no
+    orchestrator command (#1191 R6), and the verdict that follows is still round 1."""
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"reply": "looks fine to me"}, {"reply": APPROVED}])
     env.office("dispatch", "T1", check=0)
-    first = _gates(env, "convergence_review")[0]
-    assert first["review_status"] == "INVALID_RESULT" and first["verdict"] is None
-    assert _scope(env, "L-T1")["status"] == "attention"
-    env.office("resume", check=0)
     gates = _gates(env, "convergence_review")
-    assert gates[-1]["verdict"] == "APPROVED" and gates[-1]["round"] == 1
+    assert [g["round"] for g in gates] == [1] * len(gates), "an attempt with no verdict spent no round"
+    assert gates[-1]["verdict"] == "APPROVED" and gates[-1]["review_status"] == "COMPLETED"
+    assert _scope(env, "L-T1")["status"] == "approved"
+    (queued,) = _events(env, "review.fallback_queued")  # the unreadable reply, recorded, then one redispatch
+    assert "no VERDICT line" in queued["summary"], queued["summary"]
+    launched = [e["dispatch_id"] or e["summary"].split()[4] for e in _events(env, "review.launched")]
+    assert len(launched) == 2 and launched[0] != launched[1], "the redispatch is a new reviewer dispatch"
 
 
 def test_recheck_routes_repairs_even_when_the_visual_evidence_is_blocked(env):
@@ -990,14 +1103,14 @@ def test_issue_581_rerun_hint_depends_on_stored_session(monkeypatch, session, ex
 
 def test_issue_542_plan_reviewer_persists_model_and_effort(env):
     # Guard plan review route evidence, which is essential for #526-#528.
-    _start(env, gear="express", approve=False, plan_reviewer=[{"reply": APPROVED}])
+    _start(env, gear="L", approve=False, plan_reviewer=[{"reply": APPROVED}])
     rows = _q(env, "SELECT role, triple, model, effort FROM dispatches WHERE role='plan_reviewer'")
     assert rows, "a plan review must record a reviewer dispatch"
     assert all(r["model"] and r["effort"] for r in rows), rows
 
 
 
-@pytest.mark.parametrize("gear", ["express", "full"])
+@pytest.mark.parametrize("gear", ["L", "XL"])
 def test_issue_542_alternate_plan_review_routes_persist_model_effort(env, gear):
     _start(env, gear=gear, approve=False, plan_reviewer=[{"reply": APPROVED}])
     rows = _q(env, "SELECT triple, model, effort, route_json FROM dispatches WHERE role='plan_reviewer'")

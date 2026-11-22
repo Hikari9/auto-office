@@ -3,15 +3,17 @@
 Only the current accepted integration and its frozen checks can be used. A
 task PR proves its own recorded head; exact tree equality is a separate proof
 for work landed through another PR. Neither proof creates a merge parent or
-an authorization, and both re-run checks on the actual merged commit.
+an authorization, and both re-run checks on the actual merged commit, except
+the PR-scoped selector, whose integration attestation is carried (#1312).
 """
 from __future__ import annotations
 
 import contextlib
 import subprocess
 import uuid
+from pathlib import Path
 
-from office import db, gates, integration, jobs, land, paths, prs, state
+from office import db, gates, integration, jobs, land, paths, prs, state, verification_coverage
 from office.state import Refused
 from office.util import now_iso, sha256_obj
 
@@ -156,6 +158,22 @@ def _reclaim_checks(con, run: dict) -> None:
                       preserved="the open run and the running checks", next_step="office wait, then retry close")
 
 
+def _carried_scoped(con, run: dict, integrated: str, commands: list[str]) -> dict:
+    """The PR-diff selector (scripts/validate.sh --pr) diffs HEAD against its
+    merge-base with the default branch. On the merged default-branch commit
+    that diff is empty and the gate fails closed by design (#1312), so it can
+    never pass there. Its integrity-checked integration attestation on the
+    reviewed composed commit is carried instead, labeled scoped. Every other
+    check still re-runs on the merged commit; an unattested scoped check is
+    not carried and re-runs (and fails closed) as before."""
+    repo = Path(run["repo_root"])
+    current = state.get_run(con, run["id"])
+    attested = verification_coverage.attested_checks(con, current, integrated)
+    gate = ((current.get("landing") or {}).get("integration") or {}).get("full_suite") or {}
+    return {c: {"scope": verification_coverage.SCOPED, "integration_commit": integrated, "gate": gate.get("gate")}
+            for c in commands if c in attested and verification_coverage._scoped_validate(repo, integrated, c)}
+
+
 def prove(con, run: dict, selected: dict) -> tuple[dict, dict] | None:
     """Called while holding land's process lock; does not merge, deploy or close.
 
@@ -203,7 +221,14 @@ def prove(con, run: dict, selected: dict) -> tuple[dict, dict] | None:
         require_current(con, run, snapshot)
         land._require_run_coverage(run, integrated, con=con)
         commands = list(dict.fromkeys([*snapshot["run_checks"], *(cmd for t in tasks for cmd in t["checks"])]))
-        proof["checks"] = _checks(con, run, selected["merge_commit"], commands, snapshot)
+        carried = _carried_scoped(con, run, integrated, commands)
+        rerun = [c for c in commands if c not in carried]
+        proof["checks"] = (_checks(con, run, selected["merge_commit"], rerun, snapshot) if rerun else
+                           {"verdict": "PASS", "summary": "no checks to re-run on the merged commit", "results": []})
+        if carried:
+            proof["checks"]["carried"] = carried
+            proof["checks"]["summary"] += (f"; scoped PR check carried from integration {integrated[:12]}, "
+                                           "not re-run on the merged commit")
         require_current(con, run, snapshot)
         proof["verified_at"] = now_iso()
         return proof, snapshot

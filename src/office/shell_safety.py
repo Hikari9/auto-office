@@ -52,7 +52,12 @@ _KNOWN_GIT_COMMANDS = frozenset({
 
 _WRAPPERS = frozenset({"env", "timeout", "nice", "sudo", "nohup", "stdbuf", "command", "time"})
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
-_SEPARATORS = frozenset({";", "&", "|", "(", ")"})
+_SEPARATORS = frozenset({";", "&", "|", "(", ")", "&&", "||", ";;"})
+# Shell options whose following word is an operand, not a script (or -c's argument).
+_SHELL_LONG_WITH_VALUE = frozenset({"--rcfile", "--init-file"})
+# Reserved words and builtins that prefix a simple command without changing its head.
+_PREFIX_WORDS = frozenset({"!", "{", "}", "if", "then", "else", "elif", "do", "while", "until",
+                           "exec", "builtin"})
 
 # Prose words that make a following `git` read as the English noun ("from git
 # for one SHA", "a temp git repo"). Only these relax the unknown-subcommand
@@ -61,9 +66,53 @@ _ENGLISH_BEFORE = frozenset({"from", "with", "in", "of", "on", "by", "a", "an", 
                              "temp", "bare", "local", "no", "any", "each", "one"})
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A path or expansion operand: `source` runs the file it names. A bare or
+# directory-relative script name (`release.sh`, `scripts/env.sh`) also counts,
+# optionally quoted. Not anchored with `$`: the fallback scan embeds this pattern.
+_SCRIPT_TAIL = re.compile(r"\.(?:sh|bash|zsh|ksh|env)\Z", re.I)
+_SOURCE_OPERAND = re.compile(
+    r"[\"']?(?:\.{1,2}/|/(?=[\w.~-])|~|\$(?=[A-Za-z_{(@*#?!]|\d(?!\d))|\x60"
+    r"|(?:[\w.+-]+/)*[\w.+-]+\.(?:sh|bash|zsh|ksh|env)(?![\w+-]|\.[\w+-]))", re.I)
+# An extensionless word after `source` ("source publish") is a PATH script. In prose
+# that counts only in command position, so "writes the source file" stays the noun.
+_BARE_WORD = r"[A-Za-z_][\w.+-]*"
+# Words that put a following `source` in command position ("run source publish").
+# A lead may carry trailing punctuation ("Run: source publish", "Run, source publish").
+_COMMAND_LEAD_WORDS = frozenset({"run", "execute", "then", "and", "or", "first", "please", "just"})
+_EDGE_PUNCT = ".,;:!?)*_"  # trailing punctuation and emphasis marks around a lead word
+_LEAD_ALTERNATION = "|".join(sorted(_COMMAND_LEAD_WORDS))
+_BARE_SOURCE_PROSE = re.compile(
+    rf"(?:(?:^|[;&|(])\s*|\b(?:{_LEAD_ALTERNATION})[{re.escape(_EDGE_PUNCT)}]*\s+)"
+    rf"[\"']?source\s+[\"']?{_BARE_WORD}", re.I)
+# The push token after a bare-word script run: the exact word, with trailing punctuation.
+_PUSH_WORD = re.compile(rf"push[{re.escape(_EDGE_PUNCT)}]*", re.I)
+# A sourced path may push under any inflection, or inside a flag (`--push-tags`). It does not
+# match a word that merely contains push and continues (`test_pusher.py`, `pushover`).
+# A quoted script operand may hold a space ("my dir/release.sh"); the unbalanced-quote fallback needs it too.
+_QUOTED_SCRIPT = r"[\"'][^\"'\n]*?\.(?:sh|bash|zsh|ksh|env)(?![\w+-])"
+_PUSH_FORM = re.compile(r"push(?:es|ed|ing)?(?![A-Za-z])", re.I)
 # In plan prose, matching Markdown code delimiters are formatting, not shell
 # substitution. Retain the code text so actual git pushes/aliases still scan.
 _INLINE_CODE = re.compile(r"(?<!`)(`+)([^`\n]+?)\1(?!`)")
+
+
+def _sources_file(tokens: list[str], i: int, prose: bool) -> bool:
+    """`source` runs a file. In prose it is usually the English noun ("the source file"),
+    so only a path or expansion operand counts."""
+    if not prose:
+        return True
+    # A quoted operand may hold a space ("my dir/release.sh"); its script tail still counts.
+    return i + 1 < len(tokens) and (
+        _SOURCE_OPERAND.match(tokens[i + 1]) is not None
+        or _SCRIPT_TAIL.search(tokens[i + 1]) is not None)
+
+
+def _bare_source_runs(tokens: list[str], i: int) -> bool:
+    """In prose, `source <bare word>` in command position runs an extensionless script."""
+    if i + 1 >= len(tokens) or re.match(_BARE_WORD, tokens[i + 1]) is None:
+        return False
+    return i in _command_starts(tokens) or (
+        i > 0 and tokens[i - 1].lower().strip(_EDGE_PUNCT) in _COMMAND_LEAD_WORDS)
 
 
 def _is_dynamic(token: str) -> bool:
@@ -73,6 +122,9 @@ def _is_dynamic(token: str) -> bool:
     still rejected as dynamic rather than trusted as a safe literal.
     """
     if "$" in token or "`" in token:
+        return True
+    # zsh (EQUALS option) expands `=cmd` to the path of cmd.
+    if re.match(r"=[A-Za-z_]", token):
         return True
     for ch in "*?[]{}~":
         if ch in token:
@@ -133,13 +185,80 @@ def _negated_prose_unsafe(command: str) -> bool:
     return not _is_prohibition(text)
 
 
+_ASSIGNMENT_VALUE_END = re.compile(r'(?:^|[\s;&|()])[A-Za-z_][A-Za-z0-9_]*="?$')
+
+
+def _close_paren(command: str, start: int) -> int | None:
+    """Index of the `)` closing a `$(` whose body begins at `start`; quotes are honoured."""
+    depth, quote, i = 1, None, start
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _neutralize_substitutions(command: str, depth: int, *, prose: bool = False) -> str | None:
+    """Scan each `$(...)` and backtick body as a command, then replace it with a placeholder.
+
+    Returns None when a body is unsafe or a `$(` never closes. An assignment value
+    (`NAME=$(...)`) becomes a plain word, which cannot run. Any other substitution
+    keeps its `$`, so it stays dynamic and is refused if it reaches command position.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(command):
+        if command[i] == "\\":
+            # `\<newline>` is a line continuation that sh removes. Any other escaped
+            # character is literal: `\`` and `\$(` do not start a substitution.
+            if command[i + 1:i + 2] != "\n":
+                out.append(command[i:i + 2])
+            i += 2
+            continue
+        if command.startswith("$(", i):
+            end = _close_paren(command, i + 2)
+            if end is None:
+                if prose:  # an unclosed `$(` in prose is text, not a substitution
+                    out.append("$(")
+                    i += 2
+                    continue
+                return None
+            body, i = command[i + 2:end], end + 1
+        elif command[i] == "`" and (end := command.find("`", i + 1)) >= 0:
+            body, i = command[i + 1:end], end + 1
+        else:
+            out.append(command[i])
+            i += 1
+            continue
+        if _scan(body, depth + 1, prose=prose):
+            return None
+        out.append("SUBST" if _ASSIGNMENT_VALUE_END.search("".join(out)) else "$SUBST")
+    return "".join(out)
+
+
 def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
     if depth > 5:
         return True
-    # For executable shell fields, scan backtick substitution bodies before
-    # shlex tokenizes them; a non-leading substitution can otherwise be missed.
-    if any(_scan(span.group(2), depth + 1, prose=prose) for span in _INLINE_CODE.finditer(command)):
+    # Substitution bodies are scanned before shlex tokenizes the line; a
+    # non-leading substitution can otherwise be missed.
+    rewritten = _neutralize_substitutions(command, depth, prose=prose)
+    if rewritten is None:
         return True
+    # A newline ends a command in sh; shlex would read it as a plain space.
+    command = rewritten.replace("\n", ";")
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
         lexer.whitespace_split = True
@@ -149,7 +268,18 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
         if prose:
             # Unbalanced quotes are common in descriptions. Only an explicit
             # command signal can justify a fail-closed refusal in plan prose.
-            return bool(re.search(r"\b(?:git|eval|source|alias)\b", command, re.I))
+            if "$(" in command or "`" in command:
+                return True  # a substitution that cannot be tokenized is not text
+            if re.search(r"\b(?:git|eval|alias)\b", command, re.I):
+                return True
+            # Same rule as the tokenized path: a sourced script refuses only with a
+            # push word or an expansion, so "source release.sh to build" passes. A bare
+            # command-position script ("source publish") refuses with a push word alone.
+            if re.search(r"\bpush\b", command, re.I) and _BARE_SOURCE_PROSE.search(command):
+                return True
+            pushed = re.search(r"push", command, re.I)
+            sourced = re.search(rf"\bsource\s+(?:{_SOURCE_OPERAND.pattern}|{_QUOTED_SCRIPT})", command, re.I)
+            return bool(sourced and (pushed or "$" in command))
         return bool(re.search(r"push|git|eval", command, re.I))
     if not tokens:
         return False
@@ -180,15 +310,24 @@ def _scan(command: str, depth: int, *, prose: bool = False) -> bool:
             unknown = tokens[j] not in _KNOWN_GIT_COMMANDS and not english
             if tokens[j] == "push" or unknown:
                 return True
+    sourced = any(t.lower() == "source" and _sources_file(tokens, i, prose)
+                  for i, t in enumerate(tokens))
+    # In prose, a bare command-position `source <word>` also runs a script (F7).
+    bare_run = prose and any(
+        t.lower() == "source" and _bare_source_runs(tokens, i) for i, t in enumerate(tokens))
+    # A sourced path may push under any inflection (pushes, Push). A bare word run takes only
+    # the push word itself, so "pushed" or "unpushed" in ordinary prose does not refuse.
+    pushes = (any(_PUSH_FORM.search(t) for t in tokens) if sourced
+              else ("push" in tokens or (bare_run and any(_PUSH_WORD.fullmatch(t) for t in tokens))))
     # Dynamic executable construction must not bypass a detectable push token.
-    if "push" in tokens and (
+    if pushes and (
         re.search(r"\bgit\b", command, re.I)
         or "$" in command or "\x60" in command
-        or any(t in tokens for t in ("eval", "source", "alias", "function"))
+        or sourced or bare_run or any(t in ("eval", "alias", "function") for t in tokens)
     ):
         return True
     # Dynamically evaluated shell commands cannot be proved safe.
-    if any(t in ("eval", "source") for t in tokens) and ("$" in command or "\x60" in command):
+    if (sourced or "eval" in tokens) and ("$" in command or "\x60" in command):
         return True
     if any(t in ("sh", "bash", "dash", "zsh", "ksh") for t in tokens) and (
         any(t in ("-c", "-lc", "-ec") for t in tokens)
@@ -207,19 +346,33 @@ def _scan_wrappers(tokens: list[str], depth: int, *, prose: bool = False) -> boo
     return False
 
 
+def _is_redirect(token: str) -> bool:
+    return bool(token) and set(token) <= set("<>")
+
+
 def _command_starts(tokens: list[str]) -> list[int]:
+    """Indices that begin a command: after a separator, or after a redirect and its target."""
     starts: list[int] = []
     for i, tok in enumerate(tokens):
-        if tok in _SEPARATORS or tok in ("<", ">"):
+        if tok in _SEPARATORS or _is_redirect(tok):
             continue
-        if i == 0 or tokens[i - 1] in _SEPARATORS or tokens[i - 1] in ("<", ">"):
+        if (i == 0 or tokens[i - 1] in _SEPARATORS or _is_redirect(tokens[i - 1])
+                or (i >= 2 and _is_redirect(tokens[i - 2]))):
             starts.append(i)
     return starts
+
+
+def _is_prefix_word(token: str) -> bool:
+    """Reserved words and static assignments that may precede the command word."""
+    return token in _PREFIX_WORDS or (bool(_ASSIGN.match(token)) and not _is_dynamic(token))
 
 
 def _resolve_at(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
     """Return True if the command at pos is an unsafe (unverifiable/push) one."""
     seen_wrappers = 0
+    # The word after prefixes is the real head: `NAME=v $(echo g)it` must be verified.
+    while pos < len(tokens) and _is_prefix_word(tokens[pos]):
+        pos += 1
     while pos < len(tokens):
         name = PurePosixPath(tokens[pos]).name
         if name in _SHELLS:
@@ -277,21 +430,33 @@ def _git_is_push(tokens: list[str], pos: int) -> bool:
 
 
 def _shell_c_is_unsafe(tokens: list[str], pos: int, depth: int, *, prose: bool = False) -> bool:
-    for k in range(pos + 1, min(pos + 4, len(tokens))):
+    """A shell's -c script is scanned. A shell that reads stdin (no script operand, a
+    redirect, a pipe end, or -s) runs input this guard cannot see: unverifiable."""
+    stdin_fed = False
+    k = pos + 1
+    while k < len(tokens):
         t = tokens[k]
+        if t in _SEPARATORS or t.startswith(("<", ">")) or t == "-":
+            return True  # no script operand: the shell reads stdin
         if t == "--":
-            continue
-        if t == "-c" or (t.startswith("-") and "c" in t[1:] and t not in ("--",)):
-            if k + 1 < len(tokens):
+            k += 1
+        elif t.startswith("--"):
+            k += 2 if t in _SHELL_LONG_WITH_VALUE else 1
+        elif t[:1] in ("-", "+") and len(t) > 1:
+            flags = t[1:]
+            if t[0] == "-" and "c" in flags:
+                if k + 1 >= len(tokens):
+                    return True
                 script = tokens[k + 1]
                 if _is_dynamic(script) and ("$" in script or "`" in script):
                     return True
-                if _scan(script, depth + 1, prose=prose):
-                    return True
-            return False
-        if not t.startswith("-"):
-            return False
-    return False
+                return _scan(script, depth + 1, prose=prose)
+            stdin_fed = stdin_fed or (t[0] == "-" and "s" in flags)
+            k += 2 if ("o" in flags or "O" in flags) else 1  # -o/+o/-O/+O take an operand
+        else:
+            # A script file operand is opaque, unless -s makes the shell read stdin anyway.
+            return stdin_fed
+    return True
 
 
 def _consume_value(tokens: list[str], pos: int) -> bool:
@@ -339,6 +504,8 @@ def _strip_env(tokens: list[str], pos: int) -> int | None:
                     return None
                 i += 1
             return i
+        if t == "-S" or t.startswith(("-S", "--split-string")):
+            return None  # env runs the split string as a command; it is not scanned here
         if t in ("-u", "--unset"):
             if not _consume_value(tokens, i + 1):
                 return None

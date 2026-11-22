@@ -175,7 +175,7 @@ class TestSchemas(unittest.TestCase):
     def test_run_envelope_version_requiredness_matches_real_kickoff_shape(self):
         # Finding R4, partially rejected on evidence: requirements_version/routing_version
         # must stay optional on the run envelope because the real
-        # office_runtime.py::_new_run_envelope writes envelope.json once, at kickoff,
+        # the 3.0 kickoff wrote envelope.json once, at kickoff,
         # before planning/routing exist -- only plan_version/packet_version (both
         # hardcoded 1 at that point) are ever populated. Prove both directions: the
         # two are still declared properties (so a later writer *can* record them), but
@@ -241,25 +241,6 @@ class TestSchemas(unittest.TestCase):
         validator = Draft202012Validator(schema)
         self.assertEqual(list(validator.iter_errors(event)), [])
 
-    def test_family_phase_enum_matches_runtime_phase_order(self):
-        # Finding R6: the schema's phase enum must equal the real runtime's PHASE_ORDER
-        # tuple, read from the actual parent-repo file (not a copy pasted into this
-        # worktree), so the two cannot silently diverge again.
-        import subprocess
-        common_dir = subprocess.check_output(
-            ['git', '-C', str(ROOT), 'rev-parse', '--git-common-dir'], text=True
-        ).strip()
-        main_root = Path(common_dir).resolve().parent
-        runtime_path = main_root / 'scripts' / 'office_runtime.py'
-        self.assertTrue(runtime_path.exists(), f'parent runtime not found at {runtime_path}')
-        source = runtime_path.read_text()
-        m = re.search(r'PHASE_ORDER\s*=\s*\(([^)]*)\)', source)
-        self.assertTrue(m, 'PHASE_ORDER tuple not found in real office_runtime.py')
-        phase_order = tuple(x.strip().strip('"\'') for x in m.group(1).split(',') if x.strip())
-
-        schema = json.loads((ROOT / 'schemas/family-registry.schema.json').read_text())
-        phase_enum = schema['properties']['families']['additionalProperties']['properties']['phase']['enum']
-        self.assertEqual(tuple(phase_enum), phase_order)
 
     def test_review_status_to_landing_disposition_mapping_is_pinned(self):
         # Finding R6: landing dispositions had no mapping to review finding statuses.
@@ -662,30 +643,6 @@ class TestRouteNoNetworkAccess(unittest.TestCase):
     local catalog snapshot and never perform live network discovery at route time.
     Prove it by banning socket construction for the duration of a real route() call
     that runs the full candidate pipeline through to a selection."""
-
-    def test_route_selects_without_opening_a_socket(self):
-        import socket
-        original_socket = socket.socket
-
-        def _forbidden(*args, **kwargs):
-            raise AssertionError('route() must not open a socket')
-
-        candidate = {
-            'harness': 'agy', 'harness_version': 'local', 'model_id': 'gemini-3.8-flash',
-            'effort': 'medium', 'adapter_state': 'proven', 'capabilities': [],
-            'absolute_floor_pass': True,
-            'quota': {'status': 'ok', 'tightest_remaining_percent': 50},
-            'cost': {}, 'local_reward': 0,
-        }
-        socket.socket = _forbidden
-        try:
-            import office_runtime as rt
-            result = rt.route({'role': 'worker', 'candidates': [candidate]})
-        finally:
-            socket.socket = original_socket
-
-        self.assertEqual(result['status'], 'selected')
-        self.assertEqual(result['selected'], 'agy@local/gemini-3.8-flash@medium')
 
 
 import pytest as _pytest  # noqa: E402

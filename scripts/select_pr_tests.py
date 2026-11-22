@@ -32,6 +32,8 @@ SPECIAL = {
     "src/office/_resources/": ("tests/test_resource_bundle.py",),
     ".githooks/": ("tests/test_pre_push_hook.py",),
     "scripts/select_pr_tests.py": ("tests/test_pr_test_selection.py",),
+    # New plugin distribution builder has direct contract coverage, despite a different module basename.
+    "scripts/build_plugin_distribution.py": ("tests/contracts/test_plugin_distribution.py",),
     "pyproject.toml": ("tests/v31/test_verification_coverage.py",),
     "src/office/integration.py": ("tests/v31/test_run_checks.py", "tests/v31/test_verification_coverage.py"),
     "src/office/land.py": ("tests/v31/test_land.py", "tests/v31/test_land_recovery.py"),
@@ -122,20 +124,15 @@ def selection(root: Path, base_ref: str = "refs/remotes/origin/main", *,
                 if test.startswith("tests/web/") and ("browser" not in test or "test_workbench" in test):
                     include(test, f"web asset: {path}")
     for source in relevant:
-        stem = Path(source).stem
+        # Hyphenated scripts (agy-usage.py) cannot be imported, so their tests use underscores.
+        stem = Path(source).stem.replace("-", "_")
         if stem in ("__init__", "_version"):
             continue
         pattern = re.compile(r"\b(?:from\s+office\s+import\s+|office\.|import\s+office\.|from\s+office\.)" + re.escape(stem) + r"\b")
         direct = [test for test in tests if Path(test).stem == f"test_{stem}"
                   or Path(test).stem.startswith(f"test_{stem}_")]
         for test in direct:
-            if source == "src/office/integration.py" and test == "tests/test_integration.py":
-                # This is a legacy 3.0 integration module with many unrelated
-                # end-to-end tests; its single v3.1 source import is in #577.
-                include("tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log",
-                        "direct legacy regression: office.integration")
-            else:
-                include(test, f"direct test: {source}")
+            include(test, f"direct test: {source}")
         # Unrelated imports must not turn a PR gate back into a nearly full
         # suite. Keep one cross-module test if there is direct/mapped coverage,
         # or two fallback importers if this module has no explicit tests.

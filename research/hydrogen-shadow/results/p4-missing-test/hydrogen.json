@@ -1,0 +1,27 @@
+{
+  "case": "p4-missing-test",
+  "commit": "0f07899f87bce8ff68b2a577df674c5e14a670e3",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/jobs.py",
+      "line": 91,
+      "severity": "major",
+      "summary": "No tests cover kick_throttle_seconds(), OFFICE_KICK_THROTTLE_SECONDS validation and fallback cases (unset, zero, negative, non-numeric, NaN/Inf), or kick() honoring the configured throttle window, so regressions in throttle parsing or enforcement will go undetected."
+    },
+    {
+      "file": "src/office/jobs.py",
+      "line": 454,
+      "severity": "minor",
+      "summary": "Large finite OFFICE_KICK_THROTTLE_SECONDS values pass kick_throttle_seconds() because it only checks math.isfinite(value) and value >= 0, causing timedelta(seconds=...) or datetime subtraction to raise OverflowError and crash kick()."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"major\", \"file\": \"src/office/jobs.py\", \"line\": 91, \"summary\": \"No tests cover kick_throttle_seconds(), OFFICE_KICK_THROTTLE_SECONDS validation and fallback cases (unset, zero, negative, non-numeric, NaN/Inf), or kick() honoring the configured throttle window, so regressions in throttle parsing or enforcement will go undetected.\"}, {\"severity\": \"minor\", \"file\": \"src/office/jobs.py\", \"line\": 454, \"summary\": \"Large finite OFFICE_KICK_THROTTLE_SECONDS values pass kick_throttle_seconds() because it only checks math.isfinite(value) and value >= 0, causing timedelta(seconds=...) or datetime subtraction to raise OverflowError and crash kick().\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "diff",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 63.2
+}

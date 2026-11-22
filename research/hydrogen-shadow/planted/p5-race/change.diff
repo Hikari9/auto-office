@@ -1,0 +1,39 @@
+diff --git a/src/office/hydrogen_trials.py b/src/office/hydrogen_trials.py
+index fc928ad2..da30e891 100644
+--- a/src/office/hydrogen_trials.py
++++ b/src/office/hydrogen_trials.py
+@@ -140,13 +140,12 @@ def snapshot(con) -> dict:
+ 
+ def book(con, run_id: str, task_id: str, selected_route: str, *, experiment: bool,
+          fallback_route: str | None = None) -> dict:
+-    """Caller MUST already hold the same SQLite writer tx that will create the dispatch.
++    """Book one eligible opportunity. The dispatch path calls this inside its writer tx;
++    the reroute path has none, so the insert then opens its own BEGIN IMMEDIATE.
+ 
+     Records all eligible opportunities, including non-trials, so a failed trial
+     cannot vanish from the 20-entry denominator. No updates/deletes of prior rows.
+     """
+-    if not con.in_transaction:
+-        raise RuntimeError("Hydrogen reservation requires a BEGIN IMMEDIATE dispatch transaction")
+     before = snapshot(con)
+     if experiment:
+         used_run = con.execute("SELECT COUNT(*) FROM hydrogen_trial_opportunities WHERE run_id=? "
+@@ -167,9 +166,15 @@ def book(con, run_id: str, task_id: str, selected_route: str, *, experiment: boo
+     if blocked and fallback_route:
+         selected_route = fallback_route
+     event_id = "HO" + uuid.uuid4().hex
+-    con.execute("INSERT INTO hydrogen_trial_opportunities(id, run_id, task_id, selected_route, experimental, "
+-                "created_at) VALUES (?,?,?,?,?,?)", (event_id, run_id, task_id, selected_route,
+-                                                      int(experiment), now_iso()))
++    row = (event_id, run_id, task_id, selected_route, int(experiment), now_iso())
++    sql = ("INSERT INTO hydrogen_trial_opportunities(id, run_id, task_id, selected_route, experimental, "
++           "created_at) VALUES (?,?,?,?,?,?)")
++    if con.in_transaction:
++        con.execute(sql, row)
++    else:
++        from office import db
++        with db.transaction(con):
++            con.execute(sql, row)
+     return {"id": event_id, "experimental": experiment, "blocked": blocked, "route": selected_route, "prior": before,
+             "after": snapshot(con)}
+ 

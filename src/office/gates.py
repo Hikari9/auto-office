@@ -20,6 +20,7 @@ stale, or missing is ever treated as approved.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -28,14 +29,17 @@ import shutil
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
-from office import briefs, candidates, contract, db, jobs, paths, planfile, portable, review_parse, routing, state, version, worktree_setup
+from office import briefs, candidates, contract, db, jobs, paths, planfile, portable, review_parse, routing, state, verification_coverage, version, worktree_setup
 from office.result import Result
 from office.state import Refused, Usage
-from office.util import dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
+from office.util import atomic_write_json, dumps, now_iso, pid_alive, sha256_bytes, sha256_obj
 
 TASK_GATES = ("checks", "code_review", "visual")
+ATTEMPT_FILE = "review-attempt.json"  # what a launched reviewer dispatch leaves for the job that settles it
+SETTLE_KEY = "review_settle"  # the job payload key naming the launched dispatch a re-entered review job settles
 MAX_DIFF_CHARS = 120_000
 
 
@@ -48,17 +52,28 @@ def cap_diff(diff: str) -> str:
 
 # ------------------------------------------------------------------ planning
 
+def acknowledged_no_change(con, rev_id: str | None) -> bool:
+    """#1138: the revision was submitted with `--no-change` (its receipt records the reason). Checks alone never
+    accept it: an independent code review of it must PASS first."""
+    row = con.execute("SELECT self_review_json FROM revisions WHERE id=?", (rev_id,)).fetchone() if rev_id else None
+    try:
+        return bool(row and row["self_review_json"] and json.loads(row["self_review_json"]).get("no_change"))
+    except (ValueError, AttributeError):
+        return False
+
+
 def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str], d: dict) -> dict:
     """Create gate rows for a new revision and queue the first step. Caller holds tx."""
+    no_change = acknowledged_no_change(con, rev_id)
     if contract.is_convergence(run):
-        return _plan_for_revision_convergence(con, run, task, rev_id)
+        return _plan_for_revision_convergence(con, run, task, rev_id, no_change)
     from office import visual
     g = run.get("gates") or {}
     rows, summary = {}, []
     if task["checks"]:
         rows["checks"] = _new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
         summary.append("checks running")
-    if g.get("code_review"):
+    if g.get("code_review") or no_change:
         rows["code_review"] = _new_gate(con, run, task, rev_id, "code_review", f"code:{rev_id}",
                                         "waiting" if "checks" in rows else "queued")
         summary.append("code-review queued")
@@ -88,10 +103,16 @@ def plan_for_revision(con, run: dict, task: dict, rev_id: str, changed: list[str
     return {"gates": rows, "summary": summary}
 
 
-def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> dict:
+def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str, no_change: bool = False) -> dict:
     """#337: a task revision gets its deterministic checks only. Independent code
-    and visual review run once per lane on the composed result."""
+    and visual review run once per lane on the composed result. An acknowledged
+    no-change revision (#1138) also gets its own code review: it has no diff for
+    the lane review to find, so checks alone must not accept it."""
     rows, summary = {}, []
+    if no_change:
+        rows["code_review"] = _new_gate(con, run, task, rev_id, "code_review", f"code:{rev_id}",
+                                        "waiting" if task["checks"] else "queued")
+        summary.append("no change acknowledged: code-review queued")
     if task["checks"]:
         rows["checks"] = _new_gate(con, run, task, rev_id, "checks", f"checks:{rev_id}", "queued")
         state.enqueue(con, run, "run_checks", {"gate_id": rows["checks"], "task_id": task["id"], "revision_id": rev_id},
@@ -99,6 +120,8 @@ def _plan_for_revision_convergence(con, run: dict, task: dict, rev_id: str) -> d
         summary.append("checks running; lane convergence review follows")
     else:
         summary.append("no checks declared; lane convergence review follows")
+        if no_change:
+            start_waiting(con, run, task["id"], rev_id)
         if evaluate_acceptance(con, run, task["id"]):
             summary.append("task verified (lane convergence pending)")
     return {"gates": rows, "summary": summary}
@@ -151,8 +174,8 @@ def review_unavailable(gate: dict) -> bool:
     """A finished review that returned no verdict: no reviewer could answer (UNAVAILABLE), the one that
     answered left no readable reply (ATTENTION, v3.1; INVALID_RESULT, convergence-v1), or every route hit a
     quota or auth wall. None of these is a verdict, and none spends a substantive round."""
-    return gate["verdict"] in ("UNAVAILABLE", "ATTENTION") \
-        or gate.get("review_status") in (contract.UNAVAILABLE, contract.INVALID_RESULT)
+    return gate["verdict"] in ("UNAVAILABLE", "REVOKED", "ATTENTION") \
+        or gate.get("review_status") in (*contract.NO_ANSWER, contract.INVALID_RESULT)
 
 
 def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
@@ -170,16 +193,122 @@ def unavailable_review_block(con, run: dict, task: dict) -> dict | None:
     return code
 
 
-def review_pin(review_as: str | None, cli: str | None = None, external: bool = False) -> dict | None:
-    """The user's pin of a reviewer route (`--review-as` / `office review --as`), or None."""
-    return {"as": review_as, "cli": cli, "external": bool(external), "by": "user"} if review_as else None
+def review_pin(review_as: str | None, cli: str | None = None, external: bool = False, *,
+               quote: str | None = None) -> dict | None:
+    """The pin of a reviewer route (`--review-as` / `office review --as`), or None. It is the user's (`by: user`) only
+    when the command carried their `--quote`; otherwise the orchestrator chose it."""
+    return {"as": review_as, "cli": cli, "external": bool(external), "by": "user" if (quote or "").strip() else "orchestrator"} \
+        if review_as else None
+
+
+def store_review_pin(con, run: dict, scope_id: str, tids: list[str], pin: dict, *, role: str = "code_reviewer") -> None:
+    """Store `pin` as the reviewer pin of each task in `tids` (a task, or the tasks of lane `scope_id`) and record a
+    `route.changed` (kind repin) event by the pin's actor, as a plan re-pin does. Caller holds the tx."""
+    before = next((t["review_override"].get("as") for t in (state.get_task(con, run["id"], tid) for tid in tids)
+                   if t and t.get("review_override")), None)
+    for tid in tids:
+        state.update_task(con, run["id"], tid, review_override=pin)
+    state.record_route_change(con, run, scope_id, before, pin["as"], kind="repin", actor=pin.get("by") or "orchestrator",
+                              stage=role, reason=f"the {role} was re-pinned on {', '.join(tids)} (--review-as / --as)",
+                              extra={"notice": "review"})
+
+
+def uncovered_pin_tasks(con, run: dict, tids: list[str], pin: dict) -> list[str]:
+    """The tasks of `tids` the pinned reviewer route does not cover: the lane reviewer reads the first pin among them."""
+    return [tid for tid in tids if ((state.get_task(con, run["id"], tid) or {}).get("review_override") or {}).get("as")
+            != pin["as"]]
+
+
+def pin_notices(con, run: dict, tids: list[str], pin: dict, roles: list[str]) -> list[str]:
+    """What a stored reviewer pin does not do: it is dropped for a role its route cannot serve, or it covers only some
+    tasks of a lane (the lane reviewer still reads it). One line each, naming the tasks left uncovered."""
+    lines = []
+    for role in roles:
+        try:
+            candidates.declared_decision(pin["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                         run_id=run["id"])
+        except Refused as exc:
+            lines.append(f"pinned reviewer {pin['as']} is dropped for the {role} (its route cannot serve that role: "
+                         f"{exc}); that review routes normally")
+    uncovered = uncovered_pin_tasks(con, run, tids, pin) if len(tids) > 1 else []
+    if uncovered:
+        lines.append(f"pinned reviewer {pin['as']} covers only some tasks of this lane; no pin on "
+                     f"{', '.join(uncovered)} (office review <lane> --as {pin['as']} pins them all)")
+    return lines
+
+
+def set_integration_pin(con, run: dict, pin: dict | None) -> None:
+    """Store (or clear, with None) the user's pin of the integration reviewer, where `reviewer_pin` reads it. Caller
+    holds the tx."""
+    landing = dict((state.get_run(con, run["id"]) or run).get("landing") or {})
+    integ = dict(landing.get("integration") or {})
+    integ["review_override"] = pin
+    landing["integration"] = integ
+    state.update_run(con, run["id"], landing=landing)
+
+
+def stored_review_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
+    """The pin stored for this review, before the role check `reviewer_pin` applies."""
+    if role == "plan_reviewer":
+        return (run.get("plan_review") or {}).get("review_override")
+    tids = _gate_task_ids(con, run, gate)
+    pin = next((t["review_override"] for t in (state.get_task(con, run["id"], tid) for tid in tids)
+                if t and t.get("review_override")), None)
+    if not tids and role == "integration_reviewer":
+        # The composed integration names no task or scope: its pin is the one on the run's integration record.
+        pin = ((run.get("landing") or {}).get("integration") or {}).get("review_override")
+    return pin
+
+
+def _gate_task_ids(con, run: dict, gate: dict | None) -> list[str]:
+    """The tasks a task-scoped or lane review gate covers."""
+    tids = [gate["task_id"]] if gate and gate.get("task_id") else []
+    if not tids and gate and gate.get("scope"):
+        from office import convergence
+        tids = list((convergence.find_scope(con, run, gate["scope"]) or {}).get("tasks") or [])
+    return tids
+
+
+def reviewer_pin(con, run: dict, role: str, gate: dict | None = None) -> dict | None:
+    """The one place a user's reviewer pin is read, for any role (code, convergence, visual, integration, plan).
+
+    A task-scoped review (the gate names a task, or a lane whose tasks are listed in its scope) reads the first
+    `review_override` on those tasks; the plan reviewer has no task and reads the run's plan-review record, and the
+    integration reviewer, whose gate names neither a task nor a scope, reads the run's integration record
+    (`set_integration_pin` stores it). Pins already
+    stored on a running run keep working. A pin whose route lacks what `role` requires (a code reviewer's route
+    cannot judge screenshots, say) does not apply to that role: it returns None and the role routes normally."""
+    run = state.get_run(con, run["id"]) or run
+    pin = stored_review_pin(con, run, role, gate)
+    if not pin:
+        return None
+    try:
+        candidates.declared_decision(pin["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                     run_id=run["id"])
+    except Refused:
+        return None
+    return pin
+
+
+def review_pin_inert(run: dict) -> str | None:
+    """Why a user's code-reviewer pin has no effect on this run, or None (#727): its gear runs no code review,
+    so a pinned route never reviews (a convergence lane that changes a security-sensitive path still gets one)."""
+    if (run.get("gates") or {}).get("code_review"):
+        return None
+    lane = " (a lane that changes a security-sensitive path still gets one convergence review)" \
+        if contract.is_convergence(run) else ""
+    return f"gear {run.get('gear') or 'unknown'} runs no code review, so the pinned reviewer never runs{lane}"
 
 
 def tried_reviewer_routes(con, where: str, params: tuple) -> list[str]:
     """Every route a reviewer dispatch already ran on the gates `where` selects (columns of `g`), so
-    the next review of the same revision starts on another route."""
-    return [r[0] for r in con.execute("SELECT DISTINCT d.triple FROM dispatches d JOIN gates g ON g.id=d.gate_id "
-                                      f"WHERE d.triple IS NOT NULL AND {where} ORDER BY d.started_at", params)]
+    the next review of the same revision starts on another route. A dispatch the orchestrator revoked is no
+    failure of its route (#1007): that route stays eligible."""
+    return [r[0] for r in con.execute(
+        "SELECT DISTINCT d.triple FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+        f"WHERE d.triple IS NOT NULL AND COALESCE(d.terminal_classification,'')!='revoked' AND {where} "
+        "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.dispatch_id=d.id AND e.kind='dispatch.revoked') "
+        "ORDER BY d.started_at", params)]
 
 
 def rerun_unavailable_review(con, run: dict, task: dict, *, pin: dict | None = None, next_route: bool = False) -> str | None:
@@ -195,7 +324,7 @@ def rerun_unavailable_review(con, run: dict, task: dict, *, pin: dict | None = N
         return None
     rev_id = code["revision_id"]
     if pin:
-        state.update_task(con, run["id"], task["id"], review_override=pin)
+        store_review_pin(con, run, task["id"], [task["id"]], pin)
     payload = {"task_id": task["id"]}
     if next_route and not (pin or task.get("review_override")):
         tried = tried_reviewer_routes(con, "g.run_id=? AND g.task_id=? AND g.revision_id=? AND g.kind='code_review'",
@@ -265,7 +394,7 @@ def orchestrator_task_review(con, run: dict, tid: str, report: Path) -> Result:
 
 
 def review_only(con, run: dict, target: str, *, review_as: str | None = None, review_cli: str | None = None,
-                review_external: bool = False) -> Result:
+                review_external: bool = False, quote: str | None = None) -> Result:
     """`office review <task|lane> [--as <route>]`: re-dispatch only the review of the same immutable
     revision on the named route, or the next fallback one. It never launches an executor and keeps a
     pinned reviewer unless `--as` re-pins it. v3.1 task reviews and convergence-v1 lane reviews."""
@@ -277,10 +406,10 @@ def review_only(con, run: dict, target: str, *, review_as: str | None = None, re
         raise Usage("invalid-override", "a CLI review and an external review are mutually exclusive")
     if state.is_terminal(run):
         raise Refused("run-terminal", f"{run['id'][:8]} is {run['phase']}; nothing to review")
-    if review_as:  # the route's shape and capability, before any pin is written
+    if review_as and not re.match(r"[LS]-", target, re.I):  # a lane checks the role of each gate it re-runs
         candidates.declared_decision(review_as, flag="--as", role="code_reviewer", config=state.pinned_config(run),
                                     run_id=run["id"])
-    pin = review_pin(review_as, review_cli, review_external)
+    pin = review_pin(review_as, review_cli, review_external, quote=quote)
     if ":" in target and not re.match(r"[LS]-", target, re.I):
         raise Usage("bad-review-target", f"{target!r} is not a task, lane or shared scope",
                     next_step="office review T1 | office review L-T1[:convergence|visual]")
@@ -416,6 +545,29 @@ def _roots(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((str(path.resolve()), str(path))))
 
 
+_RUNNER_PYTEST_CODES = frozenset({2, 3, 4, 5})  # interrupted, internal error, usage error, nothing collected
+_RUNNER_SHELL_CODES = frozenset({126, 127})     # not executable, command not found
+
+
+def unrunnable_reason(r: dict, checkout: Path) -> str | None:
+    """Why a failing check never ran its tests, so its failure says nothing about
+    the base: the revision run exited with a runner usage/environment code, or a
+    test path the check names exists in the task's checkout but not on base (#1175)."""
+    cmd = r["command"]
+    if r["exit"] in _RUNNER_SHELL_CODES or (r["exit"] in _RUNNER_PYTEST_CODES and "pytest" in cmd):
+        return f"exited {r['exit']}, a runner usage/environment code: the check did not run its tests"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for tok in tokens:
+        path = tok.split("::", 1)[0]
+        if path.endswith(".py") and not path.startswith("-") and (Path(r["cwd"]) / path).exists() \
+                and not (checkout / path).exists():
+            return f"test path {path} does not exist on the base commit"
+    return None
+
+
 def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *,
                          allow_unchanged: bool = False, exclude_commands: frozenset[str] = frozenset()) -> list[dict]:
     """Which failing checks of this revision fail the same way on its base
@@ -435,7 +587,6 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
     if not changed and not allow_unchanged:
         return []
     cfgv = state.pinned_config(run).get("verification") or {}
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     found = []
     with check_slot(check_concurrency(cfgv)):
@@ -449,9 +600,14 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
                 # failing on base does not excuse it (#802).
                 if r["command"] in exclude_commands:
                     continue
+                reason = unrunnable_reason(r, checkout)
+                if reason:
+                    _mark_unrunnable(outcome, code_id, reason)
+                    continue
                 head = Path(r["log"]).read_text(encoding="utf-8", errors="replace")
                 if r["exit"] == 124 or runner_timeout(head) or any(p in head for p in changed):
                     continue
+                timeout, _ = check_timeout(cfgv, r["command"])
                 code, out = _run_check(r["command"], checkout, timeout, _check_env(run))
                 log = evdir / (Path(r["log"]).stem + ".base.log")
                 log.write_text(out, encoding="utf-8")
@@ -469,6 +625,13 @@ def preexisting_failures(con, run: dict, rev: dict, gate: dict, outcome: dict, *
         finally:
             remove_checkout(run, checkout)
     return found
+
+
+def _mark_unrunnable(outcome: dict, code_id: str, reason: str) -> None:
+    """Name the check as blocking in the gate output: it could not run, so it is never pre-existing."""
+    for f in (outcome.get("parsed").findings if outcome.get("parsed") else []):
+        if f["code"] == code_id:
+            f["summary"] = f"blocking, cannot be pre-existing ({reason}): {f['summary']}"
 
 
 def run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, *, check_tree: bool = True) -> dict:
@@ -548,10 +711,23 @@ def _tracked_stat_snapshot(cwd: Path) -> dict[str, tuple[int, int, int, int, int
     return snapshot
 
 
+def check_timeout(cfgv: dict, command: str) -> tuple[int, str]:
+    """(seconds, setting) one check command runs under. The full suite runs under
+    verification.full_suite_timeout_seconds or check_timeout_seconds, whichever is
+    larger. The setting is the one that binds, so a timeout names what to raise."""
+    check = int(cfgv.get("check_timeout_seconds", 1800))
+    if verification_coverage.is_full_suite(command):
+        full = int(cfgv.get("full_suite_timeout_seconds") or 0)
+        if full <= 0:  # unset, blank, or non-positive: the default
+            full = 7200
+        if full >= check:
+            return full, "full_suite_timeout_seconds"
+    return check, "check_timeout_seconds"
+
+
 def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gate: dict, cfgv: dict, *,
                   check_tree: bool = True) -> dict:
     from office.submit import matches_revision
-    timeout = int(cfgv.get("check_timeout_seconds", 1800))
     evdir = paths.run_dir(run["id"]) / "evidence" / (gate.get("task_id") or "integration") / rev["id"]
     evdir.mkdir(parents=True, exist_ok=True)
     findings, results = [], []
@@ -561,7 +737,6 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         log = evdir / f"check-{i}.log"
         started = time.time()
         environment = _check_env(run)
-        from office import verification_coverage
         if verification_coverage._complete_pytest_command(command):
             environment.pop("PYTEST_ADDOPTS", None)
             environment.pop("PYTEST_PLUGINS", None)
@@ -577,7 +752,11 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
         # but must still fail closed when the check mutates tracked source.
         before_tracked = _tracked_diff_snapshot(cwd)
         before_stats = _tracked_stat_snapshot(cwd)
+        timeout, setting = check_timeout(cfgv, command)
+        timed_out = f"timed out after {timeout}s; raise verification.{setting} to allow a longer run"
         code, out = _run_check(command, cwd, timeout, environment)
+        # Only Office's own kill is a timeout: a process that exits 124 itself is not.
+        killed = isinstance(out, _TimedOut)
         # Office's own timeout (124) or a test runner's per-test timeout (exit 1)
         # under host load is the environment, not the code (issue #267 A2).
         loaded = host_overloaded() if code == 124 or (code != 0 and runner_timeout(out)) else None
@@ -614,21 +793,51 @@ def _run_commands(con, run: dict, commands: list[str], cwd: Path, rev: dict, gat
             return {"verdict": "STALE", "summary": detail, "results": results,
                     "mutating_check": {"command": command, "paths": changed_paths}}
         if loaded:
-            what = f"timed out after {timeout}s" if code == 124 else "hit a test-runner timeout"
+            what = timed_out if killed else "exited 124" if code == 124 else "hit a test-runner timeout"
             return {"verdict": "UNAVAILABLE", "summary": f"`{command}` {what}; {loaded}; "
                     "rerun when the host is quieter: office resume", "results": results}
         if code == 127 or ("command not found" in out[-400:] and code != 0):
             return {"verdict": "UNAVAILABLE", "summary": f"check command not found: {command}", "results": results}
+        if code != 0 and (runner := _missing_runner(command, out)):
+            # #739: the interpreter this check ran with has no test runner. That is the
+            # environment, not the code: say so instead of CHANGES_REQUIRED.
+            return {"verdict": "UNAVAILABLE", "results": results,
+                    "summary": f"`{command}`: the interpreter it ran with has no `{runner}` module; run the check "
+                               f"in the repository's environment (for example `uv run python -m {runner}` or "
+                               f"`.venv/bin/python -m {runner}`) by amending the check, then office resume"}
         if not passed:
             tail = "\n".join(out.strip().splitlines()[-12:])
+            why = f"check {timed_out}" if killed else f"check failed (exit {code})"
+            action = f"raise verification.{setting} or shorten the check" if killed else "make this check pass"
             findings.append({"code": f"C{i}", "severity": "material", "location": command,
-                             "summary": f"check failed (exit {code}): {tail[-600:]}", "action": "make this check pass"})
+                             "summary": f"{why}: {tail[-600:]}", "action": action})
         if check_tree and not matches_revision(cwd, rev["commit_sha"], paths.run_dir(run["id"]) / "tmp"):
             return {"verdict": "STALE", "summary": "worktree changed while checks ran", "results": results}
     verdict = "PASS" if not findings else "CHANGES_REQUIRED"
     parsed = review_parse.Parsed(verdict=verdict, findings=findings)
     return {"verdict": verdict, "parsed": parsed, "results": results, "route": "deterministic",
             "summary": f"{len(commands) - len(findings)}/{len(commands)} checks passed"}
+
+
+def _missing_runner(command: str, out: str) -> str | None:
+    """The module a check runs as its tool (`python -m X`, or a bare `X` command) when the
+    output says that very module is missing; None otherwise, so a test's own failed
+    import stays a real failure."""
+    missing = re.search(r"No module named '?([A-Za-z0-9_.]+)'?", out[-2000:])
+    if not missing:
+        return None
+    name = missing.group(1)
+    # The whole `-m` target or command word, so `No module named 'pkg.sub'` from inside
+    # `python -m pkg.tests` (the project's own import) is never read as a missing tool.
+    end = r"(?=$|[\s;&|])"
+    runs = (re.search(rf"(?:^|[\s;&|])-m\s+{re.escape(name)}{end}", command)
+            or re.match(rf"\s*{re.escape(name)}{end}", command))
+    return name if runs else None
+
+
+class _TimedOut(str):
+    """Output of a check Office killed at its limit. Only _run_check makes one, so a check that
+    prints the timeout text and exits 124 itself still reads as a plain str, not a kill."""
 
 
 def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
@@ -647,10 +856,10 @@ def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, s
         with contextlib.suppress(OSError):
             portable.killpg(proc.pid, portable.SIGKILL)
         try:
-            stdout, _ = proc.communicate(timeout=10)
+            stdout, stderr = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
-            stdout = ""
-        return 124, f"timed out after {timeout}s\n{stdout or ''}"
+            stdout, stderr = "", ""
+        return 124, _TimedOut(f"timed out after {timeout}s\n{(stdout or '') + (stderr or '')}")
 
 
 def host_overloaded() -> str | None:
@@ -694,36 +903,402 @@ def _check_env(run: dict) -> dict:
 
 # ------------------------------------------------------------------ reviewers
 
+def reviewer_route_rejections(decision: dict, *, max_items: int = 6) -> str:
+    """Short, truthful routing rejection detail for gate receipts and office status."""
+    request = decision.get("request") or {}
+    seed = request.get("preferred_seed") or []
+    preferred = {routing.candidate_id(c) for c in request.get("candidates") or []
+                 if routing.preferred_rank(c, seed) is not None}
+    entries = list(decision.get("rejected") or []) + list(decision.get("skipped") or [])
+    entries.sort(key=lambda item: (item.get("candidate") not in preferred,
+                                   str(item.get("candidate") or "")))
+    seen, reasons = set(), []
+    for item in entries:
+        name, why = item.get("candidate"), item.get("reason")
+        if not name or not why or (name, why) in seen:
+            continue
+        seen.add((name, why))
+        reasons.append(f"{name}: {why}")
+    if not reasons:
+        return ""
+    suffix = f"; {len(reasons) - max_items} more rejected" if len(reasons) > max_items else ""
+    return "; rejected: " + "; ".join(reasons[:max_items])[:420] + suffix
+
+
+def _cooling_pin(con, run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, expires_at) when the user-pinned reviewer's route is in a quota or runtime cooldown now, else None (#958)."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    until = candidates.route_cooldown_until(con, cand)
+    return (routing.candidate_id(cand), until) if until else None
+
+
+def _reserve_blocked_pin(run: dict, pinned: dict, role: str) -> tuple[str, str] | None:
+    """(route, why) when the user-pinned reviewer's route would cross the run's protected quota reserve, else None."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    why = candidates.reserve_block(cand, state.pinned_config(run), role)
+    return (routing.candidate_id(cand), why) if why else None
+
+
+ROUTE_FAILURE_CLASSES = ("wall", "launch", "silent")
+
+
+def _failed_pin(run: dict, pinned: dict, role: str, history: list[dict]) -> tuple[str, str] | None:
+    """(route, reason) when the pinned reviewer's route already failed an attempt of this gate with a route failure."""
+    cand = candidates.declared_decision(pinned["as"], flag="--review-as", role=role, config=state.pinned_config(run),
+                                        run_id=run["id"])["candidate"]
+    triple = routing.candidate_id(cand)
+    return next(((triple, a["failure"]["reason"]) for a in reversed(history)
+                 if a["triple"] == triple and a["failure"] and a["failure"]["class"] in ROUTE_FAILURE_CLASSES), None)
+
+
+def reviewer_outcome(convergence: bool, kind: str, *, summary: str, parsed=None, route: str | None = None,
+                     dispatch_id: str | None = None, producer_route: str | None = None,
+                     env_failures: int | None = None) -> dict:
+    """The one result shape of `run_reviewer`. `kind` is completed | evidence_blocked | invalid | unavailable | revoked.
+    A convergence run reads `status` (only COMPLETED carries a verdict); a v3.1 run reads `verdict`
+    (`ATTENTION` for an unreadable reply, `UNAVAILABLE` for an exhausted chain, `REVOKED` for a stopped reviewer)."""
+    status = {"completed": contract.COMPLETED, "evidence_blocked": contract.EVIDENCE_BLOCKED,
+              "invalid": contract.INVALID_RESULT, "unavailable": contract.UNAVAILABLE, "revoked": contract.REVOKED}[kind]
+    legacy = {"invalid": "ATTENTION", "unavailable": "UNAVAILABLE", "revoked": "REVOKED"}
+    answered = kind in ("completed", "evidence_blocked")
+    verdict = parsed.verdict if answered and parsed and (kind == "completed" or not convergence) else None
+    if not convergence and kind in legacy:
+        verdict = legacy[kind]
+    out = {"verdict": verdict, "parsed": parsed if answered else None, "route": route}
+    if dispatch_id:
+        out["dispatch_id"] = dispatch_id
+    out["summary"] = summary
+    if kind != "unavailable":
+        out["producer_route"] = producer_route
+    if kind == "revoked":
+        out["revoked"] = True
+    if convergence:
+        out["status"] = status
+        if kind == "unavailable":
+            out["exhausted"] = True
+        if env_failures is not None:
+            out["env_failures"] = env_failures
+    return out
+
+
+# Automatic re-dispatches of a review that returned no verdict, per gate (a manual `office review` makes a new gate).
+REVIEW_REDISPATCH_MAX = 1
+
+
+def redispatch_max(run: dict) -> int:
+    """How many times a review that returned no verdict is re-dispatched on its own, per gate."""
+    return int((run.get("gates") or {}).get("review_redispatch_max", REVIEW_REDISPATCH_MAX))
+
+
+def _fallback_state(job: dict | None) -> dict | None:
+    """The fallback state a reviewing job carries: epoch (which round of attempts this is), chain_epoch (the first
+    epoch of the current chain: a redispatch starts a fresh chain, a REVIEWED_COMMIT re-run continues it), redispatches
+    and commit retries spent, and what a REVIEWED_COMMIT re-run resumes and corrects. None for a caller that runs in
+    no job: it drives its own attempts."""
+    if job is None:
+        return None
+    return {"epoch": 0, "chain_epoch": 0, "redispatches": 0, "commit_retries": 0, "resume_from": None,
+            "correction": None, **(job["payload"].get("review_fallback") or {})}
+
+
+def review_attempts(con, gate_id: str) -> list[dict]:
+    """The reviewer dispatches of one gate, oldest first: route, harness, the chain (`epoch`) each ran in and the
+    failure it recorded, if any. The one source of route exclusion and attempt count, so nothing about a failed
+    route lives in memory."""
+    out = []
+    for r in con.execute("SELECT id, triple, harness, route_json FROM dispatches WHERE gate_id=? AND kind='reviewer' "
+                         "ORDER BY started_at, rowid", (gate_id,)):
+        try:
+            meta = (json.loads(r["route_json"] or "{}") or {}).get("review_attempt") or {}
+        except ValueError:
+            meta = {}
+        out.append({"id": r["id"], "triple": r["triple"], "harness": r["harness"],
+                    "epoch": int(meta.get("epoch") or 0), "failure": meta.get("failure")})
+    return out
+
+
+def route_exclusions(attempts: list[dict]) -> set[str]:
+    """The routes, and the whole harnesses behind a quota, auth or silent wall (R13), that the recorded failed attempts
+    rule out. A route whose brief pointer never landed is not excluded: it runs once more, and that run records its
+    own failure. A revoked dispatch records none, so its route stays eligible."""
+    out: set[str] = set()
+    for a in attempts:
+        failure = a["failure"]
+        if not failure or failure["class"] == "pointer":
+            continue
+        out.add(a["triple"])
+        if failure.get("harness_wide") and a["harness"]:
+            out.add(f"harness:{a['harness']}")
+    return out
+
+
+def _record_failure(con, gate: dict, dispatch_id: str, cls: str, reason: str, *, harness_wide: bool = False,
+                    environment: bool = True, count: bool = True) -> None:
+    """Record on the dispatch row why this reviewer attempt did not settle its review. `environment` also labels it
+    an adapter/environment failure for scoring; `count` adds it to the gate's env_failures. Caller holds the tx."""
+    row = con.execute("SELECT route_json FROM dispatches WHERE id=?", (dispatch_id,)).fetchone()
+    route = json.loads(row["route_json"] or "{}") if row else {}
+    meta = route.setdefault("review_attempt", {})
+    count = count and "failure" not in meta  # a retried settle records the same attempt's failure once
+    meta["failure"] = {"class": cls, "reason": reason[:600], **({"harness_wide": True} if harness_wide else {})}
+    con.execute("UPDATE dispatches SET route_json=? WHERE id=?", (dumps(route), dispatch_id))
+    if environment:
+        con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
+    if count:
+        con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
+
+
 def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool = False,
                  visual: bool = False, images: list[Path] | None = None, include_dirs: list[Path] | None = None,
                  exclude: list[str] | None = None, kind: str | None = None, resume_from: str | None = None,
-                 review_override: dict | None = None, prefer_not: list[str] | None = None) -> dict:
-    """Route, launch, and parse one independent review, substituting routes on
-    environment/adapter/schema failure up to the configured bound.
+                 prefer_not: list[str] | None = None, job: dict | None = None) -> dict:
+    """Route, launch, and parse one independent review. One call is one attempt: one dispatch on one route, chosen
+    once and recorded on the dispatch row. When that attempt fails to settle the review, the next route runs:
 
-    `resume_from` names an earlier reviewer dispatch to continue (a plan-defect
-    redirect with --reviewer same): its session is resumed when the harness can,
-    else a fresh session runs on the same route. `prefer_not` lists routes a
-    review-only re-run starts away from: they are used again only when no other
+    * `job` names the reviewing job (its `kind` and `payload` rebuild the review): a failed attempt queues one
+      `review_fallback` job that re-runs it on the next eligible route and this returns `{"fallback_queued": id}`;
+      the caller ingests nothing. Once every eligible route has failed, a convergence run's review (an integration
+      review of any run) is re-dispatched, up to `gates.review_redispatch_max` times, before the unavailable outcome
+      is returned to be ingested.
+    * With no `job` (a caller outside the job flow) the attempts run here, one after another, until one settles
+      the review or the chain is exhausted, each waited on.
+    * A `job` launches the reviewer without waiting and queues a `review_supervise` job (this returns
+      `{"supervise_queued": id, "dispatch_id": ...}`; the caller ingests nothing and keeps the review's checkout). That
+      job waits for the dispatch to end and re-enters the reviewing job with `review_settle` set, which lands here to
+      record the result like an executor's supervised end. `{"fallback_queued": id}` is also set, so a caller that
+      only knows the fallback job leaves the gate open.
+
+    Which routes failed comes from this gate's recorded dispatches, never from memory. v3.1 bounds the attempts by
+    `environment_retry_max`; the convergence contract walks the whole eligible chain (#337). None of it spends a
+    substantive round.
+
+    `resume_from` names an earlier reviewer dispatch to continue (a plan-defect redirect with --reviewer same): its
+    session is resumed on the chain's first attempt when the harness can, else a fresh session runs on the same
+    route. `prefer_not` lists routes a review-only re-run starts away from: they are used again only when no other
     route qualifies."""
+    fb = _fallback_state(job)
+    settling = ((job or {}).get("payload") or {}).get(SETTLE_KEY)
+    # A job carries its chain's epochs. A caller outside the job flow starts a fresh chain on each call, so what an
+    # earlier call of the same gate failed on is preferred against but eligible again.
+    if fb:
+        epoch, chain_epoch = fb["epoch"], fb["chain_epoch"]
+        if epoch > 0:
+            # Past the first round the job's own `resume_from` (a plan-defect redirect) belongs to a chain that is over:
+            # only a REVIEWED_COMMIT re-run resumes a reviewer, and it carries that in the fallback state.
+            resume_from = fb["resume_from"]
+    else:
+        epoch = max((a["epoch"] + 1 for a in review_attempts(con, gate["id"])), default=0)
+        chain_epoch = epoch
+    while True:
+        if settling:
+            outcome, step = settle_review(con, run, gate, settling["dispatch_id"])
+            settling = None  # a failed attempt's next route launches afresh
+        else:
+            outcome, step = _review_attempt(con, run, gate, role, brief, cwd=cwd, plan_review=plan_review, visual=visual,
+                                            images=images, include_dirs=include_dirs, exclude=exclude, kind=kind,
+                                            resume_from=resume_from, prefer_not=prefer_not, epoch=epoch,
+                                            chain_epoch=chain_epoch, supervise=job is not None)
+        concluded = _conclude_attempt(con, run, gate, job, outcome, step)
+        if concluded is not None:
+            return concluded
+        # no job to carry the next attempt: it runs here
+
+
+def _conclude_attempt(con, run: dict, gate: dict, job: dict | None, outcome: dict | None, step: dict | None) -> dict | None:
+    """What `run_reviewer` returns for one attempt's (outcome, step), or None when the next attempt runs in this call."""
+    if step is None:
+        return outcome
+    if step.get("launched"):
+        queued = queue_review_supervise(con, run, gate, job, step["launched"])
+        return {"supervise_queued": queued, "fallback_queued": queued, "dispatch_id": step["launched"]}
+    if step.get("redispatch"):
+        queued = queue_review_fallback(con, run, gate, job, step["reason"], redispatch=True,
+                                       dispatch_id=step.get("dispatch_id")) if job is not None else None
+        return {"fallback_queued": queued} if queued else outcome
+    if job is None:
+        return None
+    return {"fallback_queued": queue_review_fallback(con, run, gate, job, step["reason"], dispatch_id=step["dispatch_id"])}
+
+
+def settle_reviewer(con, run: dict, gate: dict, job: dict) -> dict:
+    """The result of the reviewer a `review_supervise` job waited on, in the shape `run_reviewer` returns to a job: the
+    outcome to ingest, or `{"fallback_queued": id}` when its attempt failed and the next route is queued. The reviewing
+    job calls this instead of rebuilding the review it already launched."""
+    outcome, step = settle_review(con, run, gate, job["payload"][SETTLE_KEY]["dispatch_id"])
+    return _conclude_attempt(con, run, gate, job, outcome, step)
+
+
+def queue_review_fallback(con, run: dict, gate: dict, job: dict, reason: str, *, redispatch: bool = False,
+                          commit_retry: dict | None = None, dispatch_id: str | None = None) -> str | None:
+    """Queue the one `review_fallback` job that re-runs `job`'s review of `gate` on the next eligible route. The
+    next attempt of the same chain (the default), a fresh chain after the whole chain failed (`redispatch`, bounded
+    by `gates.review_redispatch_max`, returns None once spent), or a re-run that asks the reviewer to correct its
+    REVIEWED_COMMIT (`commit_retry` = {resume_from, correction}). Starts no round. Returns the job id."""
+    fb = _fallback_state(job)
+    nxt = dict(fb)
+    if redispatch:
+        if fb["redispatches"] >= redispatch_max(run):
+            return None
+        nxt.update(redispatches=fb["redispatches"] + 1, epoch=fb["epoch"] + 1, chain_epoch=fb["epoch"] + 1,
+                   resume_from=None, correction=None)
+    elif commit_retry:
+        nxt.update(commit_retries=fb["commit_retries"] + 1, epoch=fb["epoch"] + 1, **commit_retry)
+    origin_payload = {k: v for k, v in job["payload"].items() if k not in ("review_fallback", SETTLE_KEY)}
+    how = "redispatch" if redispatch else "commit" if commit_retry else "next"
+    scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    with db.transaction(con):
+        job_id = state.enqueue(con, run, "review_fallback",
+                               {"gate_id": job["payload"].get("gate_id") or gate["id"],
+                                "origin": {"kind": job["kind"], "payload": origin_payload},
+                                "fallback": nxt, "reason": reason[:300]},
+                               dedup_key=f"review_fallback:{gate['id']}:{dispatch_id or uuid.uuid4().hex[:8]}:{how}",
+                               max_attempts=2)
+        state.emit(con, run, "review.fallback_queued", f"{scope} review {gate['id']}: {reason[:200]}; "
+                   f"re-running it ({how}, attempt chain {nxt['epoch']})", task_id=gate.get("task_id"),
+                   dispatch_id=dispatch_id, payload={"gate": gate["id"], "how": how, "epoch": nxt["epoch"], "job": job_id})
+    return job_id or "queued"
+
+
+def review_launched(outcome: dict | None) -> bool:
+    """Whether `run_reviewer` left its reviewer running under a queued `review_supervise` job: the caller ingests nothing
+    and keeps the checkout the reviewer reads until that job settles it."""
+    return bool(outcome and outcome.get("supervise_queued"))
+
+
+def queue_review_supervise(con, run: dict, gate: dict, job: dict, dispatch_id: str) -> str | None:
+    """Queue the `review_supervise` job that records the result of the reviewer `dispatch_id` once it submits or its
+    dispatch ends. It carries `job`'s kind and payload (its fallback chain included) so it can re-enter the reviewing
+    job. Returns the job id."""
+    origin_payload = {k: v for k, v in job["payload"].items() if k != SETTLE_KEY}
+    scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    with db.transaction(con):
+        job_id = state.enqueue(con, run, "review_supervise",
+                               {"gate_id": gate["id"], "dispatch_id": dispatch_id,
+                                "origin": {"kind": job["kind"], "payload": origin_payload}},
+                               dedup_key=f"review_supervise:{dispatch_id}", max_attempts=3)
+        state.emit(con, run, "review.launched", f"{scope} review {gate['id']}: reviewer {dispatch_id} launched; "
+                   "its result is recorded when it submits or ends", audience="runtime", task_id=gate.get("task_id"),
+                   dispatch_id=dispatch_id, payload={"gate": gate["id"], "job": job_id})
+    return job_id or "queued"
+
+
+def release_launched_review(con, run: dict, gate_id: str, dispatch_id: str) -> None:
+    """Free what a launched reviewer held when no settle will run for it (its gate closed, went stale or was revoked):
+    the checkout it read, its detached snapshot and its lease. Safe to repeat."""
+    for name in (f"review-{gate_id}", f"converge-{gate_id}", f"integration-{gate_id}"):
+        path = paths.run_dir(run["id"]) / "checkouts" / name
+        if path.exists():
+            remove_checkout(run, path)
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    snapshot = _launch_spec_file(ddir / ATTEMPT_FILE).get("snapshot")
+    if snapshot and Path(snapshot).exists():
+        _drop_review_snapshot(Path(run["repo_root"]), Path(snapshot))
+    with db.transaction(con):
+        con.execute("UPDATE leases SET released_at=? WHERE dispatch_id=? AND released_at IS NULL AND revoked_at IS NULL",
+                    (now_iso(), dispatch_id))
+
+
+def _launch_spec_file(path: Path) -> dict:
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def job_review_supervise(con, run: dict, job: dict) -> dict:
+    """Wait for the launched reviewer's dispatch to end, then re-enter the job that launched it to record its result.
+    A claim that dies is reclaimed by the next office command and waits again."""
+    p = job["payload"]
+    gate = con.execute("SELECT status FROM gates WHERE id=?", (p["gate_id"],)).fetchone()
+    if gate is None or gate["status"] not in ("queued", "running"):
+        release_launched_review(con, run, p["gate_id"], p["dispatch_id"])
+        return {"skipped": gate["status"] if gate else "missing"}
+    from office import dispatch as dispatch_mod
+    ended = dispatch_mod._wait_terminal(p["dispatch_id"])
+    origin = p["origin"]
+    inner = {**job, "kind": origin["kind"],
+             "payload": {**origin["payload"], "gate_id": p["gate_id"], SETTLE_KEY: {"dispatch_id": p["dispatch_id"]}}}
+    result = jobs.handler(origin["kind"])(con, run, inner) or {}
+    if "skipped" in result:  # the origin job found its gate or composition gone: nothing will settle the reviewer
+        release_launched_review(con, run, p["gate_id"], p["dispatch_id"])
+    return {"ended": ended.get("terminal"), **result}
+
+
+def job_review_fallback(con, run: dict, job: dict) -> dict:
+    """Re-run the reviewing job that queued this fallback, on the next eligible route (its attempts and exclusions are
+    read from the gate's recorded dispatches)."""
+    p = job["payload"]
+    inner = {**job, "kind": p["origin"]["kind"],
+             "payload": {**p["origin"]["payload"], "gate_id": p["gate_id"], "review_fallback": p["fallback"]}}
+    return jobs.handler(p["origin"]["kind"])(con, run, inner) or {}
+
+
+def _unavailable(con, convergence: bool, gate: dict, failures: list[str], cooled_pin) -> dict:
+    if cooled_pin:  # first, so the summary truncation below never cuts the recovery (#958)
+        failures = [cooled_pin_recovery(con, gate["id"], *cooled_pin), *failures]
+    summary = ("every eligible reviewer route failed: " + "; ".join(failures)[:560]) if convergence \
+        else "; ".join(failures)[:600]
+    return reviewer_outcome(convergence, "unavailable", summary=summary, env_failures=len(failures) if convergence else None)
+
+
+def _review_attempt(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path, plan_review: bool, visual: bool,
+                    images: list[Path] | None, include_dirs: list[Path] | None, exclude: list[str] | None,
+                    kind: str | None, resume_from: str | None, prefer_not: list[str] | None,
+                    epoch: int, chain_epoch: int = 0, supervise: bool = False) -> tuple[dict | None, dict | None]:
+    """One reviewer attempt. Returns (outcome, step): step None is a settled result to ingest; a step with no outcome
+    is a failed attempt whose next route runs; a step with `redispatch` carries the exhausted or unreadable outcome,
+    which a job may re-dispatch before ingesting it. With `supervise` the reviewer is launched without waiting and the
+    step is `{"launched": dispatch_id}`: `settle_review` settles it once the dispatch ends."""
+    # Route from the run as stored now, not the snapshot the calling job loaded: one
+    # convergence job runs every self-review subagent in turn, and a user re-pin
+    # (office config --apply-routing) made meanwhile must reach the next reviewer.
+    run = state.get_run(con, run["id"]) or run
     convergence = contract.is_convergence(run)
-    # v3.1 bounds route substitution; the convergence contract walks the whole
-    # eligible fallback chain before reporting the reviewer unavailable (#337),
-    # and none of those attempts spends a substantive round.
     limit = int((run.get("gates") or {}).get("environment_retry_max", 2)) if not convergence else 12
-    excluded = set(exclude or [])
-    soft = set(prefer_not or [])
     rc = contract.of(run)
     producer = _producer_route(con, gate)
-    failures = []
-    task = state.get_task(con, run["id"], gate["task_id"]) if gate.get("task_id") else None
+    history = review_attempts(con, gate["id"])
+    attempts = [a for a in history if a["epoch"] == epoch]
+    first = not attempts
+    # A convergence run's review, and an integration review of any run, is re-dispatched once its chain is spent.
+    redispatchable = (convergence or role == "integration_reviewer")
+    recorded = [a for a in history if a["failure"]]
+    # Excluded: the caller's and every recorded failure of the current chain (a walled harness included). A re-run goes
+    # to the next eligible route: only a route that newly qualifies is tried, never a known failure again (a manual
+    # `office review` may retry one). A redispatch starts a new chain once the last one exhausted every route, so the
+    # routes (and harnesses) the exhausted chain failed on are eligible again: they may have recovered.
+    excluded = set(exclude or []) | route_exclusions([a for a in history if chain_epoch <= a["epoch"] <= epoch])
+    soft = set(prefer_not or [])
+    failures = [a["failure"]["reason"] for a in recorded if a["failure"]["class"] != "invalid"]  # every chain's, for the summary
     # A user-pinned code reviewer (dispatch --review-as) replaces routing.
     # Independence is per agent: every reviewer is a fresh dispatch and session,
     # never the producer's, so the producer's model or family is not excluded.
-    pinned = review_override or ((task or {}).get("review_override") if role == "code_reviewer" else None)
+    pinned = reviewer_pin(con, run, role, gate)
+    role_dropped = None if pinned else stored_review_pin(con, run, role, gate)  # a pin this role's gate dropped
+    # #958: a pinned route still in a quota or usage-limit cooldown is not launched into the same wall. The review moves
+    # to the next eligible route with a notice. The pin stays on the task, so a later review checks it again.
+    cooled_pin = _cooling_pin(con, run, pinned, role) if pinned else None
+    if cooled_pin:
+        pinned = None
+    # The protected quota reserve binds a pinned route as it binds a routed one, for every reviewer role.
+    reserved_pin = _reserve_blocked_pin(run, pinned, role) if pinned else None
+    if reserved_pin:
+        pinned = None
+    # A pinned route that already failed this gate with a route failure (a quota or auth wall, model_not_found, a 402,
+    # an empty reply) is not launched into the same failure again: the review moves to the next fallback with a notice.
+    dropped_pin = _failed_pin(run, pinned, role, history) if pinned else None
+    if dropped_pin:
+        pinned = None
+        # The failed attempt's full exclusions, so a harness-wide wall also rules out the rest of that harness.
+        excluded |= {dropped_pin[0]} | route_exclusions([a for a in history if a["triple"] == dropped_pin[0]])
     profile_kind = kind or ("vision" if visual else "reviewer")
-    resume, same_route = (_reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"]) if resume_from
-                          else (None, None))
+    if first and resume_from:
+        resume, same_route = _reviewer_resume(con, run, resume_from, profile_kind, cwd, gate_id=gate["id"])
+    else:
+        resume, same_route = None, None
     if pinned and same_route and routing.candidate_id(
             candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
                                          config=state.pinned_config(run), run_id=run["id"])["candidate"]) != same_route:
@@ -732,194 +1307,511 @@ def run_reviewer(con, run: dict, gate: dict, role: str, brief: str, *, cwd: Path
     started_away = [r for r in [*(exclude or []), *(prefer_not or [])] if not r.startswith("harness:")]
     last_failed: tuple[str, str] | None = ((started_away[-1], "an earlier attempt on that route did not settle this review")
                                            if started_away and not pinned else None)
-    retry_route: str | None = None  # a route whose launch pointer never landed: tried once more before any fallback
-    retried: set[str] = set()
-    for attempt in range(limit + 1):
-        retry, retry_route = retry_route, None
-        if retry and not pinned:
-            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"), exact=retry)
-            if decision.get("status") != "selected":
-                excluded.add(retry)
-                decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                                 exclude=excluded | soft)
-        elif attempt == 0 and same_route:
-            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                             exact=same_route)
-            if decision.get("status") != "selected":
-                if resume:
-                    with db.transaction(con):
-                        notify_fallback(con, run, resume["parent"], f"its route {same_route} cannot run now "
-                                        f"({decision.get('status')})", None, gate_id=gate["id"])
-                resume = None
-                decision = candidates.route_role(con, state.pinned_config(run), run, role,
-                                                 task_id=gate.get("task_id"), exclude=excluded)
-        elif pinned:
-            decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
-                                                    config=state.pinned_config(run), run_id=run["id"],
-                                                    scope=gate["id"], claim=True)
-            decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
-        else:
+    if cooled_pin:
+        last_failed = (cooled_pin[0], f"the pinned route {cooled_pin[0]} is in a cooldown until {cooled_pin[1][:16]}Z")
+    elif reserved_pin:
+        last_failed = (reserved_pin[0], f"the pinned route {reserved_pin[0]}: {reserved_pin[1]}")
+    if role_dropped and not (cooled_pin or reserved_pin):
+        last_failed = (role_dropped["as"], f"the pinned route {role_dropped['as']} cannot serve the {role}; routed normally")
+    if recorded:
+        last_failed = (recorded[-1]["triple"], recorded[-1]["failure"]["reason"])
+    if dropped_pin:
+        last_failed = (dropped_pin[0], f"the pinned route {dropped_pin[0]} failed on an earlier attempt of this review "
+                                       f"({dropped_pin[1]}); the pin is dropped for this review")
+    # A route whose launch pointer never landed (#790) runs once more, in a fresh session, before any fallback.
+    last = attempts[-1] if attempts else None
+    retry = last["triple"] if last and last["failure"] and last["failure"]["class"] == "pointer" else None
+    if len(attempts) > limit:
+        return _unavailable(con, convergence, gate, failures, cooled_pin), \
+            ({"redispatch": True, "reason": "every eligible reviewer route failed",
+              "dispatch_id": attempts[-1]["id"]} if redispatchable and not pinned else None)
+    if retry and pinned:
+        decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                                config=state.pinned_config(run), run_id=run["id"],
+                                                scope=gate["id"], claim=True)
+        decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
+    elif retry:
+        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"), exact=retry)
+        if decision.get("status") != "selected":
+            excluded.add(retry)
             decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
                                              exclude=excluded | soft)
-            if decision.get("status") != "selected" and soft:
-                soft = set()  # nothing else qualifies: the routes tried before may have recovered
-                decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
-                                                 exclude=excluded)
+    elif first and same_route:
+        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                         exact=same_route)
         if decision.get("status") != "selected":
-            failures.append(f"no qualifying {role} route ({decision.get('status')})"
-                            + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
-                               if decision.get("status") == "protected_quota_would_be_consumed" else "")
-                            + (f"; other seeded routes were out: {blockers}"
-                               if (blockers := candidates.seeded_fallback_blockers(decision)) else ""))
-            break
-        cand = decision["candidate"]
-        triple = routing.candidate_id(cand)
+            if resume:
+                with db.transaction(con):
+                    notify_fallback(con, run, resume["parent"], f"its route {same_route} cannot run now "
+                                    f"({decision.get('status')})", None, gate_id=gate["id"])
+            resume = None
+            decision = candidates.route_role(con, state.pinned_config(run), run, role,
+                                             task_id=gate.get("task_id"), exclude=excluded)
+    elif pinned:
+        decision = candidates.declared_decision(pinned["as"], flag="--review-as", role=role,
+                                                config=state.pinned_config(run), run_id=run["id"],
+                                                scope=gate["id"], claim=True)
+        decision["launch"] = {k: pinned[k] for k in ("cli", "external") if pinned.get(k)}
+    else:
+        decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                         exclude=excluded | soft)
+        if decision.get("status") != "selected" and soft:
+            soft = set()  # nothing else qualifies: the routes tried before may have recovered
+            decision = candidates.route_role(con, state.pinned_config(run), run, role, task_id=gate.get("task_id"),
+                                             exclude=excluded)
+    if decision.get("status") != "selected" and role == "visual_reviewer" and not pinned:
+        # A reviewer failure may leave the next preferred route unproven.
+        # Prove further eligible candidates and immediately re-route within
+        # this same gate; a failed/protected primary never ends the chain.
+        from office import conformance
+        conformance.ensure_vision_route(con, run, state.pinned_config(run), exclude=excluded | soft)
+        decision = candidates.route_role(con, state.pinned_config(run), run, role,
+                                         task_id=gate.get("task_id"), exclude=excluded | soft)
+    if decision.get("status") != "selected":
+        failures.append(f"no qualifying {role} route ({decision.get('status')})"
+                        + (f"; {candidates.protected_quota_remedy(run, role, gate.get('task_id'))}"
+                           if decision.get("status") == "protected_quota_would_be_consumed" else "")
+                        + reviewer_route_rejections(decision))
+        return _unavailable(con, convergence, gate, failures, cooled_pin), \
+            ({"redispatch": True, "reason": failures[-1], "dispatch_id": attempts[-1]["id"] if attempts else None}
+             if redispatchable and not pinned else None)
+    cand = decision["candidate"]
+    triple = routing.candidate_id(cand)
+    with db.transaction(con):
+        dispatch_id = _reviewer_dispatch(con, run, gate, role, decision, epoch=epoch)
+        from office import dispatch as dispatch_budget
+        dispatch_budget.note_daily_budget(con, run, cand, task_id=gate.get("task_id"))
+        if last_failed and last_failed[0] != triple:
+            review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
+        elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
+            review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id,
+                                skip_class=skipped[2])
+        if pinned and not gate.get("task_id") and len(tids := _gate_task_ids(con, run, gate)) > 1 \
+                and (uncovered := uncovered_pin_tasks(con, run, tids, pinned)):
+            review_route_notice(con, run, gate, role, pinned["as"], triple,
+                                f"the pin covers only some tasks of {gate.get('scope')}; no pin on {', '.join(uncovered)}",
+                                dispatch_id=dispatch_id, kind="pin-partial")
+        con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
+                    "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    ddir.mkdir(parents=True, exist_ok=True)
+    output = ddir / "reply.txt"
+    from office import dispatch as dispatch_mod
+    d = state.get_dispatch(con, dispatch_id)
+    _record_reviewer_packet(con, run, gate, role, d, ddir, epoch=epoch)
+    launch_form = decision.get("launch") or {}
+    if resume:
+        # The resumed reviewer continues its parent's session: it records that
+        # id, so the next RECHECK round can resume it again.
         with db.transaction(con):
-            dispatch_id = _reviewer_dispatch(con, run, gate, role, decision)
-            if last_failed and last_failed[0] != triple:
-                review_route_notice(con, run, gate, role, last_failed[0], triple, last_failed[1], dispatch_id=dispatch_id)
-            elif not last_failed and not pinned and (skipped := _skipped_primary(decision, cand)):
-                review_route_notice(con, run, gate, role, skipped[0], triple, skipped[1], dispatch_id=dispatch_id)
-            con.execute("UPDATE gates SET status='running', route=?, route_json=?, started_at=COALESCE(started_at, ?) "
-                        "WHERE id=?", (triple, dumps(decision.get("selection_disclosure")), now_iso(), gate["id"]))
-        ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
-        ddir.mkdir(parents=True, exist_ok=True)
-        (ddir / "brief.md").write_text(brief, encoding="utf-8")
-        output = ddir / "reply.txt"
-        from office import dispatch as dispatch_mod
-        d = state.get_dispatch(con, dispatch_id)
-        launch_form = decision.get("launch") or {}
-        if resume and attempt == 0:
-            # The resumed reviewer continues its parent's session: it records that
-            # id, so the next RECHECK round can resume it again.
-            with db.transaction(con):
-                con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
-                            (resume["parent"], resume["session_id"], dispatch_id))
-        dispatch_mod.launch(run, d, profile_kind, ddir, cwd=cwd, wait=True, output=output, images=images,
-                            include_dirs=include_dirs, cli=launch_form.get("cli"),
-                            external=bool(launch_form.get("external")),
-                            resume=resume if attempt == 0 else None)
-        d = state.get_dispatch(con, dispatch_id)
-        text = _reply_text(d, ddir, output)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc)
-        wrote_file = output.is_file() and output.stat().st_size > 0
-        pane_terminal_status = _reviewer_pane_terminal_without_reply(d, output)
-        # Wall signatures come from the harness log, never from the review
-        # itself (a review of quota code must not read as a quota wall).
-        log_text = "" if wrote_file else _log_text(d, ddir)
-        launch_failed = ((d.get("terminal_classification") != "success" or pane_terminal_status) and not wrote_file) \
-            or _quota_signature(log_text) or _auth_signature(log_text)
-        if not parsed.valid and not launch_failed:
-            # The reviewer answered (or ended cleanly) but its reply file is
-            # missing or unparseable. Its work is not discarded and no other
-            # reviewer is substituted: the same session is asked to rewrite the
-            # file with the exact errors (R11). Results come only from the file
-            # (R13), never from pane or transcript text.
-            # Read before re-prompting: the loop moves an unreadable reply aside to reply.invalid-N.txt,
-            # and a headless reply may have come from the harness log rather than the file (#399).
-            replied = bool(text.strip())
-            text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
-                                                            plan_review=plan_review, visual=visual)
-            never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
-            if never_replied:
-                with db.transaction(con):
-                    state.emit(con, run, "review.empty_reply", f"{gate.get('task_id') or gate.get('scope') or 'plan'} {role} "
-                               f"{dispatch_id} on {triple} ended: {d.get('terminal_classification')} with an empty reply: "
-                               "no reply file was written", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
-                               payload={"route": triple, "gate": gate["id"], "classification": d.get("terminal_classification")})
-            if attention and never_replied and triple not in retried and _launch_spec(ddir).get("retry_same_route"):
-                # T1 recorded that this reviewer's brief pointer never reached its agent (#790): the route is not at
-                # fault, so it runs once more, in a fresh session, before any fallback route is taken.
-                retried.add(triple)
-                retry_route = triple
-                last_failed = (triple, f"{triple}: launch pointer never landed")
-                with db.transaction(con):
-                    state.emit(con, run, "review.retry_same_route", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
-                               f"{role} {dispatch_id}: its brief pointer never landed; re-running once on the same route "
-                               f"{triple} before any fallback", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
-                               payload={"route": triple, "gate": gate["id"]})
-                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
-                                (dispatch_id,))
-                dispatch_mod.reclaim_pane(run, dispatch_id)
-                continue
-            if attention and never_replied and convergence and not pinned:
-                # Every re-prompt came back empty: the reviewer never worked (a
-                # quota wall the harness did not report, a brief that never
-                # landed). That is a launch failure, so the next route runs
-                # instead of the gate ending INVALID_RESULT on this one (#384).
-                (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
-                log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir, pane=True)
-                wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
-                failures.append(f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""))
-                last_failed = (triple, failures[-1])
-                # A harness that silently answers nothing is walled for every
-                # model on it, so the chain moves to another harness.
-                excluded.update({triple, f"harness:{cand['harness']}"})
-                with db.transaction(con):
-                    con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
-                    con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?",
-                                (dispatch_id,))
-                # The silent session may still be alive: close its pane before
-                # the next route opens another.
-                dispatch_mod.reclaim_pane(run, dispatch_id)
-                continue
-            if attention:
-                with db.transaction(con):
-                    state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
-                                          task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
-                                          gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
-                                          digest=sha256_bytes(text.encode()))
-                if convergence:
-                    return {"status": contract.INVALID_RESULT, "verdict": None, "parsed": None, "route": triple,
-                            "dispatch_id": dispatch_id, "summary": attention, "producer_route": producer}
-                return {"verdict": "ATTENTION", "parsed": None, "route": triple, "dispatch_id": dispatch_id,
-                        "summary": attention, "producer_route": producer}
-            d = state.get_dispatch(con, dispatch_id)
-        if parsed.valid and text and not (output.is_file() and output.stat().st_size):
-            # The reply came from the headless harness's stdout log (no reply
-            # file and no `-o` to write one, #399). Keep it as the reply file:
-            # later steps (an INTAKE_GAP's decision) re-read the evidence path.
-            output.write_text(text, encoding="utf-8")
+            con.execute("UPDATE dispatches SET resumed_from=?, session_id=COALESCE(session_id, ?) WHERE id=?",
+                        (resume["parent"], resume["session_id"], dispatch_id))
+    guard = _worktree_guard(d, profile_kind, cwd)
+    # A guarded reviewer reviews a detached snapshot of the reviewed commit, so an edit another process makes
+    # to the shared task worktree meanwhile is not the reviewer's write. The snapshot is removed once the review is
+    # settled.
+    snapshot = (_review_snapshot(cwd, ddir / "snapshot") or _evidence_copy(cwd, ddir / "snapshot")) if guard else None
+    if snapshot:
+        # The reviewer reads only the snapshot: a path in its brief, its include dirs or its images that names the
+        # shared checkout would let a concurrent edit there reach the review.
+        brief = _retarget_text(brief, cwd, snapshot)
+        include_dirs = [_retarget_path(p, cwd, snapshot) for p in include_dirs] if include_dirs else include_dirs
+        images = [_retarget_path(p, cwd, snapshot) for p in images] if images else images
+    (ddir / "brief.md").write_text(brief, encoding="utf-8")  # what the reviewer is shown, after any retargeting
+    if guard and not snapshot:
+        # This harness has no read-only sandbox: the snapshot is its only isolation, so it never runs in the shared
+        # checkout (an edit another process makes there would pass for the reviewer's write). The attempt fails and
+        # the next route runs.
+        reason = (f"{triple}: no isolated snapshot of the reviewed commit could be created, and a reviewer on a "
+                  "harness with no read-only sandbox does not run in the shared worktree")
         with db.transaction(con):
-            state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
-                                  task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
-                                  meta={"route": triple, "exit": d.get("exit_code")},
-                                  digest=sha256_bytes(text.encode()))
-        if parsed.valid:
-            # A valid reply file is the result, whatever the exit classification.
-            # The reviewer is done: snapshot and close its pane (R1).
-            dispatch_mod.reclaim_pane(run, dispatch_id)
-            out = {"verdict": parsed.verdict, "parsed": parsed, "route": triple, "dispatch_id": dispatch_id,
-                   "summary": f"{parsed.verdict or parsed.evidence_status} by {triple}", "producer_route": producer}
-            if convergence:
-                out["status"] = contract.COMPLETED if parsed.verdict else contract.EVIDENCE_BLOCKED
-                out["env_failures"] = len(failures)
-            return out
-        # Only a launch failure reaches here: the agent never produced a reply
-        # (never started, died first, or hit an auth or quota wall). That is the
-        # one case where another route is substituted.
-        log_text = _log_text(d, ddir)
-        reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
-        if pane_terminal_status:
-            reason += f" (Herdr pane status {pane_terminal_status})"
-        wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
-        if wall:
-            reason += f" [{wall}]"
-        failures.append(reason)
-        last_failed = (triple, reason)
+            dispatch_mod._end_failed_dispatch(con, run, dispatch_id, "launch_failed")
+            con.execute("UPDATE leases SET released_at=? WHERE id=? AND released_at IS NULL AND revoked_at IS NULL",
+                        (now_iso(), d.get("lease_id")))
+            _record_failure(con, gate, dispatch_id, "snapshot", reason)
         if pinned:
-            break  # the user named this reviewer; never substitute another
-        excluded.add(triple)
-        if wall:
-            excluded.add(f"harness:{cand['harness']}")
+            return _unavailable(con, convergence, gate, [*failures, reason], cooled_pin), None
+        return None, {"reason": reason, "dispatch_id": dispatch_id}
+    # A job launches the reviewer and ends: a `review_supervise` job settles it once it ends.
+    detach = supervise
+    launched = False
+    try:
+        if snapshot:
+            guard = _worktree_guard(d, profile_kind, snapshot)
+        before = guard(None) if guard else None
+        attempt = _Attempt(run=run, gate=gate, role=role, plan_review=plan_review, visual=visual, profile_kind=profile_kind,
+                           screenshots=[Path(i).name for i in images or []], triple=triple, dispatch_id=dispatch_id,
+                           pinned=bool(pinned), cooled_pin=cooled_pin, failures=failures, attempts=attempts,
+                           producer=producer, ddir=ddir, drop_cwd=cwd)
+        if detach:
+            atomic_write_json(ddir / ATTEMPT_FILE, {**attempt.persisted(), "snapshot": str(snapshot) if snapshot else None,
+                                                    "before": before, "repo": run["repo_root"]})
+        dispatch_mod.launch(run, d, profile_kind, ddir, cwd=snapshot or cwd, wait=not detach, output=output,
+                            images=images, include_dirs=include_dirs, cli=launch_form.get("cli"),
+                            external=bool(launch_form.get("external")), resume=resume)
+        launched = True
+    finally:
+        if snapshot and not launched:  # once launched, its settle fingerprints the snapshot and then removes it
+            _drop_review_snapshot(cwd, snapshot)
+    if detach:
+        return None, {"launched": dispatch_id}
+    return _settle_review(con, attempt, guard=guard, before=before, snapshot=snapshot)
+
+
+@dataclass
+class _Attempt:
+    """What settling one reviewer dispatch needs, whether the launching call or a later `review_supervise` job settles it."""
+    run: dict
+    gate: dict
+    role: str
+    plan_review: bool
+    visual: bool
+    profile_kind: str
+    screenshots: list[str]
+    triple: str
+    dispatch_id: str
+    pinned: bool
+    cooled_pin: tuple | list | None
+    failures: list[str]
+    attempts: list[dict]
+    producer: str | None
+    ddir: Path
+    drop_cwd: Path
+
+    def persisted(self) -> dict:
+        """The part a settling job cannot recompute: what the route decided before the reviewer ran (a pin that began to
+        cool because this very attempt failed must still read as pinned)."""
+        return {"role": self.role, "plan_review": self.plan_review, "visual": self.visual,
+                "profile_kind": self.profile_kind, "screenshots": self.screenshots, "triple": self.triple,
+                "pinned": self.pinned, "cooled_pin": list(self.cooled_pin) if self.cooled_pin else None,
+                "failures": self.failures, "producer": self.producer}
+
+
+def _attempt_from_record(con, run: dict, gate: dict, dispatch_id: str) -> tuple[_Attempt, dict] | None:
+    """The attempt a launched reviewer dispatch recorded for its settling job, with the raw record, or None."""
+    ddir = paths.run_dir(run["id"]) / "dispatches" / dispatch_id
+    try:
+        rec = json.loads((ddir / ATTEMPT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("role") is None:
+        return None
+    history = review_attempts(con, gate["id"])
+    me = next((a for a in history if a["id"] == dispatch_id), None)
+    attempts = [a for a in history if me and a["epoch"] == me["epoch"] and a["id"] != dispatch_id]
+    return _Attempt(run=state.get_run(con, run["id"]) or run, gate=gate, role=rec["role"], plan_review=bool(rec["plan_review"]),
+                    visual=bool(rec["visual"]), profile_kind=rec["profile_kind"], screenshots=list(rec.get("screenshots") or []),
+                    triple=rec["triple"], dispatch_id=dispatch_id, pinned=bool(rec.get("pinned")),
+                    cooled_pin=tuple(rec["cooled_pin"]) if rec.get("cooled_pin") else None,
+                    failures=list(rec.get("failures") or []), attempts=attempts, producer=rec.get("producer"), ddir=ddir,
+                    drop_cwd=Path(rec.get("repo") or run["repo_root"])), rec
+
+
+def settle_review(con, run: dict, gate: dict, dispatch_id: str) -> tuple[dict | None, dict | None]:
+    """Record the end of a launched reviewer dispatch: its outcome, or the step that follows a failed attempt (the same
+    pair `_review_attempt` returns). The settling half of an attempt a job launched without waiting."""
+    found = _attempt_from_record(con, run, gate, dispatch_id)
+    if found is None:
+        raise Refused("review-attempt-missing", f"reviewer dispatch {dispatch_id} left no launch record to settle from")
+    attempt, rec = found
+    d = state.get_dispatch(con, dispatch_id)
+    snapshot = Path(rec["snapshot"]) if rec.get("snapshot") else None
+    if "changed" in rec:
+        # An earlier settle took the guard's verdict and dropped the snapshot before it died: that verdict stands, and a
+        # fingerprint of the removed snapshot would read as a change.
+        guard, before = (lambda _before, changed=rec["changed"]: changed), None
+    else:
+        guard, before = (_worktree_guard(d, attempt.profile_kind, snapshot) if snapshot else None), rec.get("before")
+    return _settle_review(con, attempt, guard=guard, before=before, snapshot=snapshot)
+
+
+def _record_guard_result(ddir: Path, changed) -> None:
+    """Keep the guard's verdict on the launch record before the snapshot it judged is removed, for a settle that retries."""
+    path = ddir / ATTEMPT_FILE
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        atomic_write_json(path, {**rec, "changed": changed})
+    except (OSError, ValueError):
+        pass
+
+
+def _settle_review(con, a: _Attempt, *, guard, before, snapshot: Path | None) -> tuple[dict | None, dict | None]:
+    """The reviewer dispatch has ended: read what it left and return (outcome, step) as `_review_attempt` does."""
+    from office import dispatch as dispatch_mod
+    run, gate, role, triple, dispatch_id, ddir = a.run, a.gate, a.role, a.triple, a.dispatch_id, a.ddir
+    plan_review, visual, producer, pinned, cooled_pin = a.plan_review, a.visual, a.producer, a.pinned, a.cooled_pin
+    failures, attempts, screenshots = a.failures, a.attempts, a.screenshots
+    convergence = contract.is_convergence(run)
+    rc = contract.of(run)
+    output = ddir / "reply.txt"
+    try:
+        d = state.get_dispatch(con, dispatch_id)
         with db.transaction(con):
-            con.execute("UPDATE gates SET env_failures=env_failures+1 WHERE id=?", (gate["id"],))
-            con.execute("UPDATE dispatches SET attribution='adapter', outcome='environment_failure' WHERE id=?", (dispatch_id,))
-    if convergence:
-        return {"status": contract.UNAVAILABLE, "verdict": None, "parsed": None, "route": None,
-                "summary": "every eligible reviewer route failed: " + "; ".join(failures)[:560],
-                "env_failures": len(failures), "exhausted": True}
-    return {"verdict": "UNAVAILABLE", "parsed": None, "route": None, "summary": "; ".join(failures)[:600]}
+            con.execute("UPDATE leases SET released_at=? WHERE id=? AND released_at IS NULL AND revoked_at IS NULL",
+                        (now_iso(), d.get("lease_id")))
+        with contextlib.suppress(Exception):  # a session probe never costs a review its reply
+            dispatch_mod.backfill_session(con, run, d)
+            d = state.get_dispatch(con, dispatch_id)
+        if dispatch_mod.was_revoked(con, d):
+            # The orchestrator stopped this reviewer on purpose (#1007): not a route failure, no fallback, no demotion,
+            # nothing recorded against its route, so it stays eligible.
+            summary = f"{triple}: revoked by the orchestrator; no fallback route was taken"
+            return reviewer_outcome(convergence, "revoked", summary=summary, route=triple, dispatch_id=dispatch_id,
+                                    producer_route=producer), None
+        _note_headless_reviewer(con, run, d, a.profile_kind)
+        changed = guard(before) if guard else None
+        if snapshot and (ddir / ATTEMPT_FILE).is_file():
+            _record_guard_result(ddir, changed)
+    finally:
+        if snapshot:
+            _drop_review_snapshot(a.drop_cwd, snapshot)
+
+    def failed(cls: str, reason: str, **kw) -> tuple[dict | None, dict]:
+        """This attempt did not settle the review: record why on its dispatch, then the next route runs (a pinned
+        reviewer never substitutes another: the review ends unavailable)."""
+        with db.transaction(con):
+            _record_failure(con, gate, dispatch_id, cls, reason, **kw)
+        if pinned:
+            return _unavailable(con, convergence, gate, [*failures, reason], cooled_pin), None
+        return None, {"reason": reason, "dispatch_id": dispatch_id}
+
+    if changed:
+        # A reviewer on a harness without a read-only sandbox touched the worktree: its verdict is not
+        # trusted. The route is degraded and the chain moves on; a pinned reviewer ends the gate.
+        reason = (f"{triple}: degraded, the worktree changed during the review ({changed}); the check ran on "
+                  "the reviewer's own snapshot, so the reviewer made the change")
+        dispatch_mod.reclaim_pane(run, dispatch_id)
+        with db.transaction(con):
+            state.emit(con, run, "review.worktree_changed", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
+                       f"{role} {dispatch_id} on {triple}: {changed}", task_id=gate.get("task_id"),
+                       dispatch_id=dispatch_id, payload={"route": triple, "gate": gate["id"], "changed": changed})
+        return failed("degraded", reason)
+    text = _reply_text(d, ddir, output)
+    parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=rc,
+                                screenshots=screenshots if visual else None)
+    wrote_file = output.is_file() and output.stat().st_size > 0
+    pane_terminal_status = _reviewer_pane_terminal_without_reply(d, output)
+    # Wall signatures come from the harness log, never from the review
+    # itself (a review of quota code must not read as a quota wall).
+    log_text = "" if wrote_file else _log_text(d, ddir)
+    # A pane agent prints its quota wall only in the pane. Read before any re-prompt, so a walled
+    # reviewer moves to another harness at once instead of minutes later (run 12922516, 2026-11-02).
+    pane_wall = None if wrote_file else _pane_quota_wall(d, ddir)
+    launch_failed = ((d.get("terminal_classification") != "success" or pane_terminal_status) and not wrote_file) \
+        or _quota_signature(log_text) or _auth_signature(log_text) or bool(pane_wall)
+    if not parsed.valid and not launch_failed:
+        # The reviewer answered (or ended cleanly) but its reply file is
+        # missing or unparseable. Its work is not discarded and no other
+        # reviewer is substituted: the same session is asked to rewrite the
+        # file with the exact errors (R11). Results come only from the file
+        # (R13), never from pane or transcript text.
+        # Read before re-prompting: the loop moves an unreadable reply aside to reply.invalid-N.txt,
+        # and a headless reply may have come from the harness log rather than the file (#399).
+        replied = bool(text.strip())
+        text, parsed, attention = _reprompt_until_valid(con, run, d, ddir, output, parsed,
+                                                        plan_review=plan_review, visual=visual,
+                                                        screenshots=screenshots if visual else None)
+        never_replied = not replied and not (output.is_file() and output.stat().st_size > 0)
+        if never_replied:
+            with db.transaction(con):
+                state.emit(con, run, "review.empty_reply", f"{gate.get('task_id') or gate.get('scope') or 'plan'} {role} "
+                           f"{dispatch_id} on {triple} ended: {d.get('terminal_classification')} with an empty reply: "
+                           "no reply file was written", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                           payload={"route": triple, "gate": gate["id"], "classification": d.get("terminal_classification")})
+        if attention and never_replied and not pointer_retried_on(attempts, triple) \
+                and _launch_spec(ddir).get("retry_same_route"):
+            # T1 recorded that this reviewer's brief pointer never reached its agent (#790): the route is not at
+            # fault, so it runs once more, in a fresh session, before any fallback route is taken.
+            with db.transaction(con):
+                state.emit(con, run, "review.retry_same_route", f"{gate.get('task_id') or gate.get('scope') or 'plan'} "
+                           f"{role} {dispatch_id}: its brief pointer never landed; re-running once on the same route "
+                           f"{triple} before any fallback", task_id=gate.get("task_id"), dispatch_id=dispatch_id,
+                           payload={"route": triple, "gate": gate["id"]})
+            dispatch_mod.reclaim_pane(run, dispatch_id)
+            with db.transaction(con):
+                _record_failure(con, gate, dispatch_id, "pointer", f"{triple}: launch pointer never landed", count=False)
+            return None, {"reason": f"{triple}: launch pointer never landed", "dispatch_id": dispatch_id}
+        if attention and never_replied and convergence and not pinned:
+            # Every re-prompt came back empty: the reviewer never worked (a
+            # quota wall the harness did not report, a brief that never
+            # landed). That is a launch failure, so the next route runs
+            # instead of the gate ending INVALID_RESULT on this one (#384).
+            (ddir / "pane-tail.txt").unlink(missing_ok=True)  # re-read after the re-prompts
+            log_text = _log_text(state.get_dispatch(con, dispatch_id), ddir, pane=True)
+            wall = "quota" if _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+            # A harness that silently answers nothing is walled for every model on it, so the chain moves to
+            # another harness.
+            # The silent session may still be alive: close its pane before the next route opens another.
+            dispatch_mod.reclaim_pane(run, dispatch_id)
+            return failed("silent", f"{triple}: no reply after re-prompts" + (f" [{wall}]" if wall else ""),
+                          harness_wide=True)
+        if attention:
+            with db.transaction(con):
+                state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
+                                      task_id=gate.get("task_id"), revision_id=gate.get("revision_id"),
+                                      gate_id=gate["id"], meta={"route": triple, "exit": d.get("exit_code")},
+                                      digest=sha256_bytes(text.encode()))
+                if convergence and not pinned:
+                    _record_failure(con, gate, dispatch_id, "invalid", attention, environment=False, count=False)
+            outcome = reviewer_outcome(convergence, "invalid", summary=attention, route=triple, dispatch_id=dispatch_id,
+                                       producer_route=producer)
+            return outcome, ({"redispatch": True, "reason": attention, "dispatch_id": dispatch_id}
+                             if convergence and not pinned else None)
+        d = state.get_dispatch(con, dispatch_id)
+    if parsed.valid and text and not (output.is_file() and output.stat().st_size):
+        # The reply came from the headless harness's stdout log (no reply
+        # file and no `-o` to write one, #399). Keep it as the reply file:
+        # later steps (an INTAKE_GAP's decision) re-read the evidence path.
+        output.write_text(text, encoding="utf-8")
+    with db.transaction(con):
+        state.record_evidence(con, run["id"], "review_output", output if output.is_file() else None,
+                              task_id=gate.get("task_id"), revision_id=gate.get("revision_id"), gate_id=gate["id"],
+                              meta={"route": triple, "exit": d.get("exit_code")},
+                              digest=sha256_bytes(text.encode()))
+    if parsed.valid:
+        # A valid reply file is the result, whatever the exit classification.
+        # The reviewer is done: snapshot and close its pane (R1).
+        dispatch_mod.reclaim_pane(run, dispatch_id)
+        return reviewer_outcome(convergence, "completed" if parsed.verdict or not convergence else "evidence_blocked",
+                                summary=f"{parsed.verdict or parsed.evidence_status} by {triple}", parsed=parsed,
+                                route=triple, dispatch_id=dispatch_id, producer_route=producer,
+                                env_failures=len(failures) if convergence else None), None
+    # Only a launch failure reaches here: the agent never produced a reply
+    # (never started, died first, or hit an auth or quota wall). That is the
+    # one case where another route is substituted.
+    log_text = _log_text(d, ddir)
+    reason = f"{triple}: exit {d.get('exit_code')} ({d.get('terminal_classification')}) with no reply"
+    if pane_terminal_status:
+        reason += f" (Herdr pane status {pane_terminal_status})"
+    wall = "quota" if pane_wall or _quota_signature(log_text) else "auth" if _auth_signature(log_text) else None
+    if wall:
+        reason += f" [{wall}" + (f": {pane_wall}" if pane_wall else "") + "]"
+    return failed("wall" if wall else "launch", reason, harness_wide=bool(wall))
+
+
+def pointer_retried_on(attempts: list[dict], triple: str) -> bool:
+    """Whether an earlier attempt on `triple` already took the one same-route retry for a launch pointer that never landed."""
+    return any(a["triple"] == triple and a["failure"] and a["failure"]["class"] == "pointer" for a in attempts)
+
+
+def _review_snapshot(cwd: Path, dest: Path) -> Path | None:
+    """A detached worktree of `cwd`'s HEAD at `dest`, or None when it cannot be made (a guarded reviewer's attempt
+    then fails: it never runs in `cwd` itself)."""
+    try:
+        if dest.exists():
+            _drop_review_snapshot(cwd, dest)
+        proc = subprocess.run(["git", "-C", str(cwd), "worktree", "add", "--detach", "--force", str(dest), "HEAD"],
+                              capture_output=True, text=True)
+    except OSError:
+        return None
+    return dest if proc.returncode == 0 else None
+
+
+def _evidence_copy(cwd: Path, dest: Path) -> Path | None:
+    """A plain copy of `cwd` at `dest` when it is a directory of evidence (a visual review's captures) and no checkout,
+    else None: a checkout whose snapshot could not be made is never copied around the failure."""
+    try:
+        if not Path(cwd).is_dir() or subprocess.run(["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
+                                                     capture_output=True, text=True).returncode == 0:
+            return None
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(cwd, dest)
+        return dest
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)  # a copy that stopped half way is no snapshot
+        return None
+
+
+def _retarget_path(path: Path, cwd: Path, snapshot: Path) -> Path:
+    """`path` as it sits in `snapshot` when it is `cwd` or lies under it, else unchanged."""
+    try:
+        return snapshot / Path(path).relative_to(cwd)
+    except ValueError:
+        return Path(path)
+
+
+def _retarget_text(text: str, cwd: Path, snapshot: Path) -> str:
+    """`text` with every path of the checkout `cwd` (and of anything under it) naming `snapshot` instead."""
+    return re.sub(re.escape(str(cwd)) + r"(?![\w\-]|\.\w)", lambda _m: str(snapshot), text)
+
+
+def _snapshot_paths(brief: str, include_dirs: list[Path] | None, cwd: Path, snapshot: Path) -> tuple[str, list[Path] | None]:
+    """A guarded review's brief and include dirs pointed at its snapshot: paths of the shared checkout `cwd` move to
+    `snapshot`, so the reviewer cannot read the concurrently mutable checkout. Directories outside it are kept."""
+    return (_retarget_text(brief, cwd, snapshot),
+            None if include_dirs is None else [_retarget_path(i, cwd, snapshot) for i in include_dirs])
+
+
+def _drop_review_snapshot(cwd: Path, snapshot: Path) -> None:
+    with contextlib.suppress(OSError):
+        subprocess.run(["git", "-C", str(cwd), "worktree", "remove", "--force", str(snapshot)],
+                       capture_output=True, text=True)
+    shutil.rmtree(snapshot, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        subprocess.run(["git", "-C", str(cwd), "worktree", "prune"], capture_output=True, text=True)
+
+
+def _worktree_guard(d: dict, profile_kind: str, cwd: Path):
+    """For a reviewer profile that declares `verify_worktree_unchanged` (a harness with no read-only
+    sandbox), return `guard(before) -> dict | str | None`: `guard(None)` takes the fingerprint (HEAD,
+    tracked diff, status, untracked file contents) and `guard(before)` returns the names of what changed,
+    or None. Returns None when the profile does not ask for the check. Gitignored files and `.git/` are
+    not fingerprinted (caches and build outputs change outside the reviewer); the harness's read-only
+    mode is the write barrier for them. Untracked bytecode under `__pycache__/` and untracked files under tool
+    caches (`.pytest_cache`, ...) are skipped too, gitignored or not: a reviewer that imports a module leaves
+    bytecode behind without editing the code under review (#1182). A sourceless `*.pyc` elsewhere still counts."""
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "")
+    if not (adapters.profile(adapter or {}, profile_kind) or {}).get("verify_worktree_unchanged"):
+        return None
+
+    def git(*args: str) -> str:
+        try:
+            proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+        except OSError as exc:
+            return f"unverifiable: {exc}"
+        return f"unverifiable: git exited {proc.returncode}" if proc.returncode else proc.stdout
+
+    def fingerprint() -> dict:
+        untracked = sha256_bytes(b"".join(
+            name.encode() + b"\0" + _file_digest(Path(cwd) / name).encode()
+            for name in sorted(git("ls-files", "--others", "--exclude-standard", "-z").split("\0"))
+            if name and not _is_cache_path(name)))
+        status = "\0".join(entry for entry in git("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
+                           if not (entry.startswith("?? ") and _is_cache_path(entry[3:])))
+        return {"HEAD": git("rev-parse", "HEAD").strip(),
+                "tracked diff": sha256_bytes(git("diff", "HEAD", "--binary").encode()),
+                "status": sha256_bytes(status.encode()),
+                "untracked files": untracked}
+
+    def guard(before: dict | None):
+        now = fingerprint()
+        if before is None:
+            return now
+        if str(now["HEAD"]).startswith("unverifiable") or str(before["HEAD"]).startswith("unverifiable"):
+            return "the worktree could not be fingerprinted (not a git checkout or git failed), so the review cannot be trusted"
+        return ", ".join(k for k in now if now[k] != before[k]) or None
+    return guard
+
+
+# Untracked caches the reviewer guard ignores (#1182); tracked files are always fingerprinted. Bytecode counts only
+# as `__pycache__/<module>.<tag>.pyc` (PEP 3147): a sourceless `evil.pyc` beside the code is importable and counts.
+# The tool caches hold data no import path reaches (their names start with a dot).
+_TOOL_CACHE_DIRS = frozenset({".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
+
+
+def _is_cache_path(name: str) -> bool:
+    parts = name.split("/")
+    if _TOOL_CACHE_DIRS.intersection(parts[:-1]):
+        return True
+    return len(parts) >= 2 and parts[-2] == "__pycache__" and parts[-1].endswith(".pyc")
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError:
+        return "unreadable"
 
 
 def _reviewer_pane_terminal_without_reply(d: dict, output: Path) -> str | None:
@@ -948,10 +1840,10 @@ def _launch_spec(ddir: Path) -> dict:
     return spec if isinstance(spec, dict) else {}
 
 
-def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
-    """(route, why) when routing passed over the review's preferred primary route for `chosen`: the first
+def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str, str] | None:
+    """(route, why, skip_class) when routing passed over the review's preferred primary route for `chosen`: the first
     preferred_seed entry matched a candidate that selection rejected (quota cooldown, trust, capability) and
-    `chosen` is not that entry's route."""
+    `chosen` is not that entry's route. skip_class is "quota-auth" for a quota or auth rejection, else "other"."""
     seed = ((decision.get("request") or {}).get("preferred_seed") or [])[:1]
     if not seed or routing.preferred_rank(chosen, seed) is not None:
         return None
@@ -959,17 +1851,21 @@ def _skipped_primary(decision: dict, chosen: dict) -> tuple[str, str] | None:
               if routing.preferred_rank(c, seed) is not None}
     for r in decision.get("rejected") or []:
         if r.get("candidate") in wanted:
-            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}"
+            skip_class = "quota-auth" if routing.quota_auth_rejection(r) else "other"
+            return r["candidate"], f"{r['candidate']} was rejected: {r.get('reason')}", skip_class
     return None
 
 
 def review_route_notice(con, run: dict, gate: dict, role: str, before: str | None, after: str, reason: str, *,
-                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office") -> None:
+                        dispatch_id: str | None = None, kind: str = "reviewer-fallback", actor: str = "office",
+                        skip_class: str | None = None) -> None:
     """A user-visible notice that a plan or lane review left its primary or pinned route: old route, new route and
-    why, in `office status` and `office inspect route`. Caller holds the tx."""
+    why, in `office status` and `office inspect route`. `skip_class` (#921) says whether the route was avoided for
+    quota or auth. Caller holds the tx."""
     scope = gate.get("task_id") or gate.get("scope") or gate.get("subject") or "plan"
+    extra = {"notice": "review", "gate": gate["id"], **({"skip_class": skip_class} if skip_class else {})}
     state.record_route_change(con, run, scope, before, after, kind=kind, reason=reason, actor=actor, dispatch_id=dispatch_id,
-                              stage=role, extra={"notice": "review", "gate": gate["id"]})
+                              stage=role, extra=extra)
     if kind == "reviewer-fallback":
         state.emit(con, run, "route.fallback", f"{scope} {role} fell back from {before or 'unrecorded'} to {after}: {reason}",
                    task_id=gate.get("task_id"), dispatch_id=dispatch_id,
@@ -995,16 +1891,27 @@ REPLY_FILE_RULE = ("Office reads your review only from that file; text you print
 
 
 def _reply_text(d: dict, ddir: Path, output: Path) -> str:
-    """The reviewer's reply: its reply file, or (headless only) the captured
-    stdout log, which is also a file the harness wrote. Never pane text."""
-    if output.is_file() and output.stat().st_size:
+    """The reviewer's reply: what `office review submit` stored (the reply file, with its submitted marker), else
+    the reply file written directly, else (headless only, a pane-hosted supervisor counting as headless) the harness's last message or captured stdout log. Never
+    pane text. Each fallback is recorded on the dispatch."""
+    from office import review_submit
+    if review_submit.submitted(output):
         return output.read_text(encoding="utf-8", errors="replace")
-    if d.get("launcher") in ("herdr", "external"):
+    source, text = "reply_file", ""
+    if output.is_file() and output.stat().st_size:
+        text = output.read_text(encoding="utf-8", errors="replace")
+    # A pane-hosted supervisor runs the headless form, so its stdout log is the reply exactly as headless.
+    elif d.get("launcher") in ("herdr", "external") and _launch_spec(ddir).get("supervisor") != "pane":
         return ""
-    last_message = output.with_name("last-message.txt")
-    if last_message.is_file() and last_message.stat().st_size:
-        return last_message.read_text(encoding="utf-8", errors="replace")
-    return _log_text(d, ddir)
+    else:
+        last_message = output.with_name("last-message.txt")
+        if last_message.is_file() and last_message.stat().st_size:
+            source, text = "last_message", last_message.read_text(encoding="utf-8", errors="replace")
+        else:
+            source, text = "stdout_log", _log_text(d, ddir)
+    if text:
+        review_submit.record_fallback(d, source)
+    return text
 
 
 def log_path(d: dict, ddir: Path) -> Path:
@@ -1035,7 +1942,7 @@ def _log_text(d: dict, ddir: Path, *, pane: bool = False) -> str:
 
 
 def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, parsed, *, plan_review: bool,
-                          visual: bool) -> tuple[str, "review_parse.Parsed", str | None]:
+                          visual: bool, screenshots: list[str] | None = None) -> tuple[str, "review_parse.Parsed", str | None]:
     """Ask the same reviewer to rewrite its reply file until it parses, up to
     gates.review_reprompt_max. Returns (text, parsed, attention reason or None)."""
     from office import dispatch as dispatch_mod
@@ -1072,6 +1979,17 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                            f"refused, {exc}", audience="runtime", task_id=d.get("task_id"), dispatch_id=d["id"])
             return text, parsed, (f"reviewer {d['id']} ({d.get('triple')}): {exc}; Office did not re-prompt it. Inspect the pane, "
                                   f"then re-run only the review on another reviewer route: {_review_only_hint(con, d)}")
+        if got == "held":
+            if output.is_file():
+                got = "landed"
+            else:
+                sample = dispatch_mod._herdr_agent_sample(name)
+                working = bool(sample and (sample.get("status") == "working" or sample.get("busy") is True))
+                if working:
+                    got = "landed"
+                # A reply written while the agent was being sampled counts as landed.
+                elif output.is_file():
+                    got = "landed"
         sent += 1
         unsent = " (typed but unsubmitted)" if got == "held" else ""
         with db.transaction(con):
@@ -1084,7 +2002,8 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
                                   f"unsubmitted in herdr agent {name}; submit it (herdr agent send-keys {name} "
                                   f"Enter) or re-run only the review: {_review_only_hint(con, d)}")
         text = _await_file(output, wait_s, poll)
-        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run))
+        parsed = review_parse.parse(_last_block(text), plan_review=plan_review, visual=visual, contract=contract.of(run),
+                                    screenshots=screenshots)
         if parsed.valid:
             return text, parsed, None
         errors = parsed.errors or ["no reply file"]
@@ -1106,16 +2025,60 @@ def _reprompt_until_valid(con, run: dict, d: dict, ddir: Path, output: Path, par
     return text, parsed, reason
 
 
+def _note_headless_reviewer(con, run: dict, d: dict, profile_kind: str) -> None:
+    """A reviewer whose profile has a Herdr pane form but ran headless took the CLI fallback (Herdr unusable,
+    or no pane): say so where office status reads launch notices (#1027). Herdr runs it by default."""
+    from office import adapters
+    if (d or {}).get("launcher") not in ("process", "process-fallback"):
+        return
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    if not adapters.pane_capable(adapter, profile_kind):
+        return
+    why = "the Herdr pane could not start" if d["launcher"] == "process-fallback" else "Herdr was not usable"
+    with db.transaction(con):
+        state.emit(con, run, "launch", f"{d.get('task_id') or d['id']}: {d['role']} {d['id']} on {d.get('triple')} ran "
+                   f"headless (CLI fallback): {why}", task_id=d.get("task_id"), dispatch_id=d["id"],
+                   payload={"launcher": d["launcher"], "profile": profile_kind})
+
+
+def _gate_review_target(con, gate_id: str | None) -> str | None:
+    """The `office review` target that re-runs the review gate `gate_id` names: a task id, or `<scope>:visual|convergence`."""
+    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (gate_id,)).fetchone() if gate_id else None
+    if g and g["scope"]:
+        return f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
+    if g and g["kind"] == "code_review" and g["task_id"]:
+        return g["task_id"]
+    return None
+
+
 def _review_only_hint(con, d: dict) -> str:
     """The review-only command that re-runs this reviewer's review on another route."""
-    g = con.execute("SELECT kind, task_id, scope FROM gates WHERE id=?", (d.get("gate_id"),)).fetchone() if d.get("gate_id") else None
-    if g and g["scope"]:
-        target = f"{g['scope']}:{'visual' if g['kind'] == 'visual' else 'convergence'}"
-    elif g and g["kind"] == "code_review" and g["task_id"]:
-        target = g["task_id"]
-    else:
-        return "office resume"
-    return f"office review {target} --as <harness>/<model>[@effort]"
+    target = _gate_review_target(con, d.get("gate_id"))
+    return f"office review {target} --as <harness>/<model>[@effort]" if target else "office resume"
+
+
+def cooled_pin_recovery(con, gate_id: str | None, candidate: str, until: str) -> str:
+    """Why a pinned reviewer did not run, and when and how to re-run it: its route, its cooldown expiry and the
+    exact `office review <target> --as <route>` that runs it once the cooldown has expired (#958)."""
+    m = routing.CANDIDATE_ID_RE.fullmatch(candidate)  # `--as` takes harness/model@effort, not the candidate id
+    route = (f"{m['harness']}/{m['model']}" + ("" if m["effort"] == "None" else f"@{m['effort']}")) if m else candidate
+    target = _gate_review_target(con, gate_id) or "<task|lane>"
+    return (f"the pinned reviewer {route} is in a cooldown until {until[:16]}Z; after that, re-run only its review: "
+            f"office review {target} --as {route}")
+
+
+def cooling_pin_recovery(con, run: dict, task: dict | None, gate_id: str) -> str | None:
+    """The `next:` recovery for a blocked review whose pinned reviewer is still cooling, or None (#958)."""
+    pinned = (task or {}).get("review_override")
+    try:
+        cooled = _cooling_pin(con, run, pinned, "code_reviewer") if pinned else None
+    except (Refused, Usage):  # a pin that no longer declares a route must not break every status line
+        return None
+    if not cooled:
+        return None
+    target = _gate_review_target(con, gate_id) or "<task|lane>"
+    text = cooled_pin_recovery(con, gate_id, *cooled) + f"; before then, office review {target} runs another eligible route if one qualifies"
+    return text[:1].upper() + text[1:]
 
 
 def _agent_alive(name: str) -> bool:
@@ -1226,7 +2189,7 @@ def _reviewer_resume(con, run: dict, parent_id: str, profile_kind: str, cwd: Pat
     return {"parent": parent_id, "session_id": parent["session_id"], "argv": argv[0], "herdr_kind": argv[1]}, same_route
 
 
-def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) -> str:
+def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict, *, epoch: int = 0) -> str:
     from office import dispatch as dispatch_mod
     cand = decision["candidate"]
     dispatch_id = "D" + uuid.uuid4().hex[:8]
@@ -1236,7 +2199,8 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) ->
                 (dispatch_id, run["id"], role, dispatch_id, routing.candidate_id(cand), cand.get("invocation_model_id"),
                  (decision.get("selection_disclosure") or {}).get("reason"), now_iso(), gate.get("task_id"), "reviewer",
                  version.current(), "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
-                 cand.get("adapter_id"), dumps(dispatch_mod._route_payload(decision)), gate["id"]))
+                 cand.get("adapter_id"),
+                 dumps({**dispatch_mod._route_payload(decision), "review_attempt": {"epoch": epoch}}), gate["id"]))
     if decision.get("override"):
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
                     (dumps({"by": "user", "declared": True, "triple": routing.candidate_id(cand),
@@ -1244,25 +2208,89 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict) ->
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, run["id"], role, sha256_obj(role + gate["id"]),
                                           decision.get("selected"), decision.get("decision_hash"), now_iso()))
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (_reviewer_lease(con, run, role, dispatch_id), dispatch_id))
     return dispatch_id
+
+
+def _reviewer_lease(con, run: dict, role: str, dispatch_id: str) -> str:
+    """A fenced lease for one reviewer dispatch. It holds no scope (a reviewer is read-only, so it never blocks a task),
+    so only a revoke or the settled end changes it: a revoked reviewer's late `office review submit` is refused.
+    Caller holds the tx."""
+    from datetime import datetime, timedelta, timezone
+    from office import dispatch as dispatch_mod
+    now = datetime.now(timezone.utc)
+    lease_id = "L" + uuid.uuid4().hex[:8]
+    fencing = (con.execute("SELECT COALESCE(MAX(fencing),0) FROM leases WHERE run_id=?", (run["id"],)).fetchone()[0] or 0) + 1
+    con.execute("INSERT INTO leases(id, run_id, role, scope, holder_id, acquired_at, expires_at, task_id, fencing, dispatch_id, "
+                "renewed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (lease_id, run["id"], role, "[]", dispatch_id, now.isoformat(),
+                 (now + timedelta(seconds=dispatch_mod.LEASE_TTL_SECONDS)).isoformat(), None, fencing, dispatch_id,
+                 now.isoformat()))
+    return lease_id
+
+
+def _record_reviewer_packet(con, run: dict, gate: dict, role: str, d: dict, ddir: Path, *, epoch: int) -> None:
+    """The reviewer dispatch's packet (what it was asked to review, under which lease and contract), written beside its
+    brief and bound to the dispatch row the way an executor's is."""
+    plan = state.current_plan(con, run["id"])
+    packet = state.packet_envelope(run, "reviewer-dispatch", {
+        "role": role, "dispatch_id": d["id"], "gate_id": gate["id"], "gate_kind": gate.get("kind"),
+        "task_id": gate.get("task_id"), "revision_id": gate.get("revision_id"), "scope": gate.get("scope"),
+        "input_key": gate.get("input_key"), "lease_id": d.get("lease_id"), "fencing": _lease_fencing(con, d.get("lease_id")),
+        "plan_version": plan["version"] if plan else 0, "requirements_version": run["requirements_version"],
+        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch})
+    state.check_packet(run, packet)
+    atomic_write_json(ddir / "packet.json", packet)
+    with db.transaction(con):
+        con.execute("UPDATE dispatches SET packet_hash=?, packet_path=? WHERE id=?",
+                    (packet["packet_hash"], str(ddir / "packet.json"), d["id"]))
+
+
+def _lease_fencing(con, lease_id: str | None) -> int | None:
+    row = con.execute("SELECT fencing FROM leases WHERE id=?", (lease_id,)).fetchone() if lease_id else None
+    return row[0] if row else None
 
 
 def _last_block(text: str) -> str:
     """Reviewers sometimes narrate before answering; keep the reply from the
     last VERDICT line onward plus the finding lines around it."""
     lines = text.splitlines()
-    idx = [i for i, l in enumerate(lines) if re.search(r"VERDICT\s*[:=]", l, re.I)]
+    # A verdict line leads its line (as the parser reads it), never a quote inside a finding:
+    # `verdict == "UNAVAILABLE"` in a FINDING once cut the real VERDICT line off every rewrite (#894).
+    idx = [i for i, l in enumerate(lines) if re.match(r"VERDICT\s*[:=]", review_parse._clean(l), re.I)]
     if not idx:
         return text
     start = idx[-1]
-    while start > 0 and re.match(r"^(EVIDENCE_STATUS|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT|NEXT|DECISION|WHY|AFFECTS)",
+    while start > 0 and re.match(r"^(EVIDENCE_STATUS|OBSERVATION|FINDING|DEFECT|RESOLVED|CLEARED|RETRACT|NEXT|DECISION|WHY|AFFECTS)",
                                  review_parse._clean(lines[start - 1]), re.I):
         start -= 1
     return "\n".join(lines[start:])
 
 
+PANE_WALL_LINES = 12
+
+
+def _pane_quota_wall(d: dict, ddir: Path) -> str | None:
+    """The id of an adapter quota failure signature (opencode's "Free usage limit reached")
+    among the last lines of a Herdr pane agent that wrote no reply, or None. Only the
+    adapter's own quota signatures, and only the pane's last lines, count: the agent's
+    review text above them may well discuss quota code."""
+    if d.get("launcher") != "herdr":
+        return None
+    from office import adapters
+    adapter = adapters.load_all().get(d.get("adapter_id") or d.get("harness") or "") or {}
+    sigs = [s for s in adapter.get("failure_signatures") or []
+            if isinstance(s, dict) and s.get("pattern") and _quota_signature(s["pattern"])]
+    if not sigs:
+        return None
+    lines = [line for line in _log_text(d, ddir, pane=True).splitlines() if line.strip()][-PANE_WALL_LINES:]
+    tail = "\n".join(lines).lower()
+    return next((s.get("id") or s["pattern"] for s in sigs if s["pattern"].lower() in tail), None)
+
+
 def _quota_signature(text: str) -> bool:
-    return bool(re.search(r"rate.?limit|quota|usage limit|session limit|weekly limit|429|too many requests|exhausted",
+    return bool(re.search(r"rate.?limit|quota|usage limit|session limit|weekly limit|429|too many requests|exhausted"
+                          r"|resource_exhausted|credits? balance .{0,20}too low|out of (ai )?credits",
                           text[-2000:], re.I))
 
 
@@ -1276,9 +2304,18 @@ def job_review(con, run: dict, job: dict) -> dict:
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
+    if job["payload"].get(SETTLE_KEY):
+        # The reviewer was launched by an earlier run of this job, which left its checkout for it to read.
+        checkout = paths.run_dir(run["id"]) / "checkouts" / f"review-{gate['id']}"
+        try:
+            outcome = settle_reviewer(con, run, gate, job)
+        finally:
+            remove_checkout(run, checkout)
+        return _finish_review_job(con, run, gate, outcome)
     task = state.get_task(con, run["id"], gate["task_id"])
     rev = dict(con.execute("SELECT * FROM revisions WHERE id=?", (gate["revision_id"],)).fetchone())
     checkout = detached_checkout(run, rev["commit_sha"], f"review-{gate['id']}", purpose="review")
+    outcome = None
     try:
         diff = paths.git(Path(run["repo_root"]), "diff", rev["base_commit"], rev["commit_sha"])
         diff = cap_diff(diff)
@@ -1298,9 +2335,18 @@ def job_review(con, run: dict, job: dict) -> dict:
                                                                   (run["id"], task["id"])))
         exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
         outcome = run_reviewer(con, run, gate, "code_reviewer", brief, cwd=checkout, include_dirs=[checkout],
-                               exclude=exclude, prefer_not=job["payload"].get("exclude_routes"))
+                               exclude=exclude, prefer_not=job["payload"].get("exclude_routes"), job=job)
     finally:
-        remove_checkout(run, checkout)
+        if not review_launched(outcome):  # a launched reviewer reads the checkout until its supervise job settles it
+            remove_checkout(run, checkout)
+    return _finish_review_job(con, run, gate, outcome)
+
+
+def _finish_review_job(con, run: dict, gate: dict, outcome: dict) -> dict:
+    if review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
     with db.transaction(con):
         ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
     return {"verdict": outcome["verdict"]}
@@ -1377,12 +2423,16 @@ def _fresh_code(code: str, taken: set[str]) -> str:
     return f"{prefix}{n}"
 
 
-def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=()) -> list[dict]:
+def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict], reserved=(),
+                 foreign=()) -> list[dict]:
     """One review reply's findings under codes that still name what they named. A code the scope already
     holds for a finding with a different fingerprint is recorded under a fresh code; a code reused for the
     same finding keeps it. Findings recorded before fingerprints existed carry none and keep their code.
-    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take."""
-    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved)
+    `reserved` are codes the same reply uses elsewhere, which a fresh code must not take. `foreign` are codes
+    another gate of the same scope already holds (#398: a visual F11 beside a convergence F11 left one of
+    them unreachable by `office disposition L-T1:F11`): a finding new to this gate kind never takes one."""
+    foreign = set(foreign)
+    taken = set(finding_codes(con, where, params)) | {f["code"] for f in findings} | set(reserved) | foreign
     seen: dict[str, str] = {}
     renamed: dict[tuple[str, str], str] = {}  # (code, fingerprint) -> the fresh code this reply already gave it
     out = []
@@ -1393,9 +2443,14 @@ def stable_codes(con, run: dict, where: str, params: tuple, findings: list[dict]
             row = con.execute(f"SELECT fingerprint FROM findings WHERE {where} AND code=? AND fingerprint IS NOT NULL "
                               "ORDER BY rowid DESC LIMIT 1", (*params, f["code"])).fetchone()
             known = row[0] if row else None
-        if known is not None and known != fp and (f["code"], fp) in renamed:
+        # A code another gate kind holds collides only when this gate kind never held it (a row recorded
+        # before fingerprints existed keeps its code).
+        collides = (known is not None and known != fp) or (
+            f["code"] in foreign and f["code"] not in seen and con.execute(
+                f"SELECT 1 FROM findings WHERE {where} AND code=? LIMIT 1", (*params, f["code"])).fetchone() is None)
+        if collides and (f["code"], fp) in renamed:
             f = {**f, "code": renamed[(f["code"], fp)]}
-        elif known is not None and known != fp:
+        elif collides:
             fresh = renamed[(f["code"], fp)] = _fresh_code(f["code"], taken)
             taken.add(fresh)
             state.emit(con, run, "finding.recoded", f"{f['code']} was already used for a different finding in this scope; "
@@ -1445,6 +2500,22 @@ def _preexisting_summary(outcome: dict, old: list[dict]) -> str:
     base = (outcome.get("preexisting") or [{}])[0].get("base_commit") or ""
     return (f"{outcome.get('summary', '')}; {len(old)} failing check(s) also fail the same way on base {base[:7]} "
             f"({', '.join(f['code'] for f in old)}): pre-existing, not caused by this task")
+
+
+def _task_review_outcome(outcome: dict) -> dict:
+    """A convergence reviewer's result for a task-level code review (#1138 no-change revisions) in the v3.1 task-gate
+    terms `ingest_task_gate` reads: APPROVED is PASS, RECHECK is CHANGES_REQUIRED, and a result with no verdict
+    (the reviewer never answered, or its reply was invalid) is UNAVAILABLE."""
+    status, verdict = outcome.get("status"), outcome.get("verdict")
+    if verdict == "STALE":
+        return outcome
+    if status not in (None, contract.COMPLETED) or verdict not in ("APPROVED", "RECHECK", "PASS", "CHANGES_REQUIRED"):
+        return {**outcome, "verdict": "REVOKED" if status == contract.REVOKED else "UNAVAILABLE"}
+    parsed = outcome.get("parsed")
+    mapped = {"APPROVED": "PASS", "RECHECK": "CHANGES_REQUIRED"}.get(verdict, verdict)
+    if parsed is not None and parsed.verdict != mapped:
+        parsed = dataclasses.replace(parsed, verdict=mapped)
+    return {**outcome, "verdict": mapped, "parsed": parsed}
 
 
 def checks_outcome(outcome: dict) -> dict:
@@ -1540,6 +2611,7 @@ def _ingest_checks_convergence(con, run: dict, gate: dict, task: dict, outcome: 
             _upsert_finding(con, run, task, gate, f, outcome)
         state.emit(con, run, "gate.approved", f"{task['id']} checks APPROVED on {gate['revision_id']}", audience="runtime",
                    task_id=task["id"])
+        start_waiting(con, run, task["id"], gate["revision_id"])
         evaluate_acceptance(con, run, task["id"])
         return
     for f in parsed.findings:
@@ -1559,6 +2631,8 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
     if contract.is_convergence(run) and gate["kind"] == "checks":
         _ingest_checks_convergence(con, run, gate, state.get_task(con, run["id"], gate["task_id"]), outcome)
         return
+    if contract.is_convergence(run) and gate["kind"] == "code_review":
+        outcome = _task_review_outcome(outcome)
     if _already_decided(con, run, gate, outcome):
         return
     task = state.get_task(con, run["id"], gate["task_id"])
@@ -1629,8 +2703,8 @@ def ingest_task_gate(con, run: dict, gate_id: str, outcome: dict) -> None:
         state.update_task(con, run["id"], task["id"], status="blocked",
                           pause_reason=f"{kind_label} review needs attention: {outcome.get('summary', '')[:200]}")
         return
-    elif verdict == "UNAVAILABLE":
-        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} UNAVAILABLE: {outcome.get('summary', '')[:400]}; "
+    elif verdict in ("UNAVAILABLE", "REVOKED"):
+        state.emit(con, run, "gate.unavailable", f"{task['id']} {kind_label} {verdict}: {outcome.get('summary', '')[:400]}; "
                    "valid unrelated results are preserved", task_id=task["id"])
         if gate["kind"] == "checks":
             con.execute("UPDATE gates SET status='cancelled', stale_reason='checks unavailable' WHERE revision_id=? "
@@ -1786,7 +2860,7 @@ def _no_progress(con, run, task, gate, repeats: int) -> bool:
     for h in history:
         prior = {r["fingerprint"] for r in con.execute("SELECT fingerprint FROM findings WHERE origin_gate_id=? OR gate_id=?",
                                                        (h["id"], h["id"])).fetchall()}
-        if not fps_now & prior:
+        if fps_now != prior:  # two substantive RECHECKs must be identical, not merely overlapping
             return False
     return True
 
@@ -1906,6 +2980,12 @@ def evaluate_acceptance(con, run: dict, task_id: str) -> bool:
     waived = authority.waived(con, run["id"], task_id) if not convergence else set()
     if "checks" in waived and _requeue_reviews_cancelled_by_checks(con, run, task_id, rev_id):
         return False
+    if acknowledged_no_change(con, rev_id):
+        # #1138: nothing changed, so checks prove nothing about the accept criteria. Only an independent code
+        # review PASS on this revision accepts it, whatever the contract, waiver or gate policy says.
+        review = next((g for g in required_gates(con, run, task, rev_id) if g["kind"] == "code_review"), None)
+        if review is None or review["status"] != "done" or review["verdict"] != "PASS":
+            return False
     gates_now = [g for g in required_gates(con, run, task, rev_id) if g["kind"] not in waived]
     basis = "all required gates PASS"
     if convergence:
@@ -2083,6 +3163,22 @@ def owning_jobs(con, run: dict, gate) -> list[dict]:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='integrate' "
                            "AND status='claimed' AND (claimed_at IS NULL OR claimed_at<=?)",
                            (run["id"], gate["created_at"])).fetchall()
+        # The review's own jobs name the gate: the supervise job of a launched reviewer and a queued re-run.
+        rows += con.execute("SELECT * FROM outbox WHERE run_id=? AND kind IN ('review_supervise','review_fallback',"
+                            "'integration_review') AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                            (run["id"], f'%"{gate["id"]}"%')).fetchall()
+    elif gate["kind"] == "self_review_subagent":
+        # A self-review subagent gate is created and run inline by its lane's convergence review job, whose
+        # payload names the lane gate, not this one: that job is its owner (#961). Only a lane holding its task.
+        from office import convergence
+        lanes = {s["id"] for s in convergence.all_scopes(con, run) if gate["task_id"] in s["tasks"]}
+        rows = [r for r in con.execute("SELECT * FROM outbox WHERE run_id=? AND kind='convergence_review' "
+                                       "AND status IN ('queued','claimed')", (run["id"],)).fetchall()
+                if (json.loads(r["payload_json"] or "{}") or {}).get("scope") in lanes]
+        # The supervise job of its launched reviewer and a queued re-run name the gate.
+        rows += con.execute("SELECT * FROM outbox WHERE run_id=? AND kind IN ('review_supervise','review_fallback') "
+                            "AND status IN ('queued','claimed') AND payload_json LIKE ?",
+                            (run["id"], f'%"{gate["id"]}"%')).fetchall()
     else:
         rows = con.execute("SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') "
                            "AND payload_json LIKE ?", (run["id"], f'%"{gate["id"]}"%')).fetchall()
@@ -2111,16 +3207,18 @@ def owner_state(con, run: dict, gate) -> tuple[str, str]:
 
 
 def orphaned_gates(con, run: dict) -> list[tuple[dict, dict]]:
-    """Open task gates whose job already failed, with no other owner: left by a
-    runtime that failed a dead worker's job without settling its gate (#404).
-    [(gate, failed job)]"""
+    """Open task and lane gates whose job already failed, with no other owner: left by a
+    runtime that failed a dead worker's job without settling its gate (#404). A lane gate also counts when
+    its job finished without settling it: nothing else ever runs that review, so it would stay queued with no
+    next step (#1022). [(gate, ended job)]"""
     out = []
-    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND subject='task' AND status IN ('queued','running')",
+    for g in con.execute("SELECT * FROM gates WHERE run_id=? AND subject IN ('task','lane') AND status IN ('queued','running')",
                          (run["id"],)).fetchall():
         g = dict(g)
         if owner_state(con, run, g)[0] != "none":
             continue
-        row = con.execute("SELECT id FROM outbox WHERE run_id=? AND status='failed' AND payload_json LIKE ? "
+        ended = "('failed','done')" if g["subject"] == "lane" else "('failed')"
+        row = con.execute(f"SELECT id FROM outbox WHERE run_id=? AND status IN {ended} AND payload_json LIKE ? "
                           "ORDER BY finished_at DESC LIMIT 1", (run["id"], f'%"{g["id"]}"%')).fetchone()
         if row is not None:
             out.append((g, state.get_job(con, row["id"])))
@@ -2142,11 +3240,18 @@ def close_blockers(con, run: dict) -> list[str]:
     for t in state.tasks(con, run["id"]):
         if t["status"] not in ("accepted", "cancelled"):
             out.append(f"{t['id']} is {t['status']}")
-    if con.execute("SELECT 1 FROM deliveries WHERE run_id=? AND status IN ('queued','delivered')", (run["id"],)).fetchone():
-        out.append("an amendment is delivered but not applied")
-    if any(not superseded_integration_gate(con, run, g) for g in
-           con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting')", (run["id"],))):
+    pending = con.execute("SELECT amendment_id, task_id FROM deliveries WHERE run_id=? AND status IN ('queued','delivered') "
+                          "ORDER BY amendment_id, task_id", (run["id"],)).fetchall()
+    if pending:
+        named = ", ".join(f"{r['amendment_id']} ({r['task_id']})" for r in pending[:4])
+        out.append(f"{UNAPPLIED_PREFIX} not applied: {named}" + (f" and {len(pending) - 4} more" if len(pending) > 4 else ""))
+    open_gates = [g for g in
+                  con.execute("SELECT * FROM gates WHERE run_id=? AND status IN ('queued','running','waiting') ORDER BY created_at, id",
+                              (run["id"],)) if not superseded_integration_gate(con, run, g)]
+    if open_gates:
         out.append("reviews are still running")
+        out.append("open gates: " + ", ".join(f"{g['id']} ({g['kind']})" for g in open_gates[:4])
+                   + (f" and {len(open_gates) - 4} more" if len(open_gates) > 4 else ""))
     if contract.is_convergence(run):
         from office import convergence
         out.extend(convergence.close_blockers(con, run))
@@ -2158,8 +3263,34 @@ def close_blockers(con, run: dict) -> list[str]:
     from office import integration
     integ = integration.status(con, run)
     if integ["required"] and integ["status"] != "accepted":
-        out.append(f"integration {integ['status']}")
+        out.append(f"{INTEGRATION_PREFIX}{integ['status']}")
     return out
+
+
+# The close blockers a hand-composed handoff settles (#729): the user composed the integration from the accepted
+# revisions themselves and hands that PR over, so Office's own integration and pending deltas no longer apply.
+UNAPPLIED_PREFIX = "amendment delivered but"
+INTEGRATION_PREFIX = "integration "
+
+
+_PR_REF = re.compile(r"/pull/\d+/?$|/merge_requests/\d+/?$|^#\d+$")
+
+
+def is_pr_ref(ref: str | None) -> bool:
+    """A pull or merge request: the only handoff that can stand in for a hand-composed integration (#729)."""
+    return bool(ref and _PR_REF.search(ref.strip()))
+
+
+# Integration states a hand composition replaces. `waiting` (tasks not accepted) and `converging` (lane reviews
+# open) are not: the work itself is unfinished, and their own blockers say so.
+HAND_COMPOSABLE = ("blocked", "conflict", "pending", "stale")
+
+
+def composed_by_hand_blockers(blockers: list[str]) -> tuple[list[str], list[str]]:
+    """(blockers a `--handoff` close still has, blockers the hand-composed handoff settles)."""
+    exact = {INTEGRATION_PREFIX + s for s in HAND_COMPOSABLE}
+    settled = [b for b in blockers if b in exact or b.startswith(UNAPPLIED_PREFIX + " not applied: ")]
+    return [b for b in blockers if b not in settled], settled
 
 
 def landing_state(con, run: dict, handoff: str | None) -> dict:

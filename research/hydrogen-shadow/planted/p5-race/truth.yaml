@@ -1,0 +1,10 @@
+id: p5-race
+class: race
+file: src/office/hydrogen_trials.py
+line: 149
+defect: >-
+  book() no longer requires the caller's BEGIN IMMEDIATE transaction: snapshot() and the per-run count are read
+  before the insert opens its own transaction, so two concurrent bookings can both pass the cap and per-run checks
+  and exceed the Hydrogen trial limits.
+must_mention: [transaction, cap, concurrent]
+keywords: [race, concurrent, toctou, check-then, transaction, begin immediate, lock, atomic]

@@ -10,7 +10,7 @@ import random
 
 from hypothesis import assume, given, strategies as st
 
-from office import routing
+from office import config, routing
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
 FLOOR = {"min_effort": "medium"}
@@ -194,8 +194,9 @@ def _quota_class(c, reserve=5):
 
 @given(cands=_qualifying_with_quota(), role=st.sampled_from(["worker", "plan_reviewer"]))
 def test_the_quota_reserve_is_never_spent_while_a_safe_or_unknown_route_exists(cands, role):
+    reserve = config.shipped_quota_reserve_percent(role)  # worker is executor family (20%), plan_reviewer 5%
     decision = routing.route(_worker(cands) if role == "worker" else _reviewer(cands))
-    ids = {k: [routing.candidate_id(c) for c in cands if _quota_class(c) == k] for k in ("safe", "unknown", "unsafe")}
+    ids = {k: [routing.candidate_id(c) for c in cands if _quota_class(c, reserve) == k] for k in ("safe", "unknown", "unsafe")}
     if not ids["safe"] and not ids["unknown"]:
         assert decision["status"] == "protected_quota_would_be_consumed" and decision["selected"] is None
         return

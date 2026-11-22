@@ -31,7 +31,7 @@ EVIDENCE_OPTIONS = {
  "brief_shape": ("deliverables-enumerated", "checks-only", "unknown"),
 }
 TOKENS = ("estimated_input_tokens", "estimated_output_tokens")
-PLAN_KEYS = frozenset((*OPTIONS, *EVIDENCE_OPTIONS, *TOKENS, "task_size_rationale", "inline_advantage"))
+PLAN_KEYS = frozenset((*OPTIONS, *EVIDENCE_OPTIONS, *TOKENS, "task_size_rationale", "inline_advantage", "inline_quality"))
 VERSION = "task-descriptor-1"
 
 
@@ -46,6 +46,13 @@ def parse_field(key: str, value: str):
         text = value.strip()
         if not 12 <= len(text) <= 500 or unsafe_text(text):
             raise ValueError(f"{key} must contain concrete evidence (12-500 characters, no control characters)")
+        return text
+    if key == "inline_quality":  # #1297: why the orchestrator's model meets this task size's executor floor
+        from office import task_sizing
+        text = value.strip()
+        if len(text) > 500 or unsafe_text(text) or task_sizing.evidence_text(text) is None:
+            raise ValueError("inline_quality must say why the orchestrator's model meets this task size's executor floor "
+                             "(at least 12 characters and 3 words)")
         return text
     if key == "inline_advantage":
         from office import task_sizing

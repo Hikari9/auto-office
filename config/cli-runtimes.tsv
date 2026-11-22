@@ -6,4 +6,3 @@ pi	skills/pi-cli/SKILL.md	models/pi.json
 hermes	skills/hermes-cli/SKILL.md	models/hermes.json
 kilo	skills/kilo-cli/SKILL.md	models/kilo.json
 opencode	skills/opencode-cli/SKILL.md	models/opencode.json
-gemini	skills/gemini-cli/SKILL.md	models/gemini.json

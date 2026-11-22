@@ -7,9 +7,10 @@ created by setting a persistent role rule.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
-from office import adapters, candidates, config as cfg, configcmd, route_policy, scoring
+from office import adapters, candidates, config as cfg, configcmd, executor_slates, hydrogen_trials, route_policy, scoring
 from office.result import Result
 
 
@@ -49,9 +50,60 @@ def _canonicalize(spec: str) -> str:
     return f"{harness}@{major}/{target}@{effort}" if major.isdigit() else f"{harness}/{target}@{effort}"
 
 
-def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True) -> tuple[bool, str]:
-    """(dispatches, why) for one catalog route under one role (#845). An allow dispatches with no proof;
-    a catalog or overlay `dispatchable: false` only stops a route the user has not allowed."""
+def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: bool = True, *,
+                   candidate: dict | None = None, role: str = "executor", size: str | None = None,
+                   config: dict | None = None, probe: dict | None = None,
+                   canary: dict | None = None) -> tuple[bool | None, str]:
+    """(dispatches, why) for one catalog route under one role, including the Hydrogen exception."""
+    if hydrogen_trials.is_hydrogen(candidate or row):
+        candidate = candidate or {**row, "harness": row.get("invocation_harness")}
+        rules = ("Hydrogen executes XS-L tasks and reviews plans (@high) and visuals (@low) only as the exact user-allowed "
+                 "agy/gemini-4-hydrogen route for that role; never code review or XL; "
+                 "automatic effort per size (XS/low, S/medium, M/high, none for L); "
+                 "automatic only for bounded, reversible, low-risk S/M tasks when routing.hydrogen_trials.enabled "
+                 "is true, at most 3 per rolling 20 and one per run; a manual --as takes any effort for XS-L; "
+                 "manual --as and the automatic canary "
+                 "both require a fresh exact conformance probe pass; an exact user allow of the route skips the "
+                 "canary limits (enabled flag, S/M, risk) but still needs that pass")
+        if canary and canary.get("budget"):
+            # #1168: the S canary prefers the user-allowed agy/gemini-4-hydrogen@medium route until its budget is spent.
+            rules += ("; S canary complete " if canary.get("complete") else "; S canary ") + \
+                f"{canary['spent']}/{canary['budget']}" + (", ordinary scoring again" if canary.get("complete") else
+                                                           " (prefers the user-allowed S route, one per run)")
+        # Synthetic risk/descriptor are hypothetical, for display only.
+        allowed = hydrogen_trials.user_allowed(state)
+        if size or role != "executor":
+            refusal = hydrogen_trials.route_refusal(
+                candidate, role=role, size=size, manual=False, user_allowed=allowed, config=config,
+                risk={"size_class": size, "blast_radius": "local"},
+                descriptor={"task_size": size, "bounds": "bounded", "domain": "repo"})
+        else:
+            refusal = ("depends on task size; automatic canary disabled"
+                       if not hydrogen_trials.settings(config)["enabled"] else "depends on task size")
+        if state["state"] == "deny":
+            refusal = f"denied by {state['source']}"
+        elif not installed:
+            refusal = f"{candidate.get('harness')} is not installed here"
+        elif not has_profile:
+            refusal = f"{candidate.get('harness')} has no launch profile for this role"
+        proof = "" if probe and probe.get("result") == "pass" else "; cannot dispatch until a fresh exact probe passes"
+        if refusal is None and allowed and role in hydrogen_trials.REVIEW_ROLES:
+            # H5, visual (Rico 2026-11-19): the exact user-allowed route is a voting reviewer, never a canary trial.
+            kind = {"plan_reviewer": "plan", "visual_reviewer": "visual"}[role]
+            if not proof:
+                return True, f"user allow; exact probe passed; a voting {kind} reviewer; " + rules
+            return False, f"user allow as a {kind} reviewer; {rules}{proof}"
+        if refusal is None and allowed and size:
+            if not proof:
+                return True, ("user allow; exact probe passed; a normal executor route for this size, "
+                              "outside the automatic canary limits; " + rules)
+            return False, f"user allow; {rules}{proof}"
+        if refusal is None and not proof:
+            return None, ("can dispatch as an automatic canary trial on eligible bounded, reversible, low-risk S/M tasks, "
+                          "within 3 per rolling 20 and 1 per run, after a cold start of 19 recorded opportunities; " + rules)
+        if refusal is None:
+            refusal = "automatic Hydrogen requires a bounded, reversible, low-risk S/M task"
+        return False, f"{refusal}; {rules}{proof}"
     if state["state"] == "deny":
         return False, f"denied by {state['source']}"
     if not installed:
@@ -67,6 +119,57 @@ def _dispatch_view(row: dict, state: dict, installed: bool = True, has_profile: 
     return True, "ready"
 
 
+def _by_size(cand: dict, role: str, policies: list[dict], unsized: dict) -> dict | None:
+    """Each task size's (state, source) when any size differs from the unsized verdict, else None (#1099)."""
+    by_size = {s: route_policy.effective_role_state(cand, role, policies, s) for s in route_policy.SIZES}
+    if all((v["state"], v["source"]) == (unsized["state"], unsized["source"]) for v in by_size.values()):
+        return None
+    return {s: {"state": v["state"], "source": v["source"]} for s, v in by_size.items()}
+
+
+def _by_size_text(by_size: dict) -> str:
+    """`deny XS,S,M (shipped), allow L (shipped)`: sizes that share a state and source are grouped."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for size, verdict in by_size.items():
+        groups.setdefault((verdict["state"], verdict["source"]), []).append(size)
+    return ", ".join(f"{state} {','.join(sizes)} ({source})" for (state, source), sizes in groups.items())
+
+
+def _slate_entry(row: dict, role: str) -> str:
+    """One slate or seed rung as harness/model@effort, with what a conditional rung needs to dispatch."""
+    harness = row.get("harness") or "*"
+    route = f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else "")
+    if not row.get("conditional"):
+        return route
+    if hydrogen_trials.MODEL in route:
+        gate = (f"the user's exact allow: office route allow {route} --role {role}" if role in hydrogen_trials.REVIEW_ROLES
+                else "the Hydrogen gate (hydrogen_trials)")
+        return f"{route} (conditional, not dispatching without {gate})"
+    return f"{route} (conditional)"
+
+
+def _slate_view(roles: tuple[str, ...], cfg_effective: dict, size: str | None) -> tuple[list[str], dict]:
+    """Executor slates in rung order per size, and each reviewer role's preferred_seed order (AA v5)."""
+    lines, data = [], {"executor_slates": {}, "preferred_seed": {}}
+    if "executor" in roles:
+        for s in ([size] if size else list(route_policy.SIZES)):
+            rows = executor_slates.POLICY["executor_preferred"].get(s, ())
+            data["executor_slates"][s] = [{"rung": row.get("rung"), "route": _slate_entry({**row, "conditional": False}, "executor"),
+                                           "conditional": bool(row.get("conditional"))} for row in rows]
+            if rows:
+                lines.append(f"  executor slate {s}: " + " > ".join(
+                    f"{row.get('rung')} {_slate_entry(row, 'executor')}" for row in rows)
+                    + "; a frontend-heavy task moves its agy gemini-* rung to rung 1 for that task only")
+    for r in roles:
+        if r in ("executor", "worker"):
+            continue
+        seed = candidates.role_policy(cfg_effective, r).get("preferred_seed") or []
+        if seed:
+            data["preferred_seed"][r] = [_slate_entry({**row, "conditional": False}, r) for row in seed]
+            lines.append(f"  {r} preferred_seed: " + " > ".join(_slate_entry(row, r) for row in seed))
+    return lines, data
+
+
 def policy(*, role: str | None = None, effective: bool = False, size: str | None = None) -> Result:
     if size and size not in route_policy.SIZES:
         raise configcmd._usage(f"unknown task size {size!r} (known: {', '.join(route_policy.SIZES)})")
@@ -78,11 +181,13 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
     roles = (role,) if role else tuple(sorted(route_policy.POLICY_ROLES))
     show_rows = role is not None or effective
     output = []
-    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate; "
+    lines = ["effective role routing policy (#845): an allowed route dispatches with no proof or qualification gate, except Hydrogen, which also needs a fresh exact probe; "
              "a runtime failure is logged and falls back to the next eligible route:"]
     lines.append(f"  for task size {size}" if size else
                  "  task size unknown: size-scoped rules do not apply (use --size XS|S|M|L|XL)")
     unknown_versions = set()
+    con = None
+    probe_db_checked = False
     for r in roles:
         count = {"allow": 0, "neutral": 0, "deny": 0}
         kind = candidates.KIND_FOR_ROLE.get(r, "worker")
@@ -102,19 +207,56 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
                  "model_id": row["model_id"], "invocation_model_id": row.get("invocation_model_id"),
                  "alias_resolved_to": row.get("alias_resolved_to"), "effort": row["effort"]}
             state = route_policy.effective_role_state(c, r, [seed, p], size)
-            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile(adapter, kind)))
-            result = {"role": r, "route": f"{harness}/{row['model_id']}@{row['effort']}",
+            probe = None
+            if hydrogen_trials.is_hydrogen(c):
+                from office import paths, route_probe
+                if not probe_db_checked:
+                    probe_db_checked = True
+                    try:
+                        con = sqlite3.connect(f"{paths.runs_db().resolve().as_uri()}?mode=ro", uri=True)
+                        con.row_factory = sqlite3.Row
+                    except sqlite3.OperationalError:
+                        pass
+                if con is not None:
+                    try:
+                        probe = route_probe.status(con, c, adapter=adapter)
+                    except sqlite3.DatabaseError:
+                        pass  # Missing or unreadable probe evidence cannot qualify the route.
+            canary = None
+            if hydrogen_trials.is_hydrogen(c) and con is not None:
+                try:
+                    canary = hydrogen_trials.canary_progress(
+                        con, hydrogen_trials.settings(cfg_effective)["canary_tasks"])
+                except sqlite3.DatabaseError:
+                    canary = None  # an older read-only runs.db without the canary column
+            dispatches, why = _dispatch_view(row, state, adapters.installed(adapter), bool(adapters.profile_for(
+                                                 adapter, kind, row.get("invocation_model_id") or row["model_id"], row["effort"])),
+                                             candidate=c, role=r, size=size, config=cfg_effective, probe=probe,
+                                             canary=canary)
+            result = {"role": r, "route": f"{harness}/{row['model_id']}" + (f"@{row['effort']}" if row.get("effort") else ""),
                       "state": state["state"], "source": state["source"],
                       "technical_dispatchable": row.get("dispatchable") is not False,
                       "dispatches": dispatches, "dispatch_reason": why}
+            by_size = None if size else _by_size(c, r, [seed, p], state)
+            if by_size:
+                result["by_size"] = by_size
             output.append(result)
             count[state["state"]] += 1
-            dispatching += dispatches
+            dispatching += dispatches is True
             role_lines.append(f"  {result['route']}: {state['state']} ({state['source']}) -> "
-                              + ("dispatches" if dispatches else "does not dispatch") + f" ({why})")
+                              + ("conditionally dispatches" if dispatches is None else
+                                 "dispatches" if dispatches else "does not dispatch") + f" ({why})"
+                              + (" at an unknown size" if by_size else "")
+                              + (f"; by size: {_by_size_text(by_size)}" if by_size else ""))
         lines.append(f"  {r}: {dispatching} dispatch; allow {count['allow']}, neutral {count['neutral']}, deny {count['deny']}")
         if show_rows:
             lines += role_lines
+    if con is not None:
+        con.close()
+    slate_data = {}
+    if show_rows:
+        slate_lines, slate_data = _slate_view(roles, cfg_effective, size)
+        lines += slate_lines
     rows = candidates.catalog_rows()
     for r in roles:
         seed = route_policy.preferred_seed_policy(r, candidates.role_policy(cfg_effective, r).get("preferred_seed"))
@@ -142,7 +284,7 @@ def policy(*, role: str | None = None, effective: bool = False, size: str | None
     lines.append("reshuffle in one command: office route allow|neutral|deny|clear <route>[,<route>...] --role <role>; "
                  "order a role with office config roles.<role>.preferred_seed")
     return Result(lines=lines, data={"policy": p, "effective": output, "legacy_denied": legacy,
-                                     "catalog_overlay_disabled": overlay})
+                                     "catalog_overlay_disabled": overlay, **slate_data})
 
 
 def change(action: str, *, role: str | None, route: str | None, wildcard: bool = False,
@@ -191,24 +333,43 @@ def change(action: str, *, role: str | None, route: str | None, wildcard: bool =
     backup = configcmd._write(path, raw)
     lines = [f"{role}/{label}: {'cleared user rule' if action == 'clear' else action} (user config)"]
     if action == "allow":
-        lines.append("an allowed route dispatches with no proof or qualification gate; a runtime failure falls back to the next eligible route")
+        lines.append("an allowed route dispatches with no proof or qualification gate, except Hydrogen, which also needs a fresh exact probe; a runtime failure falls back to the next eligible route")
     if backup:
         lines.append(f"commented source backed up at {backup}")
+    if action == "clear":
+        # Live runs re-read the user policy each decision; a run started while the rule was set keeps its pinned copy.
+        lines.append("running runs drop the rule at their next routing decision, except a run started while the rule was set, "
+                     "which keeps its pinned copy until `office config --run <id> --apply-routing --quote \"<words>\"`")
+    else:
+        lines.append(f"running runs apply this rule at their next routing decision; `office config --run <id> --apply-routing "
+                     "--quote \"<words>\"` re-pins the rest of a run's pinned routing")
     return Result(lines=lines, next="office route policy --effective --role " + (role if role != "*" else "code_reviewer"),
                   data={"changed": True, "role": role, "route": routes[0], "routes": routes, "action": action,
                         "path": str(path)})
 
 
+def _issuer_note(r: dict) -> str:
+    issuer = r.get("issuer")
+    if not issuer:
+        return ""  # issued before the issuer was recorded: a terminal receipt
+    note = f" [{issuer}" + (f" pane {r['pane']}" if r.get("pane") else "")
+    if issuer == "quoted":
+        note += f" quoted {r.get('quoted_at')}: {r.get('quote')!r}"
+    return note + "]"
+
+
 def override(*, route: str | None, role: str | None, run: str | None, reason: str | None, ttl: str | None,
-             revoke: str | None = None, list_receipts: bool = False) -> Result:
-    """The user's one-off override of a role deny. Only a person at a terminal can issue one."""
+             revoke: str | None = None, list_receipts: bool = False,
+             rico_quote: str | None = None, quoted_at: str | None = None) -> Result:
+    """The user's one-off override of a role deny. A person at a terminal issues one, or a non-worker caller
+    relaying the user's verbatim words (--rico-quote with --quoted-at). A worker never can."""
     from office import db, route_override
     con = db.connect()
     try:
         if list_receipts:
             rows = route_override.list_receipts(con, run)
             lines = [f"{r['id']} run {r['run_id'][:8]} {r['role']} {r['route']} until {r['expires_at']}"
-                     + (" (revoked)" if r["revoked_at"] else "") for r in rows] or ["no override receipts"]
+                     + (" (revoked)" if r["revoked_at"] else "") + _issuer_note(r) for r in rows] or ["no override receipts"]
             return Result(lines=lines, data={"receipts": [{k: v for k, v in r.items() if k != "mac"} for r in rows]})
         if revoke:
             ok = route_override.revoke(con, revoke)
@@ -216,12 +377,15 @@ def override(*, route: str | None, role: str | None, run: str | None, reason: st
         if not (route and role and run):
             raise configcmd._usage("override needs <route>, --role and --run")
         receipt = route_override.issue(con, run_id=run, role=role, route=route, reason=reason or "",
-                                       ttl_s=route_override.parse_ttl(ttl))
+                                       ttl_s=route_override.parse_ttl(ttl), quote=rico_quote, quoted_at=quoted_at)
     finally:
         con.close()
-    return Result(lines=[f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
-                         f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
-                         "landing checks still apply."],
+    lines = [f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
+             f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
+             "landing checks still apply."]
+    if receipt["issuer"] == "quoted":
+        lines.append("issued on the user's quoted words: report this override to the user")
+    return Result(lines=lines,
                   next=f"the orchestrator re-dispatches with --as/--review-as {receipt['route']}",
                   data={"receipt": {k: v for k, v in receipt.items() if k != "mac"}})
 

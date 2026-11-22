@@ -65,7 +65,8 @@ def _worker(env, tid="T1"):
 def _executor_flow(env):
     """The agent itself submits, which leads to the lane reviewer."""
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[PASS])
-    env.office("dispatch", "T1", check=0)
+    # The in-process supervisor path is the claude one; the ranker no longer picks claude by default.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
 
 
 def _reviewer_flow(env):

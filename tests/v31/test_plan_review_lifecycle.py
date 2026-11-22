@@ -19,7 +19,7 @@ import pytest
 from conftest import PLAN_ONE, PLAN_TWO
 
 MANUAL = {"OFFICE_JOBS": "manual"}
-GEAR = "express"
+GEAR = "L"
 APPROVED = "VERDICT: APPROVED\nNEXT proceed"
 
 
@@ -169,7 +169,7 @@ def test_user_round_override_is_pinned_and_survives_resume(env):
     env.trust()
     code, out = _o(env, "start", "fixture goal", "--gear", GEAR, "--planner", "inline", "--plan-review-rounds", "0")
     assert code == 2 and "1 to 10" in out, out
-    code, out = _o(env, "start", "fixture goal", "--gear", "direct+review", "--planner", "inline",
+    code, out = _o(env, "start", "fixture goal", "--gear", "S", "--planner", "inline",
                    "--plan-review-rounds", "2")
     assert code == 2 and "funds no plan review" in out, out
     _start(env, extra=("--plan-review-rounds", "2"))
@@ -252,7 +252,7 @@ def test_dedicated_planner_revision_after_approval_is_not_reviewed(env):
     revised = PLAN_ONE.replace("scope: calc.py", "scope: calc.py, calc_helpers.py")
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}, {"plan": revised, "submit": True}],
                plan_reviewer=[{"reply": APPROVED}])
-    env.office("start", "add numbers", "--gear", "full", check=0)
+    env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated", check=0)
     assert _run(env)["plan_review"]["status"] == "approved"
     env.office("approve", "plan", "--quote", "go", check=0)
     env.office("amend", "T1", "--contract", "--", "widen the envelope", check=0)
@@ -387,12 +387,15 @@ def test_review_plan_as_re_pins_and_re_runs_only_the_plan_review_without_spendin
     (gate,) = _queued(env)
     assert gate["round"] == 1 and gate["cycle"] == 1, "an attempt that had no verdict spent no round"
     pr = _run(env)["plan_review"]
-    assert pr["review_override"]["as"] == REPIN and pr["review_override"]["by"] == "user" and not pr["ended"]
+    assert pr["review_override"]["as"] == REPIN and not pr["ended"]
+    # An unquoted --as is the orchestrator's pin, not the user's (#1115).
+    assert pr["review_override"]["by"] == "orchestrator"
     payload = json.loads(_q(env, "SELECT payload_json FROM outbox WHERE kind='plan_review' ORDER BY created_at DESC")[0]["payload_json"])
-    assert payload["gate_id"] == gate["id"] and payload["review_override"]["as"] == REPIN
+    # One pin mechanism (#1191 R8): the job carries only its gate; the pin is read from the plan-review record.
+    assert payload["gate_id"] == gate["id"] and "review_override" not in payload
     assert not _q(env, "SELECT 1 FROM authorizations WHERE target='plan:review'"), "re-pinning is not another review"
     (notice,) = _route_notices(env)
-    assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "user"
+    assert notice["after"] == REPIN and notice["kind"] == "repin" and notice["actor"] == "orchestrator"
     assert notice["stage"] == "plan_reviewer" and "re-pinned" in notice["reason"]
     code, status = _o(env, "status")
     assert REPIN in status and "review route change" in status, status
@@ -452,7 +455,7 @@ def test_review_plan_without_as_still_refuses_while_open(env):
 def test_the_pinned_plan_reviewer_is_the_route_the_review_runs_on(env):
     env.trust()
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"exit": 1}])
-    env.office("start", "add numbers", "--gear", "full", check=0)
+    env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated", check=0)
     assert _run(env)["plan_review"]["status"] == "unavailable"
     fallbacks = [n for n in _route_notices(env) if n["kind"] == "reviewer-fallback"]
     assert fallbacks and fallbacks[0]["stage"] == "plan_reviewer" and fallbacks[0]["before"] != fallbacks[0]["after"]

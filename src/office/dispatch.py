@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -30,7 +31,8 @@ try:
 except ImportError:  # not POSIX: a pane's terminal mode cannot be read
     termios = None
 
-from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, portable, read_scope, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import adapters, briefs, candidates, contract, db, executor_slates, frontdoor, jobs, pane_labels, paths, planfile, planpath, portable, read_scope, review_submit, route_policy, route_probe, routing, scoring, state, task_sizing, version, worktree_setup
+from office import config as office_config
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import (DEAD, atomic_write_json, atomic_write_text, claim_signalable, dumps, now_iso, parse_iso,
@@ -242,6 +244,8 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             routes[tid] = planned_route(con, run, task, override=route, reroute=reroute)
             if not (route or launch_prefs) and (parallel or index == 0):  # a stacked task launches later, not now
                 routes[tid] = preflight_discovery(con, run, task, routes[tid], reroute=reroute)
+        if routes[tid].get("status") != "selected" and not (as_model or route or cli or external):
+            routes[tid] = _fastlane_led_route(con, run, task) or routes[tid]
         if routes[tid].get("status") == "selected":
             _apply_execution_mode(con, run, task, routes[tid], launch_prefs, explicit=bool(as_model or route or cli or external))
     res = Result()
@@ -256,6 +260,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                        f"shadow proposal {shadow['proposal']} vs actual {shadow['actual']}; no policy effect",
                        audience="runtime", payload=shadow)
         previous = None
+        no_launch: set[str] = set()
         if run.get("gear"):
             gates = run.get("gates") or {}
             for line in plan_view.run_dispatch_lines(run["gear"], gates.get("run_gear_rationale"), gates,
@@ -270,7 +275,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 # review needs its review re-run, not a fresh executor.
                 from office import gates
                 gid = gates.rerun_unavailable_review(con, run, state.get_task(con, run["id"], tid),
-                                                     pin=gates.review_pin(review_as, review_cli, review_external))
+                                                     pin=gates.review_pin(review_as, review_cli, review_external, quote=quote))
                 if gid is None:
                     raise Refused("state-changed", f"{tid} is no longer blocked on its code review; re-run dispatch",
                                   scope=tid, next_step=f"office dispatch {tid}")
@@ -305,6 +310,7 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 continue
             if task["status"] == "accepted":
                 res.add(f"{tid} already accepted")
+                no_launch.add(tid)
                 previous = tid
                 continue
             plans.require_scope_clear(con, run, tid)
@@ -320,13 +326,16 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
                 stack_after = None
             decision = routes[tid]
             if decision.get("status") != "selected":
-                raise Refused("no-route", _route_failure(tid, decision), scope=tid,
+                raise Refused("no-route", _route_failure(tid, decision) + _fastlane_route_note(con, run, task), scope=tid,
                               preserved="plan and other dispatches", next_step=_route_next(decision, tid, run))
             decision = settle_discovery(con, run, task, decision, launching=not stack_after)
             _record_routing(con, run, decision)
             if review_as:
                 from office import gates
-                state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+                gates.store_review_pin(con, run, tid, [tid], gates.review_pin(review_as, review_cli, review_external, quote=quote))
+                inert = gates.review_pin_inert(run)
+                if inert:
+                    res.notices.append(f"{tid} --review-as {review_as} recorded, but {inert}")
             if stack_after:
                 state.update_task(con, run["id"], tid, status="queued", stack_after=stack_after,
                                   pause_reason=f"stacked after {stack_after}")
@@ -372,11 +381,65 @@ def dispatch(con, run: dict, task_ids: list[str], *, parallel: bool = False, rou
             previous = tid
         if run["phase"] == "planning":
             state.update_run(con, run["id"], phase="executing")
-        state.emit(con, run, "dispatch", f"dispatched {' '.join(task_ids)}{' in parallel' if parallel else ''}",
-                   payload={"tasks": task_ids, "parallel": parallel})
+        started = [tid for tid in task_ids if tid not in no_launch]
+        if started:  # an already-accepted task launched nothing: no "dispatched" claim for it (#1220)
+            state.emit(con, run, "dispatch", f"dispatched {' '.join(started)}{' in parallel' if parallel else ''}",
+                       payload={"tasks": started, "parallel": parallel})
     jobs.kick(con, run["id"])
     res.next = "exceptions only; office status"
     return res
+
+
+def _economics_on(run: dict) -> bool:
+    from office import economics
+    return economics.enabled(run)
+
+
+def _fastlane_mode(con, run: dict, task: dict) -> dict | None:
+    from office import fastlane
+    gate = fastlane.gate(run)
+    if gate is None:
+        return None
+    live = [t for t in state.tasks(con, run["id"]) if t["status"] not in ("superseded", "cancelled")]
+    return task_sizing.execution_mode(task_sizing.execution_gear(run), candidates._effective_task_descriptor(run, task),
+                                      run.get("risk"), task_count=len(live), fastlane=gate,
+                                      parallel=fastlane.parallel(live))
+
+
+def _fastlane_led_route(con, run: dict, task: dict) -> dict | None:
+    """#1297: a task fastlane hands to the orchestrator does not depend on an executor route qualifying. When none
+    does, the pinned fastlane decision is checked and the task is recorded on the orchestrator's own route (the one
+    its inline_quality names), which is also the overflow handoff target. None when fastlane would not lead the
+    task, or no usable orchestrator route is named."""
+    mode = _fastlane_mode(con, run, task)
+    if not mode or mode["mode"] != "inline":
+        return None
+    text = (candidates._effective_task_descriptor(run, task) or {}).get("inline_quality") or ""
+    route = text.partition(":")[0].strip()
+    parsed = candidates.parse_route_override(route) if "/" in route and "@" in route else {}
+    if not (parsed.get("harness") and parsed.get("model_id") and parsed.get("effort")):
+        return None
+    try:
+        cand = candidates.declared_candidate(parsed["harness"], parsed["model_id"], parsed["effort"], role="executor",
+                                             repo_root=run.get("repo_root"), run_id=run["id"], scope=task["id"])
+    except (Usage, Refused):
+        return None
+    return {"status": "selected", "selected": routing.candidate_id(cand), "candidate": cand,
+            "request": {"role": "executor", "task_id": task["id"]}, "route_source": "fastlane",
+            "selection_disclosure": {"triple": routing.candidate_id(cand),
+                                     "reason": "fastlane: no executor route qualified; recorded on the orchestrator's "
+                                               "own route, which is also the overflow handoff target"}}
+
+
+def _fastlane_route_note(con, run: dict, task: dict) -> str:
+    """#1297: the refusal note when fastlane would lead a task but neither an executor route nor the orchestrator's
+    named route can be recorded. That route is the overflow handoff target (delegate_after_overflow)."""
+    mode = _fastlane_mode(con, run, task)
+    if not mode or mode["mode"] != "inline":
+        return ""
+    return ("; fastlane would let the orchestrator lead this task, but no executor route qualifies and its "
+            "inline_quality names no usable orchestrator route (<harness>/<model>@<effort>: <why>) to record as the "
+            "overflow handoff target")
 
 
 def _apply_execution_mode(con, run: dict, task: dict, decision: dict, launch_prefs: dict, *, explicit: bool) -> None:
@@ -384,9 +447,12 @@ def _apply_execution_mode(con, run: dict, task: dict, decision: dict, launch_pre
     worker in the normal isolated worktree and fenced lease: no model is launched, but scope, self-review,
     checks, convergence review and landing apply unchanged. An explicit --as/--route/--cli/--external always
     delegates (or prepares the external worker the user asked for)."""
+    from office import fastlane
     live = [t for t in state.tasks(con, run["id"]) if t["status"] not in ("superseded", "cancelled")]
+    gate = fastlane.gate(run)
     mode = task_sizing.execution_mode(task_sizing.execution_gear(run), candidates._effective_task_descriptor(run, task),
-                                      run.get("risk"), task_count=len(live))
+                                      run.get("risk"), task_count=len(live), fastlane=gate,
+                                      parallel=fastlane.parallel(live) if gate is not None else False)
     if mode["mode"] == "inline" and not explicit:
         decision["launch"] = {"external": True, "inline": True}
         decision["execution_mode"] = mode
@@ -529,6 +595,46 @@ def _route_origin(route: dict) -> dict:
     return {}
 
 
+USER_DENY_CATEGORIES = ("denied", "role-deny")  # routing.py: the legacy denied_models list, or a role deny
+
+
+def _user_denied_reason(decision: dict, triple: str) -> str | None:
+    """Why a user deny policy rejected `triple` in this routing decision, or None (#1106)."""
+    return next((r.get("reason") for r in decision.get("rejected") or []
+                 if r.get("candidate") == triple and r.get("category") in USER_DENY_CATEGORIES), None)
+
+
+def route_denial(con, run: dict, task: dict, route: dict) -> str | None:
+    """The user deny reason that now rejects this reused executor route, or None (#1106).
+    It requalifies the route as a relaunch does, so the task size and override receipts count."""
+    try:
+        qualify_recorded_route(con, run, task, route, observe=True)
+    except Refused as exc:
+        if exc.category == "route-denied":
+            return (exc.data or {}).get("reason") or exc.message
+    return None
+
+
+def user_denies(con, run: dict, task: dict, route: dict) -> bool:
+    """Whether the next rerun would find this reused executor route denied by user policy (#1106)."""
+    return route_denial(con, run, task, route) is not None
+
+
+def replan_from_slate(con, run: dict, task: dict, *, denied: tuple[str, str] | None = None,
+                      observe: bool = False) -> dict:
+    """The route from the approved plan slate, ignoring any reused route (#1106). `denied` is the
+    reused route and the user's deny reason; the decision carries it so the dispatch records the change."""
+    tid = task["id"]
+    decision = planned_route(con, run, {**task, "route_json": None}, observe=observe)
+    if decision.get("status") != "selected":
+        failure = _route_failure(tid, decision).removeprefix(f"{tid}: ")
+        why = f"{denied[0]} is denied ({denied[1]}); " if denied else ""
+        raise Refused("no-route", f"{tid}: {why}{failure}", scope=tid, next_step=_route_next(decision, tid, run))
+    if denied:
+        decision["denied_route"] = {"route": denied[0], "reason": denied[1]}
+    return decision
+
+
 def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: bool = False) -> dict:
     """Revalidate a reused executor route before its new lease/outbox is written.
 
@@ -545,27 +651,41 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     origin = _route_origin(route)
     quote = _route_quote(route)
     authority = origin.get("route_authority") or {}
-    if quote and not route.get("route_change"):
+    if quote:
         decision = candidates.declared_decision(text, role="executor", config=config, repo_root=run.get("repo_root"),
                                                 run_id=run["id"], scope=task["id"])
         triple = routing.candidate_id(decision["candidate"])
+        # F4 (#1106): the user deny policy reads a quoted route as it reads a routed one: the effective
+        # policy, the task's size, a receipt. Only a deny refuses here; quota, capability and trust keep
+        # the quoted-route contract below.
+        # probe=False: the deny reads policy only, and the quota gate below is the one that probes.
+        verdict = candidates.route_role(con, config, run, "executor", task_id=task["id"], exact=triple,
+                                        dispatch_kind="fix", manual=True, declared=triple, probe=False,
+                                        observe=observe)
+        if denied := _user_denied_reason(verdict, triple):
+            raise Refused("route-denied", f"{triple} is denied ({denied})", scope=task["id"],
+                          next_step=_route_next(verdict, task["id"], run), data={"reason": denied})
         # Historical adapter trust is audit-only under #837. Actual quota and
-        # capability checks still apply to this explicitly selected route.
-        quota = candidates.quota_for_candidate(
-            decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
-        decision["candidate"]["quota"] = quota
-        reserve = float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
-        if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
-                and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
-            raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
+        # capability checks still apply to this explicitly selected route. A read-only
+        # observer (status) asks only the policy deny above, so it probes no quota.
+        if not observe:
+            quota = candidates.quota_for_candidate(
+                decision["candidate"], candidates.probe_quota(adapters.load_all()[cand["harness"]]))
+            decision["candidate"]["quota"] = quota
+            reserve = office_config.quota_reserve_percent(config, "executor")
+            if (quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None
+                    and float(quota["tightest_remaining_percent"]) - float(quota.get("projected_burn_percent") or 0) < reserve):
+                raise Refused("route-unavailable", f"{triple}: its quota would cross the protected reserve", scope=task["id"])
     else:
         selection = {"override": text} if authority.get("flag") == "--route" else {"exact": triple}
         options = {**selection, "task_id": task["id"], "dispatch_kind": "fix",
                    "manual": bool(authority), "declared": triple if quote else None}
         decision = candidates.route_role(con, config, run, "executor", **options, observe=observe)
         if decision.get("status") != "selected":
-            raise Refused("route-unavailable", _route_failure(task["id"], decision), scope=task["id"],
-                          next_step=_route_next(decision, task["id"], run))
+            denied = _user_denied_reason(decision, triple)
+            raise Refused("route-denied" if denied else "route-unavailable", _route_failure(task["id"], decision),
+                          scope=task["id"], next_step=_route_next(decision, task["id"], run),
+                          data={"reason": denied} if denied else None)
     decision.update(origin)
     # The exact-route re-qualification above ranks one route; the dispatch keeps the ranking it was first given.
     for key in ("preferred_route", "fallback_routes"):
@@ -577,10 +697,16 @@ def qualify_recorded_route(con, run: dict, task: dict, route: dict, *, observe: 
     if authority:
         decision["selection_disclosure"] = {**(decision.get("selection_disclosure") or {}),
                                              "reason": authority["reason"]}
-    if route.get("launch"):
+    from office import fastlane
+    kept = route.get("execution_mode") or {}
+    # #1297: once fastlane overflowed, a relaunch of an orchestrator-led task goes to an Office executor.
+    handoff = kept.get("mode") == "inline" and fastlane.overflowed(run)
+    if route.get("launch") and not (handoff and (route["launch"] or {}).get("inline")):
         decision["launch"] = route["launch"]
-    if route.get("execution_mode"):  # a relaunch keeps who executes the task, and why
-        decision["execution_mode"] = {k: v for k, v in route["execution_mode"].items() if k != "outcome"}
+    if kept:  # a relaunch keeps who executes the task, and why
+        decision["execution_mode"] = {k: v for k, v in kept.items() if k != "outcome"}
+        if handoff:
+            decision["execution_mode"] = fastlane.delegate_after_overflow(decision["execution_mode"])
     decision["_qualified"] = True
     return decision
 
@@ -596,7 +722,8 @@ def _planned_slate(con, run: dict, tid: str) -> dict | None:
 
 
 def planned_route(con, run: dict, task: dict, *, override: str | None = None, reroute: bool = False,
-                  exclude: set[str] | None = None, discovery_input: dict | None = None) -> dict:
+                  exclude: set[str] | None = None, discovery_input: dict | None = None,
+                  observe: bool = False) -> dict:
     """Route an executor dispatch: the planner's primary, else its fallbacks in order.
 
     Live evidence (quota, availability, trust, learned eligibility) is refreshed
@@ -609,16 +736,26 @@ def planned_route(con, run: dict, task: dict, *, override: str | None = None, re
     `discovery_input` is the preflight's recompute handle (#494): a decision that comes back
     with `intent: "trial"` stands whole, because the trial route is the one route a planned
     slate cannot name. `exclude` keeps routes out of the decision (the trial route, when the
-    known-working fallback is wanted)."""
+    known-working fallback is wanted). `observe` is the read-only selection `office status`
+    shows: no quota probe, no notice, no write, and the same order a launch would take."""
     tid = task["id"]
     kind = "fix" if task.get("current_dispatch_id") else "fresh"
     planned = None if (override or reroute) else _effective_slate(con, run, task)
     # A declared route is a manual one: overkill rules never remove it. Denial, quarantine,
     # capability, permission, archive and quota gates still apply to the fresh evidence.
     declared = planned["primary"] if planned and planned.get("chooser") == "declared" else None
+    if declared and not exclude and not discovery_input:
+        # A route the user quoted qualifies as their `--as` does (#858): by `declared_decision`, keeping the deny,
+        # quota and capability gates, not by a routing row that may carry no allow. A refusal falls through so the
+        # fresh routing below reports why it cannot run.
+        try:
+            return qualify_recorded_route(con, run, task, state.recorded_route(task), observe=observe)
+        except Refused:
+            pass
     fresh = candidates.route_role(con, state.pinned_config(run), run, "executor", task_id=tid, override=override,
                                   dispatch_kind=kind, manual=bool(declared), declared=declared,
-                                  exclude=exclude, discovery_input=discovery_input)
+                                  exclude=exclude, discovery_input=discovery_input,
+                                  probe=not observe, observe=observe)
     fresh["_qualified"] = True
     if reroute and fresh.get("status") == "selected":
         prior = _prior_override_ceiling(task)
@@ -731,7 +868,29 @@ def _route_next(decision: dict, tid: str, run: dict | None = None) -> str:
     return f"office inspect route {tid}"
 
 
+BUDGET_WARNING_KIND = "route.budget_warning"
+
+
+def note_daily_budget(con, run: dict, cand: dict | None, *, task_id: str | None = None) -> None:
+    """Once a day per route, tell the orchestrator a dispatch reached 80% of the route's daily dispatch budget
+    (#831). At the budget itself routing already treats the route as quota-exhausted. Caller holds the tx."""
+    b = ((cand or {}).get("quota") or {}).get("daily_budget")
+    if not b:
+        return
+    used = int(b["used"]) + 1  # this dispatch
+    if used < routing.BUDGET_WARN_AT * int(b["budget"]):
+        return
+    today = con.execute("SELECT payload_json FROM events WHERE kind=? AND created_at>=?",
+                        (BUDGET_WARNING_KIND, routing.local_midnight_utc())).fetchall()
+    if any((loads(r[0], {}) or {}).get("key") == b["key"] for r in today):
+        return
+    state.emit(con, run, BUDGET_WARNING_KIND, f"route {routing.candidate_id(cand)} used {used}/{b['budget']} of its daily "
+               f"dispatch budget ({b['key']}); at {b['budget']} it reads as quota-exhausted until local midnight",
+               task_id=task_id, payload={"key": b["key"], "used": used, "budget": b["budget"]})
+
+
 def _record_routing(con, run: dict, decision: dict) -> None:
+    note_daily_budget(con, run, decision.get("candidate"))
     req = decision.get("request") or {}
     con.execute("INSERT INTO routing_decisions(id, run_id, role, request_hash, selected_triple, decision_hash, created_at) "
                 "VALUES(?,?,?,?,?,?,?)",
@@ -764,12 +923,18 @@ def _record_routing(con, run: dict, decision: dict) -> None:
                  "execution_owner": (decision.get("execution_mode") or {}).get("owner"),
                  "execution_reason": (decision.get("execution_mode") or {}).get("why"),
                  "estimated_savings": (decision.get("execution_mode") or {}).get("estimated_savings"),
+                 # #1297: an orchestrator-led task's spend is measured only by the opt-in economics ledger;
+                 # without it the cost is unknown, never zero.
+                 "cost_measured": (_economics_on(run) if (decision.get("execution_mode") or {}).get("mode") == "inline"
+                                   else None),
                  "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
                  "task_id": req.get("task_id"), "role": req.get("role"), "decision_hash": decision.get("decision_hash"),
                  "planner": planned or {"chooser": "router", "primary": decision.get("selected")},
                  "dispatch": {"source": source, "dispatched": decision.get("selected"),
                               "fallbacks_taken": decision.get("fallbacks_taken") or [],
                               "planned_audit_id": planned.get("audit_id")}}
+        if decision.get("hydrogen_counter"):
+            audit["hydrogen_counter"] = decision["hydrogen_counter"]
         link, record = decision.get("discovery_link"), decision.get("trial_record")
         if link:
             audit["dispatch"]["discovery"] = {
@@ -804,6 +969,7 @@ def _route_payload(decision: dict) -> dict:
         "why": "fenced orchestrator-inline worker" if (decision.get("launch") or {}).get("inline")
                else "dedicated executor default or route requalification"}
     out = {"candidate": decision.get("candidate"), "selection_disclosure": decision.get("selection_disclosure"),
+           **({"hydrogen_counter": decision["hydrogen_counter"]} if decision.get("hydrogen_counter") else {}),
            "execution_mode": mode,
            "selected_route": (task_sizing.INLINE_ROUTE if mode["mode"] == "inline" else decision.get("selected")),
            "selection_reason": (decision.get("selection_disclosure") or {}).get("reason"),
@@ -844,7 +1010,10 @@ def note_route(con, run: dict, task: dict, decision: dict) -> None:
     planned = decision.get("planned") or {}
     taken = decision.get("fallbacks_taken") or []
     why = "; ".join(f"{t['route']}: {t['reason']}" for t in taken)
-    if taken:
+    if denied := decision.get("denied_route"):
+        before = denied["route"]
+        change = (before, "denied", denied["reason"], "office")
+    elif taken:
         before = planned.get("primary")
         kind = "quota" if any("quota" in t["reason"] for t in taken) else "unavailable"
         change = (before, kind, f"fallback: {why}", "office")
@@ -953,21 +1122,59 @@ def preflight_discovery(con, run: dict, task: dict, decision: dict, *, reroute: 
 
 
 def settle_discovery(con, run: dict, task: dict, decision: dict, *, launching: bool) -> dict:
-    """The dispatch transaction's last word on a trial. Re-reads the caps, task risk, quota reserve, probe
-    record and fallback under the write lock; any failure dispatches the known-working fallback instead
-    and writes no `route_trials` row. Caller holds the transaction."""
+    """Atomically settle discovery and book an eligible Hydrogen opportunity.
+
+    A general discovered route cannot reserve Hydrogen without the independent
+    safety gate, a genuine exact probe receipt and an existing same-size fallback.
+    The append-only 20-opportunity ledger is written under the same writer lock
+    as the dispatch, so parallel Office processes cannot both take the last slot.
+    """
+    from office import hydrogen_trials
+    config = state.pinned_config(run)
     trial = decision.get("trial")
-    if not trial:
-        return decision
-    fallback, link = trial["fallback"], decision["discovery_link"]
-    blocked = None if launching else "not-launching"
-    blocked = blocked or _trial_blocked(con, run, decision, fallback, task)
+    manual = (decision.get("route_source") in ("override", "orchestrator")
+              or bool(decision.get("override"))
+              or bool((decision.get("route_authority") or {}).get("quote")))
+    eligible = bool(launching and not manual and decision.get("status") == "selected"
+                    and (decision.get("execution_mode") or {}).get("mode") != "inline"
+                    and hydrogen_trials.run_safe(config, run, task))
+    blocked = None
+    if trial:
+        fallback, link = trial["fallback"], decision["discovery_link"]
+        blocked = "not-launching" if not launching else _trial_blocked(con, run, decision, fallback, task)
+        if not blocked and hydrogen_trials.is_hydrogen(decision.get("candidate")):
+            blocked = hydrogen_trials.trial_refusal(con, run, task, decision["candidate"], fallback, config)
+    # A trial is a separate admission path. Even if a future catalog switches
+    # Hydrogen to dispatchable, it must never launch through ordinary scoring.
+    elif (hydrogen_trials.is_hydrogen(decision.get("candidate")) and not manual
+          and not (decision.get("candidate") or {}).get("hydrogen_user_allow")):
+        raise Refused("hydrogen-trial-required", "automatic Hydrogen requires an atomic qualified trial reservation")
+    reservation = None
+    canary = (decision.get("hydrogen_canary") if eligible and not trial
+              and hydrogen_trials.is_hydrogen(decision.get("candidate"))
+              and (decision.get("candidate") or {}).get("hydrogen_user_allow") else None)
+    if canary:
+        # #1168: the S canary books its own append-only row; the budget is re-checked under this lock.
+        reservation = hydrogen_trials.book_canary(con, run["id"], task["id"], decision.get("selected"),
+                                                  hydrogen_trials.live_budget(run))
+        return {**decision, "hydrogen_counter": reservation}
+    if eligible:
+        wants_hydrogen = bool(trial and not blocked and hydrogen_trials.is_hydrogen(decision.get("candidate")))
+        chosen = trial["fallback"]["selected"] if trial and blocked else decision.get("selected")
+        reservation = hydrogen_trials.book(con, run["id"], task["id"], chosen, experiment=wants_hydrogen,
+                                            fallback_route=trial["fallback"]["selected"] if trial else None)
+        if wants_hydrogen and not reservation["experimental"]:
+            blocked = reservation["blocked"] or "hydrogen-cap"
     if blocked:
-        return _annotated(fallback, link, blocked=blocked)
+        changed = _annotated(trial["fallback"], decision["discovery_link"], blocked=blocked)
+        return {**changed, **({"hydrogen_counter": reservation} if reservation else {})}
+    if not trial:
+        return {**decision, **({"hydrogen_counter": reservation} if reservation else {})}
     record = {"id": link["attempt_id"], "route": link["candidate"], "probe_key": link["probe_key"],
               "fallback_route": fallback["selected"], "policy_digest": link["policy_digest"],
               "reason": trial["reason"], "fallback": _route_payload(fallback)}
-    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record}
+    return {**{k: v for k, v in decision.items() if k != "trial"}, "trial_record": record,
+            **({"hydrogen_counter": reservation} if reservation else {})}
 
 
 def _known_working(con, cand: dict) -> bool:
@@ -995,13 +1202,13 @@ def _trial_blocked(con, run: dict, decision: dict, fallback: dict, task: dict | 
         return "trial-cap"
     if alloc["rolling"]["used"] >= alloc["rolling"]["max"]:
         return "rolling-cap"
-    if route_probe._quota_refusal(cand, config):
+    if route_probe._quota_refusal(cand, config, "executor"):
         return "quota-reserve"
     probe = route_probe.status(con, cand)
     if not probe or probe.get("result") != "pass" or cand.get("probe_key") != link["probe_key"]:
         return "probe-stale"
     from office import candidates as candidate_builder
-    policies = [route_policy.user_policy(config), *candidate_builder.required_user_policies(run.get("repo_root"))]
+    policies = candidate_builder.required_user_policies(run.get("repo_root"))
     size = ((task or {}).get("descriptor") or {}).get("task_size")
     if route_policy.effective_role_state(cand, "executor", policies, size)["state"] == "deny":
         return "role-deny"
@@ -1141,9 +1348,7 @@ def launch_instructions(run: dict, d: dict, *, output: str | None = None) -> lis
         pointer = (f"Read and carry out the brief at {ddir / 'brief.md'} exactly. "
                    "When the work and its checks are complete, run: office submit")
     else:
-        pointer = (f"Read and carry out the review brief at {ddir / 'brief.md'} exactly. Write your complete review to "
-                   f"{output}. If your tools cannot write files, end your reply with the complete review instead. "
-                   "Do not edit anything else.")
+        pointer = (review_submit.pointer(output, prompt_file=ddir / "brief.md") if output else "")
     return [f"brief: {ddir / 'brief.md'}", f"env: {ddir / 'agent.env'}", f"worktree: {wt}",
             *([f"output: {output}"] if output else []),
             f"herdr: herdr pane run <pane> {shlex.quote('. ' + str(ddir / 'agent.env') + ' && cd ' + wt)}",
@@ -1199,7 +1404,8 @@ def _base_for(con, run: dict, task: dict, graph: dict, stack_after: str | None, 
     if onto != run["base_sha"]:
         parents_for_base.insert(0, ("rebased default branch", onto))
     try:
-        return integration.combine(run, parents_for_base)
+        return integration.combine(run, parents_for_base, shared={
+            h["task"]: integration.shared_paths(state.get_task(con, run["id"], h["task"])) for h in heads})
     except integration.CombineConflict as exc:
         raise Refused("dependency-conflict", f"{task['id']} cannot build on both {exc.left} and {exc.right}: their "
                       f"accepted revisions conflict on {', '.join(exc.paths[:6])}", scope=task["id"],
@@ -1225,6 +1431,12 @@ def cli_harness(cli: str | None) -> str | None:
         if exe in {aid, Path(adapters.executable(adapter) or "").name, *kinds} - {""}:
             return aid
     return None
+
+
+# A delivery whose amendment is not a requirements change. A requirements delta is not in the contract, so only a
+# requirements delivery may carry one: the others leave it queued, and a relaunch never supersedes it (#1085).
+NOT_REQUIREMENTS_DELIVERY = ("NOT EXISTS (SELECT 1 FROM amendments a WHERE a.run_id=deliveries.run_id "
+                             "AND a.class='requirements' AND a.id=substr(deliveries.run_id, 1, 8) || ':' || deliveries.amendment_id)")
 
 
 def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | None = None,
@@ -1300,9 +1512,11 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
     # This session starts from the current contract, so an amendment still
     # waiting on an earlier session of the task is already in its brief; left
     # queued, it would hold the new revision at amendment_pending (and its ack
-    # would be refused as the wrong holder).
+    # would be refused as the wrong holder). A requirements delta is not in the
+    # contract, so it is never superseded here: it reaches this brief only as a
+    # delivery, and the transfer below hands it over (#1085).
     con.execute("UPDATE deliveries SET status='superseded', superseded_by='relaunch' WHERE run_id=? AND task_id=? "
-                "AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=?",
+                f"AND status IN ('queued','delivered') AND dispatch_id IS NOT ? AND target_version<=? AND {NOT_REQUIREMENTS_DELIVERY}",
                 (run["id"], task_id, dispatch_id, applied))
     # A newer amendment (a requirements change can target a plan version past
     # the task contract) is not in this brief: hand it to this session, or no
@@ -1333,6 +1547,18 @@ def lease_dormant(con, run_id: str, row) -> bool:
         return False
     from office import gates
     return gates.live_task_session(con, run_id, row["task_id"]) is None
+
+
+def revoked_without_live_lease(con, run_id: str, task_id: str) -> bool:
+    """True when the task's newest lease is revoked (any reason: `revoke_reason` is free text and is not read) and no
+    session of the task is live. Such a task has no session on purpose: relaunching it takes a fresh lease on its
+    scope and blocks overlapping tasks (#1085)."""
+    row = con.execute("SELECT revoked_at FROM leases WHERE run_id=? AND task_id=? "
+                      "ORDER BY fencing DESC LIMIT 1", (run_id, task_id)).fetchone()
+    if row is None or row["revoked_at"] is None:
+        return False
+    from office import gates
+    return gates.live_task_session(con, run_id, task_id) is None
 
 
 def scope_holder(con, run: dict, task: dict) -> str | None:
@@ -1484,6 +1710,13 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         else:
             con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? "
                         "AND released_at IS NULL AND revoked_at IS NULL", (now, reason, run["id"], task_id))
+            # #1318: acceptance released the lease of a session that is still live (an external or orchestrator-inline
+            # worker is not ended by acceptance). Revoking only unreleased leases left it uncounted as revoked, so
+            # it stayed live and rerun/dispatch refused worker-live in a loop. Fence the live sessions' leases too.
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND revoked_at IS NULL "
+                        "AND id IN (SELECT lease_id FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
+                        "AND status IN ('launching','running') AND (? IS NULL OR id=?))",
+                        (now, reason, run["id"], task_id, run["id"], task_id, only, only))
         if status:
             state.update_task(con, run["id"], task_id, status=status,
                               pause_reason=pause_reason or (f"lease revoked: {reason}" if status == "paused" else None))
@@ -1498,6 +1731,9 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     # Re-read: a launch may have recorded its launcher and pid since the snapshot.
     fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
     stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
+    # #1318: an orchestrator-inline worker is the orchestrator itself, which is asking for the revoke: there is no
+    # process to stop, so its end is recorded here and office rerun --fresh has an ended session to rerun.
+    inline_ended = [d["id"] for d in fresh if d["id"] not in stopped and _end_inline(con, run, d, reason)]
     starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
     if kept:
         lines = [f"{task_id} stays accepted on {task['accepted_revision_id']} | lease released; later submits from its "
@@ -1510,6 +1746,8 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     if cancelled:
         lines.append(f"cancelled {', '.join(cancelled)} before its agent started")
+    if inline_ended:
+        lines.append(f"ended {', '.join(inline_ended)} (orchestrator-inline: no process to stop)")
     if starting:
         lines.append(f"{', '.join(starting)} is starting its agent now; it is tracked once up: office revoke "
                      f"{task_id} again to stop it")
@@ -1527,6 +1765,41 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     else:
         nxt = f"office dispatch {task_id} to relaunch"
     return Result(lines=lines, next=nxt)
+
+
+def is_inline(d: dict) -> bool:
+    """An orchestrator-inline dispatch (#809 R11): an external dispatch whose worker is the orchestrator."""
+    return d.get("launcher") == "external" and loads(d.get("override_json"), {}).get("inline") is True
+
+
+def _end_inline(con, run: dict, d: dict, reason: str) -> bool:
+    """Record the end of a revoked orchestrator-inline dispatch (#1318). Other external sessions keep running:
+    Office cannot stop them and their revoked lease already fences their submits."""
+    if not is_inline(d) or d.get("ended_at") or d["status"] not in ("launching", "running"):
+        return False
+    with db.transaction(con):
+        state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {reason}", audience="runtime",
+                   task_id=d.get("task_id"), dispatch_id=d["id"])
+    _finish(d["id"], None, None, "revoked", 0.0, only_if_open=True)
+    return bool(state.get_dispatch(con, d["id"]).get("ended_at"))
+
+
+def relet_released_lease(con, run: dict, task: dict) -> str | None:
+    """#1318: a task reopened after acceptance (a convergence RECHECK) whose current session is still live gets
+    a fresh lease, so the fix it is told to submit is not refused as lease-lost. Acceptance released its lease;
+    a revoked or superseded lease is never restored, and an overlapping live scope keeps it unleased (revoke and
+    rerun then relaunch it). Returns the new lease id, or None. Caller holds the transaction."""
+    d = state.get_dispatch(con, task.get("current_dispatch_id")) if task.get("current_dispatch_id") else None
+    if not d or d.get("kind") != "executor" or not d.get("lease_id") or d.get("ended_at"):
+        return None
+    lease = con.execute("SELECT * FROM leases WHERE id=? AND run_id=?", (d["lease_id"], run["id"])).fetchone()
+    if lease is None or lease["revoked_at"] or not lease["released_at"] or scope_holder(con, run, task):
+        return None
+    new = acquire_lease(con, run, task, d["id"], lease["role"])
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (new["id"], d["id"]))
+    state.emit(con, run, "lease.relet", f"{task['id']} lease {new['id']} re-let to live {d['id']} for its repair",
+               task_id=task["id"], dispatch_id=d["id"])
+    return new["id"]
 
 
 def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
@@ -1559,12 +1832,31 @@ def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
     return bool(ended)
 
 
+REVOKED_KIND = "dispatch.revoked"
+
+
+def was_revoked(con, d: dict) -> bool:
+    """The orchestrator revoked this dispatch: its end, however the process exit was classified, is not a failure."""
+    return d.get("terminal_classification") == "revoked" or con.execute(
+        "SELECT 1 FROM events WHERE dispatch_id=? AND kind=? LIMIT 1", (d["id"], REVOKED_KIND)).fetchone() is not None
+
+
 def _end_dispatch(con, run: dict, d: dict, classification: str, why: str, *, stop: bool = True,
                   notes: list[str] | None = None) -> bool:
     """Record the end of a dispatch Office can no longer wait on. Closes its
     gate when nothing else can finish it. Returns False when it had ended."""
     if d.get("ended_at") or d["status"] not in ("launching", "running"):
         return False
+    if classification == "revoked":
+        # Recorded before the stop: stop_dispatch records the end itself (a signal exit), and the reviewer's own job
+        # must still read this end as the orchestrator's revoke, never as a route failure to fall back from (#1007).
+        with db.transaction(con):
+            state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {why}", audience="runtime",
+                       task_id=d.get("task_id"), dispatch_id=d["id"])
+            if d.get("lease_id") and d.get("kind") == "reviewer":
+                # Fences a late `office review submit` from the reviewer this revoke stops.
+                con.execute("UPDATE leases SET revoked_at=?, revoke_reason='revoked' WHERE id=? AND released_at IS NULL "
+                            "AND revoked_at IS NULL", (now_iso(), d["lease_id"]))
     if stop and d.get("launcher") not in (None, "external", "sync"):
         stop_dispatch(run, d, notes=notes)  # stops what is still alive and records the end itself
     if d.get("kind") in ("planner", "executor") and not state.get_dispatch(con, d["id"]).get("ended_at"):
@@ -1637,9 +1929,12 @@ def _fence_integrate_jobs(con, run: dict, reason: str) -> list[str]:
     """Stop and cancel the integrate jobs that own the integration reviews, so
     ending a reviewer cannot make a live job start a fallback or retry."""
     with db.transaction(con):
-        jobs_ = [dict(r) for r in con.execute("SELECT * FROM outbox WHERE run_id=? "
-                                              "AND kind='integrate' AND status IN ('queued','claimed')",
-                                              (run["id"],)).fetchall()]
+        # The integrate job, and the supervise job of a launched integration reviewer: either would record a result
+        # (or queue a fallback) for a review the orchestrator just ended.
+        jobs_ = [dict(r) for r in con.execute(
+            "SELECT * FROM outbox WHERE run_id=? AND status IN ('queued','claimed') AND (kind='integrate' OR "
+            "(kind='review_supervise' AND json_extract(payload_json,'$.gate_id') IN "
+            "(SELECT id FROM gates WHERE run_id=? AND subject='integration')))", (run["id"], run["id"])).fetchall()]
         for j in jobs_:
             con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, max_attempts=attempts "
                         "WHERE id=?", (f"revoked: {reason}"[:200], now_iso(), j["id"]))
@@ -1665,6 +1960,9 @@ def revoke_integration(con, run: dict, reason: str) -> Result:
     notes: list[str] = []
     ended = [d["id"] for d in rows if _end_dispatch(con, run, d, "revoked", f"integration revoked: {reason}", notes=notes)]
     from office import gates
+    for d in rows:
+        if d["id"] in ended:  # no supervise job is left to settle these reviewers
+            gates.release_launched_review(con, run, d["gate_id"], d["id"])
     with db.transaction(con):
         stale = [r["id"] for r in con.execute("SELECT id FROM gates WHERE run_id=? AND subject='integration' "
                                               "AND status IN ('queued','running','waiting')", (run["id"],)).fetchall()]
@@ -1708,6 +2006,61 @@ def reap_orphans(con, run: dict) -> list[str]:
 # A reply untouched this long is the finished review: the dead supervisor was the only thing that would have
 # waited for the agent to stop rewriting it.
 REPLY_SETTLE_SECONDS = 30
+# A live reviewer's reply that stays byte-identical this long is final even while its pane still reads busy (#918).
+REPLY_BUSY_SETTLE_S = 60.0
+# A reply still not ingested this long after its last write needs an operator action; the status `next:` names it (#918).
+REPLY_HARD_BOUND_S = 600.0
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return max(0.0, value) if math.isfinite(value) else default
+
+
+def reply_hard_bound() -> float:
+    return _env_seconds("OFFICE_REPLY_HARD_BOUND_S", REPLY_HARD_BOUND_S)
+
+
+def _reply_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes() or None
+    except OSError:
+        return None
+
+
+def _reply_complete(run: dict, dispatch: dict, data: bytes) -> bool:
+    """Whether the reply holds a complete verdict the review contract accepts. A busy pane's reply is ingested
+    early only then (#918, A6). `data` is the same read the stability digest was taken from. The reviewer flags
+    follow the dispatch role; a mismatch only makes a reply read as incomplete, which holds it back."""
+    from office import contract, gates, review_parse
+    text = data.decode("utf-8", errors="replace")
+    parsed = review_parse.parse(gates._last_block(text), plan_review=dispatch["role"] == "plan_reviewer",
+                                visual=dispatch["role"] in ("visual_reviewer", "visual_verifier"),
+                                contract=contract.of(run))
+    return parsed.valid
+
+
+def reply_pending(con, run: dict) -> list[dict]:
+    """Reviewer replies written to disk whose dispatch is still open, oldest first: `id`, `task_id`, `kind` (its gate
+    kind), `scope` (its lane or shared scope, else None), `path` (the reply file) and `quiet` (seconds since the last
+    write). A live watch ingests a reply once it settles (#918); this only reads."""
+    now = time.time()
+    out = []
+    for row in con.execute("SELECT d.id, d.task_id, g.kind, g.scope FROM dispatches d JOIN gates g ON g.id=d.gate_id "
+                           "WHERE d.run_id=? AND d.launcher='herdr' AND d.ended_at IS NULL AND d.status='running' "
+                           "ORDER BY d.started_at", (run["id"],)).fetchall():
+        path = paths.run_dir(run["id"]) / "dispatches" / row["id"] / "reply.txt"
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if info.st_size:
+            out.append({"id": row["id"], "task_id": row["task_id"], "kind": row["kind"], "scope": row["scope"],
+                        "path": str(path), "quiet": max(0.0, now - info.st_mtime)})
+    return out
 
 
 def _launch_spec(run: dict, dispatch_id: str) -> dict:
@@ -1809,12 +2162,21 @@ def _c_start(pid: int | None) -> str | None:
         return None
     if portable.IS_WINDOWS:
         return portable.windows_process_start(pid)
+    own = pid == os.getpid()
+    if own and pid in _OWN_C_START:
+        return _OWN_C_START[pid]
     try:
         out = subprocess.run([_system_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "lstart=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return " ".join(out.split()) or None
+    start = " ".join(out.split()) or None
+    if own and start:  # this process's own start never changes (#1302); other pids stay live reads
+        _OWN_C_START[pid] = start
+    return start
+
+
+_OWN_C_START: dict[int, str] = {}
 
 
 def _record_identity(run_id: str, dispatch_id: str, which: str, pid: int) -> None:
@@ -1975,6 +2337,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "contract_request_max_seq": contract_request_max_seq,
         "restack": extra.get("restack"),
         "base_parents": extra.get("base_parents"),
+        "context_handoff": extra.get("context_handoff"),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 
@@ -2021,7 +2384,7 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     predecessor = role == "executor" and dispatch.get("predecessor_dispatch_id")
     created = not (Path(dispatch["worktree"]) / ".git").exists()
     wt = ensure_worktree(run, dispatch, restack_existing=bool(predecessor))
-    if predecessor:
+    if predecessor and not payload.get("context_handoff"):
         # An amendment or manual dispatch reuses the old task branch. Its recorded base
         # can be stale after depends changes / dependency re-acceptance (#696).
         # Restack in this launch job (outside the amendment DB transaction), before
@@ -2059,11 +2422,14 @@ def job_launch_agent(con, run: dict, job: dict) -> dict:
     setup = None
     if role == "executor":
         _set_aside_evidence(con, run, dispatch, wt, ddir)
-        # The repo's own install, before the agent's first prompt; a failure is surfaced, never fatal.
+        # The repo's own install, before the agent's first prompt. A failure is surfaced, not fatal, except a
+        # setup command that is not on PATH at all (exit 127), which stops the dispatch (#364).
         setup = worktree_setup.prepare(run, wt, "task", ddir / "setup.log", created=created,
                                        task_id=dispatch["task_id"], dispatch_id=dispatch["id"])
         if setup:
             atomic_write_json(ddir / "setup.json", setup)
+            if setup["exit"] == worktree_setup.COMMAND_NOT_FOUND and not setup.get("timed_out"):
+                raise worktree_setup.not_found_refusal(setup, dispatch["task_id"])
             if setup["exit"] != 0:
                 _launch_notice(run, dispatch, worktree_setup.failure_text(setup))
     packet = build_packet(con, run, dispatch, role, payload)
@@ -2116,6 +2482,10 @@ def worker_env(run: dict, dispatch: dict, role: str) -> dict:
         "OFFICE_ROLE": role,
         "OFFICE_VERSION": version.current(),
     })
+    if role == "reviewer":
+        # Python the reviewer starts keeps bytecode outside the checkout: it neither leaves `__pycache__` for
+        # the worktree guard to trip on nor loads a planted one in place of the source under review (#1182).
+        env["PYTHONPYCACHEPREFIX"] = str(paths.run_dir(run["id"]) / "pycache" / dispatch["id"])
     argv, extra = frontdoor.current_argv()
     env.update(extra)
     shim = paths.data_home() / "bin"
@@ -2205,7 +2575,12 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
             _launch_notice(run, dispatch, f"{no_pane}; running headless instead")
             if resume:
                 _headless_resume(run, dispatch, kind, spec, resume)
-        if pane:
+        if pane and inter and adapters.pane_hosts_supervisor(adapters.load_all().get(dispatch.get("adapter_id") or ""), kind):
+            started = _pane_supervise(run, dispatch, spec, sup, pane, cwd, ddir, label=label)
+            if started:
+                return _wait_terminal(dispatch["id"]) if wait else started
+            headless = "process-fallback"
+        elif pane:
             started = _herdr_agent_start(run, dispatch, spec, env, inter, pane, cwd, ddir, label=label)
             if started:
                 if wait:
@@ -2231,6 +2606,31 @@ def launch(run: dict, dispatch: dict, kind: str, ddir: Path, *, cwd: Path, wait:
         proc.wait()
         return _wait_terminal(dispatch["id"])
     return {"launcher": headless, "pid": proc.pid}
+
+
+def _pane_supervise(run: dict, dispatch: dict, spec: dict, sup: list[str], pane: str, cwd: Path, ddir: Path, *,
+                    label: str | None = None) -> dict | None:
+    """Host the headless supervisor in a visible pane (`interactive.supervisor`): the pane shell sources the
+    dispatch identity and runs `office _supervise`, which runs the harness's headless form (plan mode for the agy
+    reviewer), captures its stdout as the reply, checks the worktree and applies the wall cap. None when the pane
+    shell never ran the line: the caller then runs the same supervisor as a detached process."""
+    env_file = write_agent_env(run, dispatch, ddir, worker=spec["kind"] == "worker", harness_env=_harness_env(run, dispatch, spec))
+    line = f". {shlex.quote(str(env_file))} && cd {shlex.quote(str(cwd))} && {shlex.join(sup)}"
+    mismatch = _pane_identity_mismatch(run, dispatch, pane, cwd, check_cwd=False)
+    if mismatch:
+        spec["fallback_reason"] = f"pane-mismatch: {mismatch}"
+        write_launch_spec(run, dispatch["id"], spec)
+        _launch_notice(run, dispatch, f"pane-mismatch: {mismatch}; running headless instead")
+        return None
+    spec["supervisor"] = "pane"  # the gate reads this form's stdout log as the headless path does
+    _record_launch_form(run, dispatch, spec, "herdr", ["herdr", "pane", "run", pane, line], transport="pane shell",
+                        herdr_kind=None, brief_delivery="argv prompt (headless supervisor in the pane)")
+    _herdr_quiet("pane", "run", pane, line)
+    spec["pane"] = pane
+    write_launch_spec(run, dispatch["id"], spec)
+    _record_launch(run, dispatch["id"], launcher="herdr", pane_id=pane)
+    _pane_ledger(run, dispatch, pane, agent=None, kind=None, worktree=cwd, session_id=None)
+    return {"launcher": "herdr", "pane": pane, "supervisor": "pane"}
 
 
 def _headless_resume(run: dict, dispatch: dict, kind: str, spec: dict, resume: dict) -> None:
@@ -2387,11 +2787,15 @@ def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False)
     an unknown `--agent` may fall back to a default agent that can write anywhere.
     The non-strict callers only record the reason (agent.env is written either way)."""
     adapter = adapters.load_all().get(dispatch.get("adapter_id") or "")
-    if not adapter or not spec.get("output"):
+    if not adapter:
         return {}
+    # A pane agent Herdr cannot detect through the harness's PATH launcher (Hermes' shell wrapper) gets a shim first on PATH.
+    launcher = adapters.pane_launch_env(adapter, paths.run_dir(run["id"]) / "dispatches" / dispatch["id"])
+    if not spec.get("output"):
+        return launcher
     try:
-        return adapters.reviewer_env(adapter, spec["kind"], cwd=Path(spec["cwd"]), output=Path(spec["output"]),
-                                     include_dirs=[Path(i) for i in spec.get("include_dirs") or []])
+        return {**launcher, **adapters.reviewer_env(adapter, spec["kind"], cwd=Path(spec["cwd"]), output=Path(spec["output"]),
+                                                     include_dirs=[Path(i) for i in spec.get("include_dirs") or []])}
     except adapters.AdapterError as exc:
         if strict:
             raise
@@ -2406,13 +2810,18 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     harness's own per-dispatch settings (`_harness_env`)."""
     wenv = worker_env(run, dispatch, dispatch.get("role") if worker else "reviewer")
     if not worker:
-        # Reviewers get no Office authority: they cannot submit or ack.
+        # Reviewers get no Office authority: they cannot submit or ack. They may hand back their own review
+        # through `office review submit`, which honours only this dispatch's secret (#1030).
         for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
             wenv.pop(k, None)
-    carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH")}
+        if dispatch.get("role") in review_submit.REVIEW_ROLES and dispatch.get("gate_id"):
+            wenv.update(review_submit.token_env(run, dispatch))
+    carry = {k: v for k, v in wenv.items() if k.startswith(("OFFICE_", "AUTO_OFFICE_", "XDG_")) or k in ("PYTHONPATH", "PATH", "PYTHONPYCACHEPREFIX")}
     carry.update(harness_env or {})
     env_file = ddir / "agent.env"
-    env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
+    prelude = adapters.shell_env_prelude(adapters.load_all().get(dispatch.get("adapter_id") or ""))
+    env_file.write_text((f"{prelude}\n" if prelude else "")
+                        + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())))
     env_file.chmod(0o600)
     return env_file
 
@@ -2755,7 +3164,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
         _herdr_fallback_notice(run, dispatch, spec, ddir, pane, "herdr agent start failed", str(exc))
         return None
     if proc.returncode != 0 and _office_owned(run, cwd) and "agent_not_ready" in (proc.stdout or "") + (proc.stderr or "") \
-            and _answer_startup_trust(pane, name, _land_timeout()):
+            and _answer_startup_trust(pane, name, _land_timeout(), owned=lambda p: _office_owned(run, p)):
         # The harness opened Office's own worktree on its folder-trust dialog and Herdr
         # stopped waiting; the dialog is answered and the agent is up (330605a8).
         proc = subprocess.CompletedProcess(proc.args, 0, "", "")
@@ -2820,9 +3229,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
                    "When the work and its checks are complete, run: office submit")
     else:
         images = f" Inspect each evidence image: {' '.join(spec['images'])}." if spec.get("images") else ""
-        pointer = (f"Read and carry out the review brief at {spec['prompt_file']} exactly.{images} "
-                   f"Write your complete review to {spec['output']}; Office reads only that file, never "
-                   "your terminal. Do not edit anything else.")
+        pointer = review_submit.pointer(spec["output"], prompt_file=spec["prompt_file"], images=images)
     from office import transcripts
     sent_at = time.time()
 
@@ -2850,6 +3257,7 @@ def _herdr_agent_start(run: dict, dispatch: dict, spec: dict, env: dict, inter: 
     if not mismatch:
         try:
             landed = _deliver_prompt(name, pane, pointer, answer_trust=_office_owned(run, cwd), seen=seen_cb,
+                                     owned=lambda p: _office_owned(run, p),
                                      guard=guard, max_enter_tries=1 if codex_reviewer else None,
                                      enter_budget=enter_budget)
         except PaneMismatch as exc:
@@ -2904,6 +3312,11 @@ def _settle_unlanded_pointer(run: dict, dispatch: dict, spec: dict, name: str, p
     view = _pane_view(name)
     # No Enter for an agent herdr no longer reports: the key would go to the pane's shell.
     if sample is None or not _composer_holds(view, pointer):
+        if working:
+            # The pointer is gone from the composer and herdr says the agent is working on something: it most
+            # likely took the brief. Telling the orchestrator to re-prompt it would deliver the brief twice (#583).
+            spec["landing_unconfirmed_working"] = True
+            return False, None
         _describe_unconfirmed_prompt(run, dispatch, name, pane, pointer, view)
         return False, None
     if working:
@@ -3013,7 +3426,9 @@ def _pane_busy(text: str) -> bool:
 # "You've hit your session limit · resets 9:30pm (Asia/Manila)". The weekly
 # "You've used 95% of your weekly limit" line is a warning, not a stop, and is
 # deliberately not matched (#253).
-_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit", re.I)
+# agy stops on an empty account with "Your AI credits balance is too low to continue." (#608, #1194).
+_LIMIT_HIT = re.compile(r"(?:usage|session|5-hour) limit reached|hit your (?:session|usage) limit"
+                        r"|credits? balance is too low|out of (?:ai )?credits", re.I)
 # "resets 9:30pm (Asia/Manila)" or the older "limit will reset at 9:30pm".
 _LIMIT_RESETS = re.compile(r"\breset(?:s|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?", re.I)
 LIMIT_TAIL_LINES = 40
@@ -3104,6 +3519,10 @@ def herdr_agent_name(dispatch_id: str) -> str:
 # dialog. Until it is answered the composer is empty, so a prompt sent then is
 # lost while `agent prompt` succeeds and `agent get` can read `working`.
 TRUST_DIALOG_MARKERS = ("trust this folder", "quick safety check", "is this a project you created or one you trust")
+# Claude Code's per-directory prompt for an `--add-dir` it has not trusted (#1239): "Adding a new directory:
+# <path> ... Is this a directory you created or one you trust?" with "No, exit" / "Yes, add it". Its answer
+# holds for the session only. Office answers it only for a directory it owns for this run.
+ADD_DIR_MARKER = "adding a new directory"
 # The ctx figure in a Claude status line ("ctx: 12k · $0.03"): it rises from
 # 0k once a prompt reaches the model, which is a landed signal in a pane too
 # narrow to show the busy footer.
@@ -3112,7 +3531,26 @@ _CTX_RE = re.compile(r"\bctx:\s*(\d+(?:\.\d+)?)\s*k\b", re.I)
 
 def _trust_dialog(text: str | None) -> bool:
     low = _strip_ansi(text).lower()
-    return any(m in low for m in TRUST_DIALOG_MARKERS)
+    return any(m in low for m in (*TRUST_DIALOG_MARKERS, ADD_DIR_MARKER))
+
+
+def _add_dir_target(text: str | None) -> str | None:
+    """The directory an "Adding a new directory" prompt names, rejoined across the pane's line wraps, or None
+    when the screen is not that prompt or the path cannot be read whole."""
+    lines = [ln.strip() for ln in _strip_ansi(text).splitlines()]
+    starts = [i for i, ln in enumerate(lines) if ln.lower().startswith("adding a new directory")]
+    if not starts:
+        return None
+    head = lines[starts[-1]].split(":", 1)
+    parts = [head[1].strip()] if len(head) == 2 and head[1].strip() else []
+    for ln in lines[starts[-1] + 1:]:
+        if not ln and not parts:
+            continue  # the live pane draws a blank line between the heading and the path (#1260)
+        if not ln or ln.lower().startswith(("this session", "is this a directory")):
+            break
+        parts.append(ln)
+    path = "".join(parts)
+    return path if path.startswith("/") else None
 
 
 def _ctx_k(text: str | None) -> float | None:
@@ -3185,25 +3623,30 @@ def _prompt_landed(name: str, timeout: float, *, baseline_ctx: float | None = No
         time.sleep(1)
 
 
-def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool, herdr) -> str:
+# Trust dialogs Office answers in a row at one launch: the workspace one, then one per added directory (#1239).
+MAX_TRUST_ANSWERS = 4
+
+
+def _await_agent_ui(name: str, pane: str, timeout: float, *, answer_trust: bool, herdr, owned=None) -> str:
     """Wait for the agent's UI before anything is sent. 'ready' once herdr sees
     the agent in the pane; 'trust' when a folder-trust dialog is up that Office
     may not answer; 'down' when no agent appeared by the deadline. A dialog on
-    an Office-owned directory is answered with option 1 (Trust and continue)."""
+    an Office-owned directory is answered with option 1 (Trust and continue);
+    an added-directory prompt only when `owned` accepts the directory it names."""
     deadline = time.time() + timeout
-    answered = False
+    answered = 0
     while True:
         text = _pane_view(name)
         if _startup_screen(text) and not _trust_dialog(text):
             return "trust"  # hook trust and updates always need a user decision
         if _trust_dialog(text):
-            if not answer_trust or answered:
+            if not answer_trust or answered >= MAX_TRUST_ANSWERS:
                 if time.time() >= deadline:
                     return "trust"
             else:
-                if not _confirm_trust(pane, lambda: _pane_view(name), herdr, text):
+                if not _confirm_trust(pane, lambda: _pane_view(name), herdr, text, owned=owned):
                     return "trust"  # no trust option could be selected
-                answered = True
+                answered += 1
         elif _agent_up(pane, name):
             return "ready"
         if time.time() >= deadline:
@@ -3223,32 +3666,40 @@ def _selected_option(text: str | None) -> str | None:
     return picked[-1] if picked else None
 
 
-def _trust_selected(option: str | None) -> bool:
+def _trust_selected(option: str | None, *, add_dir: bool = False) -> bool:
     low = (option or "").strip().lower()
     # The trust option itself, or a plain "Yes, proceed/continue"; never any other "Yes, ..."
-    # a startup screen offers (an MCP server, terms).
-    ok = "trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+    # a startup screen offers (an MCP server, terms). "Yes, add it" only on an added-directory prompt.
+    ok = ("trust" in low or re.match(r"yes,?\s+(?:proceed|continue)\b", low)
+          or (add_dir and re.match(r"yes,?\s+add it\b", low)))
     return bool(low) and bool(ok) and not _DECLINE.search(low)
 
 
-def _confirm_trust(pane: str, read, herdr, text: str | None = None) -> bool:
+def _confirm_trust(pane: str, read, herdr, text: str | None = None, *, owned=None) -> bool:
     """Move a folder-trust dialog's selection onto its trust option and confirm it.
     Current Claude Code preselects "No, exit", so a bare Enter would quit the
     agent; Enter is pressed only once the selected option is the trust one.
-    `text` is a screen the caller already read."""
+    `text` is a screen the caller already read. An added-directory prompt (#1239)
+    is answered only when `owned(<the directory it names>)` is true: never for a
+    directory Office does not own for this run, such as its state home."""
     if text is None or _selected_option(text) is None or not _trust_dialog(text):
         # The first frame may be blank, unreadable or half-drawn too (R3-11).
         text = _settled(read, None)
+    target = _add_dir_target(text)
+    add_dir = ADD_DIR_MARKER in _strip_ansi(text).lower()
+    if add_dir and (target is None or owned is None or not owned(target)):
+        return False
     for key in ("down", "down", "up", "up", "up", None):
         text = read() if text is None else text
-        if not _trust_dialog(text):
+        if not _trust_dialog(text) or (add_dir and _add_dir_target(text) != target):
             return False
         option = _selected_option(text)
-        if _trust_selected(option):
+        if _trust_selected(option, add_dir=add_dir):
             # A frame read right after a key can predate the redraw: confirm only when a
             # fresh, complete frame still shows the trust option selected.
             again = _settled(read, None)
-            if _trust_dialog(again) and _trust_selected(_selected_option(again)):
+            if (_trust_dialog(again) and _trust_selected(_selected_option(again), add_dir=add_dir)
+                    and (not add_dir or _add_dir_target(again) == target)):
                 herdr("pane", "send-keys", pane, "Enter")
                 return True
             text = again
@@ -3280,15 +3731,24 @@ def _settled(read, before: str | None) -> str:
         time.sleep(0.2)
 
 
-def _answer_startup_trust(pane: str, name: str, timeout: float) -> bool:
+def _answer_startup_trust(pane: str, name: str, timeout: float, owned=None) -> bool:
     """`herdr agent start` gave up on an agent held by a folder-trust dialog
-    (`agent_not_ready`): answer it, then wait until Herdr reports the agent
-    ready. True when the agent is up past the dialog."""
+    (`agent_not_ready`): answer it, and each further trust dialog up to
+    MAX_TRUST_ANSWERS (an added-directory prompt only for a directory `owned`
+    accepts, #1239), then wait until Herdr reports the agent ready. True when
+    the agent is up past the dialogs."""
     read = lambda: _pane_visible(pane)  # noqa: E731  the screen now, not scrollback (review F4)
-    if not _confirm_trust(pane, read, _herdr_quiet):
+    if not _confirm_trust(pane, read, _herdr_quiet, owned=owned):
         return False
+    answered = 1
     deadline = time.time() + timeout
     while True:
+        text = read()
+        if _trust_dialog(text) and _selected_option(text) is not None:
+            if answered >= MAX_TRUST_ANSWERS or not _confirm_trust(pane, read, _herdr_quiet, text, owned=owned):
+                return False
+            answered += 1
+            continue
         res = _herdr_json(["agent", "get", name])
         agent = res.get("agent") or res  # flat or nested, as _agent_up reads it (review F5)
         status = (agent.get("status") or agent.get("agent_status")) if isinstance(agent, dict) else None
@@ -3523,7 +3983,7 @@ def submit_prompt(name: str, text: str, *, pane: str | None = None, guard=None,
 
 
 def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = False, seen=None, guard=None,
-                    max_enter_tries: int | None = None, enter_budget: list[int] | None = None) -> bool:
+                    max_enter_tries: int | None = None, enter_budget: list[int] | None = None, owned=None) -> bool:
     """Wait for the agent UI, send the one-line pointer and confirm it landed.
     A pointer left in the composer is submitted with Enter; a lost one is typed
     into the pane once and submitted (agy can drop a prompt sent right after
@@ -3532,7 +3992,7 @@ def _deliver_prompt(name: str, pane: str, pointer: str, *, answer_trust: bool = 
     send and may raise PaneMismatch."""
     timeout = _land_timeout()
     herdr = _guarded_herdr(guard)
-    ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr)
+    ui = _await_agent_ui(name, pane, timeout, answer_trust=answer_trust, herdr=herdr, owned=owned)
     if ui == "trust":
         return False
     screen = _pane_view(name)
@@ -3645,6 +4105,8 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
     noticed = False
     history: list[dict] = []
     last_size = None
+    last_digest = last_poll = last_mono = settled_since = None
+    busy_settle = _env_seconds("OFFICE_REPLY_BUSY_SETTLE_S", REPLY_BUSY_SETTLE_S)
     unknown = 0
     unknown_limit = int(os.environ.get("OFFICE_HERDR_UNKNOWN_LIMIT", "60"))
     con = db.connect()
@@ -3667,7 +4129,22 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                 return 0, "success"
         finally:
             con.close()
+        if review_submit.submitted(output):
+            return 0, "success"  # office review submit validated and stored it: no settle or idle heuristics (#1030)
         size = output.stat().st_size if output and output.is_file() else 0
+        data = _reply_bytes(output) if size else None
+        digest = hashlib.sha256(data).hexdigest() if data else None
+        now = time.time()  # wall clock: a laptop sleep must not hide in monotonic time on macOS
+        mono = time.monotonic()
+        # Stable means byte-identical since the last poll: a rewrite that keeps the size is still a change.
+        unchanged = digest is not None and digest == last_digest
+        # A suspend or a clock step moves the wall clock but not the monotonic one (the monotonic clock stops in sleep on
+        # macOS and Linux), so their difference is the jump, in either direction. A slow poll moves both and is not one.
+        # The agent was not watched through a jump, so the settle window restarts rather than counting it as quiet time.
+        step = None if last_poll is None else (now - last_poll) - (mono - last_mono)
+        if not unchanged or step is None or abs(step) > 1.0:
+            settled_since = now
+        last_digest, last_poll, last_mono = digest, now, mono
         sample = _herdr_agent_sample(spec["herdr_agent"])
         if sample is not None:
             unknown = unknown + 1 if sample.get("busy") is None else 0
@@ -3681,12 +4158,16 @@ def watch_herdr_agent(dispatch_id: str, spec: dict, *, poll: float | None = None
                                        f"{unknown_limit} polls; check its pane, or office revoke")
         # The result file is the evidence (R13): only a pane still drawing a
         # turn (text busy) holds it back, not a `working` status alone.
-        if size and size == last_size and (sample is None or sample.get("text_busy", sample.get("busy")) is False
-                                           or blind):
-            # Complete: written, no longer growing between two polls, and the
+        if unchanged and (sample is None or sample.get("text_busy", sample.get("busy")) is False or blind):
+            # Complete: written, no longer changing between two polls, and the
             # agent is not still mid-turn (it may rewrite the file). After the
             # pane has been unreadable past the limit, a file that stopped
-            # growing is the only evidence left, so it bounds the wait.
+            # changing is the only evidence left, so it bounds the wait.
+            return 0, "success"
+        if unchanged and not worker and time.time() - settled_since >= busy_settle \
+                and data is not None and _reply_complete(run, first, data):
+            # A reviewer's complete reply has been byte-identical for the settle window while its pane still draws a
+            # turn: the agent is not writing it, so the pane's busy text does not hold it back (#918, A6).
             return 0, "success"
         fresh_output = bool(size) and size != last_size
         last_size = size or None
@@ -4588,6 +5069,8 @@ def supervise(dispatch_id: str) -> int:
 
     # An in-process supervisor hands its caller's handlers back when the dispatch ends.
     previous = {s: signal.signal(s, forward) for s in (signal.SIGTERM, signal.SIGINT, *([portable.SIGHUP] if portable.SIGHUP else []))}
+    context_stop = threading.Event()
+    context_thread = None
     timer = None
     log_path = None
     try:
@@ -4597,6 +5080,11 @@ def supervise(dispatch_id: str) -> int:
             run = state.get_run(con, d["run_id"])
         finally:
             con.close()
+        if d.get("role") == "executor":
+            from office import executor_context
+            context_thread = threading.Thread(target=executor_context.monitor,
+                                              args=(dispatch_id, context_stop), daemon=True)
+            context_thread.start()
         if os.environ.get("OFFICE_SUPERVISOR_VIA") == "herdr" and d.get("launcher") != "herdr":
             # This pane command arrived after the launch fell back to a plain
             # process; running it too would mean two writers for one dispatch.
@@ -4632,13 +5120,15 @@ def supervise(dispatch_id: str) -> int:
                 _launch_notice(run, d, why)
                 classification, code = "preflight_failed", 127
                 return 1
+        usage_file = paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "usage.json"  # the harness's run report (hermes --usage-file)
+        usage_file.unlink(missing_ok=True)  # a stale report must never vouch for this run
         argv, prof = adapters.build_argv(adapter, spec["kind"], model=d["model"], effort=d["effort"] or "none",
                                          cwd=Path(spec["cwd"]), output=output,
                                          images=[Path(i) for i in spec.get("images") or []],
                                          include_dirs=[Path(i) for i in spec.get("include_dirs") or []],
                                          session_id=None if spec.get("headless_resume") else
                                          (d.get("session_id") if spec.get("headless_fresh") else _assigned_session(d)),
-                                         resume_args=spec.get("headless_resume"))
+                                         resume_args=spec.get("headless_resume"), usage_file=usage_file)
         prompt = Path(spec["prompt_file"]).read_text(encoding="utf-8")
         if prof.get("image_transport") in ("prompt-at", "prompt-path") and spec.get("images"):
             prefix = "@" if prof["image_transport"] == "prompt-at" else ""
@@ -4649,6 +5139,8 @@ def supervise(dispatch_id: str) -> int:
             for k in ("OFFICE_TASK_ID", "OFFICE_DISPATCH_ID"):
                 env.pop(k, None)
             env["OFFICE_ROLE"] = "reviewer"
+            if d["role"] in review_submit.REVIEW_ROLES and d.get("gate_id"):
+                env.update(review_submit.token_env(run, d))  # its own review only (#1030)
         try:
             env.update(_harness_env(run, d, spec, strict=True))
         except adapters.AdapterError as exc:
@@ -4656,6 +5148,7 @@ def supervise(dispatch_id: str) -> int:
             _launch_notice(run, d, str(exc))
             classification, code = "preflight_failed", 127
             return 1
+        env = adapters.launch_env(adapter, env)
         with log_path.open("ab") as log:
             os.chmod(log_path, 0o600)
             stdin = subprocess.PIPE if prof.get("prompt") == "stdin" else subprocess.DEVNULL
@@ -4713,6 +5206,7 @@ def supervise(dispatch_id: str) -> int:
             sig, classification = state_box["signal"], "signal"
         else:
             classification = "success" if code == 0 else "nonzero"
+        classification = _audit_exit(adapter, prof, d.get("model") or "", usage_file, log_path, classification, code)
         if classification == "success" and not wrote and not output:
             # A worker with no reply file ended cleanly but said nothing: the
             # prompt may never have been consumed (adapter failure_signatures).
@@ -4733,6 +5227,7 @@ def supervise(dispatch_id: str) -> int:
                 _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
                         empty_reply=empty_reply)
         finally:
+            context_stop.set()
             if timer:
                 timer.cancel()
             for s, handler in previous.items():
@@ -4754,6 +5249,33 @@ def _note(log_path, text: str) -> None:
             log.write(f"\n[office] {text}\n".encode())
     except OSError:
         pass
+
+
+def _audit_exit(adapter: dict, prof: dict, slug: str, usage_file: Path, log_path: Path, classification: str,
+                code: int | None) -> str:
+    """The classification once the harness's own report is read back. A report naming another model or provider than
+    the pinned slug makes the run `wrong_model`, whatever the exit code. A failed run whose output matches an adapter
+    failure signature is noted with that signature's attribution (a quota or account wall is not the model's fault)."""
+    if classification in ("timeout", "signal"):
+        return classification
+    wrong = adapters.readback_problem(adapter, prof, slug, usage_file, code=code)
+    if wrong:
+        _note(log_path, f"wrong model: {wrong}")
+        return "wrong_model"
+    sig = adapters.classify_failure(adapter, _log_tail(log_path)) if classification == "nonzero" else None
+    if sig:
+        _note(log_path, f"exit {code} attributed to {sig.get('attribution')} ({sig.get('id')}), not the model")
+    return classification
+
+
+def _log_tail(log_path, size: int = 8000) -> str:
+    try:
+        with Path(log_path).open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - size))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _mark(dispatch_id: str, pid_child: int) -> None:
@@ -4788,16 +5310,24 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
                 return  # another process recorded the end first; a recovery never overwrites it
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
-                con.execute("DELETE FROM route_cooldowns WHERE route=?",
-                            (routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort")),))
-            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal") else "failed")
+                keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
+                if d.get("harness") == "agy":
+                    keys.append(routing.harness_demotion_key("agy"))  # an AI-credits wall is cleared by a working agy
+                con.executemany("DELETE FROM route_cooldowns WHERE route=?", [(k,) for k in keys])
+            status = "cancelled" if d["status"] == "cancelled" else ("exited" if classification in ("success", "nonzero", "signal", "context_cap") else "failed")
             con.execute("UPDATE dispatches SET status=?, exit_code=?, signal=?, terminal_classification=?, ended_at=?, "
                         "wall_clock_seconds=? WHERE id=?", (status, code, sig, classification, now_iso(), wall, dispatch_id))
             run = state.get_run(con, d["run_id"])
             if classification != "success" and d.get("triple"):
                 d["terminal_classification"] = classification
                 if _quota_wall(run, d):
-                    _record_route_cooldown(con, run, d)
+                    credits = _record_route_cooldown(con, run, d)
+                    if credits:
+                        state.emit(con, run, "route.failed",
+                                   f"{d['task_id'] or d['role']} agy AI credits exhausted: every agy route skipped until "
+                                   f"{credits.isoformat()[:16]}Z", task_id=d["task_id"], dispatch_id=dispatch_id,
+                                   payload={"harness": "agy", "reason": "ai-credits-exhausted",
+                                            "demoted_until": credits.isoformat()})
             # A reviewer that ended without a reply is not a plain success: the gate re-prompts or retries it.
             state.emit(con, run, "dispatch.ended", f"{d['task_id'] or d['role']} {d['role']} ended: {classification}"
                        + (" with an empty reply: no reply file was written" if empty_reply else "")
@@ -4854,6 +5384,13 @@ def _after_worker_exit(con, run: dict, dispatch_id: str) -> None:
     d = state.get_dispatch(con, dispatch_id)
     task = state.get_task(con, run["id"], d["task_id"]) if d.get("task_id") else None
     if task is None or task["current_dispatch_id"] != dispatch_id:
+        return
+    # #939: an orchestrator-requested rotation's job owns this end. Stopping the
+    # old writer is neither an executor failure nor a route failure, so never
+    # auto-retry it or consume a retry allowance.
+    from office import executor_context
+    if (executor_context.rotation_requested(d) and task["status"] in ("running", "launching")
+            and not con.execute("SELECT 1 FROM revisions WHERE dispatch_id=?", (dispatch_id,)).fetchone()):
         return
     if task["status"] == "changes_required":
         # Findings arrived while this session was alive and it ended without
@@ -4943,6 +5480,8 @@ _ROUTE_FAILURE_SIGNATURES = (
                                  r"|invalid (model|effort|reasoning)|unsupported .{0,30}(effort|reasoning|model)"
                                  r"|(effort|reasoning)\b.{0,40}(not supported|invalid|unsupported)"
                                  r"|(unknown|unrecognized|invalid|unexpected) (option|flag|argument|parameter)\b.{0,60}(effort|reasoning|thinking|model)"),
+    ("quota", r"quota (exceeded|exhausted|limit)|rate[- ]?limit(ed)?|\b429\b|usage limit reached|"
+              r"credits? (exhausted|depleted)|weekly limit reached|credits? balance .{0,20}too low|resource_exhausted|out of (ai )?credits"),
     ("auth", r"not logged in|please run /login|authentication (failed|required)|unauthorized|\b401\b|invalid api key"),
     ("transport", r"connection (reset|refused|closed)|econnreset|etimedout|socket hang up|network (error|is unreachable)"
                   r"|service unavailable|\b50[234]\b|overloaded"),
@@ -4980,6 +5519,12 @@ def _queue_route_fallback(con, run: dict, task: dict, d: dict) -> bool:
     keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
     if reason == "auth":
         keys.append(routing.harness_demotion_key(d.get("harness")))  # every route on a signed-out harness fails alike
+    if reason == "quota":
+        # Only a verified provider/account/pool receipt can demote siblings.
+        # Differently authenticated accounts are never inferred to share quota.
+        candidate = (d.get("route") or {}).get("candidate") or {}
+        if pooled := routing.verified_shared_quota_pool_key(candidate):
+            keys.append(pooled)
     for key in keys:
         con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
                     "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
@@ -4994,6 +5539,14 @@ def _queue_route_fallback(con, run: dict, task: dict, d: dict) -> bool:
                         "effort": d.get("effort"), "reason": reason, "classification": d.get("terminal_classification"),
                         "exit_code": d.get("exit_code"), "stderr_tail": detail, "demoted_until": expires,
                         "declared": declared})
+    # Authentication/authorization failures are hard security stops: a retry on
+    # another model or account would silently bypass the operator's permissions.
+    if reason == "auth" and not declared:
+        state.update_task(con, run["id"], tid, status="blocked",
+                          pause_reason=f"authorization failure on {d.get('triple')}; operator intervention required")
+        state.emit(con, run, "task.blocked", f"{tid} stopped after authorization failure; no automatic fallback",
+                   task_id=tid, dispatch_id=d["id"])
+        return True
     if declared:
         state.update_task(con, run["id"], tid, status="blocked",
                           pause_reason=f"declared route {d.get('triple')} failed ({reason}); choose another: office dispatch {tid} --reroute")
@@ -5604,9 +6157,14 @@ def _quota_wall(run: dict, d: dict) -> str | None:
         return None
     from office import gates
     text = gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"])
-    for line in [ln.strip() for ln in text.splitlines() if ln.strip()][-5:][::-1]:
-        if not line.startswith("[office]") and gates._quota_signature(line):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("[office]")][-5:]
+    for line in lines[::-1]:
+        if gates._quota_signature(line):
             return line[:200]
+    # The adapter's own quota/account signatures (Hermes exits 2 for every failed turn, so its text decides).
+    sig = adapters.classify_failure(adapters.load_all().get(d.get("adapter_id") or ""), "\n".join(lines))
+    if sig and sig.get("attribution") == "quota/account":
+        return next((ln[:200] for ln in lines[::-1] if str(sig["pattern"]).lower() in ln.lower()), str(sig["pattern"]))
     return None
 
 
@@ -5626,8 +6184,20 @@ def _clear_route_cooldown(con, route: str, harness: str | None = None,
                 (_cooldown_key(route, harness, invocation_model_id),))
 
 
-def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = None) -> None:
-    """Persist a quota wall for this invocation across efforts, runs and processes."""
+_AI_CREDITS_WALL = re.compile(r"AI credits balance is too low", re.I)
+
+
+def _ai_credits_wall(run: dict, d: dict) -> bool:
+    """agy printed its account-wide AI-credits wall in the last log lines (not narration above them)."""
+    from office import gates
+    text = gates._log_text(d, paths.run_dir(run["id"]) / "dispatches" / d["id"])
+    return any(_AI_CREDITS_WALL.search(ln) and not ln.startswith("[office]")
+               for ln in [ln.strip() for ln in text.splitlines() if ln.strip()][-5:])
+
+
+def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = None) -> datetime | None:
+    """Persist a quota wall for this invocation across efforts, runs and processes. An agy AI-credits wall
+    also cools the whole harness; returns that expiry, else None."""
     cfg = state.pinned_config(run)
     minutes = max(0.0, float((cfg.get("quota") or {}).get("cooldown_minutes", 15)))
     now = now or datetime.now(timezone.utc)
@@ -5636,10 +6206,16 @@ def _record_route_cooldown(con, run: dict, d: dict, *, now: datetime | None = No
     limit = _usage_limit(gates._log_text(d, log_path), now=now)
     expires = limit.get("resets_at") if limit else None
     expires = expires or (now + timedelta(minutes=minutes))
-    con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
-                (_cooldown_key(d.get("triple") or "", d.get("harness"), d.get("invocation_model_id")),
-                 expires.astimezone(timezone.utc).isoformat(), now.isoformat()))
+    expires = expires.astimezone(timezone.utc)
+    keys = [_cooldown_key(d.get("triple") or "", d.get("harness"), d.get("invocation_model_id"))]
+    credits = d.get("harness") == "agy" and _ai_credits_wall(run, d)
+    if credits:
+        keys.append(routing.harness_demotion_key("agy"))
+    for key in keys:
+        con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(route) DO UPDATE SET expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                    (key, expires.isoformat(), now.isoformat()))
+    return expires if credits else None
 
 
 def job_notify_worker(con, run: dict, job: dict) -> dict:
@@ -5704,8 +6280,14 @@ def _amendment_undelivered(con, run: dict, payload: dict, d: dict) -> None:
                 and submit.block_id(con, d["id"]) == payload.get("block_id")
                 and current and current["amendment_id"] == payload.get("amendment_id")):
             return
+        from office import raising
+        covered = [r for r in raising.open_raises(con, run, dispatch_id=d["id"]) if raising.scope_covers(con, r)]
+        how = (f'office answer {tid} -- "{payload.get("amendment_id")} added the requested paths to your scope" '
+               "delivers it and resumes the worker, or office revoke "
+               if covered else "office revoke ")
         state.emit(con, run, "task.amend_undelivered", f"{tid} {payload.get('amendment_id')} not confirmed delivered "
-                   f"to {d['id']}; its blocker stays: office revoke {tid}, then office rerun {tid} --resume|--fresh", task_id=tid, dispatch_id=d["id"])
+                   f"to {d['id']}; its blocker stays: {how}{tid}, then office rerun {tid} --resume|--fresh",
+                   task_id=tid, dispatch_id=d["id"])
 
 
 def _launch_or_block(con, run: dict, task_id: str, **kw) -> str | None:

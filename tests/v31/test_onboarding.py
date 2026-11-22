@@ -20,7 +20,7 @@ import yaml
 from office import cli, configcmd, discovery, onboarding, version
 from office.state import OfficeError
 
-ALL_SIGNED_IN = {"claude": "found", "codex": "found", "agy": "found", "gemini": "found"}
+ALL_SIGNED_IN = {"claude": "found", "codex": "found", "agy": "found"}
 VERSIONS = {"claude": "2.1.300", "codex": "0.160.0", "agy": "1.3.2"}
 
 
@@ -115,7 +115,7 @@ def test_reviewer_and_executor_routes_follow_role_policy_not_historical_trust(h)
     why = {u["route"]: u["reason"] for u in reviewer["unavailable"]}
     assert "claude/opus@low" not in why
     executor = h.question("executor")
-    assert "agy/gemini-3.8-flash@medium" in executor["eligible"]
+    assert "agy/claude-sonnet-5-5@medium" in executor["eligible"]
     assert not [o for o in executor["options"] if o.get("seeded")]  # executor ships no seed: adaptive routing decides
     # agy has no reviewer launch profile, so it is never a reviewer choice.
     assert not [r for r in reviewer["eligible"] if r.startswith("agy/")]
@@ -126,7 +126,7 @@ def test_status_lists_installed_harnesses_with_sign_in_and_never_writes(h):
     assert data["free_models"] == {"enabled": False, "default": False, "options": ["enable", "disable"]}
     rows = {r["harness"]: r for r in data["harnesses"]}
     assert rows["claude"]["installed"] and rows["claude"]["version"] == "2.1.300" and rows["claude"]["auth"] == "found"
-    assert rows["gemini"]["installed"] is False
+    assert rows["kilo"]["installed"] is False  # a harness with no binary on this PATH
     assert not h.user.exists() and not h.claude_settings.exists()
 
 
@@ -166,20 +166,22 @@ def test_current_harness_detection_order(h, monkeypatch):
 # ------------------------------------------------------------------ apply
 
 def test_apply_writes_role_seeds_and_marker_in_one_write(h):
-    code, out = h.office("onboard", "--planner", "codex/astra@low", "--executor", "agy/gemini-3.8-flash@medium",
+    code, out = h.office("onboard", "--planner", "codex/astra@low", "--executor", "agy/claude-sonnet-5-5@medium",
                          "--reviewer", "codex/gpt-6-luna@high")
     assert code == 0 and "onboarding complete" in out and onboarding.DISCLAIMER in out, out
     data = h.user_data()
     roles = data["roles"]
     assert roles["planner"]["preferred_seed"] == [{"model_id": "astra", "harness": "codex", "effort": "low"}]
-    assert roles["executor"]["preferred_seed"] == [{"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}]
+    assert roles["executor"]["preferred_seed"] == [{"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
     luna = [{"model_id": "gpt-6-luna", "harness": "codex", "effort": "high"}]
     assert roles["plan_reviewer"]["preferred_seed"] == luna and roles["code_reviewer"]["preferred_seed"] == luna
     assert set(roles) == {"planner", "executor", "plan_reviewer", "code_reviewer"}  # no orchestrator, no visual reviewer
     assert data["onboarding"] == {"schema_version": onboarding.SCHEMA_VERSION}
     assert "&id" not in h.user.read_text()  # plain YAML a person can edit
     status = h.status()
-    assert status["due"] is False
+    # The schema is current; the harness round (claude and agy both run claude-sonnet-5-5) is owed until answered or skipped.
+    assert status["completed_schema"] == onboarding.SCHEMA_VERSION
+    assert status["due"] is True and status["reason"].startswith("harness overlap not yet answered")
     reviewer = next(q for q in status["questions"] if q["id"] == "reviewer")
     assert reviewer["current"] == {**reviewer["current"], "choice": "route", "value": "codex/gpt-6-luna@high",
                                    "eligible": True}
@@ -250,7 +252,9 @@ def test_skip_marks_complete_and_keeps_every_preference(h):
     code, out = h.office("onboard", "--skip")
     assert code == 0 and "preferences unchanged" in out, out
     assert h.user_data() == {**prefs, "onboarding": {"schema_version": onboarding.SCHEMA_VERSION,
-                                                       "free_models_enabled": True}}
+                                                       "free_models_enabled": True,
+                                                       "harness_overlap_seen": ["anthropic|claude-opus-5-5|agy", "anthropic|claude-opus-5-5|claude",
+                                                       "anthropic|claude-sonnet-5-5|agy", "anthropic|claude-sonnet-5-5|claude"]}}
     assert h.repo_config.read_bytes() == repo_before and h.claude_settings.read_bytes() == settings_before
     assert h.status()["due"] is False
     # Skipping again writes nothing.
@@ -270,15 +274,15 @@ def test_skip_takes_no_answers_and_apply_needs_one(h):
 # ------------------------------------------------------------------ versioning
 
 def test_schema_bump_reprompts_with_current_values_but_a_package_bump_does_not(h, monkeypatch):
-    h.office("onboard", "--executor", "agy/gemini-3.8-flash@medium")
-    assert h.status()["due"] is False
+    h.office("onboard", "--executor", "agy/claude-sonnet-5-5@medium")
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # the schema is current; only the round is owed
     monkeypatch.setattr(version, "current", lambda: "9.9.9")
-    assert h.status()["due"] is False  # a new package version alone never re-onboards
+    assert h.status()["reason"].startswith("harness overlap not yet answered")  # a new package version alone never re-onboards
     monkeypatch.setattr(onboarding, "SCHEMA_VERSION", onboarding.SCHEMA_VERSION + 1)
     data = h.status()
     assert data["due"] is True and "newer than the one completed" in data["reason"]
     executor = next(q for q in data["questions"] if q["id"] == "executor")
-    assert executor["current"]["value"] == "agy/gemini-3.8-flash@medium"  # prefilled, not erased
+    assert executor["current"]["value"] == "agy/claude-sonnet-5-5@medium"  # prefilled, not erased
     h.office("onboard", "--skip")
     assert h.user_data()["onboarding"]["schema_version"] == onboarding.SCHEMA_VERSION
     assert h.user_data()["roles"]["executor"]["preferred_seed"][0]["harness"] == "agy"
@@ -362,23 +366,23 @@ def test_an_interrupted_write_leaves_onboarding_due(h, monkeypatch):
 def test_answers_reach_the_existing_routing_inputs_unchanged(h):
     from office import candidates, db
     from office import config as cfg
-    h.office("onboard", "--planner", "claude/opus@medium", "--executor", "agy/gemini-3.8-flash@medium",
+    h.office("onboard", "--planner", "claude/opus@medium", "--executor", "agy/claude-sonnet-5-5@medium",
              "--reviewer", "codex/gpt-6-luna@high")
     config, _ = cfg.resolve(h.repo)
     assert config["routing"]["adaptive"]["weights"]["balanced"]["preference"] == 0.10  # weights untouched
     con = db.connect()
     try:
-        run = {"id": None, "gear": "full"}
+        run = {"id": None, "gear": None}
         planner = candidates.route_role(con, config, run, "planner", probe=False)
         assert planner["request"]["preferred_seed"] == [{"model_id": "opus", "harness": "claude", "effort": "medium"}]
         assert planner["selected"].endswith("/opus@medium")  # planner keeps its stronger advisory seed
         executor = candidates.route_role(con, config, run, "executor", probe=False)
         assert executor["request"]["preferred_seed"] == [
-            {"model_id": "gemini-3.8-flash", "harness": "agy", "effort": "medium"}]
+            {"model_id": "claude-sonnet-5-5", "harness": "agy", "effort": "medium"}]
         reviewer = candidates.route_role(con, config, run, "code_reviewer", probe=False)
         assert reviewer["selected"].endswith("/gpt-6-luna@high")
         visual = candidates.route_role(con, config, run, "visual_reviewer", probe=False)
-        assert visual["request"]["preferred_seed"][0]["model_id"] == "gemini-3.8-flash"  # its own shipped seed
+        assert visual["request"]["preferred_seed"][0]["model_id"] == "gemini-4-hydrogen"  # its own shipped seed
     finally:
         con.close()
 
@@ -395,7 +399,7 @@ def test_integration_missing_offers_three_actions_for_the_current_harness_only(h
     assert integ["state"] == "missing"
     assert data["harness"]["offer"] == ["install-recommended", "review-individually", "skip"]
     assert data["commands"]["install_recommended"] == "office install --only claude"
-    assert [i["id"] for i in integ["items"]] == ["session.start", "prompt.submit", "tool.pre", "read-rules"]
+    assert [i["id"] for i in integ["items"]] == ["session.start", "prompt.submit", "tool.pre", "turn.stop", "read-rules"]
     assert all(i["state"] == "missing" and i["change"] for i in integ["items"])
     assert "SessionStart hook in" in integ["items"][0]["change"]
     assert not h.claude_settings.exists() and not h.gemini_settings.exists()  # status never writes
@@ -415,7 +419,8 @@ def test_review_individually_applies_only_the_accepted_items(h):
     integ = h.status()["harness"]["integration"]
     assert integ["state"] == "partial"
     assert {i["id"]: i["state"] for i in integ["items"]} == {
-        "session.start": "current", "prompt.submit": "missing", "tool.pre": "missing", "read-rules": "missing"}
+        "session.start": "current", "prompt.submit": "missing", "tool.pre": "missing", "turn.stop": "missing",
+        "read-rules": "missing"}
     code, out = h.office("install", "--only", "claude", "--item", "read-rules")
     assert code == 0 and "settings updated" in out, out
     assert "Bash(ls)" in json.loads(h.claude_settings.read_text())["permissions"]["allow"]
@@ -508,10 +513,12 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
     env.office("install", "--only", "claude", check=0)  # "Install recommended"
     env.office("onboard", "--planner", "claude/opus@medium", "--executor", "office", "--reviewer", "keep", check=0)
     code, data = env.ojson("onboard", "--harness", "claude")
-    assert data["data"]["due"] is False and data["data"]["harness"]["integration"]["state"] == "installed"
+    # The schema is current; only the harness round is owed (claude and agy share a model here), so intake is not blocked by it.
+    assert data["data"]["reason"].startswith("harness overlap not yet answered")
+    assert data["data"]["harness"]["integration"]["state"] == "installed"
     assert not (env.home / ".gemini").exists()
     # The pending request continues: intake runs with no second invocation and pins the answers.
-    code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
@@ -522,10 +529,10 @@ def test_onboarding_then_intake_starts_a_run_pinned_to_the_answers(env, monkeypa
 def test_intake_is_not_blocked_while_onboarding_is_due_and_running_runs_keep_their_pin(env, monkeypatch):
     from office import state
     _onboarding_env(env, monkeypatch)
-    code, out = env.office("start", "fixture goal", "--gear", "direct+review", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "S", "--planner", "inline")
     assert code == 0, out  # headless or not-yet-onboarded: intake proceeds on current defaults
     con = env.con()
     run_id = con.execute("SELECT id FROM runs").fetchone()[0]
     pinned = state.get_run(con, run_id)["policy"]["roles"]["executor"].get("preferred_seed")
-    env.office("onboard", "--executor", "agy/gemini-3.8-flash@medium", check=0)
+    env.office("onboard", "--executor", "claude/sonnet@high", check=0)
     assert state.get_run(env.con(), run_id)["policy"]["roles"]["executor"].get("preferred_seed") == pinned

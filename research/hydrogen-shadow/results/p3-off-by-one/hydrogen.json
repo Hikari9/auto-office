@@ -1,0 +1,21 @@
+{
+  "case": "p3-off-by-one",
+  "commit": "0f07899f87bce8ff68b2a577df674c5e14a670e3",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/route_probe.py",
+      "line": 234,
+      "severity": "major",
+      "summary": "Removing `+ 1` in `window = min(ROLLING_WINDOW, len(rows))` excludes the decision being made from the denominator, yielding `window=0` and `max=0` on an empty `route_audit` table (blocking cold-start discovery with `rolling-cap` even at `max_trial_percent_rolling_20=100`, shifting the 15% thresholds from 6/13/19 to 7/14/20 recorded decisions, and breaking existing tests in `tests/test_route_probe.py`, `tests/v31/test_route_discovery_consumer_contract.py`, `tests/v31/test_inspect_route_discovery.py`, and `tests/v31/test_issue_494_scenarios.py`)."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"major\", \"file\": \"src/office/route_probe.py\", \"line\": 234, \"summary\": \"Removing `+ 1` in `window = min(ROLLING_WINDOW, len(rows))` excludes the decision being made from the denominator, yielding `window=0` and `max=0` on an empty `route_audit` table (blocking cold-start discovery with `rolling-cap` even at `max_trial_percent_rolling_20=100`, shifting the 15% thresholds from 6/13/19 to 7/14/20 recorded decisions, and breaking existing tests in `tests/test_route_probe.py`, `tests/v31/test_route_discovery_consumer_contract.py`, `tests/v31/test_inspect_route_discovery.py`, and `tests/v31/test_issue_494_scenarios.py`).\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "diff",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 69.7
+}

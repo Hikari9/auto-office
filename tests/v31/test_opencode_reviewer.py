@@ -151,10 +151,9 @@ def test_the_reviewer_profile_declares_the_pane_form_and_keeps_headless_run(open
 
 def test_validate_adapter_passes_on_the_seed(opencode):
     root = Path(__file__).resolve().parents[2]
-    proc = subprocess.run([sys.executable, str(root / "scripts" / "office_runtime.py"), "validate-adapter",
-                           str(root / "adapters" / "seed" / "opencode.yaml")], capture_output=True, text=True,
-                          cwd=str(root))
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    from office import harnesscmd
+    res = harnesscmd.validate(None, file=str(root / "adapters" / "seed" / "opencode.yaml"))
+    assert res.exit_code == 0, res.lines
 
 
 def test_the_agent_file_names_the_reply_file_and_nothing_else_to_write(opencode):

@@ -1,0 +1,21 @@
+{
+  "case": "pr-1176",
+  "commit": "c2e2b69b63845ef241fc9576f89cccd99b5c5c97",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/routecmd.py",
+      "line": 88,
+      "severity": "major",
+      "summary": "Because the `not installed` and `not has_profile` refusal checks above are still gated on `role == \"executor\"`, the new `role in hydrogen_trials.REVIEW_ROLES` branch leaves `refusal` as `None` and reports `dispatches=True` (\"dispatches (user allow; exact probe passed) as a voting code reviewer\") even when the harness is uninstalled or lacks a `reviewer` launch profile\u2014such as the shipped `agy` adapter\u2014causing `office route policy` to claim the route dispatches while `candidates.build_candidates` skips it at runtime."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"major\", \"file\": \"src/office/routecmd.py\", \"line\": 88, \"summary\": \"Because the `not installed` and `not has_profile` refusal checks above are still gated on `role == \\\"executor\\\"`, the new `role in hydrogen_trials.REVIEW_ROLES` branch leaves `refusal` as `None` and reports `dispatches=True` (\\\"dispatches (user allow; exact probe passed) as a voting code reviewer\\\") even when the harness is uninstalled or lacks a `reviewer` launch profile\u2014such as the shipped `agy` adapter\u2014causing `office route policy` to claim the route dispatches while `candidates.build_candidates` skips it at runtime.\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "pr",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 424.7
+}

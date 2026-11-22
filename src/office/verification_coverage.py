@@ -41,14 +41,19 @@ _SAFE_VALUES = frozenset({"-n", "--numprocesses", "--tb", "--maxfail", "--durati
 _SAFE_EQUALS = ("--tb=", "--maxfail=", "--durations=", "--dist=", "--color=", "-n=")
 
 
-def _tokens(command: str) -> list[str]:
-    """Parse a single simple shell invocation; refuse chains and substitutions."""
-    if any(ch in command for ch in ";&|<>`\n") or "$(" in command:
+def _simple_words(command: str) -> list[str]:
+    """Split a single simple shell invocation; refuse chains and substitutions."""
+    if any(ch in command for ch in ";&|<>`\n\r") or "$(" in command:
         return []
     try:
-        words = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
         return []
+
+
+def _tokens(command: str) -> list[str]:
+    """`_simple_words` without a leading `env` or variable assignments."""
+    words = _simple_words(command)
     if words and words[0] == "env":
         words.pop(0)
     while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
@@ -108,16 +113,31 @@ def _is_validate_script(command: str) -> bool:
     return words in (["scripts/validate.sh"], ["./scripts/validate.sh"])
 
 
+_FULL_SUITE_ARGV = (["scripts/validate.sh"], ["./scripts/validate.sh"],
+                    ["scripts/validate.sh", "--full"], ["./scripts/validate.sh", "--full"])
+
+
+def is_full_suite(command: str) -> bool:
+    """The full regression run `--pr` does not replace: exactly `scripts/validate.sh` or
+    `./scripts/validate.sh`, alone or with `--full`.
+
+    Shell launchers (`bash`, `sh`), `env`, variable prefixes, redirections, chaining and
+    comments are not classified, so they keep check_timeout_seconds (AMENDMENT A2)."""
+    return _simple_words(command) in _FULL_SUITE_ARGV
+
+
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "24c65e6e3cd90eb81d7ce777d5dc7798b05ae76714c3e618c925d7f693304157",
-    "scripts/select_pr_tests.py": "ebdf1a495c490bc1d81b758f6a27c9925ac07518d504887ef4cfe3da2b5ff5d5",
-    "tests/test_pr_test_selection.py": "e94154d0575e7a518a241e5f0c36e778d1c0bb6c9792a181a0d06835446ffd4b",
+    "scripts/validate.sh": "d4a2a80240af41596cd4a66abf36731753e5feef9a90c5c0d13096beb98617d6",
+    "scripts/select_pr_tests.py": "96e3fe6686dba9887976007c27b54ef9d5458c7ac6edfd26248f0a15c1101bf9",
+    "tests/test_pr_test_selection.py": "cfe11f97a9ab9066a95e3044b0a7c5355bef84ef5d0d9e4ef57dab565c7b75c5",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
-    "tests/v31/test_verification_coverage.py": "363c07d0fbd3963c492b8118625f4373ed304c6b77077190058aeddcb36f9a27",
+    "tests/v31/test_verification_coverage.py": "b3d477501a5eb200ed7e8ed7d7b41ecb02b2d777ff7a3867e8eeaa96018f1927",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
-    "tests/contracts/test_executor_policy.py": "088011a0d3992a695539925b2e186c206862fb63121e5b038d45e56a1fcec746",
-    "tests/contracts/test_route_parity.py": "abbfc5288b84e1a9af689e971f2e325902b01af1aae2f5a78d12331f613aa689",
+    "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
+    "tests/contracts/test_plugin_distribution.py": "0d3178f088e954a59a1b8de9fb2b4e7a2117324ce74dcd0ce00a27875034d7b4",
+    "tests/contracts/test_route_parity.py": "68470936786223ba23971cb1c714220e67e9dad9c0f141b3c293ce36df0d219d",
+    "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
     "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",
@@ -125,6 +145,7 @@ _SCOPED_GATE_SHA256 = {
     "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
     "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
     "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
+    "tests/contracts/test_route_policy_effective.py": "1fef32764cf8c2ba782a7aab984fc5f14dc7dc8f63a85688c154e8be2dd8355d",
 }
 
 

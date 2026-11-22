@@ -1,8 +1,8 @@
 """Update the installed Auto Office runtime from its latest release."""
 from __future__ import annotations
 
-import json
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -14,13 +14,19 @@ from office import version
 from office.result import Result
 
 
-PYPI_JSON = "https://pypi.org/pypi/auto-office/json"
+# Auto Office is not on PyPI: the `auto-office` name there belongs to an unrelated project. The release
+# is the one `src/office/_version.py` declares on GitHub main.
+RELEASE_VERSION_URL = "https://raw.githubusercontent.com/Hikari9/auto-office/main/src/office/_version.py"
 
 
 def _latest_release(timeout: float = 5) -> str:
-    request = urllib.request.Request(PYPI_JSON, headers={"User-Agent": "auto-office-update-check"})
+    request = urllib.request.Request(RELEASE_VERSION_URL, headers={"User-Agent": "auto-office-update-check"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return str(json.load(response)["info"]["version"])
+        text = response.read().decode("utf-8")
+    found = re.search(r'^__version__ = "([^"]+)"', text, re.M)
+    if not found:
+        raise ValueError("no __version__ in the GitHub release version file")
+    return found.group(1)
 
 
 def _release(ver: str) -> tuple[int, ...]:
@@ -90,7 +96,7 @@ def check() -> Result:
                 lines.append(f"update available: Auto Office {current} → {latest}")
                 available = True
             else:
-                lines.append(f"Auto Office {current} is current with PyPI (latest: {latest})")
+                lines.append(f"Auto Office {current} is current with GitHub main (latest: {latest})")
 
     if available:
         return Result(lines=lines, next="ask the user during intake whether to run office update")
@@ -134,7 +140,7 @@ def update() -> Result:
                           next="resolve the git error, then run office update")
         origin = f"pulled Auto Office source at {source} and reinstalled it with {manager}"
     else:
-        origin = f"upgraded the auto-office tool from PyPI with {manager}"
+        origin = f"upgraded the auto-office tool from GitHub with {manager}"
 
     # Ensure hook integration and the runtime registry point at the updated CLI.
     try:

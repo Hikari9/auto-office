@@ -7,6 +7,7 @@ pinned snapshot, never from the live files.
 """
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -19,14 +20,22 @@ from office.util import sha256_file, sha256_obj
 NON_CONFIGURABLE_KEYS = {"schema_version", "config_precedence", "hard_invariants",
                          route_policy.PROVENANCE_KEY, route_policy.DIGEST_KEY}
 RUN_GEARS = ("XS", "S", "M", "L", "XL")
-# Existing runs pin the old representation and its gates; never rewrite their stored gear.
-LEGACY_GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
-# The XS-XL gear whose funding each legacy name is closest to, shown when a legacy name starts a run.
-LEGACY_EQUIVALENT = {"direct": "XS", "direct+review": "S", "light": "S", "quick": "M", "express": "M", "full": "XL"}
-GEARS = (*RUN_GEARS, *LEGACY_GEARS)
+# Explicit opt-in for new work (a new project, or a new component with nothing it must fit into). Never auto-fit.
+SPECIAL_GEARS = ("greenfield",)
+GEARS = (*RUN_GEARS, *SPECIAL_GEARS)
 PLAYBOOKS = ("Change", "Restructure", "Investigate", "Prototype", "Visual")
 BLAST_RADIUS = ("local", "repo", "production", "production-data")
 SIZE_CLASSES = RUN_GEARS
+
+
+def require_supported_gear(gear: str | None) -> None:
+    """Refuse a gear this release no longer has (a run pinned before the old presets were removed)."""
+    if gear and gear not in GEARS:
+        from office.state import Usage
+        raise Usage("gear-removed",
+                    f"this run is pinned to gear {gear!r}, which Office no longer has; pick XS/S/M/L/XL",
+                    next_step="start a new run with --gear XS|S|M|L|XL, and end this one with "
+                              "office close --abandon '<reason>'")
 
 
 def default_config_path() -> Path:
@@ -114,6 +123,7 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
     warnings: list = []
     effective = default
     provenance = {key: "shipped" for key in _policy_leaves(default)}
+    user_reserves: dict[str, float] = {}
     for tier, data in layers:
         if not isinstance(data, dict):
             raise ValueError(f"{tier} config must be a mapping")
@@ -150,9 +160,13 @@ def resolve(repo_root: Path | None, sets: list[str] | None = None,
         for key in _policy_leaves(kept):
             if not any(key == k or key.startswith(k + ".") for k in ignored):
                 provenance[key] = "run" if tier == "prompt_cli" else tier
+        _record_user_reserves(kept, user_reserves)
+    _resolve_quota_reserves(effective, default, user_reserves)
     effective[route_policy.PROVENANCE_KEY] = {k: provenance.get(k, "shipped") for k in _policy_leaves(effective)}
     from office import adaptive
-    problems = (adaptive.validate(effective) + route_policy.validate_discovery(effective)
+    from office import harness_preference, hydrogen_trials
+    problems = (adaptive.validate(effective) + hydrogen_trials.validate(effective) + harness_preference.validate(effective)
+                + route_policy.validate_discovery(effective)
                 + route_policy.validate_user_policy(effective) + route_policy.validate_ceiling(effective))
     if problems:
         raise ValueError("; ".join(problems))
@@ -320,8 +334,7 @@ def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview:
              adversarial: bool = False) -> str:
     """Pin complexity gear independently of blast-radius and irreversibility risk.
 
-    Old names remain explicit compatibility presets for existing pinned runs; no
-    new auto-fit silently chooses one. Unknown complexity is M, not guessed XS.
+    Unknown complexity is M, not guessed XS.
     """
     if requested:
         return requested
@@ -336,9 +349,9 @@ def fit_gear(requested: str | None, risk: dict, volume: bool = False, interview:
 def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bool = False,
                    adversarial: bool = False) -> str:
     """Human-readable, immutable at intake. Risk is explained by separate gates."""
-    if gear in LEGACY_GEARS:
-        return (f"explicit legacy preset {gear} (closest to {LEGACY_EQUIVALENT[gear]}): "
-                "its pinned review and release semantics are preserved")
+    if gear == "greenfield":
+        return ("explicit greenfield build: one strong executor owns 2-3 large phases in one task; "
+                "one independent end-of-build convergence review, with risk and release gates intact")
     if risk.get("size_class") in RUN_GEARS:
         return (f"intake complexity {risk['size_class']}: scope, coupling and coordination are "
                 "funded at this gear; safety review floors remain independent")
@@ -348,7 +361,7 @@ def gear_rationale(gear: str, risk: dict, *, volume: bool = False, interview: bo
             "no reliable task-size evidence at intake: conservative M pending planning")
 
 
-def resolve_gates(gear: str, risk, config: dict) -> dict:
+def resolve_gates(gear: str, risk, config: dict, fastlane: dict | None = None) -> dict:
     """`risk` is the run's risk record (a bare bool is the pre-#420 high flag: no floor applies).
     Gear tunes ceremony; it never drops independent code review below what the risk classification implies."""
     from office import risk as risk_mod
@@ -361,7 +374,14 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         return bool(risk_high) if v == "risk_forced" else v
 
     plan_review = value(preset.get("plan_review", False))
+    if gear == "greenfield" and not (risk_mod.classification(record) == risk_mod.LOW and record.get("classified_by") == "intake"):
+        # Only a low risk the user declared at intake skips plan review. Unknown risk, and risk the planner
+        # classifies itself, keep one independent review: a planner may not exempt its own plan (#936).
+        plan_review = True
     code_review = value(preset.get("independent_code_review", False))
+    if fastlane is not None:
+        # #1297: fastlane always gets one independent code review, at every gear (XS's preset funds it only on risk).
+        code_review = True
     code_review, floor = risk_mod.floor_gates(record, code_review)
     plan_rounds = preset.get("plan_review_max_rounds")
     code_rounds = preset.get("code_review_max_rounds")
@@ -373,12 +393,14 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
     verification = config.get("verification") or {}
     from office import contract
     review_contract = contract.default_for(config)
+    if gear == "greenfield" and review_contract != contract.CONVERGENCE:
+        raise ValueError("greenfield requires the convergence-v1 review contract; do not use v3.1 per-task review")
     if review_contract == contract.CONVERGENCE:
         # #337: every RECHECK sequence stops at three substantive rounds.
         plan_rounds = code_rounds = contract.MAX_ROUNDS
     gates = {
         "run_gear": gear,
-        "gear_model_version": "run-gear-1" if gear in RUN_GEARS else "legacy-pinned",
+        "gear_model_version": "run-gear-1",
         # Pinned per run (#337): the review contract this run keeps for its life.
         "review_contract": review_contract,
         # `policy_optional` / `shallow` / `cost_bounded` fund the gate; they
@@ -401,6 +423,11 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
         "review_reprompt_max": int(verification.get("review_reprompt_max", 3)),
         "dedicated_planner": planner is True,
     }
+    # #1233: the gears whose tasks get Office's own per-task audit (`review.self_review_audit_gears`, XL by
+    # default), pinned for this run's life like the round cap.
+    from office import self_review_subagents
+    gates[self_review_subagents.AUDIT_GEARS_KEY] = self_review_subagents.audit_gears(
+        (config.get("review") or {}).get(self_review_subagents.AUDIT_GEARS_KEY))
     if review_contract == contract.CONVERGENCE:
         # #423: the configurable substantive-round cap for lane and shared-scope
         # reviews, pinned at start so resume and recovery keep it.
@@ -412,8 +439,86 @@ def resolve_gates(gear: str, risk, config: dict) -> dict:
     return gates
 
 
-def quota_reserve_percent(config: dict) -> float:
-    return float(((config.get("quota") or {}).get("reserve_percent", 5)))
+# quota.reserve_percent_by_role key that protects each routed role. Roles not listed fall back to quota.reserve_percent.
+RESERVE_KEY_BY_ROLE = {"executor": "executor", "worker": "executor", "planner": "executor",
+                       "plan_reviewer": "reviewer", "code_reviewer": "reviewer"}
+RESERVE_FAMILIES = ("executor", "reviewer")
+
+
+def _record_user_reserves(kept: dict, into: dict) -> None:
+    """Record the reserve numbers a non-shipped layer sets: `reserve_percent` and each `reserve_percent_by_role` family.
+    A blank or non-numeric value is unset, as deep_merge treats it."""
+    quota = kept.get("quota")
+    if not isinstance(quota, dict):
+        return
+    scalar = quota.get("reserve_percent")
+    if _is_percent(scalar):
+        into["reserve_percent"] = float(scalar)
+    by_role = quota.get("reserve_percent_by_role")
+    if isinstance(by_role, dict):
+        for family, value in by_role.items():
+            if _is_percent(value):
+                into[f"reserve_percent_by_role.{family}"] = float(value)
+
+
+def reserve_origins(files: dict[str, str | None]) -> dict[str, str]:
+    """Which layer (user, repo or shipped) supplies each family's protected reserve, by the same
+    precedence `_resolve_quota_reserves` applies: a by-role value of any layer, then a scalar, then shipped."""
+    per_tier: dict[str, dict[str, float]] = {}
+    for tier in ("user", "repo"):
+        if files.get(tier) is not None:
+            per_tier[tier] = {}
+            data = yaml.safe_load(files[tier])
+            _record_user_reserves(data if isinstance(data, dict) else {}, per_tier[tier])
+    out = {}
+    for family in RESERVE_FAMILIES:
+        for key in (f"reserve_percent_by_role.{family}", "reserve_percent"):
+            tier = next((t for t in ("repo", "user") if key in per_tier.get(t, {})), None)
+            if tier:
+                out[family] = f"{tier} {'quota.' + key}"
+                break
+        else:
+            out[family] = "shipped default"
+    return out
+
+
+def _is_percent(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _resolve_quota_reserves(effective: dict, default: dict, user_set: dict[str, float]) -> None:
+    """Pin each family's reserve as a number. Precedence, highest first: a user by-role value, a user
+    quota.reserve_percent (0 included), the shipped by-role value, the shipped quota.reserve_percent.
+    A run pins what this returns, so a read never consults the installed default."""
+    quota = effective.get("quota")
+    if not isinstance(quota, dict):
+        return
+    shipped = default.get("quota") or {}
+    shipped_by_role = shipped.get("reserve_percent_by_role") or {}
+    by_role = {k: v for k, v in (quota.get("reserve_percent_by_role") or {}).items() if v is not None}
+    for family in RESERVE_FAMILIES:
+        candidates = (user_set.get(f"reserve_percent_by_role.{family}"), user_set.get("reserve_percent"),
+                      shipped_by_role.get(family), shipped.get("reserve_percent", 5))
+        by_role[family] = next(v for v in candidates if v is not None)
+    quota["reserve_percent_by_role"] = by_role
+
+
+def quota_reserve_percent(config: dict | None, role: str | None = None) -> float:
+    """The protected quota reserve for `role`, read from a config or a pinned run policy:
+    quota.reserve_percent_by_role under the role's key, else quota.reserve_percent.
+    resolve() has already pinned both families to numbers; the scalar is read only for roles outside them."""
+    quota = (config or {}).get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role")
+    key = RESERVE_KEY_BY_ROLE.get(role or "")
+    if key is not None and isinstance(by_role, dict) and by_role.get(key) is not None:
+        return float(by_role[key])
+    return float(quota.get("reserve_percent", 5))
+
+
+@functools.lru_cache(maxsize=None)
+def shipped_quota_reserve_percent(role: str | None = None) -> float:
+    """The shipped default reserve for `role`, for callers that hold no pinned policy."""
+    return quota_reserve_percent(load_yaml(default_config_path()) or {}, role)
 
 
 def balanced_money_band_percent(config: dict) -> float:

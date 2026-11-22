@@ -293,3 +293,51 @@ def test_plan_format_names_the_visual_state_verbs():
     from office import briefs
     for word in ("click", "hover", "type", "wait", "scroll", "navigate <url>", "-> expect <selector>"):
         assert word in briefs.PLAN_FORMAT, word
+
+
+@pytest.mark.approved
+def test_a_contract_amendment_covering_the_scope_request_names_answer_not_amend_again(env):
+    """#799: the amendment granted every requested path but its delivery to the worker was not confirmed, so the
+    block stays. The guidance then says the scope is covered and that office answer resumes the worker,
+    instead of telling the orchestrator to amend again or that the answer leaves the contract unchanged."""
+    from conftest import PLAN_ONE
+    wenv, wt = _live(env)
+    code, out = env.office("raise", "--kind", "scope-request", "--path", "README.md", "--", "docs need the flag",
+                           cwd=wt, env=wenv)
+    assert code == 0, out
+    env.office("wait", "--timeout", "2", "--poll", "0.2", env=EXTERNAL)  # the raise is reported once
+    env.write_plan(PLAN_ONE.replace("scope: calc.py", "scope: calc.py, README.md"))
+    code, out = env.office("amend", "T1", "--contract", "--", "add README.md", env=EXTERNAL)
+    assert code == 0, out
+    env.office("wait", "--timeout", "2", "--poll", "0.2", env=EXTERNAL)
+    assert task_row(env)["status"] == "blocked", task_row(env)  # a headless worker gets no confirmed prompt
+    code, out = env.office("status", env=EXTERNAL)
+    assert "already covers these paths" in out and "scope changes only with" not in out, out
+    code, out = env.office("answer", "T1", "--", "README.md is yours now", env=EXTERNAL)
+    assert code == 0 and "already covers the requested paths" in out and "did not change its contract" not in out, out
+    assert task_row(env)["status"] != "blocked", task_row(env)
+    code, out = env.office("status", cwd=wt, env=wenv)  # the worker's next command carries the answer
+    assert "already added README.md to your scope" in out, out
+
+
+def test_the_undelivered_amendment_notice_names_answer_when_the_scope_covers_the_request(monkeypatch):
+    from office import dispatch, raising
+    emitted = []
+    monkeypatch.setattr(dispatch.state, "get_task", lambda con, run_id, tid: {"current_dispatch_id": "D1",
+                        "status": "blocked", "pause_reason": "x"})
+    monkeypatch.setattr(dispatch.state, "emit", lambda con, run, kind, summary, **kw: emitted.append(summary))
+    monkeypatch.setattr("office.submit.self_blocked", lambda task: True)
+    monkeypatch.setattr("office.submit.block_id", lambda con, did: "B1")
+    monkeypatch.setattr(raising, "open_raises", lambda con, run, dispatch_id=None: [{"kind": "scope-request"}])
+    monkeypatch.setattr(raising, "scope_covers", lambda con, r: True)
+
+    class Con:
+        def execute(self, *a):
+            class Row:
+                def fetchone(self):
+                    return {"amendment_id": "A6"}
+            return Row()
+    monkeypatch.setattr(dispatch.db, "transaction", lambda con: __import__("contextlib").nullcontext())
+    dispatch._amendment_undelivered(Con(), {"id": "r"}, {"task_id": "T1", "block_id": "B1", "amendment_id": "A6"},
+                                    {"id": "D1"})
+    assert emitted and emitted[0].count("office answer T1") == 1 and "A6 added the requested paths" in emitted[0], emitted

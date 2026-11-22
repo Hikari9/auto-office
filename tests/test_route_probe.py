@@ -463,10 +463,16 @@ def test_an_interrupted_probe_is_abandoned_and_still_counted(world, monkeypatch)
 
 # ------------------------------------------------------------------ refusals
 
+def _live_deny(world, *denied):
+    """The user's live routing policy: routing reads it, not the run's pinned copy, whenever it is readable (#1120)."""
+    (world.tmp / "user-config.yaml").write_text(
+        "routing:\n  user_policy:\n    denied_models: [" + ", ".join(f'"{d}"' for d in denied) + "]\n")
+
+
 def test_denied_routes_are_never_probed(world):
     con = world.con()
     run = world.run()
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["codex/gpt-6.1-sol@high"]
+    _live_deny(world, "codex/gpt-6.1-sol@high")
     refused = ensure(world, con, run)
     assert refused == Refused("route-denied") and "denied" in refused.detail
     assert world.launches() == []
@@ -477,7 +483,7 @@ def test_denied_routes_are_never_probed(world):
 def test_denying_a_harness_blocks_every_route_on_it(world):
     con = world.con()
     run = world.run()
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["harness:codex"]
+    _live_deny(world, "harness:codex")
     assert ensure(world, con, run) == Refused("route-denied")
 
 
@@ -656,7 +662,7 @@ def test_every_outcome_appends_its_event_under_the_callers_attempt(world):
     assert kinds(con, "A1") == ["probe-reserved", "probe-result"]
     ensure(world, con, run, attempt="A2")
     assert kinds(con, "A2") == ["probe-cache-hit"]
-    run["policy"]["routing"]["user_policy"]["denied_models"] = ["harness:codex"]
+    _live_deny(world, "harness:codex")
     ensure(world, con, run, attempt="A3")
     assert kinds(con, "A3") == ["probe-refused"]
     first = events(con, attempt_id="A1")
@@ -832,7 +838,7 @@ def test_codex_header_is_read_only_from_the_first_fenced_block():
 
 def test_a_harness_with_no_metadata_readback_is_never_probed(world):
     con = world.con()
-    assert "agy" not in route_probe._IDENTITY_READBACK
+    assert {"pi", "hermes"}.isdisjoint(route_probe._IDENTITY_READBACK)  # harnesses with no readback yet
     world.monkeypatch.setattr(route_probe, "_IDENTITY_READBACK", {})
     refused = ensure(world, con, world.run())
     assert refused == Refused("no-identity-readback")
@@ -1027,6 +1033,96 @@ def test_a_cleanup_that_cannot_be_observed_is_never_reported_clean(world, monkey
     assert route_probe._terminate_tree(proc.pid, tracker, proc=proc) is False
 
 
+def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
+    """#1296: a long-lived Claude hook daemon outside the probe starts a child for the
+    probe's session and never reaps it. The exited child stays a zombie that carries
+    the probe's lineage, but it runs nothing, so cleanup is still confirmed."""
+    nonce = "nonce-zombie-" + uuid.uuid4().hex
+    env = {**os.environ, route_probe.NONCE_ENV: nonce}
+    zombie = route_probe.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"],
+                                          env=env, start_new_session=True)
+    try:
+        leader = route_probe.subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        leader.wait()
+        tracker = route_probe._Tracker(nonce, None)
+        assert zombie.pid in tracker.observe(None)
+        deadline = time.time() + 10
+        while time.time() < deadline:  # exited but not reaped: this test process is its parent
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(zombie.pid)], capture_output=True, text=True).stdout
+            if state.strip().startswith("Z"):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the child never became a zombie")
+        assert zombie.pid in tracker.scan(None)
+        assert route_probe._running({zombie.pid}) == set()
+        assert route_probe._terminate_tree(leader.pid, tracker, proc=leader, term_wait=0.2, kill_wait=0.2) is True
+    finally:
+        zombie.wait()
+
+
+def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeypatch, tmp_path):
+    """A live holder whose identity cannot be read is never dropped (#1296 review)."""
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {os.getpid()})
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: None)
+    tracker = route_probe._Tracker("n-holder", tmp_path)
+    assert tracker.scan(None) is None
+    gone = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    gone.wait()
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {gone.pid})
+    assert tracker.scan(None) == set()
+    # a holder is recorded only when the pid still holds the workspace after its start was read
+    calls = iter([{os.getpid() + 1_000_000}, set()])
+    monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: next(calls))
+    monkeypatch.setattr(route_probe, "process_start", lambda pid: "Sat Jan  1 00:00:00 2000")
+    assert tracker.scan(None) == set() and os.getpid() + 1_000_000 not in tracker.seen
+
+
+def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
+    """An unreadable ps row may be a live process, so cleanup fails closed (#1296 review)."""
+    garbled = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()} S+ not-a-start-time\n", stderr="")
+    monkeypatch.setattr(route_probe.subprocess, "run", lambda *a, **k: garbled)
+    assert route_probe._running({os.getpid()}) is None
+
+
+def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, monkeypatch):
+    """A recovered pid whose start time no longer matches is not ours (#1296 review)."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    sent = []
+    real = os.killpg
+    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)
+    route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-recovered", None), seed=True,
+                                start="Sat Jan  1 00:00:00 2000", term_wait=0.2, kill_wait=0.2)
+    assert sent == []
+
+
+def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
+    """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    sent = []
+    real = os.killpg
+    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
+    route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
+                                term_wait=0.2, kill_wait=0.2)
+    assert sent == []
+
+
+def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
+    assert route_probe._running({os.getpid()}) == {os.getpid()}
+    mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()
+    assert route_probe._running({os.getpid()}, {os.getpid(): mine}) == {os.getpid()}
+    # the same pid with another start time is a reused pid: not ours to wait for or signal
+    assert route_probe._running({os.getpid()}, {os.getpid(): "Sat Jan  1 00:00:00 2000"}) == set()
+    # a pid the tracker recorded no start time for has no identity to check: fail closed
+    assert route_probe._running({os.getpid()}, {}) is None
+    monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
+    assert route_probe._running({os.getpid()}) is None
+
+
 # ------------------------------------------------------------------ concurrent database setup (C3)
 
 def test_a_lock_that_outlasts_the_wait_is_a_refusal_not_a_crash_or_a_launch(world, monkeypatch):
@@ -1114,7 +1210,7 @@ def test_allocation_reports_per_run_probe_and_trial_use(world):
 
 # ------------------------------------------------------------------ claude: effort read back from the session transcript
 
-CLAUDE_ROUTE = "claude/claude-haiku-5-5@high"  # a discovery-eligible, not yet dispatchable claude row
+CLAUDE_ROUTE = "claude/claude-haiku-5-5@medium"  # a discovery-eligible, not yet dispatchable claude row (haiku@high became dispatchable)
 
 
 def claude_ensure(world, con):
@@ -1136,7 +1232,7 @@ def test_claude_opus_low_is_dispatchable_on_recorded_probe_evidence():
 def test_claude_passes_when_its_transcript_names_the_exact_model_and_effort(world):
     rec = claude_ensure(world, world.con())
     assert (rec["result"], rec["reason_class"]) == ("pass", None)
-    assert "claude-haiku-5-5 at effort high" in rec["detail"]
+    assert "claude-haiku-5-5 at effort medium" in rec["detail"]
 
 
 def test_the_claude_transcript_directory_is_removed_after_the_probe(world):
@@ -1232,3 +1328,92 @@ def test_recovery_removes_a_dead_claude_probes_transcript_folder(world):
         assert not folder.exists()
     finally:
         ws.remove()
+
+
+def test_status_reads_probe_cache_on_plain_sqlite_connection_without_row_factory(world):
+    with world.con() as con:
+        res = ensure(world, con, world.run())
+        assert res["result"] == "pass"
+
+    plain = sqlite3.connect(world.db_path)
+    try:
+        assert plain.row_factory is None
+        c = cand()
+        rec = route_probe.status(plain, c)
+        assert rec is not None
+        assert rec["fresh"] is True
+        assert rec["result"] == "pass"
+        assert rec["key"] == route_probe.key(c, route_probe._adapter(c))
+    finally:
+        plain.close()
+
+
+def test_status_reads_same_record_with_dict_row_factory(world):
+    with world.con() as con:
+        assert ensure(world, con, world.run())["result"] == "pass"
+        expected = route_probe.status(con, cand())
+        assert expected is not None
+
+    with sqlite3.connect(world.db_path) as con:
+        con.row_factory = lambda cursor, row: dict(zip((col[0] for col in cursor.description), row))
+        assert route_probe.status(con, cand()) == expected
+
+
+def test_reserve_and_expire_stale_work_on_plain_sqlite_connection_without_row_factory(world):
+    with world.con() as con:
+        pass  # ensure schema exists
+
+    c = cand()
+    run = world.run()
+    old_stamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    plain = sqlite3.connect(world.db_path)
+    try:
+        assert plain.row_factory is None
+        first = route_probe.reserve(plain, run, c, attempt_id="att-old", context=ctx(world))
+        assert isinstance(first, dict) and first.get("reserved") is True
+
+        # Second reserve() hits _inflight() on the plain connection and returns Refused("probe-in-flight", ...).
+        second = route_probe.reserve(plain, run, c, attempt_id="att-new", context=ctx(world))
+        assert isinstance(second, Refused)
+        assert second.reason == "probe-in-flight"
+
+        # Backdate reservation so expire_stale() hits _rows_dicts, _close, and _reserved_event on plain connection.
+        plain.execute("UPDATE route_probe_reservations SET reserved_at=? WHERE id=?", (old_stamp, "att-old"))
+        plain.commit()
+        route_probe._release("att-old")
+
+        expired = route_probe.expire_stale(plain)
+        assert expired == ["att-old"]
+        assert route_probe.status(plain, c) is None
+    finally:
+        plain.close()
+
+
+def test_reserve_and_expire_stale_read_reservations_with_dict_row_factory(world):
+    """#1160: the reservation reads (_inflight, and expire_stale through _rows_dicts) under a dict row_factory."""
+    with world.con() as con:
+        pass  # ensure schema exists
+
+    c = cand()
+    run = world.run()
+    old_stamp = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    con = sqlite3.connect(world.db_path)
+    try:
+        con.row_factory = lambda cursor, row: dict(zip((col[0] for col in cursor.description), row))
+        first = route_probe.reserve(con, run, c, attempt_id="att-old", context=ctx(world))
+        assert isinstance(first, dict) and first.get("reserved") is True
+        second = route_probe.reserve(con, run, c, attempt_id="att-new", context=ctx(world))
+        assert isinstance(second, Refused) and second.reason == "probe-in-flight"
+
+        con.execute("UPDATE route_probe_reservations SET reserved_at=? WHERE id=?", (old_stamp, "att-old"))
+        con.commit()
+        route_probe._release("att-old")
+
+        assert route_probe.expire_stale(con) == ["att-old"]
+        row = con.execute("SELECT status FROM route_probe_reservations WHERE id='att-old'").fetchone()
+        assert isinstance(row, dict) and row["status"] != "reserved"
+        assert route_probe.status(con, c) is None
+    finally:
+        con.close()

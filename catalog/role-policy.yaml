@@ -12,29 +12,39 @@
 version: 1
 
 executor:
+  # Rico 2026-11-19 (AA v5 table): Haiku 5.5 high is the XS executor only. It has no allowance above XS.
   claude@2/claude-haiku-5-5:
-    allow: {medium: [XS], high: [S]}
-    deny: {high: [XS], xhigh: all, max: all}
-  agy@1/gemini-3.8-flash:
-    allow: {low: [XS], medium: [S]}
-    deny: {high: [XS, S], xhigh: all, max: all}
+    allow: {medium: [XS], high: [XS]}
+    deny: {xhigh: all, max: all}
+  # Rico 2026-11-19: Gemini 3.8 Flash is retired in every role (superseded by Gemini 4 Hydrogen).
+  agy@1/gemini-3.8-flash: &retired
+    deny: {"*": all}
   codex@0/gpt-6.1-terra:
-    allow: {low: [XS], medium: [S, M], high: [L]}
-    deny: {high: [XS, S, M], xhigh: all, max: all}
-  claude@2|agy@1/claude-sonnet-5-5:
-    allow: {medium: [M], high: [L]}
-    deny: {high: [XS, S, M], xhigh: all, max: all}
+    allow: {low: [XS], medium: [S, M], high: [M, L]}
+    deny: {high: [XS, S], xhigh: all, max: all}
+  claude@2/claude-sonnet-5-5:
+    allow: {medium: [S], high: [M]}
+    deny: {high: [XS, S], xhigh: all, max: all}
+  agy@1/claude-sonnet-5-5:
+    allow: {medium: [S], high: [M]}
+    deny: {high: [XS, S], xhigh: all, max: all}
   opencode/glm-5.3-flash:
     allow: {max: [M]}
   # Claude Code only. An Opus executor on agy is never automatic, so its XL medium is denied too.
   claude@2/claude-opus-5-5:
-    allow: {medium: [XL]}
-    deny: {medium: [XS, S, M, L], high: all, xhigh: all, max: all}
+    allow: {medium: [L], high: [XL]}
+    deny: {medium: [XS, S, M], high: [XS, S, M, L], xhigh: all, max: all}
   agy@1/claude-opus-5-5:
     deny: {medium: all, high: all, xhigh: all, max: all}
   codex@0/gpt-6.1-sol:
     allow: {medium: [XL]}
     deny: {high: all, xhigh: all, max: all}
+  codex@0/gpt-6.2-sol:
+    allow: {medium: [L], high: [XL]}
+    deny: {low: all, xhigh: all, max: all}
+  agy@1/gemini-4-neon:
+    allow: {medium: [L], high: [XL]}
+    deny: {low: all, xhigh: all, max: all}
   # TODO(Gemini 4 Argon registration PR): confirm the registered harness and model id; inert until then.
   agy@1/gemini-4-argon:
     allow: {medium: [L], high: [XL]}
@@ -47,9 +57,20 @@ executor:
   codex@0/gpt-5.6-terra:
     deny: {"*": all}
 
-# Code review and plan review share one list. Order (luna high, deepseek max, Opus low on claude, Opus low on
-# agy) is roles.<role>.preferred_seed. Opus never reviews above low, and Sonnet 5.5 medium/high never reviews.
-code_reviewer: &reviewers
+# Code review and plan review have separate rule blocks. Order is roles.<role>.preferred_seed. Opus never reviews
+# above low, and Sonnet 5.5 medium/high never reviews. Code review is Luna high then Opus low (Rico 2026-11-19);
+# Hydrogen is not a code reviewer. Plan review also admits DeepSeek max and Opus low on agy.
+code_reviewer:
+  codex@0/gpt-6-luna:
+    allow: {high: all}
+    deny: {xhigh: all, max: all}
+  claude@2|agy@1/claude-opus-5-5:
+    allow: {low: all}
+    deny: {medium: all, high: all, xhigh: all, max: all}
+  claude@2|agy@1/claude-sonnet-5-5:
+    deny: {medium: all, high: all}
+  agy@1/gemini-3.8-flash: *retired
+plan_reviewer:
   codex@0/gpt-6-luna:
     allow: {high: all}
     deny: {xhigh: all, max: all}
@@ -60,12 +81,26 @@ code_reviewer: &reviewers
     deny: {medium: all, high: all, xhigh: all, max: all}
   claude@2|agy@1/claude-sonnet-5-5:
     deny: {medium: all, high: all}
-plan_reviewer: *reviewers
+  agy@1/gemini-3.8-flash: *retired
 
 visual_reviewer:
-  agy@1/gemini-3.8-flash:
-    allow: {low: all, medium: all}
+  agy@1/gemini-3.8-flash: *retired
   codex@0/gpt-6.1-terra:
     allow: {low: all}
   codex@0/gpt-5.6-terra:
     deny: {low: all}
+
+worker:
+  agy@1/gemini-3.8-flash: *retired
+
+planner:
+  agy@1/gemini-3.8-flash: *retired
+
+integration_reviewer:
+  agy@1/gemini-3.8-flash: *retired
+
+browser_verifier:
+  agy@1/gemini-3.8-flash: *retired
+
+closeout_verifier:
+  agy@1/gemini-3.8-flash: *retired

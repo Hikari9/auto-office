@@ -69,10 +69,19 @@ class World:
         self.codex.chmod(0o755)
         # Discovery fixtures model one fake codex. Do not enlist real host CLIs.
         monkeypatch.setattr(adapters, "installed", lambda adapter: adapters.executable(adapter) == "codex")
-        # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) stays out of this world.
+        # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) and 6.2 Sol stay out of this world.
         rows = candidates.catalog_rows
+        # The executor floor now reads the Engineering Index, which AA scored for only some routes. These scenarios
+        # exercise discovery, not scoring, so a route without an Engineering Index score borrows its v4.3.2 score and
+        # the fixture's floor decisions stay what they were before the cutover.
+        def scored(row):
+            have = row.get("benchmark_indexes")
+            if not isinstance(have, dict) or have.get(EI) is not None or have.get(IDX) is None:
+                return row
+            return {**row, "benchmark_indexes": {**have, EI: have[IDX]}}
+
         monkeypatch.setattr(candidates, "catalog_rows",
-                            lambda: [r for r in rows() if r.get("model_id") != "gpt-6.1-terra"])
+                            lambda: [scored(r) for r in rows() if r.get("model_id") not in ("gpt-6.1-terra", "gpt-6.2-sol")])
         if route_probe.write_boundary_reason() is not None:
             # No OS write boundary here: the launch path still runs, only the sandbox wrapper is dropped.
             monkeypatch.setattr(route_probe, "write_boundary_reason", lambda: None)
@@ -385,18 +394,26 @@ def test_a_denied_route_is_never_decided_for_discovery_and_names_its_source_tier
     assert world.cache() == [] and world.events() == []
 
 
-def test_the_probe_refuses_a_route_the_runs_pinned_policy_denies_without_reserving_or_launching(world):
+def test_the_probe_refuses_a_route_the_live_policy_denies_without_reserving_or_launching(world):
     pre = world.decide("high")
-    pinned = copy.deepcopy(world.config)
-    pinned["routing"]["user_policy"]["denied_models"] = [f"codex/{SOL}@high"]
-    pinned[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
-    attempt, refused = world.ensure(pre, route=world.sol["high"], run=world.make_run(pinned))
+    world.write_policy("user", denied=[f"codex/{SOL}@high"])
+    attempt, refused = world.ensure(pre, route=world.sol["high"], run=world.make_run(copy.deepcopy(world.config)))
     assert refused == route_probe.Refused("route-denied")
     assert refused.detail == f"denied by user routing.user_policy.denied_models: codex/{SOL}@high"
     (row,) = world.events(attempt)
     assert (row["kind"], row["outcome"]) == ("probe-refused", "refused")
     assert world.con.execute("SELECT COUNT(*) FROM route_probe_reservations").fetchone()[0] == 0
     assert world.cache() == []
+
+
+def test_a_deny_only_the_run_pinned_no_longer_refuses_the_probe(world):
+    """#1120: routing reads the live user policy; a deny the user cleared after the run pinned it does not apply."""
+    pre = world.decide("high")
+    pinned = copy.deepcopy(world.config)
+    pinned["routing"]["user_policy"]["denied_models"] = [f"codex/{SOL}@high"]
+    pinned[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
+    _, outcome = world.ensure(pre, route=world.sol["high"], run=world.make_run(pinned))
+    assert outcome != route_probe.Refused("route-denied"), outcome
 
 
 @pytest.mark.parametrize("tier", ["user", "repo"])
@@ -450,13 +467,14 @@ def test_the_budget_ceiling_and_its_source_tier_are_disclosed_and_shipped_sets_n
 # ------------------------------------------------------------------ S12: decision_hash is unchanged
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
+EI = "Artificial Analysis Engineering Index (2026-11)"
 
 
 def cand(harness, model, effort="medium", *, out=2.0, inp=0.5, idx=45, tps=100.0, ttft=1000, quota=60,
          caps=("builder",)):
     return {
         "harness": harness, "harness_version": "2.0", "model_id": model, "invocation_model_id": model,
-        "invocation_source": "documented:test", "effort": effort, "benchmark_indexes": {IDX: idx} if idx else {},
+        "invocation_source": "documented:test", "effort": effort, "benchmark_indexes": {IDX: idx, EI: idx} if idx else {},
         "capabilities": list(caps), "price_fields": {"output_per_mtok": out, "input_per_mtok": inp},
         "speed_fields": {"output_tok_per_s": tps, "ttft_ms": ttft}, "cost": {"money_estimate": out},
         "quota": {"status": "ok", "tightest_remaining_percent": quota},
@@ -488,8 +506,9 @@ def recorded_requests():
     proven_ev = evidence({"a/m1@medium": (20, 4, 1.1)})
     cheap, pricey = cand("codex", "luna", out=0.5, inp=0.1), cand("claude", "opus", out=20, inp=4, effort="xhigh")
     reviewers = [cand("codex", "luna", out=0.5), cand("claude", "opus", out=20)]
-    for c in reviewers:
+    for c in reviewers:  # reviewer floors keep the v4.3.2 index byte-identical, so no Engineering Index score
         c["capabilities"] = ["review"]
+        c["benchmark_indexes"] = {IDX: c["benchmark_indexes"][IDX]}
     return {
         "worker-three-strong": request(trio),
         "worker-local-evidence": request([smart, plain], ev=warm, adaptive={"competitive_band": 0.0}),
@@ -506,16 +525,18 @@ def recorded_requests():
     }
 
 
-# decision_hash of each request above, computed by routing.route from the eaf155a tree.
+# decision_hash of each request above, computed by routing.route from the eaf155a tree. The worker and
+# pinned-ceiling hashes are recomputed for the shipped executor reserve of 20% (A25); with it forced back to 5 they
+# return to the eaf155a values. reviewer-legacy is unchanged.
 BASE_EAF155A = {
-    "worker-three-strong": "sha256:04c6dc5d95f977acec17c5cb84e23786c81d7d077e1625d01c5a54769e29c7b8",
-    "worker-local-evidence": "sha256:8d6b7440aa3294fc8e5827784451bbe4cedcd43f96567564422427f5fe635c13",
-    "worker-close-call-draw": "sha256:b3d8b053dbea83c6d4e9ccd664aae979a02636e642b1580e656976111d9f2481",
-    "worker-preference": "sha256:a6b21f01459e0592b8c1263f615c902efd89427901cda3ccdc6621f09124260c",
-    "worker-wave-spread": "sha256:2ad13869914d3d562b63b02854224f30ec853147e4cb6230dfeffbca2c22925f",
-    "worker-exploration": "sha256:30447478e42ac83ab43130b6eb0f985f8f1910a3e07161aed620933a3f9fddec",
-    "pinned-ceiling-25": "sha256:12c934de8c97398e0bd65dc5c25997e4efd23242849bdc4af2338797ba99ba02",
-    "pinned-ceiling-1": "sha256:f1d4aadccae18083c9c93f71f498cde4779d9d00f5d34df4c8747d136ae7923d",
+    "worker-three-strong": "sha256:497c72517c4506f665b003c23e2b5bce59828c7c5eff8107f7ee1c9889d36cc3",
+    "worker-local-evidence": "sha256:efc79a66d95a1cf069ef7d3c3d8eee6a38491b693aff1ea4ff46f69e106b937c",
+    "worker-close-call-draw": "sha256:5608e1cdb18afa5915580cb71da552657664575da74c15b878111aa4a6cc0643",
+    "worker-preference": "sha256:ec56aa161372d9880ab64eef285b40273fa6414b8b27b5d768feff7b342b8107",
+    "worker-wave-spread": "sha256:d3b2cf54ca3d1364a19fad577716b5f6c3682e2f20ac73d2c067d885f44db8df",
+    "worker-exploration": "sha256:765b27345763d563b6d7eb616f3a53482f48688d1cb6e3cc539d0ac1e5390d56",
+    "pinned-ceiling-25": "sha256:6a80f66a82d0a29b9931f4cf239a9e4a37cc477d26f2406e27b1df40207f801a",
+    "pinned-ceiling-1": "sha256:1fc228438ec814c1104f9e07f0d28557bab82bf3141b395f1e4d057bd734f91d",
     "reviewer-legacy": "sha256:ece59075a9739fa6d397c868a32439e59b85e31dbcfd57bae0e4b456f7a8efc9",
 }
 ADAPTIVE = [n for n in BASE_EAF155A if n.startswith(("worker", "pinned"))]
@@ -700,7 +721,7 @@ route_why: the planner wants this route for this task
 visual: none
 """
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
-CLI_DENIED = "codex/gpt-6-astra@low"
+CLI_DENIED = "codex/gpt-6.1-terra@high"
 
 
 def cli_authority(env):

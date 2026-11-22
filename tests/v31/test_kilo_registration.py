@@ -125,7 +125,7 @@ def _install_kilo(env) -> Path:
 def _approved(env):
     _install_kilo(env)
     enable_decommissioned_mimo("kilo", MODEL_ID)
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[PASS])
 
 

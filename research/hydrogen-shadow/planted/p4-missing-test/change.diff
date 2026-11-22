@@ -1,0 +1,49 @@
+diff --git a/src/office/jobs.py b/src/office/jobs.py
+index 4b95b2e6..76f8aab2 100644
+--- a/src/office/jobs.py
++++ b/src/office/jobs.py
+@@ -38,6 +38,7 @@ import contextlib
+ import errno
+ import fcntl
+ import json
++import math
+ import os
+ import signal
+ import subprocess
+@@ -52,6 +53,7 @@ from office import db, frontdoor, paths, state, version
+ from office.util import ALIVE, DEAD, UNKNOWN, claim_identity, claim_liveness, dumps, now_iso, process_start
+ 
+ KICK_THROTTLE_SECONDS = 10
++KICK_THROTTLE_ENV = "OFFICE_KICK_THROTTLE_SECONDS"
+ LOCK_FD_ENV = "OFFICE_JOB_LOCK_FD"
+ # A spawn waits this long for the lock: a liveness probe holds it for an instant.
+ LOCK_WAIT_SECONDS = 2.0
+@@ -86,6 +88,19 @@ def mode() -> str:
+     return os.environ.get("OFFICE_JOBS", "spawn")
+ 
+ 
++def kick_throttle_seconds() -> float:
++    """Seconds before a queued job may be kicked again. `OFFICE_KICK_THROTTLE_SECONDS`
++    overrides the default; a value that is not a finite, non-negative number is ignored."""
++    raw = os.environ.get(KICK_THROTTLE_ENV)
++    if raw is None:
++        return float(KICK_THROTTLE_SECONDS)
++    try:
++        value = float(raw)
++    except ValueError:
++        return float(KICK_THROTTLE_SECONDS)
++    return value if math.isfinite(value) and value >= 0 else float(KICK_THROTTLE_SECONDS)
++
++
+ # ------------------------------------------------------------------ the execution lock
+ 
+ def job_dir(run_id: str) -> Path:
+@@ -436,7 +451,7 @@ def kick(con, run_id: str | None = None) -> int:
+     if mode() == "inline":
+         return run_pending(con, run_id)
+     now = datetime.now(timezone.utc)
+-    cutoff = (now - timedelta(seconds=KICK_THROTTLE_SECONDS)).isoformat()
++    cutoff = (now - timedelta(seconds=kick_throttle_seconds())).isoformat()
+     with db.transaction(con):
+         reclaim(con, run_id)
+         q = ("SELECT id, run_id FROM outbox WHERE status='queued' AND (not_before IS NULL OR not_before<=?) "

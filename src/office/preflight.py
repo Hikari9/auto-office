@@ -79,6 +79,41 @@ _TEST_STEM = re.compile(r"(?:[a-z0-9]Tests?|UITests?)\.")  # CalcTests.cs, Featu
 _NOT_TESTS = ("__init__.py", "conftest.py")
 _NOT_CODE = (".md", ".markdown", ".txt", ".rst", ".json", ".yml", ".yaml", ".toml", ".lock", ".csv", ".snap", ".bin", ".xml",
              ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".pdf", ".html", ".log", ".ini", ".cfg", ".pyc", ".jsonl", ".tsv", ".sql", ".golden")
+_DOC_EXTENSIONS = (".md", ".markdown", ".rst", ".txt", ".adoc")
+_DOC_DIRS = ("docs", "doc")
+
+
+def _is_doc_path(rel: str) -> bool:
+    """True if rel looks like a documentation file or documentation directory."""
+    if not rel:
+        return False
+    entry = rel.replace("\\", "/").strip()
+    p = PurePosixPath(entry)
+    if any(part.lower() in _DOC_DIRS for part in p.parts):
+        return True
+    if p.suffix.lower() in _DOC_EXTENSIONS:
+        return True
+    if p.stem.lower() in planfile._ROOT_DOC_FILES:
+        return True
+    return False
+
+
+def _is_doc_task(scope: list[str], changed: list[str] | None = None) -> bool:
+    """True when the task's scope (and any committed changes) touch only documentation."""
+    if not scope and not changed:
+        return False
+    if scope and not all(_is_doc_path(s) for s in scope):
+        return False
+    if changed and not all(_is_doc_path(c) for c in changed):
+        return False
+    return True
+
+
+def _is_independent_review(arg: str) -> bool:
+    cleaned = " ".join(arg.strip().rstrip(".").split()).lower()
+    return (cleaned in ("verified by independent review", "verified by independent reviewer")
+            or cleaned.startswith(("verified by independent review:", "verified by independent review -",
+                                   "verified by independent reviewer:", "verified by independent reviewer -")))
 
 
 def _one_line(text: str, limit: int = 160) -> str:
@@ -87,7 +122,7 @@ def _one_line(text: str, limit: int = 160) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _parse_disposition(raw: str) -> tuple[dict | None, str]:
+def _parse_disposition(raw: str, severity: str = "") -> tuple[dict | None, str]:
     """(disposition, "") or (None, why it is malformed). `fixed` takes an optional test path, then
     `mutation=failed` (the test failed with the fix reverted), `dismissed` a reason, `contract-conflict`
     the ACCEPT line it would break; the rest take nothing."""
@@ -97,12 +132,17 @@ def _parse_disposition(raw: str) -> tuple[dict | None, str]:
         return None, f"disposition must be one of {', '.join(briefs.LEDGER_DISPOSITIONS)}"
     if kind == "fixed":
         words = arg.split()
-        if len(words) > 2:
-            return None, f"`fixed` takes `<test path> {_MUTATION}`"
         if words and words[0].startswith("mutation="):
             return None, f"`fixed` names the test path before {_MUTATION}"
-        if len(words) == 2 and words[1] != _MUTATION:
+        if any(w.startswith("mutation=") and w != _MUTATION for w in words):
             return None, f"the mutation result must be `{_MUTATION}`: revert the fix, the test must fail, restore it"
+        if severity != "low":
+            if _is_independent_review(arg):
+                pass
+            elif len(words) > 2:
+                return None, f"`fixed` takes `<test path> {_MUTATION}`"
+            elif len(words) == 2 and words[1] != _MUTATION:
+                return None, f"the mutation result must be `{_MUTATION}`: revert the fix, the test must fail, restore it"
     if kind in ("open", "out-of-scope") and arg:
         return None, f"`{kind}` takes no argument"
     if kind == "dismissed" and not arg:
@@ -163,7 +203,7 @@ def parse_ledger(text: str) -> tuple[dict, list[str]]:
             sev, _, tail = head.strip().partition(" ")
             lens, _, location = tail.strip().partition(" ")
             location = location.strip()
-            disp, why = _parse_disposition(disp_raw) if sep and sep2 else (None, "")
+            disp, why = _parse_disposition(disp_raw, severity=sev) if sep and sep2 else (None, "")
             if not (sep and sep2):
                 bad("FINDING needs `<severity> <lens> <file:line> | <summary> | <disposition>`")
             elif sev not in briefs.LEDGER_SEVERITIES:
@@ -263,27 +303,43 @@ def _in_scope(wt: Path, rel: str, scope: list[str]) -> bool:
 
 
 def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: Path,
-                 tier: str = "deep") -> tuple[list[str], list[str]]:
+                 tier: str = "deep", changed: list[str] | None = None) -> tuple[list[str], list[str]]:
     """(stop, fix) lines for a ledger's text. Every line of `fix` names its repair. Only the inline
-    tier may skip a lens (the brief's other tiers cover all four). `head` is the full sha, `scope` the
+    tier may skip a lens (the brief's other tiers cover all four); the focused tier of a new run takes two lenses and
+    one round. `head` is the full sha, `scope` the
     task's SCOPE: a finding of any severity is out-of-scope only when its file is outside it."""
+    from office import self_review_subagents
     led, errors = parse_ledger(text)
     stop: list[str] = []
     fix = [f"ledger {e}" for e in errors]
     if led["commit"] is None:
         fix.append("ledger: no COMMIT line; name HEAD " + head[:12])
-    elif led["commit"] != head.lower():
-        fix.append(f"ledger: names commit {led['commit'][:12]} but HEAD is {head[:12]}; the review is stale: re-review "
-                   "what changed, then update COMMIT")
+    elif led["commit"] != head.strip().lower():
+        # #806: print enough of both shas to tell them apart, never two identical-looking values.
+        shown = 12 if led["commit"][:12] != head.strip().lower()[:12] else 40
+        fix.append(f"ledger: names commit {led['commit'][:shown]} but HEAD is {head.strip()[:shown]}; the review is "
+                   "stale: re-review what changed, then update COMMIT")
     if led["round"] is None:
         fix.append("ledger: no ROUND line")
-    for lens in briefs.LEDGER_LENSES:
-        if lens not in led["lenses"]:
-            fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
-        elif led["lenses"][lens] is not None and tier != "inline":
-            fix.append(f"ledger: lens {lens} is skipped, but the {tier} tier reviews all four lenses: review it and "
-                       f"write `LENS {lens} reviewed`")
-    last_round = (led["round"] or 1) >= briefs.MAX_REVIEW_ROUNDS
+    if tier == briefs.FOCUSED:
+        if (led["round"] or 1) > briefs.FOCUSED_REVIEW_ROUNDS:
+            fix.append(f"ledger: self-review is one round: use ROUND {briefs.FOCUSED_REVIEW_ROUNDS} and stop reviewing")
+        platform = self_review_subagents.platform_relevant(changed if changed is not None else scope)
+        for lens in ("edge-cases", "test-strength", "platform"):
+            if lens not in led["lenses"]:
+                fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+            elif led["lenses"][lens] is not None and (lens != "platform" or platform):
+                fix.append(f"ledger: lens {lens} must be reviewed" if lens != "platform" else
+                           "ledger: platform must be reviewed: the diff touches platform or build files")
+    else:
+        for lens in briefs.LEDGER_LENSES:
+            if lens not in led["lenses"]:
+                fix.append(f"ledger: lens {lens} has no line: add `LENS {lens} reviewed` or `LENS {lens} skipped <reason>`")
+            elif led["lenses"][lens] is not None and tier != "inline":
+                fix.append(f"ledger: lens {lens} is skipped, but the {tier} tier reviews all four lenses: review it and "
+                           f"write `LENS {lens} reviewed`")
+    cap = briefs.FOCUSED_REVIEW_ROUNDS if tier == briefs.FOCUSED else briefs.MAX_REVIEW_ROUNDS
+    last_round = (led["round"] or 1) >= cap
     for f in led["findings"]:
         what = f"line {f['line']}: {f['severity']} {_one_line(f['location'], 80)} {_one_line(f['summary'])}"
         if f["kind"] == "contract-conflict":
@@ -294,7 +350,7 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                 stop.append(f"contract-conflict: {what} would break ACCEPT {n}: \"{_one_line(accept[n - 1])}\"; "
                             "do not change the contract yourself: report it")
         elif f["kind"] == "open" and f["severity"] in _BLOCKERS and last_round:
-            stop.append(f"self-review: round {briefs.MAX_REVIEW_ROUNDS} ended with a finding still open ({what}); "
+            stop.append(f"self-review: round {cap} ended with a finding still open ({what}); "
                         "the round cap is spent: report it")
         elif f["kind"] == "open":
             fix.append(f"ledger {what} is open: fix it and mark it `fixed <test path> {_MUTATION}`, or mark it "
@@ -306,6 +362,18 @@ def check_ledger(text: str, head: str, accept: list[str], scope: list[str], wt: 
                 fix.append(f"ledger {what} is marked out-of-scope, but {_one_line(file, 80)} is inside SCOPE: fix it and "
                            f"mark it `{proof}`, or `dismissed <reason>`")
         elif f["kind"] == "fixed" and f["severity"] in _BLOCKERS:
+            if _is_independent_review(f["arg"]):
+                file = _finding_file(wt, f["location"])
+                is_doc_fix = file is not None and _is_doc_path(file)
+                if _is_doc_task(scope, changed) and is_doc_fix:
+                    continue
+                if not _is_doc_task(scope, changed):
+                    fix.append(f"ledger {what} is marked fixed without a test path: code tasks require a test path: "
+                               f"write the test, prove it fails without the fix, then `fixed <test path> {_MUTATION}`")
+                else:
+                    fix.append(f"ledger {what} is marked fixed without a test path: only doc fixes can be verified "
+                               f"by independent review: write the test, prove it fails without the fix, then `fixed <test path> {_MUTATION}`")
+                continue
             test, _, proof = f["arg"].partition(" ")
             if not test:
                 fix.append(f"ledger {what} is marked fixed without a test path: write the test, prove it fails "
@@ -361,7 +429,7 @@ def ledger_verdict(wt: Path, task: dict, changed: list[str], head: str, tier: st
     if len(text) > briefs.LEDGER_MAX_CHARS:
         return [], uncommitted + [f"ledger: {name} is over {briefs.LEDGER_MAX_CHARS} characters; keep one short line "
                                   "per finding"]
-    stop, fix = check_ledger(text, head, task["accept"] or [], task["scope"] or [], wt, tier)
+    stop, fix = check_ledger(text, head, task["accept"] or [], task["scope"] or [], wt, tier, changed)
     return stop, uncommitted + fix
 
 
@@ -389,6 +457,39 @@ def committed_changes(wt: Path, base: str, head: str, dep_bases: list[str]) -> l
     return changed
 
 
+def review_changes(con, task: dict, wt: Path, base: str, head: str, dep_bases: list[str]) -> list[str]:
+    """The committed changes the producer self-review covers: `committed_changes`, or none when HEAD's tree is
+    the tree of the task's accepted revision. Resubmitting the accepted work unchanged (say, after an amendment
+    demoted the task) is empty work, which owes no ledger (#781). Uncommitted edits still count as pending."""
+    rid = task.get("accepted_revision_id")
+    row = (con.execute("SELECT tree_sha, commit_sha, base_commit FROM revisions WHERE id=?", (rid,)).fetchone()
+           if rid else None)
+    if row and row["tree_sha"] and _git(wt, "rev-parse", f"{head}^{{tree}}").strip() == row["tree_sha"]:
+        return []
+    if row and row["base_commit"] and _same_patch(wt, row["base_commit"], row["commit_sha"], base, head):
+        # A restack moved the base under the accepted work but the task's own change is the same patch: the
+        # accepted self-review still covers it, so the ack-only rerun owes no new ledger (#1127).
+        return []
+    return committed_changes(wt, base, head, dep_bases)
+
+
+def _patch_id(wt: Path, base: str, head: str) -> str:
+    """git's stable patch id for base..head, or "" when there is no diff or git cannot compute it."""
+    diff = paths.git(wt, "diff", "--no-renames", "--binary", base, head, check=False)
+    if not diff:
+        return ""
+    # --verbatim: whitespace is part of the change (Python indentation); an older git without it fails closed.
+    out = paths.git(wt, "patch-id", "--verbatim", check=False, input_text=diff + "\n")
+    return out.split()[0] if out else ""
+
+
+def _same_patch(wt: Path, old_base: str, old_head: str, base: str, head: str) -> bool:
+    if (old_base, old_head) == (base, head):
+        return False  # the tree comparison above already decided this one
+    old = _patch_id(wt, old_base, old_head)
+    return bool(old) and old == _patch_id(wt, base, head)
+
+
 def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: str,
                 dep_bases: list[str], *, stop: list[str], fix: list[str],
                 submission: bool = False, require: bool = False) -> tuple[list[str], list[str], bool]:
@@ -397,18 +498,54 @@ def ledger_gate(con, run: dict, task: dict, d: dict, wt: Path, base: str, head: 
     `stop` and `fix` are preflight's other findings, so both commands choose the
     same signal verdict and reasons without duplicating the ledger gate.
     """
-    changed = committed_changes(wt, base, head, dep_bases)
+    changed = review_changes(con, task, wt, base, head, dep_bases)
+    tier = briefs.run_self_review_tier(run)
     ledger_stop, ledger_fix = ledger_verdict(
-        wt, task, changed, head, briefs.self_review_tier(run.get("gear"), run.get("risk_json")),
+        wt, task, changed, head, tier,
         submission=submission, require=require)
     all_stop = stop + ledger_stop
     all_fix = fix + ledger_fix
-    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= briefs.MAX_REVIEW_ROUNDS))
+    signaled = bool(all_stop or (all_fix and (ledger_round(wt) or 0) >= (
+        briefs.FOCUSED_REVIEW_ROUNDS if tier == briefs.FOCUSED else briefs.MAX_REVIEW_ROUNDS)))
     if signaled:
         verdict = "stop" if all_stop else "fix"
         reasons = all_stop or [f"self-review round cap spent with repairs outstanding: {item}" for item in all_fix]
         _signal(con, run, task["id"], d, verdict, reasons)
     return ledger_stop, ledger_fix, signaled
+
+
+_CAP_REPAIR = "self-review round cap spent with repairs outstanding: "
+
+
+def _quoted(text: str) -> str:
+    """Reason text made safe to embed in a double-quoted `office prompt` argument."""
+    return _one_line(text, 160).replace('"', "'")
+
+
+def _repair_next(dispatch_id: str, item: str) -> str:
+    """The prompt that fixes the one repair a spent self-review round cap or a failed proof left outstanding.
+    The generic `fixed <test> mutation=failed` advice fits only a finding line (#1130)."""
+    def prompt(text: str) -> str:
+        return f'office prompt {dispatch_id} -- "{text}, run `office preflight`, then `office submit`"'
+    if "revert-and-fail proof" in item:
+        if "environment error" in item:
+            return prompt("the proof run hit an environment error, not a test failure: fix the environment the named "
+                          "test needs (or name a test that runs here)")
+        return prompt("the revert-and-fail proof failed: make the named test fail with the source reverted and pass "
+                      "restored")
+    if item.startswith("ledger: names commit"):
+        return prompt("the ledger COMMIT is stale: re-review what changed since, then update COMMIT to HEAD")
+    if item.startswith("ledger: lens"):
+        return prompt("review the lens the ledger names and write `LENS <name> reviewed`")
+    if item.startswith("ledger: no ") and briefs.LEDGER_FILE in item:
+        return prompt(f"write {briefs.LEDGER_FILE} in the worktree root after the last commit")
+    if item.startswith("ledger: uncommitted"):
+        return prompt(f"commit the in-scope changes first ({_quoted(item[len('ledger: '):])})")
+    if item.startswith("ledger: "):  # name the refusal itself, never a generic placeholder (#1130)
+        return prompt(f"repair the ledger: {_quoted(item[len('ledger: '):])}")
+    if _MUTATION in item:
+        return prompt(f"mark the line `fixed <test> {_MUTATION}` (or dispose it via `office prompt`)")
+    return prompt("repair the ledger line the reason names")
 
 
 def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
@@ -421,9 +558,17 @@ def _signal_next(task_id: str, dispatch_id: str, reason: str) -> str:
                 f"then office rerun {task_id} --fresh once findings are recorded")
     if reason.startswith("superseded"):  # a stale session ended itself; the current holder continues
         return f"none: {task_id} has a newer session; office status shows it"
-    if "round cap" in reason:
-        return (f'office prompt {dispatch_id} -- "mark the line `fixed <test> mutation=failed` (or dispose it via '
-                '`office prompt`), run `office preflight`, then `office submit`"')
+    if reason.startswith(_CAP_REPAIR):
+        return _repair_next(dispatch_id, reason[len(_CAP_REPAIR):])
+    if reason.startswith("self-review: round"):  # an open medium or high finding at the round cap (#1130)
+        # The worker reported it as told; the orchestrator decides, so the hint names the finding and the choices.
+        found = re.search(r"\((line \d+:.*)\); the round cap", reason)
+        what = _quoted(found.group(1)) if found else "the open finding"
+        return (f'office prompt {dispatch_id} -- "<your decision on {what}: fix it with a test and mark it '
+                f'`fixed <test> {_MUTATION}`, or mark it `dismissed <reason>`>, run `office preflight`, '
+                f'then `office submit`", or office revoke {task_id} then office rerun {task_id} --fresh')
+    if "revert-and-fail proof" in reason:
+        return _repair_next(dispatch_id, reason)
     if reason.startswith("self-review"):
         return f'office prompt {dispatch_id} -- "<decision>", or office revoke {task_id} then office rerun {task_id} --fresh'
     return f"office status; then office rerun {task_id} --resume|--fresh or office revoke {task_id}"
@@ -575,6 +720,13 @@ def preflight(con, run: dict, cwd: Path) -> Result:
                                              stop=stop, fix=fix)
     stop += ledger_stop
     fix += ledger_fix
+    if not (stop or fix or wait):
+        from office import self_review_proof
+        proof = self_review_proof.gate(con, run, task, wt, base, head,
+                                       review_changes(con, task, wt, base, head, dep_bases), execute=True)
+        if not proof["ok"]:
+            fix.append("self-review: " + proof["reason"])
+        res.data["self_review_proof"] = proof
 
     res.data["head"] = head
     verdict = "stop" if stop else "fix" if fix else "wait" if wait else "ready"

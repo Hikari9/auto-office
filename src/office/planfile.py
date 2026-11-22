@@ -65,7 +65,7 @@ END_STATES = ("ask", "preview", "merge", "e2e")
 # endpoint list, a mock table). Two shared entries never overlap: leases and
 # plan review do not serialize them, and the compose step merges the appends.
 SHARED = "+"
-LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "questions"}
+LIST_KEYS = {"accept", "done", "non_goals", "non-goals", "actions", "checks", "notes", "interfaces", "phases", "questions"}
 VISUAL_KEYS = {"url", "start", "reference", "viewports", "states", "selectors", "strict", "affects", "ready", "auth",
                "deviations"}
 
@@ -215,6 +215,9 @@ def parse(text: str) -> ParsedPlan:
             elif key == "integration_risk":
                 # #422: the planner marks the composed outcome high risk to integrate.
                 task["integration_risk"] = value.strip().lower()
+            elif key == "phases":
+                if value:
+                    task.setdefault("phases", []).append(value)
             elif key == "notes":
                 if value:
                     task["notes"].append(value)
@@ -252,6 +255,8 @@ def _append(task: dict, key: str, item: str) -> None:
         task["accept"].append(item)
     elif key == "interfaces":
         task["interfaces"].append(item)
+    elif key == "phases":
+        task.setdefault("phases", []).append(item)
     else:
         task["notes"].append(item)
 
@@ -294,8 +299,7 @@ def _unsafe_force_push_in_plan(task: dict) -> str | None:
                         *(task.get("interfaces") or [])]:
         if _unsafe_force_push_instruction(instruction):
             return instruction
-    # These fields run as shell commands, not prose. Keep command-substitution
-    # detection strict even when a command happens to contain backticks.
+    # These fields run as shell commands, not prose, so the strict scan applies.
     for command in (task.get("checks") or []):
         if shell_safety.unsafe_manual_push(command):
             return command
@@ -328,8 +332,10 @@ def _validate(plan: ParsedPlan) -> None:
     for d in sorted(dup):
         plan.errors.append(f"{d}: duplicate task id")
     known = set(ids)
-    if _unsafe_force_push_requirement(plan):
-        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership; "
+    unsafe_requirement = _unsafe_force_push_requirement(plan)
+    if unsafe_requirement:
+        plan.errors.append("run-level Requirements: unsafe manual git push with unverified remote ownership in line "
+                           f"{unsafe_requirement!r}: it runs git push or a command the guard cannot verify; "
                            "use the Office-owned task PR workflow")
     for t in plan.tasks:
         if not t["scope"] and not t.get("scope_none"):
@@ -344,7 +350,8 @@ def _validate(plan: ParsedPlan) -> None:
                 plan.entry_problems.append((t["id"], entry, err))
         forbidden_push = _unsafe_force_push_in_plan(t)
         if forbidden_push:
-            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership; "
+            plan.errors.append(f"{t['id']}: unsafe manual git push with unverified remote ownership in line "
+                               f"{forbidden_push!r}: it runs git push or a command the guard cannot verify; "
                                "remove it and use the Office-owned task PR workflow")
         if not t["accept"]:
             plan.errors.append(f"{t['id']} (line {t['line']}): missing `accept:` criteria")

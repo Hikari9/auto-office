@@ -147,42 +147,6 @@ def test_rollback_changes_future_runs_only(env):
     assert code == 0 and data["data"]["phase"] == "planning"
 
 
-def _legacy_run(env, commit: str) -> tuple[str, Path]:
-    run_id = "0legacy0-aaaa-bbbb-cccc-000000000001"
-    sdir = env.tmp / "legacy-state" / run_id
-    sdir.mkdir(parents=True)
-    (sdir / "state.json").write_text(json.dumps({"run_id": run_id, "family_id": "f", "phase": "executing",
-                                                  "goal": "a 3.0 run", "plugin_commit": commit, "plan_version": 1,
-                                                  "packet_version": 1, "repo_root": str(env.repo)}))
-    ref = env.repo / ".office" / "runs"
-    ref.mkdir(parents=True, exist_ok=True)
-    (ref / f"{run_id}.ref").write_text(str(sdir) + "\n")
-    return run_id, sdir
-
-
-def test_legacy_run_is_listed_and_served_by_its_pinned_runtime(env):
-    from office import runtime_default
-    run_id, sdir = _legacy_run(env, runtime_default.LEGACY_V3_FINAL)
-    code, out = env.office("list")
-    assert "3.0 legacy" in out and run_id[:8] in out
-    code, out = env.office("resume", run_id[:8])
-    assert code == 0 and "stays on its pinned runtime" in out, out
-    retained = env.data / "runtimes" / f"legacy-{runtime_default.LEGACY_V3_FINAL[:12]}"
-    assert (retained / "scripts" / "office_runtime.py").is_file()
-    code, out = env.office("raw", "check-spoke", "--state-dir", str(sdir), "--spoke", "auto-routing")
-    assert "deprecated" in out
-    con = env.con()
-    assert con.execute("SELECT outcome FROM compat_calls ORDER BY at DESC").fetchone()[0] == "forwarded-legacy"
-
-
-def test_missing_pinned_legacy_runtime_is_an_actionable_blocker(env):
-    run_id, sdir = _legacy_run(env, "0123456789abcdef0123456789abcdef01234567")
-    code, out = env.office("resume", run_id[:8])
-    assert "not available on this machine" in out and "next:" in out
-    code, out = env.office("raw", "state-load", "--state-dir", str(sdir))
-    assert code == 5 and "blocked" in out
-
-
 def test_session_binding_does_not_cross_into_another_repository_with_its_own_run(env):
     # One orchestrator session drove runs in two repositories; starting the second
     # rebound the session there. Inside the first repository, its own run wins.
@@ -263,16 +227,6 @@ def test_a_nested_repository_inside_the_bound_checkout_is_not_the_bound_repo(env
     (nested / ".git").mkdir(parents=True)
     assert discovery._under_checkout(run, env.repo / "src") is True
     assert discovery._under_checkout(run, nested / "x") is False
-
-
-def test_a_skipped_binding_note_is_shown_for_a_legacy_run_too(env, monkeypatch, capsys):
-    # Review #447 F11: the legacy branch returned before the note was added.
-    from office import cli, discovery, legacy
-    monkeypatch.setattr(discovery, "resolve", lambda *a, **kw: discovery.Target(legacy=object(), source="sole-active",
-                                                                              note="note: skipped binding"))
-    monkeypatch.setattr(legacy, "guidance", lambda leg: ("legacy run", "office legacy"))
-    cli.main(["status"])
-    assert "note: skipped binding" in capsys.readouterr().out
 
 
 def test_an_edited_plan_draft_keeps_entries_the_accepted_plan_had():

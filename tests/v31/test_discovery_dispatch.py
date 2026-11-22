@@ -1003,7 +1003,7 @@ def _discovery_env(env, monkeypatch, **probe):
     """The Env's fake `codex` answers a route probe (it is launched with a probe nonce, or asked its version) like
     the probe suites' fake harness, and anything else like the Env's scripted agent: one binary serves the probe,
     the trial worker and the fallback worker."""
-    for other in ("claude", "gemini", "agy"):  # one harness: the draw can only land on a route the fake can probe
+    for other in ("claude", "agy"):  # one harness: the draw can only land on a route the fake can probe
         (env.bin / other).unlink()
         env.fakes.pop(env.bin / other, None)
     codex = env.bin / "codex"

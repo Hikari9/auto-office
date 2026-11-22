@@ -1,0 +1,9 @@
+id: p1-logic
+class: logic
+file: src/office/util.py
+line: 139
+defect: >-
+  claim_liveness now uses pid_alive, which returns False for any os.kill error other than EPERM,
+  so a pid that cannot be probed is reported DEAD instead of UNKNOWN and a live claim can be reclaimed and its work rerun.
+must_mention: [pid_alive, UNKNOWN, DEAD, reclaim]
+keywords: [unknown, pid_alive, pid_state, tri-state, could not be probed, reclaim]

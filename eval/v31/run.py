@@ -263,10 +263,10 @@ def pre_event(fixture: dict, version: str, repo: Path, env: dict, root: Path) ->
     if event.get("kind") != "second_run":
         return {}
     if version == "v31":
-        argv = ["office", "start", "--goal", event["goal"], "--gear", "direct"]
+        argv = ["office", "start", "--goal", event["goal"], "--gear", "XS"]
     else:
         argv = [sys.executable, str(PLUGINS["v3"] / "scripts" / "office_runtime.py"), "start", "--goal", event["goal"],
-                "--playbook", "Change", "--gear", "direct", "--repo", str(repo)]
+                "--playbook", "Change", "--gear", "XS", "--repo", str(repo)]
     proc = sh(argv, cwd=repo, env=env, timeout=600)
     (root / "second-run.txt").write_text(proc.stdout + proc.stderr)
     return {"second_run_exit": proc.returncode}

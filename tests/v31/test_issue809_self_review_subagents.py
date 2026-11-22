@@ -3,19 +3,36 @@
 XS none (the executor's inline four-lens self-check); S and M one four-lens subagent; L and XL up to four
 specialists. Each is a separate reviewer session on the accepted revision. A report is reused for the same
 revision, commit and rubric. A missing, invalid or wrong-commit report blocks convergence and spends no round.
+
+#1233: a new run funds these audits on XL only (`review.self_review_audit_gears`). These tests exercise the audit
+machinery on S, M and L runs, so their config funds every gear, as a run started before #1233 does.
 """
+import os
+from pathlib import Path
+
 import pytest
+import yaml
 
 from conftest import GOOD_ADD
 from test_convergence_contract import APPROVED, _gates, _q, _roles, _start
 
 from office import contract, gates, paths, self_review_subagents as srs, state
 
+
+def fund_every_gear() -> None:
+    """Fund the per-task audit on S, M, L and XL in the test env's user config (merged with what is there)."""
+    path = Path(os.environ["OFFICE_USER_CONFIG"])
+    cfg = (yaml.safe_load(path.read_text()) if path.exists() else None) or {}
+    cfg.setdefault("review", {})[srs.AUDIT_GEARS_KEY] = list(srs.FUNDED_GEARS)
+    path.write_text(yaml.safe_dump(cfg))
+
+
 @pytest.fixture(autouse=True)
 def _in_process_routing(request):
     """These tests patch `gates.run_reviewer`, which only reaches work that runs in this process (#841)."""
     if "env" in request.fixturenames:
         request.getfixturevalue("env").hide_agy = True
+        fund_every_gear()
 
 
 EXECUTOR = [{"write": {"calc.py": GOOD_ADD}, "submit": True}]
@@ -48,7 +65,7 @@ def test_l_and_xl_add_specialists_for_what_the_task_touches_up_to_four():
 
 @pytest.mark.parametrize("run", [
     {"gear": "S", "gates": {"gear_model_version": "legacy-pinned"}},
-    {"gear": "express", "gates": {}}, {"gear": "direct+review", "gates": {}}, {"gear": None, "gates": {}},
+    {"gear": None, "gates": {}},
 ])
 def test_legacy_pinned_runs_keep_their_contract(run):
     assert srs.rubrics(run, {"scope": ["calc.py"]}) == ()
@@ -85,18 +102,14 @@ def test_an_s_run_launches_one_subagent_before_the_one_convergence_review(env):
     assert "is the commit under review" in sub_brief and sub["reviewer_dispatch_id"] != conv["reviewer_dispatch_id"]
 
 
-def test_an_l_run_launches_its_specialists_and_keeps_the_initial_plan_review(env):
+def test_an_l_run_launches_one_combined_subagent_and_keeps_the_initial_plan_review(env):
+    """#938: a new run funds one subagent per task at every funded gear, never specialists."""
     _s_run(env, gear="L")
-    assert len(_subagent_gates(env)) == 2
-    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"edge-cases", "test-strength"}
+    assert len(_subagent_gates(env)) == 1
+    assert {g["input_key"].split(":")[2] for g in _subagent_gates(env)} == {"combined"}
     roles = _roles(env)
-    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 2
+    assert roles.count("plan_reviewer") == 1 and roles.count("code_reviewer") == 1
     assert roles.count("convergence_reviewer") == 1
-
-
-def test_a_run_with_the_legacy_gear_launches_no_subagent(env):
-    _s_run(env, gear="direct+review")
-    assert _subagent_gates(env) == [] and _roles(env).count("code_reviewer") == 0
 
 
 def test_a_failed_subagent_blocks_convergence_and_spends_no_round(env, monkeypatch):
@@ -201,3 +214,30 @@ def test_a_task_with_no_accepted_revision_blocks(env):
     con, run, tasks, commit = _after_run(env)
     out = srs.audit_scope(con, run, [{**tasks[0], "accepted_revision_id": None}], env.repo, commit)
     assert out["status"] == contract.EVIDENCE_BLOCKED and "no accepted revision" in out["reason"]
+
+
+def test_a_queued_self_review_gate_is_owned_by_its_lane_convergence_job(env):
+    """#961: the convergence review job runs a self-review gate inline but names the lane gate in its payload, so a
+    just-queued self-review gate read as 'no job is queued or running' and fired a false stall."""
+    import json
+    from conftest import approved_run
+    from office import gates, state
+    approved_run(env)
+    con = env.con()
+    run = state.get_run(con, con.execute("SELECT id FROM runs").fetchone()[0])
+    con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, created_at) "
+                "VALUES('Gsr1', ?, 'T1', 'T1', 'self_review_subagent', 'R1:c:combined:v', 'queued', '2026-01-01')",
+                (run["id"],))
+    con.commit()
+    gate = dict(con.execute("SELECT * FROM gates WHERE id='Gsr1'").fetchone())
+    assert gates.owner_state(con, run, gate)[0] == "none"
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at) VALUES('Jother', ?, 'convergence_review', 'k-o', ?, ?, 'queued', 0, 2, '2026-01-01')",
+                (run["id"], json.dumps({"gate_id": "Gother", "scope": "L-T9"}), run["office_version"]))
+    con.commit()
+    assert gates.owner_state(con, run, gate)[0] == "none", "another lane's review job does not own it"
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at) VALUES('Jcv', ?, 'convergence_review', 'k-cv', ?, ?, 'queued', 0, 2, '2026-01-01')",
+                (run["id"], json.dumps({"gate_id": "Glane", "scope": "L-T1"}), run["office_version"]))
+    con.commit()
+    assert gates.owner_state(con, run, gate)[0] == "queued"

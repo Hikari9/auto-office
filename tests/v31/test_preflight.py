@@ -132,7 +132,7 @@ def _signals(env):
     return [dict(r) for r in env.con().execute("SELECT * FROM events WHERE kind='worker.signal' ORDER BY seq")]
 
 
-@pytest.mark.approved
+@pytest.mark.review_contract("v3.1")
 def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
@@ -152,7 +152,7 @@ def test_contract_conflict_and_round_cap_stops_signal_the_orchestrator(env):
     assert "office prompt" in next_step and "office preflight" in next_step and "office submit" in next_step, next_step
 
 
-@pytest.mark.approved
+@pytest.mark.review_contract("v3.1")
 def test_a_fix_signals_only_after_the_round_cap(env):
     from test_self_review_ledger import ledger_text
     wenv, wt, d = _dispatched(env)
@@ -281,8 +281,8 @@ def test_preflight_outside_a_task_worktree_stops(env):
     assert code == 4 and "no executor dispatch owns this directory" in out, out
 
 
+@pytest.mark.review_contract("v3.1")
 @pytest.mark.integration
-@pytest.mark.approved
 def test_executor_brief_carries_self_review_preflight_and_status_line(env):
     _, _, d = _dispatched(env)
     from office import paths
@@ -341,8 +341,8 @@ def test_fix_round_brief_repeats_simplify_self_review_preflight_tail(env):
 
 # ------------------------------------------------------------------ self-review tier
 
-GEARS = ("direct", "direct+review", "light", "quick", "express", "full")
-LOW_GEARS = ("direct", "direct+review", "light")
+GEARS = ("XS", "S", "M", "L", "XL", "greenfield")
+LOW_GEARS = ("XS",)
 
 
 def _risk(blast, irreversible=False, size=None, high=False):
@@ -379,12 +379,12 @@ def test_a_low_gear_with_a_contained_clean_risk_is_inline(gear, blast, size):
     assert briefs.self_review_tier(gear, _risk(blast, size=size)) == "inline"
 
 
-@example(gear="direct", blast="production", size=None, irreversible=False, high=False)  # each signal alone is enough
-@example(gear="direct", blast="production-data", size=None, irreversible=False, high=False)
-@example(gear="direct", blast="local", size="L", irreversible=False, high=False)
-@example(gear="light", blast="repo", size="XL", irreversible=False, high=False)
-@example(gear="direct", blast="local", size=None, irreversible=True, high=False)
-@example(gear="direct", blast="local", size=None, irreversible=False, high=True)
+@example(gear="XS", blast="production", size=None, irreversible=False, high=False)  # each signal alone is enough
+@example(gear="XS", blast="production-data", size=None, irreversible=False, high=False)
+@example(gear="XS", blast="local", size="L", irreversible=False, high=False)
+@example(gear="XS", blast="repo", size="XL", irreversible=False, high=False)
+@example(gear="XS", blast="local", size=None, irreversible=True, high=False)
+@example(gear="XS", blast="local", size=None, irreversible=False, high=True)
 @given(gear=_GEARS, blast=_BLASTS, size=_SIZES, irreversible=st.booleans(), high=st.booleans())
 def test_any_high_risk_signal_is_deep_review_in_every_gear(gear, blast, size, irreversible, high):
     from office import briefs
@@ -395,10 +395,10 @@ def test_any_high_risk_signal_is_deep_review_in_every_gear(gear, blast, size, ir
 @given(risk=st.one_of(_UNUSABLE_RISK, st.builds(_risk, _BLASTS, st.booleans(), _SIZES, st.booleans())))
 def test_gear_full_is_deep_even_without_a_usable_risk_record(risk):
     from office import briefs
-    assert briefs.self_review_tier("full", risk) == "deep"
+    assert briefs.self_review_tier("XL", risk) == "deep"
 
 
-@given(gear=_GEARS.filter(lambda g: g != "full"), risk=_UNUSABLE_RISK)
+@given(gear=_GEARS.filter(lambda g: g not in ("L", "XL")), risk=_UNUSABLE_RISK)
 def test_an_unusable_risk_record_is_single_never_inline(gear, risk):
     from office import briefs
     assert briefs.self_review_tier(gear, risk) == "single"
@@ -429,12 +429,12 @@ def test_the_risk_a_run_resolves_drives_the_tier(gear, blast, size, irreversible
     lambda b: b not in ("local", "repo", "production", "production-data")))
 def test_a_blast_radius_that_is_not_exactly_a_known_value_is_single_never_inline(blast):
     from office import briefs
-    assert briefs.self_review_tier("direct", _risk(blast)) == "single"
+    assert briefs.self_review_tier("XS", _risk(blast)) == "single"
 
 
-@pytest.mark.parametrize("gear, blast, tier", [("direct", "local", "inline"), ("light", "repo", "inline"),
-                                               ("quick", "local", "single"), ("express", "repo", "single"),
-                                               ("full", "production", "deep")])
+@pytest.mark.parametrize("gear, blast, tier", [("XS", "local", "inline"), ("XS", "repo", "inline"),
+                                               ("M", "local", "single"), ("S", "repo", "single"),
+                                               ("XL", "production", "deep")])
 def test_initial_and_fix_round_briefs_print_the_tier_the_gear_and_blast_radius_call_for(gear, blast, tier):
     from office import briefs
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
@@ -447,8 +447,8 @@ def test_initial_and_fix_round_briefs_print_the_tier_the_gear_and_blast_radius_c
 
 def test_pathologically_nested_risk_record_fails_toward_review():
     from office import briefs
-    assert briefs.self_review_tier("direct", "[" * 500_000) == "single"
-    assert briefs.self_review_tier("full", "[" * 500_000) == "deep"
+    assert briefs.self_review_tier("XS", "[" * 500_000) == "single"
+    assert briefs.self_review_tier("XL", "[" * 500_000) == "deep"
 
 
 def _self_review_block(brief: str) -> str:
@@ -457,8 +457,8 @@ def _self_review_block(brief: str) -> str:
 
 def _tier_brief(tier: str) -> str:
     from office import briefs
-    gear, risk = {"inline": ("direct", _risk("local")), "single": ("quick", _risk("local")),
-                  "deep": ("full", _risk("production"))}[tier]
+    gear, risk = {"inline": ("XS", _risk("local")), "single": ("M", _risk("local")),
+                  "deep": ("XL", _risk("production"))}[tier]
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
               "base_commit": "abc123"}
     brief = briefs.executor_brief(None, {"gear": gear, "risk_json": risk}, packet)
@@ -488,12 +488,12 @@ def test_inline_tier_has_no_subagent_instruction_and_the_shared_round_rules():
 
 def test_inline_tier_applies_to_repo_blast_but_not_to_quick_gear():
     from office import briefs
-    assert briefs.self_review_tier("direct", _risk("repo")) == "inline"
-    assert briefs.self_review_tier("light", _risk("repo")) == "inline"
-    assert briefs.self_review_tier("quick", _risk("local")) == "single"
-    assert briefs.self_review_tier("quick", _risk("repo")) == "single"
-    assert briefs.self_review_tier("direct", _risk("repo", high=True)) == "deep"
-    assert briefs.self_review_tier("direct", _risk(None)) == "single"
+    assert briefs.self_review_tier("XS", _risk("repo")) == "inline"
+    assert briefs.self_review_tier("XS", _risk("repo")) == "inline"
+    assert briefs.self_review_tier("M", _risk("local")) == "single"
+    assert briefs.self_review_tier("M", _risk("repo")) == "single"
+    assert briefs.self_review_tier("XS", _risk("repo", high=True)) == "deep"
+    assert briefs.self_review_tier("XS", _risk(None)) == "single"
 
 
 def test_single_tier_names_exactly_one_subagent_covering_all_four_lenses():
@@ -515,11 +515,11 @@ def test_deep_tier_keeps_four_parallel_subagents_and_three_rounds():
 def test_packet_cannot_lower_the_tier(injected):
     from office import briefs
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
-              "self_review_tier": injected, "tier": injected, "gear": "direct", "risk": {"blast_radius": "local"},
+              "self_review_tier": injected, "tier": injected, "gear": "XS", "risk": {"blast_radius": "local"},
               "risk_json": _risk("local"), "blast_radius": "local"}
-    deep = briefs.executor_brief(None, {"gear": "full", "risk_json": _risk("production")}, packet)
+    deep = briefs.executor_brief(None, {"gear": "XL", "risk_json": _risk("production")}, packet)
     assert "(tier: deep)" in deep
-    unset = briefs.executor_brief(None, {"gear": "direct", "risk_json": _risk(None)}, packet)
+    unset = briefs.executor_brief(None, {"gear": "XS", "risk_json": _risk(None)}, packet)
     assert "(tier: single)" in unset
     assert "(tier: single)" in briefs.executor_brief(None, {}, packet)
 
@@ -616,7 +616,6 @@ def test_install_shell_guard_is_opt_in_kept_and_removable(env, tmp_path, monkeyp
     cfg = tmp_path / "settings.json"
     cfg.write_text("{}")
     monkeypatch.setitem(install.CONFIG, "claude", cfg)
-    monkeypatch.setitem(install.CONFIG, "gemini", tmp_path / "absent" / "settings.json")
     monkeypatch.setattr(install.read_scope, "sync", lambda data, ledger: ([], [], []))
     monkeypatch.setattr(install.read_scope, "load_ledger", lambda: [])
 

@@ -14,10 +14,21 @@ Every PR that lands on `main` bumps the release version in that same PR, followi
 - Add one line for the new version at the top of `CHANGELOG.md`.
 - Parallel PRs that bump the same version conflict. Rebase, take the next free version, and update the `CHANGELOG.md` line.
 - The bump is part of the change, not a separate release step. Do not skip it, and do not stop on a classifier block: report the exact command that was blocked.
+- **Batch exception:** for an explicitly planned office land --batch release, member PRs defer their bump to the **one** designated version-owner lane/PR. The batch manifest and final SHA enforce one version change and one changelog version heading. See docs/batch-landing.md.
 
 ## Validation
 
 For an ordinary PR, run `scripts/validate.sh --pr`: it always runs `tests/contracts/`, the named safety-smoke set and tests selected for changed files. Use `scripts/validate.sh --full` for test infrastructure changes, deleted or renamed tests, release work, or when the task requires full regression coverage. See `docs/validation.md`.
+
+## Owner-approved experimental exception (#1143)
+
+`gemini-4-hydrogen` is an explicit narrow exception to generic #845 role-allow activation:
+no automatic use outside the independent disabled-by-default S/M canary; no XS/L
+without a manually named route and a fresh exact conformance receipt; never XL
+or a reviewer. A verified account-level quota exhaustion demotes the verified
+shared pool. Hard authorization/security errors **block** instead of falling
+back, while ordinary provider failure may use a qualified fallback. Legacy
+flat-seed receipts remain byte compatible; new seeds support equal adaptive rungs.
 
 ## Routing contract (3.9, #845)
 

@@ -109,12 +109,23 @@ def process_start(pid: int | None) -> str | None:
         return None
     if portable.IS_WINDOWS:
         return portable.windows_process_start(pid)
+    own = pid == os.getpid()
+    if own and pid in _OWN_START:
+        return _OWN_START[pid]
     import subprocess
     try:
         proc = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
-    return " ".join(proc.stdout.split()) or None
+    start = " ".join(proc.stdout.split()) or None
+    if own and start:
+        # This process's own start time never changes, so one read serves the
+        # whole command (#1302). Keyed by pid: a forked child misses and reads its own.
+        _OWN_START[pid] = start
+    return start
+
+
+_OWN_START: dict[int, str] = {}
 
 
 def claim_identity(pid: int) -> str:

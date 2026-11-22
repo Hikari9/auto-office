@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <rect width="1600" height="1000" fill="#090b10"/>
+  <rect x="0" y="0" width="1600" height="48" fill="#0c0f15"/>
+  <line x1="0" y1="48" x2="1600" y2="48" stroke="#283142"/>
+  <rect x="0" y="48" width="74" height="952" fill="#0a0d12"/>
+  <line x1="74" y1="48" x2="74" y2="1000" stroke="#283142"/>
+  <rect x="74" y="48" width="230" height="952" fill="#0d1016"/>
+  <line x1="304" y1="48" x2="304" y2="1000" stroke="#283142"/>
+
+  <rect x="16" y="12" width="24" height="24" rx="7" fill="#5b8cff"/>
+  <text x="50" y="29" fill="#eef2f8" font-family="Inter,Arial" font-size="15" font-weight="700">Auto Office</text>
+  <rect x="145" y="15" width="46" height="18" rx="6" fill="#151a23" stroke="#283142"/>
+  <text x="155" y="28" fill="#8994a7" font-family="Inter,Arial" font-size="10">v3.2.1</text>
+  <circle cx="1470" cy="24" r="4" fill="#4fd1a5"/>
+  <text x="1480" y="28" fill="#8994a7" font-family="Inter,Arial" font-size="10">Local service</text>
+
+  <g font-family="Inter,Arial" font-size="9" text-anchor="middle">
+    <rect x="9" y="70" width="56" height="58" rx="10" fill="#1a202a" stroke="#343d4c"/>
+    <circle cx="37" cy="89" r="8" fill="#5b8cff"/>
+    <text x="37" y="115" fill="#ffffff">Issues</text>
+    <rect x="9" y="137" width="56" height="58" rx="10" fill="transparent"/>
+    <circle cx="37" cy="156" r="8" fill="#4fd1a5"/>
+    <text x="37" y="182" fill="#8994a7">Agents</text>
+    <rect x="9" y="204" width="56" height="58" rx="10" fill="transparent"/>
+    <circle cx="37" cy="223" r="8" fill="#a98cff"/>
+    <text x="37" y="249" fill="#8994a7">Allocate</text>
+    <rect x="9" y="271" width="56" height="58" rx="10" fill="transparent"/>
+    <circle cx="37" cy="290" r="8" fill="#6d7788"/>
+    <text x="37" y="316" fill="#8994a7">Settings</text>
+  </g>
+
+  <text x="94" y="78" fill="#5e6878" font-family="Inter,Arial" font-size="10" font-weight="700" letter-spacing="1.2">REPOSITORIES</text>
+  <rect x="90" y="92" width="198" height="34" rx="8" fill="#080a0e" stroke="#283142"/>
+  <text x="103" y="113" fill="#778398" font-family="Inter,Arial" font-size="11">Search repositories…</text>
+
+  <g font-family="Inter,Arial" font-size="11">
+    <rect x="86" y="140" width="206" height="42" rx="8" fill="#1b212b" stroke="#343d4c"/>
+    <rect x="98" y="151" width="20" height="20" rx="6" fill="#202735"/>
+    <text x="126" y="165" fill="#ffffff">auto-office</text><text x="263" y="165" fill="#5e6878" font-size="9">7</text>
+    <rect x="86" y="188" width="206" height="42" rx="8" fill="transparent"/>
+    <rect x="98" y="199" width="20" height="20" rx="6" fill="#202735"/>
+    <text x="126" y="213" fill="#b9c2cf">rock-pages</text><text x="263" y="213" fill="#5e6878" font-size="9">11</text>
+    <rect x="86" y="236" width="206" height="42" rx="8" fill="transparent"/>
+    <rect x="98" y="247" width="20" height="20" rx="6" fill="#202735"/>
+    <text x="126" y="261" fill="#b9c2cf">bible.favor.church</text><text x="263" y="261" fill="#5e6878" font-size="9">4</text>
+  </g>
+
+  <text x="330" y="89" fill="#eef2f8" font-family="Inter,Arial" font-size="23" font-weight="780">Issues</text>
+  <text x="330" y="111" fill="#8994a7" font-family="Inter,Arial" font-size="12">What is waiting, running, reviewing, or ready to land.</text>
+
+  <g font-family="Inter,Arial">
+    <rect x="330" y="138" width="210" height="82" rx="11" fill="#121820" stroke="#283142"/>
+    <line x1="330" y1="139" x2="540" y2="139" stroke="#5b8cff" stroke-width="3"/>
+    <text x="348" y="170" fill="#eef2f8" font-size="22" font-weight="800">8</text><text x="348" y="192" fill="#8994a7" font-size="10">RUNNING ISSUES</text>
+    <rect x="550" y="138" width="210" height="82" rx="11" fill="#121820" stroke="#283142"/>
+    <line x1="550" y1="139" x2="760" y2="139" stroke="#4fd1a5" stroke-width="3"/>
+    <text x="568" y="170" fill="#eef2f8" font-size="22" font-weight="800">6</text><text x="568" y="192" fill="#8994a7" font-size="10">ACTIVE AGENTS</text>
+    <rect x="770" y="138" width="210" height="82" rx="11" fill="#121820" stroke="#283142"/>
+    <line x1="770" y1="139" x2="980" y2="139" stroke="#a98cff" stroke-width="3"/>
+    <text x="788" y="170" fill="#eef2f8" font-size="22" font-weight="800">72%</text><text x="788" y="192" fill="#8994a7" font-size="10">CPU LOAD</text>
+  </g>
+
+  <rect x="330" y="242" width="1230" height="690" rx="12" fill="#0e1218" stroke="#283142"/>
+  <rect x="330" y="242" width="1230" height="42" rx="12" fill="#141923"/>
+  <g fill="#828da0" font-family="Inter,Arial" font-size="9" font-weight="700" letter-spacing="1">
+    <text x="350" y="268">ISSUE</text><text x="760" y="268">PHASE</text><text x="900" y="268">PROGRESS</text><text x="1100" y="268">OWNER</text><text x="1260" y="268">AUTHORIZATION</text><text x="1450" y="268">ACTION</text>
+  </g>
+
+  <g font-family="Inter,Arial" font-size="11">
+    <rect x="332" y="285" width="1226" height="72" fill="#171e29"/>
+    <rect x="332" y="285" width="3" height="72" fill="#5b8cff"/>
+    <text x="350" y="312" fill="#e9edf5" font-weight="650">#276 Auto Office Web UI</text>
+    <text x="350" y="334" fill="#778398" font-size="9">auto-office · run ao-7f9c</text>
+    <circle cx="770" cy="316" r="4" fill="#4fd1a5"/><text x="780" y="320" fill="#dce4ef">Executing</text>
+    <rect x="900" y="310" width="150" height="6" rx="3" fill="#202835"/><rect x="900" y="310" width="118" height="6" rx="3" fill="#5b8cff"/>
+    <text x="900" y="333" fill="#8994a7" font-size="9">7/10 weighted tasks</text>
+    <text x="1100" y="320" fill="#dce4ef">Orchestrator</text>
+    <rect x="1260" y="304" width="90" height="24" rx="6" fill="#151b24" stroke="#394457"/><text x="1272" y="320" fill="#b9c3d3" font-size="9">PR / no merge</text>
+    <rect x="1450" y="304" width="80" height="26" rx="7" fill="#202735"/><text x="1465" y="321" fill="#d8dee8" font-size="9">Inspect</text>
+
+    <line x1="330" y1="357" x2="1560" y2="357" stroke="#1e2531"/>
+    <text x="350" y="389" fill="#e9edf5" font-weight="650">#281 Ratify Web UI integration contract</text>
+    <text x="350" y="411" fill="#778398" font-size="9">auto-office · no run yet</text>
+    <circle cx="770" cy="393" r="4" fill="#6d7788"/><text x="780" y="397" fill="#dce4ef">Incoming</text>
+    <text x="900" y="397" fill="#8994a7">—</text><text x="1100" y="397" fill="#8994a7">Unowned</text>
+    <rect x="1260" y="381" width="90" height="24" rx="6" fill="#151b24" stroke="#394457"/><text x="1276" y="397" fill="#b9c3d3" font-size="9">Preview only</text>
+    <rect x="1415" y="381" width="115" height="26" rx="7" fill="#5b8cff"/><text x="1428" y="398" fill="#08111f" font-size="9" font-weight="700">Copy office start</text>
+
+    <line x1="330" y1="430" x2="1560" y2="430" stroke="#1e2531"/>
+    <text x="350" y="462" fill="#e9edf5" font-weight="650">#277 Runtime location and access boundary</text>
+    <text x="350" y="484" fill="#778398" font-size="9">auto-office · run ao-33c4</text>
+    <circle cx="770" cy="466" r="4" fill="#a98cff"/><text x="780" y="470" fill="#dce4ef">Reviewing</text>
+    <rect x="900" y="456" width="150" height="6" rx="3" fill="#202835"/><rect x="900" y="456" width="88" height="6" rx="3" fill="#a98cff"/>
+    <text x="900" y="479" fill="#8994a7" font-size="9">Reviewer blocking 2 tasks</text>
+    <text x="1100" y="466" fill="#dce4ef">Orchestrator</text>
+    <rect x="1260" y="450" width="90" height="24" rx="6" fill="#151b24" stroke="#394457"/><text x="1272" y="466" fill="#b9c3d3" font-size="9">Merge to main</text>
+  </g>
+
+  <rect x="1295" y="887" width="228" height="30" rx="8" fill="#151b24" stroke="#395268"/>
+  <circle cx="1312" cy="902" r="4" fill="#4fd1a5"/><text x="1325" y="906" fill="#cfe9df" font-family="Inter,Arial" font-size="9">AGY → Claude · quota fallback</text>
+</svg>

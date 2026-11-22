@@ -106,26 +106,6 @@ def test_overkill_role_and_size_scope():
     assert policy.is_overkill(eligible(), "executor", None, {"overkill": [{"route": "new-model"}]})
 
 
-def test_shipped_discovery_catalog_exactly_matches_locked_choices():
-    from office import shipped_catalog
-    rows = shipped_catalog.load()["models"]
-    actual = {(r["invocation_harness"], r["model_id"], r["effort"]) for r in rows if r.get("discovery") == "eligible"}
-    expected = {(h, m, e) for h, m in (("codex", "gpt-6.1-sol"), ("claude", "claude-haiku-5-5"))
-                for e in ("low", "medium", "high", "xhigh", "max")}
-    expected.add(("agy", "gemini-3.8-flash", "high"))
-    expected |= {("agy", "gemini-4-argon", e) for e in ("medium", "high")}
-    # The other five Agy Claude rows are dispatchable with launch evidence; Opus low never showed its banner.
-    expected.add(("agy", "claude-opus-5-5", "low"))
-    # GPT-6.1 Terra (#811): every AA effort, including none, until an exact probe qualifies it.
-    expected |= {("codex", "gpt-6.1-terra", e) for e in ("none", "low", "medium", "high", "xhigh", "max")}
-    assert actual == expected
-    for row in rows:
-        if row.get("dispatchable") is False:
-            assert policy.row_status(row)["status"] == "discovered-unconfirmed"
-        if row.get("discovery") == "eligible":
-            assert row["discovery_reason"] and row["invocation_model_id"]
-
-
 def test_missing_invocation_evidence_is_unknown_and_not_probe_eligible():
     result = policy.row_status({"dispatchable": False})
     assert result == {"status": "discovered-unconfirmed",
@@ -158,7 +138,9 @@ def test_additive_migration_fresh_and_prechange_copy(tmp_path, historical):
     v12 = {"predecessor_dispatch_id", "first_executor_dispatch_id", "accepted_producer_dispatch_id",
            "members_json", "attribution_basis", "attributed_task", "clone_of",
            # v14 (#701/#722): passive progress-watchdog state on dispatches.
-           "watchdog_progress_hash", "watchdog_progress_since"}
+           "watchdog_progress_hash", "watchdog_progress_since",
+           # v20 (#939): per-executor context-cap handoff on dispatches.
+           "context_handoff_json"}
     assert all([col for col in columns[table] if col[1] not in v12] == info for table, info in old_columns.items())
     assert {"route_probes", "route_probe_reservations", "route_trials", "route_discovery_events"} <= columns.keys()
     expected = {

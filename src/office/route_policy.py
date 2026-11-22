@@ -10,9 +10,11 @@ from copy import deepcopy
 import json
 import math
 import re
+import shutil
+import time
 
 from office.util import dumps, new_run_id, now_iso, sha256_obj
-from office import model_lineages
+from office import hermes_access, model_lineages
 
 POLICY_VERSION = "route-discovery-3"
 # A route that fails at runtime is demoted for this long, never permanently (#845).
@@ -40,6 +42,38 @@ EVENT_ORIGINS = ("preflight", "manual", "dispatch", "recovery", "job")
 _EVENT_FIELDS = ("run_id", "plan_version", "task_id", "dispatch_id", "role", "fingerprint_json",
                  "candidate_route", "primary_route", "fallback_route", "probe_freshness", "source_attempt_id",
                  "allocation_json", "outcome", "reason_class", "detail")
+
+
+PROVIDER_UNREACHABLE = "provider-unreachable"
+_PROVIDER_TTL_S = 30.0
+_reachable_cache: tuple[float, frozenset[str]] | None = None
+
+
+def reachable_hermes_providers() -> frozenset[str]:
+    """Providers `hermes auth list` shows with a usable credential, read at most once per TTL (policy views ask per row)."""
+    global _reachable_cache
+    now = time.monotonic()
+    if _reachable_cache is None or now - _reachable_cache[0] > _PROVIDER_TTL_S:
+        _reachable_cache = (now, frozenset(hermes_access.reachable_providers()))
+    return _reachable_cache[1]
+
+
+def reset_provider_cache() -> None:
+    global _reachable_cache
+    _reachable_cache = None
+
+
+def provider_unreachable(cand: dict) -> str | None:
+    """Why a Hermes route cannot run here: its pinned provider has no usable credential. None otherwise.
+
+    A bare model id pins no provider, and an absent Hermes is the not-installed case, so neither is blocked here.
+    """
+    if cand.get("harness", cand.get("invocation_harness")) != "hermes" or not shutil.which("hermes"):
+        return None
+    provider, _ = hermes_access.expected_route(cand.get("invocation_model_id") or "")
+    if provider and provider not in reachable_hermes_providers():
+        return f"{PROVIDER_UNREACHABLE}: hermes auth list shows no usable {provider} credential"
+    return None
 
 
 def row_status(row: dict, probe: dict | None = None) -> dict:
@@ -295,7 +329,8 @@ def _rule_matches(cand: dict, spec: str, *, state: str | None = None) -> bool:
         # A deny must not fail open because the installed major cannot be read.
         major_ok = major == match["major"] or (state == "deny" and not major.isdigit())
         return (cand.get("harness") == match["harness"] and major_ok and
-                match["model"] in {cand.get("model_id"), cand.get("alias_resolved_to")} and
+                match["model"] in {cand.get("model_id"), cand.get("invocation_model_id"),
+                                   cand.get("alias_resolved_to")} and
                 cand.get("effort") == match["effort"])
     return _matches(cand, spec)
 
@@ -305,6 +340,29 @@ def _in_scope(rule: dict, size: str | None) -> bool:
     return "sizes" not in rule or size in rule["sizes"]
 
 
+# Qualification must be set in a separately reviewed, effort-specific planner
+# activation change, after real Claude Code identity/tool/quota receipts. A role
+# allow cannot promote this still-unqualified catalog registration (#1133).
+FABLE_PLANNER_QUALIFIED_EFFORTS: frozenset[str] = frozenset()
+
+
+def is_fable(cand: dict) -> bool:
+    return "claude-fable-5-2" in {
+        cand.get("model_id"), cand.get("invocation_model_id"),
+        cand.get("alias_resolved_to"),
+    } or cand.get("lineage_key") == "anthropic/claude-fable"
+
+
+def fable_role_block(cand: dict, role: str) -> str | None:
+    if not is_fable(cand):
+        return None
+    if role != "planner":
+        return "Claude Fable 5.2 is planner-only; executor, worker and reviewer roles are prohibited"
+    if cand.get("effort") not in FABLE_PLANNER_QUALIFIED_EFFORTS:
+        return "Claude Fable 5.2 planner effort is not locally qualified or authorized"
+    return None
+
+
 def effective_role_state(cand: dict, role: str, policies: list[dict], size: str | None = None) -> dict:
     """Effective role policy; newest user rules > legacy denies > shipped rules > neutral.
 
@@ -312,7 +370,15 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
     Policy evaluation is independent of technical availability, quotas and review safety.
     A list entry is exact unless its author deliberately set `wildcard: true`.
     """
+    if block := fable_role_block(cand, role):
+        return {"state": "deny", "source": "hard-model-role-boundary", "reason": block}
+    if reason := provider_unreachable(cand):
+        return {"state": "deny", "source": PROVIDER_UNREACHABLE, "reason": reason}
+    # A preferred_seed allow never lifts a deny, the same refusal dispatch gives (#899).
+    seed_outranked = any(is_denied(cand, policy) for policy in policies)
     for policy in reversed(policies):
+        if seed_outranked and (policy.get("sources") or {}).get("role_rules") == "preferred_seed":
+            continue
         matching = [rule for rule in policy.get("role_rules", ())
                     if rule.get("role") in (role, "*") and _in_scope(rule, size)
                     and _rule_matches(cand, rule["route"], state=rule.get("state"))]
@@ -325,7 +391,7 @@ def effective_role_state(cand: dict, role: str, policies: list[dict], size: str 
             # Equivalent spellings of one route can disagree; fail closed, deterministically.
             rule = next((r for r in best if r["state"] == "deny"), None) or sorted(best, key=lambda r: r["state"])[0]
             source = (policy.get("sources") or {}).get("role_rules") or "user"
-            return {"state": rule["state"], "source": source, "rule": rule["route"]}
+            return {"state": rule["state"], "source": source, "rule": rule["route"], "role": rule["role"]}
     for policy in reversed(policies):
         if reason := is_denied(cand, policy):
             return {"state": "deny", "source": "legacy-user-deny", "reason": reason}

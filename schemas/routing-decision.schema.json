@@ -122,6 +122,21 @@
         }
       }
     },
+    "harness_preference": {
+      "description": "Present only when routing.harness_preference weights applied to the lead route's model: the weights, the deterministic (run, task) draw and the harness it picked.",
+      "type": "object",
+      "required": ["scope", "weights", "pick", "why"],
+      "properties": {
+        "scope": {"type": "string"},
+        "weights": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
+        "model": {"type": ["string", "null"]},
+        "effort": {"type": ["string", "null"]},
+        "available": {"type": "array", "items": {"type": "string"}},
+        "pick": {"type": ["string", "null"]},
+        "draw": {"type": ["number", "null"]},
+        "why": {"type": "string"}
+      }
+    },
     "lineage_supersession": {
       "description": "Present only when a qualifying newer generation moved ahead of its predecessor of the same lineage and effort (#811).",
       "type": "array",

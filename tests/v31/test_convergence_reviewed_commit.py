@@ -59,6 +59,30 @@ def test_the_brief_names_the_commit_and_retires_earlier_checkouts():
     assert "REVIEWED_COMMIT <the full commit sha you reviewed" in brief  # the reply format
     assert "checkout path named in an earlier round or reply is stale and must not be used" in brief
     assert "/tmp/checkout-now" in brief
+    # #1044: an environment the reviewer cannot provision is not a finding against the work.
+    assert "Office's record for this composition" in brief and "NEXT line instead" in brief
+
+
+def _commit_brief(run, task_commits):
+    revision = {"id": "L-T1@0123456789", "commit_sha": SHA, "base_commit": None, "dispatch_id": None}
+    return briefs.convergence_review_brief({"id": "r", "requirements_version": 1, **run}, {"id": "L-T1", "tasks": ["T1"]},
+                                           [{"id": "T1", "title": "add"}], revision, "diff", "T1 PASS", [],
+                                           "/tmp/checkout-now", 1, task_commits=task_commits)
+
+
+def test_the_brief_lists_task_commits_and_names_office_compose_commits():
+    brief = _commit_brief({}, {"T1": {"sha": "a" * 40, "message": "Fix the adder (#360)\n\nBody line"}})
+    assert f"task commit: {'a' * 40}" in brief
+    assert "| Fix the adder (#360)" in brief and "| Body line" in brief
+    assert "start with `office:`" not in brief and "starts with `office:`" in brief
+    assert "producers cannot edit them" in brief
+    assert "judge commit-message or PR-body criteria against the task commits".lower() in brief.lower()
+    assert "this run has no task prs" in brief.lower()
+
+
+def test_the_no_task_prs_line_is_absent_when_prs_are_on():
+    brief = _commit_brief({"landing": {"prs": {"enabled": True}}}, {"T1": {"sha": "b" * 40, "message": "m"}})
+    assert "no task PRs" not in brief and f"task commit: {'b' * 40}" in brief
 
 
 # ------------------------------------------------------------------ through the gate
@@ -142,3 +166,33 @@ def test_ingest_alone_rejects_a_stated_commit_that_is_not_the_gates(env):
         con.close()
     assert gate["review_status"] == "INVALID_RESULT" and gate["verdict"] is None
     assert _findings(env) == []
+
+
+@pytest.mark.parametrize("stated, ok", [
+    (SHA, True), (SHA[:12], True), (SHA[:9], True),  # #893: a full sha for an abbreviated composed commit
+    (SHA[:13], False), (SHA + "0", False), ("deadbeef" * 5, False),
+])
+def test_an_abbreviated_composed_commit_accepts_the_full_sha(stated, ok):
+    assert (convergence.commit_problem(SHA[:12], stated) is None) is ok
+
+
+def test_a_commit_with_the_composed_commits_tree_is_the_same_review(tmp_path):
+    """#782: a same-tree recomposition keeps the earlier review, so naming the earlier commit is no mismatch."""
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    git("init", "-q")
+    (tmp_path / "a.txt").write_text("a\n")
+    git("add", "a.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
+    earlier = git("rev-parse", "HEAD")
+    recomposed = git("-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", "-m", "again", f"{earlier}^{{tree}}")
+    (tmp_path / "a.txt").write_text("b\n")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "other")
+    other = git("rev-parse", "HEAD")
+    assert convergence.commit_problem(recomposed, earlier, repo=tmp_path) is None
+    assert convergence.commit_problem(recomposed, earlier[:12], repo=tmp_path) is None
+    assert convergence.commit_problem(recomposed, other, repo=tmp_path)
+    assert convergence.commit_problem(recomposed, earlier)  # no repo: no tree proof

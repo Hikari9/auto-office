@@ -29,9 +29,11 @@ def test_codex_interactive_launch_pre_trusts_its_cwd(tmp_path):
         args, _ = adapters.interactive_argv(codex, kind, model="m", effort="high", cwd=tmp_path)
         key = json.dumps(str(tmp_path.resolve()))
         assert f'projects={{{key}={{trust_level="trusted"}}}}' in args, (kind, args)
-        # Headless `codex exec` shows no dialog and keeps its argv.
+        # Headless `codex exec` shows no dialog and keeps its argv. The code and visual reviewers trust their own
+        # sandbox dir, so codex loads the dispatch's office-review-submit rule there (#1042; vision since #1192).
         argv, _ = adapters.build_argv(codex, kind, model="m", effort="high", cwd=tmp_path)
-        assert not any(a.startswith("projects=") for a in argv)
+        trusted = [a for a in argv if a.startswith("projects=")]
+        assert trusted == ([f'projects={{{key}={{trust_level="trusted"}}}}'] if kind != "worker" else []), (kind, argv)
 
 
 @pytest.mark.approved
@@ -217,7 +219,7 @@ def test_enter_that_empties_the_composer_counts_as_submitted(env, monkeypatch):
     assert len(prompts) == 1 and len(enters) == 1 and typed == []
 
 
-def _reviewer_reprompt(env, monkeypatch, reads):
+def _reviewer_reprompt(env, monkeypatch, reads, *, harness="claude"):
     state_file = _fake(env, monkeypatch, gets=["idle"], reads=reads)
     run, d = _live_dispatch(env, monkeypatch)
     monkeypatch.setenv("OFFICE_HERDR_LAND_TIMEOUT", "0")
@@ -225,7 +227,10 @@ def _reviewer_reprompt(env, monkeypatch, reads):
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_WAIT", "0")
     monkeypatch.setenv("OFFICE_REVIEW_REPROMPT_POLL", "0")
     from office import dispatch, gates, review_parse
-    d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer"}
+    # Pin the reviewer's harness so routing drift (T1 now routes to codex) cannot change the Enter budget under
+    # test. Codex keeps its one-Enter cap (#790).
+    d = {**d, "launcher": "herdr", "pane_id": "w1:p7", "role": "code_reviewer",
+         "harness": harness, "adapter_id": harness, "triple": f"{harness}/fake-model/high"}
     run = {**run, "gates": {"review_reprompt_max": 1}}
     # Herdr holds this reviewer in its pane: the fail-closed fence types only into a pane it shows to be the dispatch's own.
     data = json.loads(state_file.read_text())
@@ -251,12 +256,43 @@ def test_reviewer_reprompt_left_unsubmitted_gets_enter_not_a_second_prompt(env, 
 
 
 def test_reviewer_reprompt_that_never_submits_stops_with_an_enter_hint(env, monkeypatch):
+    # A non-Codex reviewer gets the configured OFFICE_HERDR_ENTER_TRIES Enters, never a second copy of the prompt.
     monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
     held = "› Office could not read your review (empty reply). Write your complete review again"
     state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held])
     prompts, enters, typed = _sends(_calls(state_file))
     assert len(prompts) == 1 and len(enters) == 2 and typed == []
     assert "typed but unsubmitted" in reason and "send-keys" in reason
+
+
+def test_codex_reviewer_reprompt_that_never_submits_gets_one_enter(env, monkeypatch):
+    # Codex code reviewers cap recovery at one Enter (#790), whatever OFFICE_HERDR_ENTER_TRIES says.
+    monkeypatch.setenv("OFFICE_HERDR_ENTER_TRIES", "2")
+    held = "› Office could not read your review (empty reply). Write your complete review again"
+    state_file, (text, parsed, reason) = _reviewer_reprompt(env, monkeypatch, [EMPTY, held], harness="codex")
+    prompts, enters, typed = _sends(_calls(state_file))
+    assert len(prompts) == 1 and len(enters) == 1 and typed == []
+    assert "typed but unsubmitted" in reason and "send-keys" in reason
+
+
+def test_issue_583_a_working_agent_whose_composer_is_empty_gets_no_did_not_land_notice(env, monkeypatch):
+    """The pointer is no longer in the composer and herdr reports the agent working: no re-prompt advice."""
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
+                        lambda name: {"status": "working", "busy": True, "content_hash": None})
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=[EMPTY, EMPTY, EMPTY])
+    assert res["prompt_landed"] is False
+    assert _launch_events(env, run) == [], _launch_events(env, run)
+    assert json.loads((ddir / "launch.json").read_text()).get("landing_unconfirmed_working") is True
+
+
+def test_issue_583_an_idle_agent_whose_composer_is_empty_is_still_reported(env, monkeypatch):
+    from office import dispatch
+    monkeypatch.setattr(dispatch, "_herdr_agent_sample",
+                        lambda name: {"status": "idle", "busy": False, "content_hash": None})
+    state_file, run, d, ddir, res = _launch(env, monkeypatch, adapter="claude", reads=[EMPTY, EMPTY, EMPTY])
+    assert res["prompt_landed"] is False
+    assert _launch_events(env, run), "an idle agent that never took the brief is still news"
 
 
 def test_issue_583_working_pi_agent_does_not_emit_unsubmitted_pointer_notice(env, monkeypatch):

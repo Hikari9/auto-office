@@ -40,13 +40,14 @@ def _rev_commit(env, rev_id):
 def _t2_on_superseded_t1(env):
     """T2 starts on T1's first revision; T1 is then accepted on its second."""
     approved_run(env, plan=PLAN_STACK, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
-    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    # T2 is resumed later: pin claude, whose session the fake harness can resume (the ranker no longer picks it).
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", env=EXTERNAL, check=0)
     w1, wt1 = _worker(env, "T1")
     _commit(env, wt1, {"calc.py": GOOD_ADD}, "t1 r1")
     env.office("submit", cwd=wt1, env=w1, check=0)
     t1_r1 = task_row(env, "T1")["current_revision_id"]
     assert task_row(env, "T1")["status"] == "changes_required"
-    env.office("dispatch", "T2", env=EXTERNAL, check=0)
+    env.office("dispatch", "T2", "--as", "claude/claude-opus-5-5@medium", env=EXTERNAL, check=0)
     _commit(env, wt1, {"calc.py": GOOD_ADD + "# reviewed\n"}, "t1 r2")
     env.office("submit", cwd=wt1, env=w1, check=0)
     t1 = task_row(env, "T1")

@@ -4,14 +4,19 @@
 The invoking agent presents the questions through its harness's native question tool. `office onboard` owns detection,
 eligibility, validation and persistence, so the skill never writes config or judges a route itself.
 
+## Missing CLI
+
+The root `auto-office` skill runs `command -v office` before onboarding. If `office` is missing, it asks once per session: **Install the CLI** (`uv tool install git+https://github.com/Hikari9/auto-office`, `office install --no-hooks`, `office doctor`, then onboarding), **Lean for this request** (hands off to `auto-office:auto-office-lean`), or **Lean, don't ask again**, which also writes `lean` to `${XDG_CONFIG_HOME:-~/.config}/auto-office/install-choice`. A saved `lean` skips the question; to ask again, delete that file. Onboarding below runs only once the CLI is installed.
+
 ## Contract
 
 | Command | Effect |
 |---|---|
 | `office onboard --harness <h> [--json]` | Status only, never prompts or writes: `due`, `reason`, the current harness and its Office integration, every harness with its sign-in state, the three questions with current values, options, eligible and unavailable routes. |
 | `office onboard --planner A --executor A --reviewer A` | Validates every answer, then writes the accepted preferences and `onboarding.schema_version` to the user file in one atomic write. An omitted flag means `keep`. |
-| `office onboard --skip` | Writes only `onboarding.schema_version`. Every preference stays as it was, including the free-model opt-in. |
+| `office onboard --skip` | Writes `onboarding.schema_version` and the current overlap set as `onboarding.harness_overlap_seen`. Every preference stays as it was, including the free-model opt-in and the harness weights. |
 | `office onboard --enable-free-models` / `--disable-free-models` | Writes `onboarding.free_models_enabled` (`true` / `false`) with the schema marker, alone or together with answers. Not allowed with `--skip`. |
+| `office onboard --harness-preference office\|keep\|recommended [--harness-budget PROVIDER:HARNESS=USD ...]` | Answers the harness overlap round (below). Writes `routing.harness_preference` for `recommended` and `office`, and `onboarding.harness_overlap_seen`. Never touches the schema marker. |
 
 Free models are off by default. A catalog route marked `free_model` is not offered to routing until the user opts in, and `--disable-free-models` turns it off again. The opt-in persists in the user file, and the status output reports it (`free_models`). Once opted in, a free route competes on merit through normal qualification, scoring and fallback like any other route.
 
@@ -25,10 +30,30 @@ An answer is `office` (Let Office decide), `keep`, or a full `harness/model@effo
 
 `office` removes only that role's user-level `preferred_seed`, so the shipped default applies. The repo file is never written,
 and a repo override still wins in its repository. `office onboard` reports one when it exists. Running runs keep the policy they
-pinned (#440). `office config --run <id> --apply-routing --quote "<words>"` stays the only way to re-pin a run.
+pinned (#440). `office config --run <id> --apply-routing --quote "<words>"` stays the only way to re-pin a run's routing; `--apply-verification` re-pins only its check timeouts and check concurrency (#755).
 
 User-facing copy says preference, not promise: *Office favors this route according to its routing policy, but may choose another model or
 effort when availability, quota, task fit, capability, evidence, or policy calls for it.*
+
+## Harness preference round
+
+When two or more installed harnesses can run the same model on a provider, that overlap makes onboarding due once, even when the schema is current.
+`office onboard --harness <h> --json` lists each overlap under `harness_preference.overlap` (models, harnesses, provider) and the harnesses still
+pending. Hermes counts for a provider only when `hermes auth list` shows a usable credential for it, and the JSON lists Hermes providers by name and
+status only (`harnesses[].providers`), never a credential.
+
+The question is one of three answers:
+
+- `office`: Let Office decide. It clears the weights for the overlapping providers only; other `routing.harness_preference` scopes stay.
+- `keep`: leave the weights as they are.
+- `recommended`: derive the weights from monthly USD. Pass `--harness-budget PROVIDER:HARNESS=USD` for every pair in `budget_inputs`
+  (zero or more, finite). Each harness's weight is its share of the provider's total monthly budget, in percent, so a harness with $0 gets weight 0 and
+  is only a fallback. A provider whose budgets all sum to zero gets no weights. The reasoning (`$40/mo of $100 = 40%`) is printed and kept in status.
+  The budgets are stored under `onboarding.harness_budgets` as onboarding input; routing never reads them.
+
+Any answer records the overlap set in `onboarding.harness_overlap_seen`: one `provider|model|harness` entry per harness running a shared model. A narrowing overlap asks nothing new, but a newly shared model reopens the round even when its harnesses were already recorded. Bare harness names written by an earlier version still count for their harness until the next answer replaces them with entries.
+An invalid or incomplete answer writes nothing and stays re-askable. `--skip` writes no weights but records the current overlap set as seen, so the
+round is due again only when that set changes (a new harness or a newly shared model joins the overlap). A `--harness-budget` without `recommended` is refused.
 
 ## Eligibility
 

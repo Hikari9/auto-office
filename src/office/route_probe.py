@@ -53,7 +53,8 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, db, paths, portable, route_policy
+from office import adapters, db, hermes_access, paths, portable, route_policy
+from office import config as office_config
 from office.util import (ALIVE, DEAD, UNKNOWN, atomic_write_json, now_iso, parse_iso, process_is, process_start,
                          sha256_file)
 
@@ -140,9 +141,29 @@ def _parsed(value: str | None) -> datetime | None:
     return dt
 
 
+def _row_dict(cur, row) -> dict | None:
+    """Convert a fetched row to a dict whether or not the connection uses sqlite3.Row."""
+    if row is None:
+        return None
+    if isinstance(row, (dict, sqlite3.Row)):
+        return dict(row)
+    return {col[0]: val for col, val in zip(cur.description or (), row)}
+
+
+def _first(row):
+    """A row's first column whether the connection returns tuples, sqlite3.Row or dicts (#1160)."""
+    return next(iter(row.values())) if isinstance(row, dict) else row[0]
+
+
+def _rows_dicts(cur) -> list[dict]:
+    """Convert all fetched rows to dicts regardless of the connection's row_factory."""
+    cols = [col[0] for col in (cur.description or ())]
+    return [dict(row) if isinstance(row, (dict, sqlite3.Row)) else dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 def _cache_row(con, probe_key: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_probes WHERE key=?", (probe_key,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_probes WHERE key=?", (probe_key,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def _is_fresh(rec: dict, ttl_days: float, timeout_s: float, now: datetime) -> bool:
@@ -165,16 +186,20 @@ def _is_fresh(rec: dict, ttl_days: float, timeout_s: float, now: datetime) -> bo
     return age <= timedelta(days=ttl_days)
 
 
-def status(con, cand: dict, *, adapter: dict | None = None, ttl_days: float | None = None,
-           timeout_s: float | None = None, now: datetime | None = None) -> dict | None:
-    """The fresh probe record for this exact fingerprint, or None. A record of a
-    sibling effort, model, harness version, adapter or profile is never returned."""
+def exact_row(con, cand: dict, adapter: dict | None = None) -> dict | None:
+    """The cache row for this candidate's exact fingerprint, fresh or not, or None when a part cannot be read. A row of
+    a sibling effort, model, harness version, adapter or profile is a different key and is never returned."""
     ad = _adapter(cand, adapter)
     fp = fingerprint(cand, ad)
     if "unknown" in (fp["harness_version"], fp["adapter_hash"]):
         return None
-    probe_key = key(cand, ad)
-    rec = _cache_row(con, probe_key)
+    return _cache_row(con, key(cand, ad))
+
+
+def status(con, cand: dict, *, adapter: dict | None = None, ttl_days: float | None = None,
+           timeout_s: float | None = None, now: datetime | None = None) -> dict | None:
+    """The fresh probe record for this exact fingerprint, or None."""
+    rec = exact_row(con, cand, adapter)
     if rec is None:
         return None
     defaults = route_policy.DISCOVERY_DEFAULTS
@@ -202,13 +227,13 @@ def rolling(con, settings: dict) -> dict:
                            (ROLLING_WINDOW,)).fetchall()
     except sqlite3.OperationalError:
         rows = []
-    since = rows[-1][0] if rows else None
+    since = _first(rows[-1]) if rows else None
     query = "SELECT COUNT(*) FROM route_trials WHERE role IN ('executor','worker')"
     args: tuple = ()
     if since is not None:
         query += " AND created_at >= ?"
         args = (since,)
-    used = con.execute(query, args).fetchone()[0]
+    used = _first(con.execute(query, args).fetchone())
     window = min(ROLLING_WINDOW, len(rows) + 1)
     cap = int(math.floor(window * percent / 100.0 + 1e-9))
     return {"used": used, "max": cap, "window": window, "percent": percent,
@@ -217,9 +242,9 @@ def rolling(con, settings: dict) -> dict:
 
 def allocation(con, run_id: str | None, settings: dict) -> dict:
     """Probe, trial and rolling cap snapshot. Pure reads, so a router can use it as a request input."""
-    probes = con.execute("SELECT COUNT(*) FROM route_probe_reservations WHERE run_id=?", (run_id,)).fetchone()[0] \
+    probes = _first(con.execute("SELECT COUNT(*) FROM route_probe_reservations WHERE run_id=?", (run_id,)).fetchone()) \
         if run_id else 0
-    trials = con.execute("SELECT COUNT(*) FROM route_trials WHERE run_id=?", (run_id,)).fetchone()[0] \
+    trials = _first(con.execute("SELECT COUNT(*) FROM route_trials WHERE run_id=?", (run_id,)).fetchone()) \
         if run_id else 0
     return {"probes": {"used": probes, "max": int(settings["max_probes_per_run"])},
             "trials": {"used": trials, "max": int(settings["max_trials_per_run"])},
@@ -312,16 +337,32 @@ def row_state(row: dict) -> dict:
 
 
 def _denial(cand: dict, run: dict | None, config: dict) -> tuple[str, str] | None:
-    """A denial in the pinned config or in the live user and repo policy (the path
-    `route_role` and `declared_candidate` read), so a denial written after `office start`
-    stops a probe too. A live policy that cannot be read refuses: it might deny this route."""
+    """A denial in the live user and repo policy (the path `route_role` and `declared_candidate`
+    read), so a denial written after `office start` stops a probe too. `config` (a run's pinned
+    copy) is not consulted since #1120. A live policy that cannot be read refuses: it might deny this route."""
     from office import candidates
     try:
         live = candidates.live_user_policies((run or {}).get("repo_root"))
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return "policy-unreadable", f"the live user or repo policy cannot be read ({exc}), so a denial cannot be ruled out"
     # A probe serves the executor role (#837): a role allow supersedes a legacy global deny, a role deny holds.
-    verdict = route_policy.effective_role_state(cand, "executor", [route_policy.user_policy(config), *live])
+    policies = list(live)
+    if route_policy.is_fable(cand):
+        # --probe-route observes an unqualified *planner* route. The Office
+        # doctor is historically executor-scoped; its normal role verdict would
+        # prohibit gathering the very evidence required for Fable qualification.
+        # Preserve explicit user denials while permitting manual readback only.
+        for policy in policies:
+            if reason := route_policy.is_denied(cand, policy):
+                return "route-denied", reason
+            # A probe is executor-scoped (#837) and here observes a planner
+            # route, so an explicit deny for either role (or every role) holds.
+            if any(rule.get("state") == "deny" and rule.get("role") in ("planner", "executor", "*")
+                   and route_policy._rule_matches(cand, rule.get("route"), state="deny")
+                   for rule in policy.get("role_rules", ())):
+                return "route-denied", "route explicitly denied for the planner or executor role by user policy"
+        return None
+    verdict = route_policy.effective_role_state(cand, "executor", policies)
     if verdict["state"] == "deny":
         return "route-denied", verdict.get("reason") or f"executor is denied by {verdict['source']}: {verdict.get('rule')}"
     return None
@@ -360,12 +401,12 @@ def _static_refusal(cand: dict, adapter: dict | None, fp: dict, ctx: dict, confi
     return None
 
 
-def _quota_refusal(cand: dict, config: dict) -> str | None:
+def _quota_refusal(cand: dict, config: dict, role: str | None) -> str | None:
     quota = cand.get("quota") or {}
     remaining = quota.get("tightest_remaining_percent")
     if quota.get("status") != "ok" or remaining is None:
         return None
-    reserve = float((config.get("quota") or {}).get("reserve_percent", 5.0))
+    reserve = office_config.quota_reserve_percent(config, role)
     burn = float(quota.get("projected_burn_percent") or 0)
     if float(remaining) - burn < reserve:
         return f"quota {float(remaining):g}% left would cross the {reserve:g}% protected reserve"
@@ -539,11 +580,70 @@ class _Tracker:
             held = _workspace_pids(self.base)
             if held is None:
                 return None
-            found |= held
+            starts = {}
+            for pid in held:
+                start = process_start(pid)
+                if start:
+                    starts[pid] = start
+                elif not _pid_gone(pid):
+                    return None  # a holder that runs on with no readable identity: never confirm cleanup
+            if starts:
+                # The start time read after lsof names the holder only if that pid still holds the
+                # workspace afterwards: a pid reused in between by an unrelated process does not
+                # know the random workspace path. A holder is the probe's, so its start time is
+                # what identifies it from here on, even when its pid was seen before as another process.
+                again = _workspace_pids(self.base)
+                if again is None:
+                    return None
+                for pid in starts.keys() & again:
+                    self.seen[pid] = starts[pid]
+                    found.add(pid)
         return {pid for pid in found if pid > 1 and pid != os.getpid()}
 
 
+def _pid_gone(pid: int) -> bool:
+    """True only when no process has this pid any more."""
+    return portable.pid_exists(pid) is False
+
+
+def _running(pids: set[int], starts: dict[int, str] | None = None) -> set[int] | None:
+    """The pids that still run as the same process. A zombie (an exited child its
+    parent has not reaped) runs no code and writes nothing, so it is not left over
+    (#1296: a long-lived Claude hook daemon outside the probe never reaps the child it
+    started for the probe's session). A pid no longer listed is gone, and one whose
+    start time differs from the one the tracker saw was reused by another process, so
+    it is not ours to wait for or signal (ps shows start times to the second; reusing a
+    pid within the same second would take a full wrap of the pid space). None when the
+    states cannot be read, so the caller fails closed."""
+    try:
+        listing = subprocess.run([_tool("ps", "/bin/ps", "/usr/bin/ps"), "-o", "pid=,stat=,lstart=", "-p",
+                                  ",".join(str(p) for p in sorted(pids))],
+                                 capture_output=True, text=True, timeout=10)  # same locale as _process_table, so starts compare
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode not in (0, 1):  # 1: none of the pids is listed any more
+        return None
+    alive = set()
+    for line in listing.stdout.splitlines():
+        m = re.match(r"^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w+\s+\w+\s+[\d:]{8}\s+\d{4})\s*$", line)
+        if not m:
+            if line.strip():
+                return None  # a row we cannot read may be a live process: never confirm cleanup on it
+            continue
+        if m.group(2).startswith("Z"):
+            continue
+        pid = int(m.group(1))
+        if starts is not None and pid in pids:
+            if pid not in starts:
+                return None  # no recorded identity: whether it is still ours cannot be told
+            if " ".join(starts[pid].split()) != " ".join(m.group(3).split()):
+                continue
+        alive.add(pid)
+    return alive & pids
+
+
 def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | None = None, seed: bool = True,
+                    start: str | None = None,
                     term_wait: float = 3.0, kill_wait: float = 3.0) -> bool:
     """Stop the probe's process group and every process the tracker attributes to
     it, including ones that left the group, and confirm none is left."""
@@ -552,7 +652,19 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
         if proc is not None:
             proc.poll()  # reap the leader so a zombie does not count as alive
         # A reaped leader's pid may be reused, so it only seeds the tree while it is still ours.
-        return tracker.scan(pgid if seed and (proc is None or proc.returncode is None) else None)
+        pids = tracker.scan(pgid if group_ours() else None)
+        return _running(pids, tracker.seen) if pids else pids
+
+    def group_ours() -> bool:
+        # The group id is ours to seed from and signal only while its leader is: our own
+        # unreaped child, or a recovered pid that still has its recorded start time, checked
+        # again on every call. Once the leader is gone an emptied group's id can be reused by
+        # an unrelated process, so stragglers are then signalled one by one through the tracker.
+        if not (pgid > 1 and seed):
+            return False
+        if proc is not None:
+            return proc.returncode is None
+        return start is not None and process_is(pgid, start)
 
     for sig, wait in ((signal.SIGTERM, term_wait), (portable.SIGKILL, kill_wait)):
         pids = left()
@@ -560,7 +672,7 @@ def _terminate_tree(pgid: int, tracker: _Tracker, *, proc: subprocess.Popen | No
             return False
         if not pids and not _group_alive(pgid):
             return True
-        if pgid > 1:
+        if group_ours():
             try:
                 portable.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):
@@ -609,7 +721,7 @@ def _kill_recorded_children(attempt_id: str) -> str | None:
         return None
     base = _probe_base(rec.get("base"))
     ours = isinstance(pid, int) and pid > 1 and pid != os.getpid() and process_is(pid, rec.get("start"))
-    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours)
+    gone = _terminate_tree(pid if ours else 0, _Tracker(nonce, base), seed=ours, start=rec.get("start"))
     if base is not None:  # a claude probe keeps its session record in the user's config dir, not under base
         shutil.rmtree(claude_transcript_dir(base / "wt"), ignore_errors=True)
     if not ours and pid:
@@ -680,9 +792,9 @@ def candidate_from_spec(spec: str) -> dict:
 # ------------------------------------------------------------------ reserve
 
 def _inflight(con, probe_key: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_probe_reservations WHERE probe_key=? AND status='reserved'",
-                      (probe_key,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_probe_reservations WHERE probe_key=? AND status='reserved'",
+                      (probe_key,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dict | None = None,
@@ -740,7 +852,7 @@ def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dic
                 return refuse("discovery-disabled", "routing.discovery.enabled is false in the pinned config")
             if ctx["origin"] != "manual" and ctx.get("role") not in (None, *settings["roles"]):
                 return refuse("role-not-eligible", f"discovery is limited to {', '.join(settings['roles'])}")
-            quota = _quota_refusal(cand, config)
+            quota = _quota_refusal(cand, config, ctx.get("role"))
             if quota:
                 return refuse("quota-reserve", quota)
             if cached and cached["result"] != "pending":
@@ -786,9 +898,9 @@ def _reserve(con, run: dict | None, cand: dict, *, attempt_id: str, context: dic
 # ------------------------------------------------------------------ expiry
 
 def _reserved_event(con, attempt_id: str) -> dict | None:
-    row = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? AND kind='probe-reserved' "
-                      "ORDER BY seq LIMIT 1", (attempt_id,)).fetchone()
-    return dict(row) if row else None
+    cur = con.execute("SELECT * FROM route_discovery_events WHERE attempt_id=? AND kind='probe-reserved' "
+                      "ORDER BY seq LIMIT 1", (attempt_id,))
+    return _row_dict(cur, cur.fetchone())
 
 
 def _close(con, attempt_id: str, status_: str, detail: str, *, kind: str, outcome: str) -> bool:
@@ -800,7 +912,8 @@ def _close(con, attempt_id: str, status_: str, detail: str, *, kind: str, outcom
         if cur.rowcount != 1:
             return False
         reserved = _reserved_event(con, attempt_id)
-        row = con.execute("SELECT probe_key, run_id FROM route_probe_reservations WHERE id=?", (attempt_id,)).fetchone()
+        row_cur = con.execute("SELECT probe_key, run_id FROM route_probe_reservations WHERE id=?", (attempt_id,))
+        row = _row_dict(row_cur, row_cur.fetchone())
         # The cache holds verdicts. An attempt that reached none leaves nothing behind.
         con.execute("DELETE FROM route_probes WHERE key=? AND attempt_id=? AND result='pending'",
                     (row["probe_key"], attempt_id))
@@ -832,7 +945,7 @@ def expire_stale(con, *, now: datetime | None = None) -> list[str]:
     now = now or _utcnow()
     expired = []
     try:
-        rows = con.execute("SELECT * FROM route_probe_reservations WHERE status='reserved'").fetchall()
+        rows = _rows_dicts(con.execute("SELECT * FROM route_probe_reservations WHERE status='reserved'"))
     except sqlite3.OperationalError:
         return expired
     for row in rows:
@@ -901,7 +1014,7 @@ _PATTERNS = (
         r"unsupported (?:reasoning[ _-]?)?(?:effort|model|value)|invalid (?:reasoning[ _-]?)?(?:effort|model)|"
         r"(?:effort|reasoning_effort)[^\n]{0,60}(?:not supported|invalid|unsupported|unknown)|"
         r"(?:not supported|does not support)[^\n]{0,60}(?:effort|reasoning)|"
-        r"(?:unknown|unrecognized|no such) model|"
+        r"(?:unknown|unrecognized|no such) model|conflicts with --effort|"
         r"model[^\n]{0,60}(?:not found|does not exist|not supported|is not available)", re.I)),
     ("transient", re.compile(
         r"timed? ?out|connection (?:reset|refused|closed|error)|network (?:error|unreachable)|temporar(?:y|ily)|"
@@ -993,9 +1106,62 @@ def _claude_transcript(ws: "_Workspace") -> dict[str, str] | None:
     return final
 
 
+_AGY_TIER = re.compile(r"-(low|medium|high|xhigh)$")
+
+
+def _agy_events(text: str) -> list[dict]:
+    """The NDJSON events of an `agy --output-format stream-json` run. stderr shares the
+    stream, so a line that is not a JSON object is skipped."""
+    events = []
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            events.append(record)
+    return events
+
+
+def _agy_init(text: str, ws=None) -> dict[str, str] | None:
+    """The model agy itself reports in its first `init` event, and the effort tier that
+    slug names. agy enforces the slug's tier against `--effort` (a contradiction exits
+    nonzero), so the tier is the effort the session ran at. Only the first `init` before any step or result event is read,
+    and the model's reply, which is JSON-escaped inside later events, is never identity
+    evidence."""
+    init = None
+    for event in _agy_events(text):
+        if event.get("event") in ("step_update", "result"):
+            break  # the session has started: no later init is the harness's own
+        if event.get("event") == "init":
+            init = event.get("init")
+            break
+    model = init.get("model") if isinstance(init, dict) else None
+    if not isinstance(model, str) or not model:
+        return None
+    tier = _AGY_TIER.search(model.strip().lower())
+    return {"model": model, **({"reasoning effort": tier.group(1)} if tier else {})}
+
+
+def _agy_reply(text: str) -> str:
+    """The reply text of a stream-json run: the final `result` event's `response`, else the
+    concatenated agent_response deltas. It is what the probe's reply check reads."""
+    events = _agy_events(text)
+    for event in reversed(events):
+        result = event.get("result") if event.get("event") == "result" else None
+        if isinstance(result, dict) and isinstance(result.get("response"), str):
+            return result["response"]
+    return "".join(str(step.get("text_delta") or "") for event in events
+                   for step in [event.get("step_update")] if isinstance(step, dict)
+                   and step.get("step_type") == "agent_response")
+
+
 # Harness id -> reader of authoritative model and effort metadata, given the launch's output and workspace.
 # A harness absent here is never probed.
-_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws)}
+_IDENTITY_READBACK = {"codex": lambda text, ws: _codex_header(text), "claude": lambda text, ws: _claude_transcript(ws),
+                      "agy": _agy_init}
+# Harness id -> extra probe-only launch argv (given the mapped effort). Real dispatch argv never gains these.
+_PROBE_ARGV = {"agy": lambda effort: ["--output-format", "stream-json", "--effort", effort]}
 
 
 def classify_text(text: str) -> str | None:
@@ -1165,6 +1331,8 @@ def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, no
                 except OSError:
                     pass
         env["CODEX_HOME"] = str(private)
+    elif harness == "hermes":
+        env = hermes_access.launch_env(env)  # HERMES_* would steer the model and provider the probe pins
     elif harness == "claude":
         # Claude's login lives in the real config directory (its keychain entry is keyed by it), so the
         # probe keeps it and may write only this one working directory's session record.
@@ -1264,7 +1432,8 @@ def _evaluate(launch: dict, ws: _Workspace, prompt: str, harness: str, expected_
         return "fail", "conformance-failed", f"harness reported model {seen_model}, asked {expected_model}"
     if expected_effort is None or _normal(seen_effort) != _normal(expected_effort):
         return ("fail", "unsupported-model-effort", f"harness reported effort {seen_effort}, asked {expected_effort}")
-    if not re.search(rf"^[ \t]*PROBE-OK[ \t]+{re.escape(ws.token)}[ \t]*$", text, re.M):
+    reply = _agy_reply(text) if harness == "agy" else text
+    if not re.search(rf"^[ \t]*PROBE-OK[ \t]+{re.escape(ws.token)}[ \t]*$", reply, re.M):
         return "fail", classify_text(text) or "conformance-failed", f"no well-formed probe reply: {tail}"
     written = ws.output_file()
     if written is None or written.strip() != ws.token:
@@ -1290,12 +1459,14 @@ def _run_probe(reservation: dict, cand: dict, adapter: dict) -> tuple[str, str |
                                              effort=fp["effort"], cwd=ws.wt)
         except adapters.AdapterError as exc:
             return "fail", "isolation-missing", str(exc)
+        effort = adapters.effort_value(adapter, fp["effort"])
+        if effort is not None and fp["harness"] in _PROBE_ARGV:
+            argv = [*argv, *_PROBE_ARGV[fp["harness"]](effort)]
         env = _probe_env(reservation["attempt_id"], reservation["probe_key"], ws, fp["harness"], uuid.uuid4().hex)
         launch = _launch([*_boundary_argv(ws), *argv], prof, prompt, ws.wt, env, float(settings["probe_timeout_s"]),
                          reservation["attempt_id"], ws.base,
                          observe=(lambda: watch_claude_transcript(ws)) if fp["harness"] == "claude" else None)
-        return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"],
-                         adapters.effort_value(adapter, fp["effort"]))
+        return _evaluate(launch, ws, prompt, fp["harness"], fp["invocation_model_id"], effort)
     finally:
         ws.remove()
 

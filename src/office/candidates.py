@@ -7,17 +7,20 @@ a live quota probe, then hands them to office.routing.route unchanged.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, model_lineages, paths, portable, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, greenfield, harness_preference, model_lineages, paths, portable, route_policy, routing, shipped_catalog, state, task_sizing
+from office import config as office_config
 
 KIND_FOR_ROLE = {
     "planner": "worker",
@@ -39,7 +42,30 @@ _QUOTA_TTL = 60.0
 def catalog_rows() -> list[dict]:
     data = shipped_catalog.load()
     from office import user_catalog
-    return model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or []))))
+    return inherit_benchmarks(model_lineages.annotate(resolve_aliases(user_catalog.apply(list(data.get("models") or [])))))
+
+
+# Harnesses that re-launch a model another harness already benchmarked: their rows carry no scores of their own.
+BENCHMARK_INHERITORS = frozenset({"hermes"})
+
+
+def inherit_benchmarks(rows: list[dict]) -> list[dict]:
+    """Give each inheriting row the benchmark fields of its canonical model at the same effort.
+
+    The canonical row is a non-inheriting, non-alias row of the same model (an alias resolves to its target) with
+    scores. A row with no such source keeps what it has, so a missing source shows as an unscored route.
+    """
+    canonical: dict[tuple, dict] = {}
+    for r in rows:
+        if r.get("invocation_harness") not in BENCHMARK_INHERITORS and not r.get("alias_family") and r.get("benchmark_indexes"):
+            canonical.setdefault((r.get("model_id"), r.get("effort")), r)
+    out = []
+    for r in rows:
+        source = canonical.get((r.get("alias_resolved_to") or r.get("model_id"), r.get("effort"))) \
+            if r.get("invocation_harness") in BENCHMARK_INHERITORS else None
+        out.append({**r, "benchmark_indexes": source["benchmark_indexes"], "task_benchmarks": source.get("task_benchmarks")}
+                   if source else r)
+    return out
 
 
 _ALIAS_FIELDS = ("benchmark_indexes", "task_benchmarks", "price_fields", "speed_fields", "release_date",
@@ -248,8 +274,28 @@ def role_policy(config: dict, role: str) -> dict:
 def probe_quota(adapter: dict) -> dict:
     """Tightest remaining quota percent, or unknown/unavailable with a safe cause.
 
-    A successful result is cached per harness (`quota_cache_ttl`); a failed one is
-    cached only briefly and stays unknown/unavailable, never ok (#450)."""
+    A timed-out probe falls back to the harness's last good reading within
+    `OFFICE_QUOTA_LAST_GOOD_TTL` (#941). Other failures stay unknown/unavailable.
+
+    An adapter that sets `quota_probe.unknown_is_unlimited: true` declares a harness with no quota to
+    exhaust: an unknown result (no probe command, or a probe that cannot tell) reads as full headroom,
+    so routing does not set the route aside as quota-unknown (#1002). An unavailable result stays as is."""
+    return _unknown_as_unlimited(adapter, _stale_fallback(adapter.get("id"), _probe_quota(adapter)))
+
+
+UNLIMITED_CAUSE = "quota_probe.unknown_is_unlimited"
+
+
+def _unknown_as_unlimited(adapter: dict, result: dict) -> dict:
+    if result.get("status") != "unknown" or (adapter.get("quota_probe") or {}).get("unknown_is_unlimited") is not True:
+        return result
+    return {**result, "status": "ok", "tightest_remaining_percent": 100.0, "unlimited": True,
+            "cause": f"{UNLIMITED_CAUSE} (probe: {result.get('cause') or 'unknown'})"}
+
+
+def _probe_quota(adapter: dict) -> dict:
+    """The cached probe. A successful result is cached per harness (`quota_cache_ttl`); a
+    failed one is cached only briefly and stays unknown/unavailable, never ok (#450)."""
     harness = adapter.get("id")
     fixed = os.environ.get("OFFICE_QUOTA_FIXTURE")
     disabled = os.environ.get("OFFICE_QUOTA_PROBE") == "off"
@@ -272,7 +318,7 @@ def probe_quota(adapter: dict) -> dict:
         if isinstance(value, dict):
             result = _normalize_probe_result(value, unknown)
         else:
-            result = ({"status": "ok", "tightest_remaining_percent": float(value)} if value is not None
+            result = (_normalize_probe_result({"tightest_remaining_percent": value}, unknown) if value is not None
                       else unknown("fixture returned null"))
         _QUOTA_CACHE[harness] = (time.time(), result)
         return result
@@ -293,23 +339,24 @@ PROBE_RETRY_BACKOFF_S = 2.0
 
 
 def _run_probe(argv: list[str], unknown) -> dict:
-    """Run one probe command. A timeout while the host is overloaded is the
-    environment, not the harness (the rule checks use, gates.host_overloaded):
-    it is retried once after a backoff, and if it times out again the result is
-    `unavailable` with the load as its cause. A timeout on a quiet host stays a
-    plain unknown with no retry, since a retry would only cost another 20s."""
+    """Run one probe command. Any timeout is retried once after a backoff (#941). A
+    second timeout is marked `timed_out` so it can fall back to the last good reading.
+    While the host is overloaded (gates.host_overloaded) it is `unavailable` with the load
+    as its cause; on a quiet host it stays a plain unknown."""
     from office import gates
     for attempt in (1, 2):
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+            # stdin is closed, so a probe that reads it gets EOF rather than blocking (#941).
+            proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                  timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            loaded = gates.host_overloaded()
-            if not loaded:
-                return unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds")
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
                 continue
-            return {"status": "unavailable", "tightest_remaining_percent": None,
+            loaded = gates.host_overloaded()
+            if not loaded:
+                return {**unknown(f"command timed out after {PROBE_TIMEOUT_S} seconds"), "timed_out": True}
+            return {"status": "unavailable", "tightest_remaining_percent": None, "timed_out": True,
                     "cause": f"command timed out twice after {PROBE_TIMEOUT_S} seconds; {loaded}"}
         except (OSError, subprocess.SubprocessError, TypeError, ValueError):
             return unknown("command could not be run or parsed")
@@ -317,10 +364,24 @@ def _run_probe(argv: list[str], unknown) -> dict:
             return unknown(f"command exited with code {proc.returncode}")
         try:
             data = json.loads(proc.stdout)
-        except ValueError:
+        except (ValueError, RecursionError):
             return unknown("command returned invalid JSON")
         return _normalize_probe_result(data, unknown)
     return unknown("command could not be run or parsed")  # pragma: no cover
+
+
+def _verified_pool(data: dict) -> dict:
+    """Carry only an explicitly verified provider/account/pool identity from a live probe.
+
+    A harness id, matching model family or similar percentage is NOT proof of
+    a shared account. Never turn absent metadata into shared quota identity.
+    """
+    fields = ("provider", "account_id", "pool_id")
+    if not isinstance(data, dict) or data.get("shared_pool_verified") is not True:
+        return {}
+    if not all(isinstance(data.get(f), str) and 0 < len(data[f].strip()) <= 160 for f in fields):
+        return {}
+    return {**{f: data[f].strip() for f in fields}, "shared_pool_verified": True}
 
 
 def _normalize_probe_result(data: dict, unknown) -> dict:
@@ -330,11 +391,16 @@ def _normalize_probe_result(data: dict, unknown) -> dict:
         result = unknown(str(data.get("cause") or "command returned null tightest_remaining_percent"))
         if isinstance(data.get("families"), dict):  # a known family can still gate its own models
             result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
-        return result
+        return {**result, **_verified_pool(data)}
+    if isinstance(data["tightest_remaining_percent"], bool):
+        return unknown("command returned a boolean tightest_remaining_percent")
     try:
-        result = {"status": "ok", "tightest_remaining_percent": float(data["tightest_remaining_percent"])}
-    except (TypeError, ValueError):
+        percent = float(data["tightest_remaining_percent"])
+    except (TypeError, ValueError, OverflowError):
         return unknown("command could not be run or parsed")
+    if not math.isfinite(percent):  # json accepts NaN and Infinity; neither is a reading
+        return unknown("command returned a non-finite tightest_remaining_percent")
+    result = {"status": "ok", "tightest_remaining_percent": percent, **_verified_pool(data)}
 
     if isinstance(data.get("families"), dict):
         result["families"] = {str(f): _normalize_family(str(f), raw) for f, raw in data["families"].items()}
@@ -346,12 +412,14 @@ def _normalize_family(family: str, raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     try:
         remaining = float(raw["tightest_remaining_percent"]) if raw.get("status") == "ok" else None
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         remaining = None
-    if remaining is None:
+    if remaining is None or not math.isfinite(remaining) or isinstance(raw.get("tightest_remaining_percent"), bool):
         return {"status": "unknown", "tightest_remaining_percent": None,
-                "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported"}
-    return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time")}
+                "reset_time": raw.get("reset_time"), "cause": f"{family} family quota not reported",
+                **_verified_pool(raw)}
+    return {"status": "ok", "tightest_remaining_percent": remaining, "reset_time": raw.get("reset_time"),
+            **_verified_pool(raw)}
 
 
 # Quota moves slowly relative to a dispatch; one successful probe result serves every
@@ -364,32 +432,121 @@ _FAILED_TTL = 60.0
 
 def _shared_ttl() -> float:
     try:
-        return max(0.0, float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL)))
+        ttl = float(os.environ.get("OFFICE_QUOTA_CACHE_TTL", _SHARED_TTL))
     except ValueError:
         return _SHARED_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _SHARED_TTL
+
+
+# A timed-out probe (#941) uses the last successful reading for this long. The reading is
+# marked stale with its age, so `office status` shows the route chosen on it. 0 disables.
+_LAST_GOOD_TTL = 600.0
+
+
+def _last_good_ttl() -> float:
+    try:
+        ttl = float(os.environ.get("OFFICE_QUOTA_LAST_GOOD_TTL", _LAST_GOOD_TTL))
+    except ValueError:
+        return _LAST_GOOD_TTL
+    return max(0.0, ttl) if math.isfinite(ttl) else _LAST_GOOD_TTL
 
 
 def _shared_cache_path() -> Path:
     return paths.state_home() / "quota-cache.json"
 
 
-def _shared_cache_get(harness: str) -> dict | None:
+def _shared_entry(harness: str) -> dict | None:
     try:
         entry = json.loads(_shared_cache_path().read_text()).get(harness)
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _stamp(value) -> float | None:
+    """A cache timestamp, or None when the file holds a corrupt one. A NaN or infinite stamp
+    fails the `0 <= now - at < ttl` checks at each use, so it needs no check here."""
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _shared_cache_get(harness: str) -> dict | None:
+    entry = _shared_entry(harness)
     if not entry or not isinstance(entry.get("result"), dict):
         return None
-    ok = entry["result"].get("status") == "ok"
+    result = entry["result"]
+    ok = result.get("status") == "ok"
+    if ok and not _valid_reading(result):
+        return None
     ttl = _shared_ttl() if ok else min(_FAILED_TTL, _shared_ttl())
-    if time.time() - float(entry.get("at", 0)) < ttl:
-        return entry["result"]
+    at = _stamp(entry.get("at"))
+    if at is not None and 0 <= time.time() - at < ttl:
+        return result
     return None
+
+
+def _is_number(value) -> bool:
+    """A finite real number. Bools, numeric strings and integers too large for a float are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_reading(reading: dict) -> bool:
+    """A stored ok reading whose percents are numbers. The cache file is not trusted: a bad value
+    would otherwise reach the reserve check as a crash or as a reading that is not a number."""
+    families = reading.get("families")
+    fams = [f for f in families.values() if isinstance(f, dict) and f.get("status") == "ok"] \
+        if isinstance(families, dict) else []
+    try:
+        return reading.get("status") == "ok" and all(
+            _is_number(r["tightest_remaining_percent"]) for r in [reading, *fams])
+    except KeyError:
+        return False
+
+
+def _shared_last_good(harness: str) -> tuple[float, dict] | None:
+    """(age seconds, reading) of the last ok probe for this harness, if within the TTL."""
+    last = (_shared_entry(harness) or {}).get("last_good")
+    if not isinstance(last, dict) or not isinstance(last.get("result"), dict) \
+            or not _valid_reading(last["result"]):
+        return None
+    at = _stamp(last.get("at"))
+    if at is None:
+        return None
+    age = time.time() - at
+    # A future stamp means the clock moved back: the reading's age is unknowable, so it is not used.
+    return (age, last["result"]) if 0 <= age < _last_good_ttl() else None
+
+
+def _stale_fallback(harness: str, result: dict) -> dict:
+    """A timed-out probe becomes the harness's last good reading, marked stale, with each ok agy
+    family marked too (quota_for_candidate hands a family result on alone). Any other result is
+    returned without the internal `timed_out` marker. A stale value never stands in for an auth
+    or parse failure."""
+    last = _shared_last_good(harness) if result.get("timed_out") else None
+    if last is None:
+        return {k: v for k, v in result.items() if k != "timed_out"}
+    age, reading = last
+    stale = {"stale": True, "stale_age_s": round(age),
+             "cause": f"probe timed out; last good reading {round(age)}s old"}
+    families = reading.get("families")
+    if isinstance(families, dict):
+        reading = {**reading, "families": {
+            name: {**fam, **stale} if isinstance(fam, dict) and fam.get("status") == "ok" else fam
+            for name, fam in families.items()}}
+    return {**reading, **stale}
 
 
 def _shared_cache_put(harness: str, result: dict) -> None:
     """Read-modify-write under an flock so concurrent office processes do not
-    drop each other's harness entries; the file itself is replaced atomically."""
+    drop each other's harness entries; the file itself is replaced atomically. A
+    failed result keeps the harness's last good reading for `_shared_last_good`."""
     path = _shared_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,9 +556,16 @@ def _shared_cache_put(harness: str, result: dict) -> None:
                 data = json.loads(path.read_text()) if path.exists() else {}
                 if not isinstance(data, dict):
                     data = {}
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 data = {}
-            data[harness] = {"at": time.time(), "result": result}
+            now = time.time()
+            prior = data.get(harness) if isinstance(data.get(harness), dict) else {}
+            entry = {"at": now, "result": result}
+            if result.get("status") == "ok":
+                entry["last_good"] = {"at": now, "result": result}
+            elif isinstance(prior.get("last_good"), dict):
+                entry["last_good"] = prior["last_good"]
+            data[harness] = entry
             tmp = path.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data))
             os.replace(tmp, path)
@@ -416,12 +580,14 @@ def quota_unknown_record(candidate: dict | None) -> dict | None:
     """Why a chosen route's quota was not read, or None when it was. Kept on the
     dispatch's route record and shown in `office status` (#450)."""
     quota = (candidate or {}).get("quota") or {}
-    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None:
+    stale = bool(quota.get("stale"))
+    if quota.get("status") == "ok" and quota.get("tightest_remaining_percent") is not None and not stale:
         return None
     if quota.get("cause") in _NOT_PROBED:
         return None  # no probe ran: nothing failed, so nothing to flag on every live task
     return {"harness": (candidate or {}).get("adapter_id") or (candidate or {}).get("harness"),
-            "status": quota.get("status") or "unknown", "cause": quota.get("cause") or "quota not probed"}
+            "status": "stale" if stale else quota.get("status") or "unknown",
+            "cause": quota.get("cause") or "quota not probed"}
 
 
 def vision_proven(con: sqlite3.Connection, candidate: dict, adapter: dict) -> bool:
@@ -469,7 +635,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
                      quota_snapshot: dict[str, dict] | None = None,
                      discovery: dict | None = None,
                      user_policies: list[dict] | None = None,
-                     allow_policies: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+                     allow_policies: list[dict] | None = None, manual_hydrogen: bool = False,
+                     task_size: str | None = None, vision_probe: bool = False) -> tuple[list[dict], list[dict]]:
     """Return (candidates, skipped). Every active catalog row lands in exactly one of
     them: `skipped` names each row that is not a candidate, with a `category`
     (denied, not-eligible, untried, floor, not-installed, no-profile) and a reason.
@@ -486,6 +653,10 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
     dispatchable (#845): an allowed route is a candidate even when its catalog row, a user catalog
     overlay or the family floor says otherwise, and it needs no probe. Routing still applies deny,
     capability, quota and independence rules to it.
+
+    `vision_probe` (office doctor --probe-vision) lists the visual reviewer's exact Hydrogen route without the
+    user's allow so its vision proof can be recorded. The proof alone never dispatches it: routing still needs the
+    user's exact allow (hydrogen_trials.route_refusal).
     """
     from office import onboarding, route_probe
     kind = KIND_FOR_ROLE.get(role, "worker")
@@ -500,6 +671,10 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         adapter = all_adapters.get(harness)
         label = f"{harness}/{row.get('model_id')}@{row.get('effort')}"
         state = route_policy.row_status(row)
+        # A generic user allow or discovery cannot promote a planner-only model.
+        if block := route_policy.fable_role_block(row, role):
+            skipped.append({"candidate": label, "category": "role-deny", "reason": block})
+            continue
         is_free_model = route_policy.is_free_model(row)
         if is_free_model and not free_models_allowed:
             skipped.append({"candidate": label, "category": "free-model-opt-in",
@@ -507,13 +682,35 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
             continue
         if row.get("status_reason"):
             state = {**state, "reason": row["status_reason"]}
+        if adapter and adapters.installed(adapter) and (why := route_policy.provider_unreachable(row)):
+            skipped.append({"candidate": label, "category": route_policy.PROVIDER_UNREACHABLE, "reason": why})
+            continue
         floor = below_family_floor(row.get("model_id"), family_floors)
         allowed = None
+        identity = {"harness": harness, "model_id": row.get("model_id"),
+                    "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
+                    "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}
         if (row.get("dispatchable") is False or floor) and allow_pols and adapter and adapters.installed(adapter):
-            allowed = route_policy.user_allows(
-                {"harness": harness, "harness_version": adapters.route_version(harness, adapter, sources),
-                 "model_id": row.get("model_id"), "invocation_model_id": row.get("invocation_model_id") or row.get("model_id"),
-                 "alias_resolved_to": row.get("alias_resolved_to"), "effort": row.get("effort")}, role, allow_pols)
+            identity["harness_version"] = adapters.route_version(harness, adapter, sources)
+            allowed = route_policy.user_allows(identity, role, allow_pols)
+        if row.get("model_id") == "gemini-4-hydrogen":
+            from office import hydrogen_trials
+            if role == "executor" and manual_hydrogen:
+                allowed = {"source": "hydrogen-manual", "rule": label}
+            elif (vision_probe and role == "visual_reviewer"
+                  and row.get("effort") == hydrogen_trials.REVIEW_EFFORTS["visual_reviewer"]):
+                allowed = {"source": "vision-probe", "rule": label}
+            else:
+                sizes = [size for size in route_policy.SIZES
+                         if hydrogen_trials.user_allowed(route_policy.effective_role_state(identity, role, allow_pols, size))
+                         and hydrogen_trials.route_refusal(identity, role=role, size=size, manual=False,
+                                                           user_allowed=True) is None]
+                if not allowed or (task_size is not None and task_size not in sizes) or not sizes:
+                    allowed = None
+                else:
+                    # Every size covered is an unsized allow: no user_allow_sizes, so a role that routes with
+                    # no task size (a code reviewer, H4 #1178) is not refused as "an unknown size".
+                    allowed = {**allowed, "sizes": None if len(sizes) == len(route_policy.SIZES) else sizes}
         if allowed and row.get("dispatchable") is False:
             # The user's allow outranks the catalog or an overlay: no proof, qualification or trust gate (#845).
             why = "a user catalog overlay disabled it" if row.get("user_disabled") else (
@@ -532,7 +729,8 @@ def build_candidates(con: sqlite3.Connection, role: str, *, probe: bool = True,
         if floor and not allowed:
             skipped.append({"candidate": label, "category": "floor", "reason": f"below model family floor {floor}"})
             continue
-        if not adapter or not adapters.profile(adapter, kind):
+        if not adapter or not adapters.profile_for(adapter, kind, row.get("invocation_model_id") or row.get("model_id"),
+                                                   row.get("effort")):
             skipped.append({"candidate": label, "category": "no-profile", "reason": f"no {kind} launch profile"})
             continue
         if not adapters.installed(adapter):
@@ -675,7 +873,31 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     family = model_family(candidate.get("model_id"))
     family = _AGY_QUOTA_FAMILY.get(family, family)
     family_result = families.get(family) if isinstance(families, dict) else None
-    return family_result if isinstance(family_result, dict) else result
+    if isinstance(family_result, dict):
+        # Provider-account metadata from the parent is only inherited when the
+        # family does not publish its own identity. Do not merge unverified IDs.
+        return {**_verified_pool(result), **family_result}
+    return result
+
+
+SLUG_HARNESSES = frozenset({"pi"})  # harnesses whose --model only accepts a provider/model slug
+
+
+def _provider_slug(harness: str, model: str, rows: list[dict]) -> str:
+    """The invocation slug a bare alias names on a slug-only harness (#1185). A model with a
+    catalog row of its own keeps that row; otherwise its lineage must reach exactly one slug."""
+    from office.state import Refused
+    if any(model == r.get("model_id") for r in rows):
+        return model
+    lineage = model_lineages.alias_lineages().get(model) or (model_lineages.identify(model) or {}).get("lineage_key")
+    slugs = sorted({r["invocation_model_id"] for r in rows if lineage and r.get("lineage_key") == lineage
+                    and "/" in (r.get("invocation_model_id") or "")})
+    if len(slugs) == 1:
+        return slugs[0]
+    found = f"matches {', '.join(slugs)}" if slugs else "matches no registered row"
+    raise Refused("model-needs-provider", f"{harness} needs a provider-qualified model, and {model!r} {found}",
+                  next_step=f"name the route as {harness}/<provider>/{model}@<effort>, "
+                            f"e.g. office model add {harness}/<provider>/{model} --effort medium")
 
 
 def declared_candidate(harness: str, model: str, effort: str | None = None, *, repo_root=None, role: str = "executor",
@@ -683,15 +905,19 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     """A candidate the user named with --as/--review-as. It bypasses the
     registry, trust, and floors, but still resolves through the catalog when a
     row matches, so `agy/gemini-3.8-flash@medium` invokes the combined slug
-    `gemini-3.8-flash-medium` the harness actually accepts."""
-    from office import onboarding
+    `gemini-3.8-flash-medium` the harness actually accepts. `harness@2` pins the
+    installed major the way Office status prints it."""
+    from office import onboarding, scoring
     from office.state import Refused, Usage
+    harness, pin_sep, pinned_major = harness.partition("@")
     adapter = adapters.load_all().get(harness)
     if adapter is None:
         raise Usage("unknown-harness", f"--as names harness {harness!r}, which has no adapter",
                     next_step="use one of: " + ", ".join(sorted(adapters.load_all())))
-    rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness
-            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    all_rows = [r for r in catalog_rows() if r.get("invocation_harness") == harness]
+    if harness in SLUG_HARNESSES and "/" not in model:
+        model = _provider_slug(harness, model, all_rows)
+    rows = [r for r in all_rows if model in (r.get("model_id"), r.get("invocation_model_id"))]
     if effort:
         rows = [r for r in rows if r.get("effort") == effort] or rows
     # A row named exactly what the user typed beats an alias that invokes it.
@@ -711,12 +937,22 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     # A user-denied route is not selectable by any manual route either (--as, --review-as,
     # amend route). Overkill is automatic-only and never blocks a declared route (#494).
     version = adapters.route_version(harness, adapter)
+    installed = scoring.harness_major(version)
+    if pin_sep and (not pinned_major.isdigit() or installed != str(int(pinned_major))):
+        raise Refused("harness-major-mismatch",
+                      f"{harness}@{pinned_major} pins a major, but the installed {harness} major is {installed}",
+                      next_step=f"office route policy --effective --role {role} shows each route under the installed {harness}")
     named = {"harness": harness, "harness_version": version, "model_id": (row or {}).get("model_id") or model,
              "invocation_model_id": (row or {}).get("invocation_model_id") or model,
              "alias_resolved_to": (row or {}).get("alias_resolved_to"),
              "effort": effort or (row or {}).get("effort") or "none",
              "lineage_key": (row or {}).get("lineage_key"),
              "generation_version": (row or {}).get("generation_version")}
+    # Do not let direct --as, --review-as or a signed ordinary deny override
+    # bypass a planner-only technical qualification boundary.
+    if block := route_policy.fable_role_block(named, role):
+        raise Refused("route-denied", block, scope=role,
+                      next_step="complete exact Claude Code planner-role qualification before Fable activation")
     active_policy = route_policy.effective_role_state(named, role, required_user_policies(repo_root))
     policy_override = None
     if active_policy["state"] == "deny":
@@ -736,9 +972,16 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
                         if active_policy["source"] == "legacy-user-deny" else
                         f"it stays denied until you change the policy: office route neutral|allow {harness}/{model}@{named['effort']} --role {role}")
             raise state.Refused("route-denied", denied, next_step=(
-                f"{way_back}. A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
+                f"office route policy --effective --role {role} shows the verdict for every route; {way_back}. "
+                "A quote or orchestrator pin cannot override a deny; the user can issue a one-off override "
                 f"in their own terminal: office route override {harness}/{model}@{named['effort']} --role {role} "
                 "--run <run> --reason \"<why>\""))
+    # A declared visual reviewer is the user's own allow, so the route's vision launch profile is the capability.
+    # The proof routed candidates need is not asked of it; a harness with no such profile still lacks `vision`.
+    capabilities = set(adapter.get("capabilities") or [])
+    if KIND_FOR_ROLE.get(role) == "vision" and adapters.profile_for(adapter, "vision", named["invocation_model_id"],
+                                                                    named["effort"]):
+        capabilities.add("vision")
     return {
         "harness": harness,
         "harness_version": version,
@@ -748,7 +991,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "effort": effort or (row or {}).get("effort") or "none",
         "benchmark_indexes": (row or {}).get("benchmark_indexes") or {},
         "task_benchmarks": (row or {}).get("task_benchmarks") or [],
-        "capabilities": sorted(set(adapter.get("capabilities") or [])),
+        "capabilities": sorted(capabilities),
         "adapter_id": adapter.get("id"),
         "adapter_hash": adapters.adapter_hash(adapter),
         "cost": _cost(row or {}),
@@ -759,6 +1002,31 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "override": True,
         **({"policy_override": policy_override} if policy_override else {}),
     }
+
+
+def route_cooldown_until(con: sqlite3.Connection, candidate: dict) -> str | None:
+    """Expiry of the latest live quota or runtime cooldown on this candidate's route, or None (#958).
+
+    Checks the keys routing.route checks: the invocation across efforts (a quota wall), and its demotion,
+    harness-wide and shared-pool keys. A user-declared route bypasses routing, so it needs this check of its own."""
+    model = candidate.get("invocation_model_id") or candidate.get("model_id")
+    keys = {routing.cooldown_key(candidate.get("harness"), model), *routing._demotion_keys(candidate)}
+    marks = ",".join("?" for _ in keys)
+    return con.execute(f"SELECT MAX(expires_at) FROM route_cooldowns WHERE expires_at>? AND route IN ({marks})",
+                       (datetime.now(timezone.utc).isoformat(), *keys)).fetchone()[0]
+
+
+def reserve_block(candidate: dict, config: dict | None, role: str) -> str | None:
+    """Why a user-declared route may not launch for `role` under the run's protected quota reserve, or None.
+
+    A declared route skips routing, so it needs the check routing applies to every candidate: the harness's
+    quota is probed (as route_role does) and read through the same gate against the role's pinned reserve."""
+    adapter = adapters.load_all().get(candidate.get("adapter_id") or candidate.get("harness") or "")
+    if adapter is None or os.environ.get("OFFICE_QUOTA_PROBE") == "off":
+        return None
+    quota = quota_for_candidate(candidate, probe_quota(adapter))
+    gate = routing._quota_gate({**candidate, "quota": quota}, office_config.quota_reserve_percent(config, role))
+    return gate[1] if gate else None
 
 
 def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
@@ -776,6 +1044,30 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
         raise Usage("invalid-override", f"{flag} {text!r}: expected <harness>/<model>[@effort]")
     cand = declared_candidate(want["harness"], want["model_id"], want["effort"], repo_root=repo_root, role=role or "executor",
                           run_id=run_id, scope=scope, claim=claim)
+    # #1143 is a hard exception to the legacy #845 quoted allow: even the
+    # user's --as cannot skip exact Hydrogen identity qualification or
+    # select XL. No run/scope means there is no trustworthy size classification.
+    # #1282: --as picks the effort for an XS-L task; every refusal names its own cause and next step.
+    if cand.get("model_id") == "gemini-4-hydrogen" or cand.get("alias_resolved_to") == "gemini-4-hydrogen":
+        from contextlib import closing
+        from office import db, hydrogen_trials
+        # A pinned Hydrogen reviewer has no task size (H4, #1178; H5): dispatch --review-as, review --as, rerun and the
+        # gate's pin checks name only the run. An executor still needs the task that classifies its size.
+        if not run_id or (not scope and (role or "executor") not in hydrogen_trials.REVIEW_ROLES):
+            raise Refused("hydrogen-no-task-size", "Hydrogen manual routing needs a run and task that classify its size",
+                          next_step="name the run and task so its size is known, or route it to another harness")
+        with closing(db.connect()) as proof_con:
+            pinned = state.get_run(proof_con, run_id)
+            task = state.get_task(proof_con, run_id, scope)
+            size = ((task or {}).get("descriptor") or {}).get("task_size") or ((pinned or {}).get("risk") or {}).get("size_class")
+            # A manual --review-as is not the exact user allow a Hydrogen review needs (H4, #1178).
+            allowed = (role in hydrogen_trials.REVIEW_ROLES and hydrogen_trials.user_allowed(
+                route_policy.effective_role_state(cand, role, required_user_policies(repo_root), size)))
+            denial = hydrogen_trials.manual_denial(proof_con, cand, role=role or "executor", size=size,
+                                                   user_allowed=allowed)
+            if denial:
+                code, message, next_step = denial
+                raise Refused(code, message, next_step=next_step)
     if role:
         required = set(role_policy(config or {}, role).get("required_capabilities") or [])
         missing = sorted(required - set(cand.get("capabilities") or []))
@@ -793,12 +1085,17 @@ def declared_decision(text: str, *, flag: str = "--as", role: str | None = None,
             "skipped": []}
 
 
+def _slate_gear(run: dict) -> str | None:
+    """The gear the size slate and its floors read. A greenfield build is one XL executor task (#936)."""
+    return "XL" if greenfield.enabled(run) else run.get("gear")
+
+
 def _uses_size_slate(policy_cfg: dict, run: dict, task_size: str | None, role: str,
                      executor_policy: dict | None = None) -> bool:
     """True when the #809 ideal slate, not a user seed, nominates this sized XS-XL run's routes (#846)."""
     executor_policy = executor_policy or executor_slates.POLICY
     sizes = executor_policy["floors"]
-    return (role in routing.ADAPTIVE_ROLES and run.get("gear") in sizes
+    return (role in routing.ADAPTIVE_ROLES and _slate_gear(run) in sizes
             and task_size in sizes
             and task_size not in (policy_cfg.get("preferred_seed_by_size") or {}))
 
@@ -829,8 +1126,8 @@ def protected_quota_remedy(run: dict, role: str, task_id: str | None = None) -> 
     (dispatch --as), task code review (dispatch --review-as), and a task's
     visual review (approve visual). Plan and integration review have none.
     The reserve is pinned at `office start`, so a config edit does not apply."""
-    reserve = float(((run.get("policy") or {}).get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT))
-    pinned = (f"quota.reserve_percent is pinned at {reserve:g}% for this run (set at office start), "
+    reserve = office_config.quota_reserve_percent(run.get("policy") or {}, role)
+    pinned = (f"the {role} quota reserve is pinned at {reserve:g}% for this run (set at office start), "
               "config edits do not apply to it")
     route = "<harness>/<model>[@effort]"
     if role == "executor" and task_id:
@@ -891,7 +1188,7 @@ def adaptive_inputs(con: sqlite3.Connection, config: dict, run: dict, role: str,
     desc = _effective_task_descriptor(run, task)
     task_size = desc.get("task_size") or (run.get("risk") or {}).get("size_class")
     context = {"role": role, "playbook": run.get("playbook"), "size_class": task_size,
-               "gear": run.get("gear"), "dispatch_kind": dispatch_kind,
+               "gear": _slate_gear(run), "dispatch_kind": dispatch_kind,
                "task_size_rationale": desc.get("task_size_rationale"),
                "dispatch_profile": desc.get("profile"),
                "dispatch_profile_version": desc.get("profile_version")}
@@ -978,13 +1275,19 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         (run.get("risk") or {}).get("size_class")
     seed = None if override else _preferred_seed(policy_cfg, run, effective_task_size, role=role,
                                                    executor_policy=executor_policy)
+    if seed and role == "executor" and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
+        # AA v5: a frontend-heavy task tries its size's agy gemini-* rung first. Same routes, same gates.
+        seed = executor_slates.frontend_bias(seed, descriptor_for_route, (task_for_route or {}).get("scope")) or seed
     # A role allow, or an exact entry of the role's preferred list, makes a route dispatchable (#845).
     allow_policies = [route_policy.preferred_seed_policy(role, policy_cfg.get("preferred_seed") if seed else None),
-                      route_policy.user_policy(config), *live]
+                      *live]
+    manual_hydrogen = bool(manual and ("gemini-4-hydrogen" in (exact or "")
+                                       or "gemini-4-hydrogen" in (override or "")))
     candidates, skipped = build_candidates(con, role, probe=probe, family_floors=floors,
                                            quota_snapshot=quota_snapshot,
                                            discovery=settings if discovering else None, user_policies=[],
-                                           allow_policies=allow_policies)
+                                           allow_policies=allow_policies, manual_hydrogen=manual_hydrogen,
+                                           task_size=effective_task_size)
     for entry in seed or []:
         if not any(routing.preferred_rank(c, [entry]) is not None for c in candidates):
             wanted = f"{entry.get('harness') + '/' if entry.get('harness') else ''}{entry.get('model_id')}" \
@@ -1029,7 +1332,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
     policy = {
         "required_capabilities": list(policy_cfg.get("required_capabilities") or []),
         "floor": policy_cfg.get("floor"),
-        "quota_reserve_percent": float((config.get("quota") or {}).get("reserve_percent", routing.DEFAULT_RESERVE_PERCENT)),
+        "quota_reserve_percent": office_config.quota_reserve_percent(config, role),
+        "daily_dispatch_budget": dict((config.get("quota") or {}).get("daily_dispatch_budget") or {}),
         "balanced_money_band_percent": float((config.get("cost_policy") or {}).get(
             "balanced_money_band_percent", routing.DEFAULT_MONEY_BAND_PERCENT)),
         "cost_policy": cost_policy,
@@ -1049,10 +1353,25 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
         "task_id": task_id,
         "benchmark_snapshot": snapshot,
         "candidates": candidates,
+        "require_classified_executor_size": ((run.get("gates") or {}).get("gear_model_version") == "run-gear-1"),
+        "hydrogen_policy": {"routing": {"hydrogen_trials": (config.get("routing") or {}).get("hydrogen_trials") or {}}},
+        "hydrogen_risk": run.get("risk") or {},
+        "hydrogen_descriptor": descriptor_for_route,
+        "hydrogen_independent_review": (run.get("gates") or {}).get("code_review") is True,
     }
+    if prefs := harness_preference.settings(config):
+        request["harness_preference"] = prefs
+    if role == "executor" and not override:
+        from office import hydrogen_trials
+        # Budget from the live config (a global runs.db cap); enabled and the user allow stay pinned.
+        budget = hydrogen_trials.live_budget(run)
+        if budget and hydrogen_trials.canary_active(con, config, run, {"descriptor": descriptor_for_route}, budget):
+            request["hydrogen_canary"] = hydrogen_trials.canary_progress(con, budget)
     if seed and _uses_size_slate(policy_cfg, run, effective_task_size, role, executor_policy):
         # A user's own flat or per-size seed keeps the ordinary advisory scoring.
         request["slate_anchor"] = True
+    if manual and exact and manual_hydrogen:
+        request["declared_route"] = exact
     if declared:
         request["declared_route"] = declared
     if exact:
@@ -1067,7 +1386,7 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             state.get_task(con, run["id"], task_id) if task_id and run.get("id") else None)
         if discovery_input:
             request["discovery_input"] = discovery_input
-    policies = [pol for pol in (route_policy.user_policy(config), *live)
+    policies = [pol for pol in live
                 if pol["denied"] or pol["overkill"] or pol["ceilings"] or pol["role_rules"] or pol["strict_roles"]]
     if policies:
         request["user_policies"] = policies
@@ -1089,8 +1408,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             # Explicit user opt-in (#837): the seeded order is the whole order for this role.
             request["policy"]["strict_seed"] = True
             request["strict_seed_user_authorized"] = True
-        if override or manual:
-            request["manual_route"] = True
+    if override or manual:
+        request["manual_route"] = True
     with routing._using_executor_policy(executor_policy):
         result = routing.route(request, connection=con) if observe or con.in_transaction else routing.route(request)
     if role in routing.ADAPTIVE_ROLES and effective_task_size in executor_policy["floors"] and seed:

@@ -150,3 +150,20 @@ def test_a_worker_cannot_apply_routing_even_with_a_quote(env, worker_env):
     assert code != 0 and "worker-cannot-apply-routing" in out, out
     assert _seed(_run(env)) == pinned_before
     assert env.con().execute("SELECT COUNT(*) FROM events WHERE kind='run.routing_applied'").fetchone()[0] == 0
+
+
+def test_apply_routing_repins_the_quota_reserve_routing_reads(env):
+    """Route choice reads the run's pinned quota.reserve_percent, so a lowered
+    reserve must reach a live run through --apply-routing too."""
+    _approve(env, plan=PLAN_ONE)
+    before = (_run(env)["policy"].get("quota") or {}).get("reserve_percent")
+    assert before != 1, before
+    env.office("config", "quota.reserve_percent", "1", env=EXTERNAL, check=0)
+    assert (_run(env)["policy"].get("quota") or {}).get("reserve_percent") == before, "a config edit alone does not re-pin"
+    rid = _run(env)["id"]
+    code, out = env.office("config", "--run", rid[:8], "--apply-routing", "--quote", "lower the reserve",
+                           env=EXTERNAL)
+    assert code == 0 and "quota" in out, out
+    assert _run(env)["policy"]["quota"]["reserve_percent"] == 1
+    (event,) = [json.loads(r[0]) for r in env.con().execute("SELECT payload_json FROM events WHERE kind='run.routing_applied'")]
+    assert event["changed"] == ["quota"], event

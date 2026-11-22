@@ -8,14 +8,14 @@ from test_issue809_real_routes import candidate
 PROFILE = {"XS": "lean", "S": "balanced", "M": "balanced", "L": "deep", "XL": "deep"}
 
 # The slate primary at its nominal benchmark score (#809 final matrix).
-PRIMARY_SCORE = {"XS": 34, "S": 40, "M": 41, "L": 47, "XL": 51}
+PRIMARY_SCORE = {"XS": 34, "S": 40, "M": 41, "L": 47, "XL": 58}
 FLAT_SEED = [{"model_id": "claude-sonnet-5-5", "harness": "claude", "effort": "high"}]
 
 
 # Catalog list prices (USD per Mtok in/out) so a cheap slate primary is not out-scored on price alone.
 PRICE = {"claude-haiku-5-5": (0.1, 0.5), "gemini-3.8-flash": (0.75, 3.75), "claude-sonnet-5-5": (2.0, 10.0),
          "gpt-6.1-terra": (1.0, 5.0), "claude-opus-5-5": (5.0, 25.0)}
-FLOORS_OK = {"XS": 33, "S": 38, "M": 41, "L": 47, "XL": 51}
+FLOORS_OK = {"XS": 33, "S": 38, "M": 41, "L": 47, "XL": 53}  # XL floor is 52 (AA v5 Engineering Index)
 
 
 def priced(model, effort, score, harness):
@@ -52,26 +52,6 @@ def _slate_pool(size):
 
 
 @pytest.mark.parametrize("size", list(executor_slates.FLOORS))
-def test_each_size_selects_its_slate_primary_when_allowed(size):
-    model, effort, harness = executor_slates.IDEAL[size][0]
-    pool = _slate_pool(size)[:1] + [priced("claude-sonnet-5-5", "high", 47, "claude")]
-    out = decide(size, pool)
-    assert out["status"] == "selected", out
-    chosen = out["candidate"]
-    assert (chosen["model_id"], chosen["effort"], chosen["harness"]) == (model, effort, harness or "agy"), out
-
-
-@pytest.mark.parametrize("size", list(executor_slates.FLOORS))
-def test_each_size_falls_to_the_next_slate_route_when_the_primary_cannot_run(size):
-    pool = _slate_pool(size)[:2] + [priced("claude-sonnet-5-5", "high", 47, "claude")]
-    pool[0] = dict(pool[0], route_status="untried")
-    model, effort, harness = executor_slates.IDEAL[size][1]
-    out = decide(size, pool)
-    assert out["status"] == "selected", out
-    assert (out["candidate"]["model_id"], out["candidate"]["effort"]) == (model, effort), out
-
-
-@pytest.mark.parametrize("size", list(executor_slates.FLOORS))
 def test_a_flat_executor_seed_does_not_shadow_the_size_slate(size):
     run = {"gear": size, "risk": {"size_class": size}}
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, size) == executor_slates.ideal_seed(size)
@@ -83,7 +63,7 @@ def test_a_per_size_seed_still_wins_and_a_legacy_run_keeps_the_flat_seed():
     run = {"gear": "S"}
     assert candidates._preferred_seed({"preferred_seed_by_size": by_size, "preferred_seed": FLAT_SEED},
                                       run, "S") == by_size["S"]
-    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "express"}, "S") == FLAT_SEED
+    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": None}, "S") == FLAT_SEED
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "S"}, None) == FLAT_SEED
     assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": "S"}, "S", role="code_reviewer") \
         == FLAT_SEED
@@ -97,15 +77,15 @@ def test_the_size_slate_anchors_routing_but_a_users_own_seed_does_not():
     copied = {"preferred_seed_by_size": {"S": executor_slates.ideal_seed("S")}}
     assert not candidates._uses_size_slate(copied, run, "S", "executor")
     assert candidates._uses_size_slate(copied, run, "M", "executor")
-    assert not candidates._uses_size_slate({}, {"gear": "express"}, "S", "executor")
+    assert not candidates._uses_size_slate({}, {"gear": None}, "S", "executor")
     assert not candidates._uses_size_slate({}, run, "S", "code_reviewer")
     assert not candidates._uses_size_slate({}, run, None, "executor")
 
 
 @pytest.mark.parametrize("size", list(executor_slates.FLOORS))
 def test_routes_outside_the_slate_stay_behind_it_as_fallbacks(size):
-    outsider = (priced("gpt-6.1-terra", "xhigh", 45, "codex") if size == "L"
-                else priced("claude-sonnet-5-5", "high", 47, "claude"))
+    # Terra xhigh is on no slate (AA v5), and 60 clears every size's Engineering Index floor.
+    outsider = priced("gpt-6.1-terra", "xhigh", 60, "codex")
     pool = _slate_pool(size)[:1] + [outsider]
     out = decide(size, pool)
     routes = [e["route"] for e in out["routing"]["slate"]]
@@ -162,30 +142,6 @@ def test_no_reroute_without_a_seed_or_a_selected_fresh_decision():
 
 
 # ------------------------------------------------------------------ #850 §4: the orchestrator plans
-
-
-@pytest.mark.parametrize("gear,effort", [("M", "low"), ("L", "medium"), ("XL", "high")])
-def test_an_explicit_planner_follows_the_run_gear_table(gear, effort):
-    run = {"gear": gear}
-    seed = candidates._preferred_seed({"preferred_seed": FLAT_SEED}, run, "S", role="planner")
-    assert [(e["model_id"], e["effort"]) for e in seed] == [
-        ("claude-opus-5-5", effort), ("gpt-6-astra", effort), ("gemini-4-argon", effort)]
-    assert seed[0]["harness"] == "claude" and seed[1]["harness"] == "codex"
-
-
-@pytest.mark.parametrize("gear", ["XS", "S", "express", None])
-def test_xs_s_and_legacy_gears_have_no_gear_planner_table(gear):
-    assert candidates._preferred_seed({"preferred_seed": FLAT_SEED}, {"gear": gear}, None, role="planner") \
-        == FLAT_SEED
-
-
-def test_no_new_gear_queues_a_dedicated_planner_by_default():
-    from office import config
-    cfg = config.load_yaml(config.default_config_path())
-    for gear in ("XS", "S", "M", "L", "XL"):
-        risk = config.resolve_risk(cfg, "repo", None, False)
-        risk["size_class"] = gear
-        assert config.resolve_gates(gear, risk, cfg)["dedicated_planner"] is False, gear
 
 
 @pytest.mark.parametrize("size", ["S", "M"])

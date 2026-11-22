@@ -10,7 +10,7 @@ evidence), and a PR leaves draft when its task is accepted.
 Everything here runs as outbox jobs (`pr_sync`): GitHub is never called inside
 a transaction, and a GitHub failure is a notice, never a lifecycle failure.
 PRs are off when the run is local, the repository has no `origin`, `gh` is
-missing, or `office start --no-prs` was given; the 3.1 flow then applies.
+missing, or live run options currently have `--no-prs` set; the 3.1 flow then applies.
 """
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ def _detect(con, run: dict) -> dict:
 
 
 def settings(con, run: dict) -> dict:
-    """The run's PR settings, detected once (outside any transaction) and pinned.
+    """The run's PR settings, detected outside transactions and pinned until
+    a user explicitly amends them with `office amend options`.
 
     A transient detection failure (`gh repo view` erred or timed out) is not
     pinned for good: it is probed again on each later call (dispatch, land,
@@ -77,6 +78,8 @@ def settings(con, run: dict) -> dict:
     detected = {**_detect(con, run), **carried}
     with db.transaction(con):
         landing = dict(state.get_run(con, run["id"]).get("landing") or {})
+        if (landing.get("prs") or {}) != current:
+            return landing.get("prs") or {}
         landing["prs"] = detected
         state.update_run(con, run["id"], landing=landing)
         if current.get("transient") and detected.get("enabled"):
@@ -183,6 +186,22 @@ def has_pr(task: dict | None) -> bool:
     return bool(task and (task["scope"] or task.get("pr")))
 
 
+def push_refusal(task: dict) -> dict | None:
+    """Return the current accepted revision's unrecorded-remote push refusal, if any."""
+    refusal = (task.get("pr") or {}).get("push_refused")
+    return refusal if refusal and refusal.get("revision") == task.get("accepted_revision_id") else None
+
+
+def push_refusal_next(task: dict) -> str | None:
+    refusal = push_refusal(task)
+    if not refusal:
+        return None
+    branch, reason = refusal.get("branch") or "the task branch", refusal.get("reason") or "remote tip is unrecorded"
+    return (f"{task['id']} PR push was refused: {reason}. Inspect origin/{branch} and reconcile its unrecorded work "
+            "without force-pushing it; then open/update the task PR and hand it off with "
+            "office close --handoff <pr-url>")
+
+
 def pr_blocker(con, run: dict, task: dict) -> str | None:
     """Why `task` cannot become PR-free, or None. Local and conservative (no gh
     call; the caller holds the tx): any recorded PR, open or closed, or a PR job
@@ -198,8 +217,11 @@ def pr_blocker(con, run: dict, task: dict) -> str | None:
 
 
 def queue(con, run: dict, task_id: str, event: str, ref: str) -> None:
-    if enabled(run) and has_pr(state.get_task(con, run["id"], task_id)):
-        state.enqueue(con, run, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
+    # Live run options can change after a worker loaded `run`. Use the state
+    # visible in this transaction, not that worker's stale snapshot (#937).
+    current = state.get_run(con, run["id"])
+    if enabled(current) and has_pr(state.get_task(con, run["id"], task_id)):
+        state.enqueue(con, current, "pr_sync", {"task_id": task_id, "event": event, "ref": ref},
                       dedup_key=f"pr_sync:{run['id'][:8]}:{task_id}:{event}:{ref}", max_attempts=2)
 
 
@@ -303,8 +325,8 @@ def ensure_pr(con, run: dict, task: dict, dispatch: dict) -> dict:
                                    f"{(edited.stderr or edited.stdout).strip()}"[:300])
         # If gh pr view is unavailable, link the task to the existing PR as
         # before, but do not edit remote title/body without ownership proof.
-    pr = {**(task.get("pr") or {}), "number": found["number"], "url": found["url"], "base": base,
-          "branch": dispatch["branch"]}
+    pr = {k: v for k, v in (task.get("pr") or {}).items() if k != "push_refused"}
+    pr.update(number=found["number"], url=found["url"], base=base, branch=dispatch["branch"])
     with db.transaction(con):
         state.update_task(con, run["id"], task["id"], pr=pr)
     if pr["number"] != (task.get("pr") or {}).get("number"):
@@ -386,6 +408,13 @@ def _publish(con, run: dict, task: dict, rev_id: str) -> tuple[dict, dict]:
     if not ok:
         ok, err = _safe_restack_push(con, run, task, dispatch, rev, err)
     if not ok:
+        if any(reason in err for reason in (
+                "no earlier task revision proves ownership of remote head",
+                "remote tip is not a recorded previous task revision")):
+            pr = {**(task.get("pr") or {}), "push_refused": {"revision": rev["id"],
+                  "branch": dispatch["branch"], "reason": err}}
+            with db.transaction(con):
+                state.update_task(con, run["id"], task["id"], pr=pr)
         raise RuntimeError(f"push of {dispatch['branch']} failed: {err}"[:300])
     return rev, ensure_pr(con, run, task, dispatch)
 

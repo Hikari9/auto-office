@@ -113,11 +113,15 @@ def test_discovery_off_ignores_pool_candidates_and_hashes_exactly_as_before():
 # decision_hash and a digest of the whole result, computed by routing.route at 341b48b (before #494)
 # for requests that carry no discovery input. The decision hashes are unchanged (replay parity); the whole-result
 # digests were regenerated for #837, which replaced the per-route `trust` eligibility record with `policy`.
+# AA v5 T1: adaptive priors read the Engineering Index; the adaptive prior config names the Engineering Index and these requests carry only v4.3.2
+# scores, so every entry was re-baselined for the changed config and unbenchmarked_p prior.
+# A27: the shipped executor reserve is 20% (r3). These four entries were re-baselined for it; with
+# quota.reserve_percent_by_role.executor forced back to 5 they return to the values above the A27 update.
 GOLDEN_BEFORE_494 = {
-    "two": ("sha256:ff3c41ae5690c965d11f4599ccca6a22714035e6751374c4a90a4ee9398acf2a", "9494701bd45cf5cb"),
-    "three": ("sha256:811e29d6fbaf68a6337c594860b7db95093e57d126214cdb8dcb03ad9bdca5a9", "25e556810cbc1660"),
-    "worker": ("sha256:40ab10639a2b4e71fa048b2d5a8ff496a24e9d1c78fc8c8573484c51e31ad894", "850d746eb8f21fc1"),
-    "explore": ("sha256:ea98364617d5102b827b2a025a28bd56120372c536c6202dd9f82367bdf7b700", "cb2ee4bc183b05f6"),
+    "two": ("sha256:657a19aa70d13beefaadbb8bbbc6454cd4a39a7ac1471a8b807afa302d93a7a9", "6440f7189df95bce"),
+    "three": ("sha256:a989c33b5be62173c8cd4798d57b056d450cf73fc1906fe83c08b60df5a4aaeb", "3efcedc6bedc77b3"),
+    "worker": ("sha256:b048f7dd052b37debbe94100fa57a881f1606692b32b2c5554aa144e49ec535c", "dfdc8431d9d158c7"),
+    "explore": ("sha256:f31183569e225d94a11d286bed7e52389e2b3aad199544a7a2d1ad39dc8a7168", "36fdd67049f75089"),
 }
 
 
@@ -591,7 +595,9 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     built, skipped = candidates.build_candidates(None, "executor", probe=False, discovery=settings, user_policies=[])
     pool = [c for c in built if c["route_status"] != "available"]
     assert {label(c) for c in pool} >= {f"codex/gpt-6.1-sol@{e}" for e in ("low", "medium", "high", "xhigh", "max")}
-    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "high", "xhigh", "max")}
+    # Haiku high passed its exact probe (2026-11-20), so it is a plain candidate; the other efforts stay discovery rows.
+    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "xhigh", "max")}
+    assert "claude/claude-haiku-5-5@high" not in {label(c) for c in pool}
     for c in pool:
         assert c["discovery"] is True and c["route_status"] == "discovered-unconfirmed" and c["probe_key"]
         assert c["probe_key"].split("|")[:4] == [c["harness"], "2.0.0", c["invocation_model_id"], c["effort"]]
@@ -621,7 +627,7 @@ def test_a_fresh_exact_pass_attaches_to_exactly_that_candidate(installed, tmp_pa
     by = {label(c): c for c in built}
     assert by["codex/gpt-6.1-sol@high"]["probe"]["result"] == "pass"
     assert by["codex/gpt-6.1-sol@high"]["route_status"] == "probe-passed"
-    for sibling in ("codex/gpt-6.1-sol@low", "codex/gpt-6.1-sol@xhigh", "claude/claude-haiku-5-5@high"):
+    for sibling in ("codex/gpt-6.1-sol@low", "codex/gpt-6.1-sol@xhigh", "claude/claude-haiku-5-5@max"):
         assert by[sibling]["probe"] is None and by[sibling]["route_status"] == "discovered-unconfirmed"
 
 
@@ -937,10 +943,12 @@ def test_route_role_rejects_a_denied_route_with_its_source_and_a_plan_route_choi
     start_inline(env)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1").fetchone()[0])
-    config = copy.deepcopy(run["policy"])
-    config["routing"]["user_policy"]["denied_models"] = ["claude/haiku@high", "claude/claude-opus-5-5@medium"]
-    config[route_policy.PROVENANCE_KEY]["routing.user_policy.denied_models"] = "user"
-    result = candidates.route_role(con, config, run, "executor", task_id="T1", probe=False)
+    # The denial is the user's live config: a run's pinned copy of it is not routed from (#1120).
+    from office import paths
+    import yaml
+    paths.user_config_path().write_text(yaml.safe_dump({"routing": {"user_policy": {
+        "denied_models": ["claude/haiku@high", "claude/claude-opus-5-5@medium"]}}}))
+    result = candidates.route_role(con, copy.deepcopy(run["policy"]), run, "executor", task_id="T1", probe=False)
     denied = [x for x in result["rejected"] if x.get("category") == "denied"]
     assert denied and all(x["stage"] == 1 and "denied by user routing.user_policy.denied_models" in x["reason"]
                           for x in denied)

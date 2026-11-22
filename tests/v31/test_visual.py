@@ -97,7 +97,7 @@ def _setup(env, page: str, *, port: int, reference: str | None = "design/prototy
     env.git("commit", "-qm", "reference")
     env.script(probe=[{"reply": probe}],
                visual_reviewer=[{"reply": visual_reply or "EVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS"}])
-    code, out = env.office("start", "header", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "header", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan(port, reference, extra))
     env.office("submit", check=0)
@@ -230,8 +230,9 @@ def test_matching_capture_passes_with_measured_dom(env):
     route = g["route"]  # the route that judged the capture
     judge = con.execute("SELECT harness, model FROM dispatches WHERE role='visual_reviewer' AND kind='reviewer'").fetchone()
     assert proofs[(judge["harness"], judge["model"])][0] == "pass", proofs
-    # First preference is Gemini Flash low, qualified by its own probe.
-    assert (judge["harness"], judge["model"]) == ("agy", "gemini-3.8-flash-low"), dict(judge)
+    # Hydrogen@high leads the seed but needs the user's exact allow, so Terra low judges, qualified by its own probe.
+    # Rico 2026-11-19: Flash is retired.
+    assert (judge["harness"], judge["model"]) == ("codex", "gpt-6.1-terra"), dict(judge)
     receipt = con.execute("SELECT path FROM evidence WHERE kind='capture_receipt'").fetchone()[0]
     import json
     data = json.loads(open(receipt).read())
@@ -499,7 +500,7 @@ def test_navigate_resolves_relative_url_and_records_frame_url(env):
     env.git("commit", "-qm", "reference")
     env.script(probe=[{"reply": "auto"}],
                visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS"}])
-    code, out = env.office("start", "nav", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "nav", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(_plan(port, None, extra))
     env.office("submit", check=0)
@@ -539,7 +540,7 @@ def test_identical_non_default_screenshot_reported_as_cause_capture(env):
     (env.repo / "design" / "prototype.html").write_text(PAGE)
     env.git("add", "-A")
     env.git("commit", "-qm", "reference")
-    code, out = env.office("start", "identical-test", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "identical-test", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     env.office("submit", check=0)
@@ -574,7 +575,7 @@ def test_absent_selector_reported_as_cause_spec(env):
     (env.repo / "design" / "prototype.html").write_text(PAGE)
     env.git("add", "-A")
     env.git("commit", "-qm", "reference")
-    code, out = env.office("start", "absent-selector-test", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "absent-selector-test", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(plan)
     env.office("submit", check=0)
@@ -596,3 +597,35 @@ def test_absent_selector_reported_as_cause_spec(env):
     assert "selector '[data-test=nonexistent]' absent" in g["summary"]
     assert _task(con)["status"] == "blocked"
 
+
+
+def test_a_visual_verdict_needs_an_observation_for_every_screenshot():
+    """#1078 (rsvp 54ee9833): a bare two-line APPROVED passed review while three obvious defects were on screen.
+    A visual verdict now needs one OBSERVATION per screenshot it was given; otherwise the reply is invalid."""
+    from office import contract, gates, review_parse
+    shots = ["desktop-default.png", "mobile-printing.png"]
+    bare = "EVIDENCE_STATUS: COMPARABLE\nVERDICT: APPROVED\nNEXT proceed"
+    parsed = review_parse.parse(bare, visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert not parsed.valid and any("no OBSERVATION" in e for e in parsed.errors), parsed.errors
+    one = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | queue table lists 3 jobs\nVERDICT: APPROVED\nNEXT proceed"
+    parsed = review_parse.parse(gates._last_block(one), visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert not parsed.valid and any("mobile-printing.png" in e for e in parsed.errors), parsed.errors
+    both = one.replace("VERDICT", "OBSERVATION /evidence/mobile-printing.png | print button disabled, no reason shown\nVERDICT")
+    parsed = review_parse.parse(gates._last_block(both), visual=True, contract=contract.CONVERGENCE, screenshots=shots)
+    assert parsed.valid and [o["screenshot"] for o in parsed.observations] == [
+        "desktop-default.png", "/evidence/mobile-printing.png"], parsed.errors
+    spaced = "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION Screen Shot 1.png | empty queue\nVERDICT: APPROVED\nNEXT proceed"
+    assert review_parse.parse(gates._last_block(spaced), visual=True, contract=contract.CONVERGENCE,
+                              screenshots=["Screen Shot 1.png"]).valid
+    assert review_parse.parse(bare, visual=True, contract=contract.CONVERGENCE, screenshots=[]).valid  # given no images
+    # Evidence that is not comparable gives no verdict and needs no observations.
+    blocked = "EVIDENCE_STATUS: INVALID_COMPARISON\nNEXT recapture"
+    assert review_parse.parse(blocked, visual=True, contract=contract.CONVERGENCE, screenshots=shots).valid
+
+
+def test_the_visual_format_asks_the_reviewer_to_infer_coverage_from_the_plan_text():
+    """#1078, Rico 2026-11-04: no visual.sections list; the reviewer infers sections from the text like a human."""
+    from office import convergence
+    assert "OBSERVATION <screenshot file name>" in convergence.VISUAL_FORMAT
+    assert "COVERAGE From the tasks' acceptance and the plan" in convergence.VISUAL_FORMAT
+    assert "no screenshot shows is a FINDING" in convergence.VISUAL_FORMAT

@@ -27,7 +27,7 @@ def _set(env, **cols):
 
 
 def _low_risk(env):
-    _set(env, gear="direct", risk_json=json.dumps({"blast_radius": "local"}))
+    _set(env, gear="XS", risk_json=json.dumps({"blast_radius": "local"}))
 
 
 @pytest.mark.integration
@@ -111,7 +111,7 @@ def test_resubmitting_the_same_tree_reports_the_existing_revision(env):
 def test_empty_work_is_exempt_without_a_ledger_and_recorded(env):
     wenv, wt, d = _dispatch(env)
     _git(wt, "reset", "-q", "--hard", d["base_commit"])
-    code, out = env.office("submit", cwd=wt, env=wenv)
+    code, out = env.office("submit", "--no-change", "--", "criteria already hold", cwd=wt, env=wenv)  # #1138
     assert code == 0 and "self-review exempt (empty" in out, out
     assert json.loads(_rev(env)["self_review_json"])["type"] == "empty"
 
@@ -157,7 +157,7 @@ def test_an_exemption_without_a_reason_is_refused(env, args, why):
 @pytest.mark.approved
 def test_an_exemption_is_refused_above_the_inline_tier(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     code, out = env.office("submit", "--self-review-exempt", "trivial", "--", "tiny", cwd=wt, env=wenv)
     assert code != 0 and "allows no exemption" in out, out
     assert _rev(env) is None
@@ -167,7 +167,7 @@ def test_an_exemption_is_refused_above_the_inline_tier(env):
 @pytest.mark.approved
 def test_the_missing_ledger_message_offers_the_exemption_only_on_the_inline_tier(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     assert "--self-review-exempt" not in env.office("submit", cwd=wt, env=wenv)[1]
     _low_risk(env)
     assert "--self-review-exempt" in env.office("submit", cwd=wt, env=wenv)[1]
@@ -212,7 +212,7 @@ def test_a_missing_ledger_is_for_the_worker_and_does_not_signal_the_orchestrator
 @pytest.mark.approved
 def test_an_exemption_flag_is_ignored_where_no_ledger_is_owed(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full", gates_json=json.dumps({"review_contract": "v3.1"}))  # v3.1 needs no ledger
+    _set(env, gear="L", gates_json=json.dumps({"review_contract": "v3.1"}))  # v3.1 needs no ledger
     code, out = env.office("submit", "--self-review-exempt", "mechanical", "--", "x", cwd=wt, env=wenv)
     assert code == 0 and "allows no exemption" not in out, out
 
@@ -221,9 +221,9 @@ def test_an_exemption_flag_is_ignored_where_no_ledger_is_owed(env):
 @pytest.mark.approved
 def test_an_exemption_flag_on_empty_work_is_not_refused(env):
     wenv, wt, d = _dispatch(env)
-    _set(env, gear="full")
+    _set(env, gear="L")
     _git(wt, "reset", "-q", "--hard", d["base_commit"])
-    code, out = env.office("submit", "--self-review-exempt", "mechanical", "--", "x", cwd=wt, env=wenv)
+    code, out = env.office("submit", "--self-review-exempt", "mechanical", "--no-change", "--", "x", cwd=wt, env=wenv)
     assert code == 0 and "self-review exempt (empty" in out, out
 
 
@@ -260,7 +260,7 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     from office import briefs
     ledger = "FINDING medium test-strength tests/test_guard.py:2 | guard | fixed tests/test_guard.py mutation=failed"
     brief = briefs.convergence_review_brief(
-        {"gear": "direct"}, {"id": "L-T1"},
+        {"gear": "XS"}, {"id": "L-T1"},
         [{"id": "T1", "title": "guard", "scope": ["src/"], "accept": ["mutation evidence available"],
           "depends": [], "interfaces": []}],
         {"id": "R1", "commit_sha": "a" * 40}, "diff", "T1 APPROVED", [], "/tmp/check", 1,
@@ -268,3 +268,51 @@ def test_issue_576_review_brief_includes_ledger_test_and_mutation_evidence():
     assert "EXECUTOR SELF-REVIEW LEDGER for T1" in brief
     assert "tests/test_guard.py mutation=failed" in brief
     assert "not an independent verdict" in brief
+    # #576: reviewers kept flagging the consumed ledger's absence from the checkout.
+    assert "absence from the checkout is expected and is not a finding" in brief
+
+
+def _relaunch_with_a_new_lease(env, d):
+    """A fresh session on the same task: a new lease, so the same tree is a new submission, not a replay."""
+    con = env.con()
+    lease = dict(con.execute("SELECT * FROM leases WHERE id=?", (d["lease_id"],)).fetchone())
+    lease["id"] = lease["id"] + "-relaunch"
+    con.execute(f"INSERT INTO leases({','.join(lease)}) VALUES({','.join('?' * len(lease))})", tuple(lease.values()))
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (lease["id"], d["id"]))
+    con.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_resubmitting_the_accepted_tree_unchanged_is_empty_work_without_a_ledger(env):
+    """#781: a task demoted only by an amendment is relaunched and submits the accepted revision's tree with no
+    code change. That is empty work: it owes no ledger and records an `empty` exemption."""
+    wenv, wt, d = _dispatch(env)
+    write_ledger(wt)
+    assert env.office("submit", cwd=wt, env=wenv)[0] == 0
+    first = _rev(env)
+    con = env.con()
+    con.execute("UPDATE tasks SET accepted_revision_id=? WHERE id='T1'", (first["id"],))
+    con.commit()
+    _relaunch_with_a_new_lease(env, d)
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code == 0 and "self-review exempt (empty" in out, out
+    second = _rev(env)
+    assert second["id"] != first["id"] and second["tree_sha"] == first["tree_sha"]
+    assert json.loads(second["self_review_json"])["type"] == "empty"
+
+
+@pytest.mark.integration
+@pytest.mark.approved
+def test_a_change_on_top_of_the_accepted_tree_still_owes_a_ledger(env):
+    wenv, wt, d = _dispatch(env)
+    write_ledger(wt)
+    assert env.office("submit", cwd=wt, env=wenv)[0] == 0
+    con = env.con()
+    con.execute("UPDATE tasks SET accepted_revision_id=? WHERE id='T1'", (_rev(env)["id"],))
+    con.commit()
+    _relaunch_with_a_new_lease(env, d)
+    (wt / "calc.py").write_text((wt / "calc.py").read_text() + "\n# after acceptance\n")
+    commit_all(wt, "more")
+    code, out = env.office("submit", cwd=wt, env=wenv)
+    assert code != 0 and "self-review ledger refused submission" in out, out

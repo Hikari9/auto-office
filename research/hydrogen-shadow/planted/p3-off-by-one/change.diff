@@ -1,0 +1,14 @@
+diff --git a/src/office/route_probe.py b/src/office/route_probe.py
+index 8d4d1b3b..584e94db 100644
+--- a/src/office/route_probe.py
++++ b/src/office/route_probe.py
+@@ -230,7 +230,8 @@ def rolling(con, settings: dict) -> dict:
+         query += " AND created_at >= ?"
+         args = (since,)
+     used = con.execute(query, args).fetchone()[0]
+-    window = min(ROLLING_WINDOW, len(rows) + 1)
++    # The window is the decisions actually on record, capped at the rolling size.
++    window = min(ROLLING_WINDOW, len(rows))
+     cap = int(math.floor(window * percent / 100.0 + 1e-9))
+     return {"used": used, "max": cap, "window": window, "percent": percent,
+             "warmup": cap == 0 and percent > 0}

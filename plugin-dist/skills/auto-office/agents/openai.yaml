@@ -1,0 +1,3 @@
+interface:
+  display_name: "auto-office"
+  short_description: "Original full Auto Office orchestrator; explicit invocation only"

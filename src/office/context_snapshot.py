@@ -126,6 +126,8 @@ def _read(con, run_id: str, since: int | None) -> dict:
 
 
 def snapshot(con, run: dict, *, since: int | None = None) -> dict:
+    from office import routechange
+    routechange.sweep_recovered(con, run)  # before the read, so a recovery is in this snapshot's seq and events
     if con.in_transaction:
         raw = _read(con, run["id"], since)
     else:
@@ -168,6 +170,7 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
                               "status": status})
             if status in ("missing", "stale"):
                 stale.append(f"{kind} {row['id']} {status}: {row['path']}")
+    recovered = routechange.recovery_lines(con, r)
     open_tasks, done_tasks = raw["tasks"]["open"], raw["tasks"]["done"]
     req = raw["req"]
     return _bound({
@@ -186,6 +189,7 @@ def snapshot(con, run: dict, *, since: int | None = None) -> dict:
         "blocking_findings": [{**f, "summary": _clip(f["summary"])} for f in raw["findings"][:MAX_ITEMS]],
         "amendments": raw["amendments"],
         "authorizations": raw["auths"],
+        "route_recovered": recovered,
         "artifacts": artifacts,
         "events": [{**e, "summary": _clip(e["summary"])} for e in raw["events"][:MAX_ITEMS]],
         "events_truncated": len(raw["events"]) > MAX_ITEMS,
@@ -258,6 +262,7 @@ def render(snap: dict) -> list[str]:
         lines.append(f"amendment {a['id']} #{a['seq']} {a['class']} {a['status']}")
     for a in snap["authorizations"][:5]:
         lines.append(f"authorized {a['kind']} {a['target'] or ''} r{a['requirements_version']}")
+    lines.extend(snap["route_recovered"])
     bad = [a for a in snap["artifacts"] if a["status"] != "ok"]
     lines.append(f"artifacts: {len(snap['artifacts'])} referenced, {len(bad)} not verified ok (office inspect evidence)")
     for e in snap["events"]:
@@ -279,6 +284,14 @@ def render(snap: dict) -> list[str]:
     return out
 
 
+# Root turn rule (#922): a turn that ends with nothing armed is never woken for an event.
+TURN_RULE = ("turn: arm `office wait` instead of ending the turn on an event-dependent step "
+             "(root wake is on by default in a bound Claude Herdr pane; --wake-off disables it)")
+
+
 def context(con, run: dict, *, since: int | None = None) -> Result:
     snap = snapshot(con, run, since=since)
-    return Result(lines=render(snap), next=snap["next"] or "office status", data=snap)
+    lines = render(snap)
+    if not state.is_terminal(run):
+        lines.append(TURN_RULE)
+    return Result(lines=lines, next=snap["next"] or "office status", data=snap)

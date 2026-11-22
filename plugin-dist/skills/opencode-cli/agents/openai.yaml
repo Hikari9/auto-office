@@ -1,0 +1,3 @@
+interface:
+  display_name: "opencode-cli"
+  short_description: "Explicit opencode-cli harness primitive"

@@ -1,0 +1,27 @@
+{
+  "case": "p5-race",
+  "commit": "0f07899f87bce8ff68b2a577df674c5e14a670e3",
+  "exit": 0,
+  "findings": [
+    {
+      "file": "src/office/hydrogen_trials.py",
+      "line": 149,
+      "severity": "blocker",
+      "summary": "When con.in_transaction is False, snapshot(con) and the per-run COUNT(*) query execute before db.transaction(con) acquires BEGIN IMMEDIATE at line 176, creating a TOCTOU race where concurrent callers can observe the same counts and both insert experimental=1 rows past MAX_PER_RUN, CAP, or cold_start (and reading after=snapshot(con) at line 179 after commit)."
+    },
+    {
+      "file": "src/office/hydrogen_trials.py",
+      "line": 174,
+      "severity": "major",
+      "summary": "Removing the non-transactional RuntimeError guard and adding the db.transaction(con) fallback breaks the existing test_atomic_booking_requires_writer_transaction assertion in tests/v31/test_issue_1143_hydrogen_trials.py without updating it or adding tests for non-transactional or concurrent autocommit book() calls."
+    }
+  ],
+  "raw_reply": "{\"verdict\": \"RECHECK\", \"findings\": [{\"severity\": \"blocker\", \"file\": \"src/office/hydrogen_trials.py\", \"line\": 149, \"summary\": \"When con.in_transaction is False, snapshot(con) and the per-run COUNT(*) query execute before db.transaction(con) acquires BEGIN IMMEDIATE at line 176, creating a TOCTOU race where concurrent callers can observe the same counts and both insert experimental=1 rows past MAX_PER_RUN, CAP, or cold_start (and reading after=snapshot(con) at line 179 after commit).\"}, {\"severity\": \"major\", \"file\": \"src/office/hydrogen_trials.py\", \"line\": 174, \"summary\": \"Removing the non-transactional RuntimeError guard and adding the db.transaction(con) fallback breaks the existing test_atomic_booking_requires_writer_transaction assertion in tests/v31/test_issue_1143_hydrogen_trials.py without updating it or adding tests for non-transactional or concurrent autocommit book() calls.\"}]}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "diff",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "RECHECK",
+  "wall_seconds": 54.7
+}

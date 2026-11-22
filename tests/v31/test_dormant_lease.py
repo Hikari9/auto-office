@@ -14,6 +14,8 @@ import pytest
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, approved_run, self_reviewed, task_row
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
+# These tests resume a claude session; the adaptive ranker no longer picks a claude executor by default.
+CLAUDE_AS = ("--as", "claude/claude-opus-5-5@medium")
 CHANGES = "VERDICT: CHANGES_REQUIRED\nFINDING F1 | material | calc.py | needs a comment | add one"
 # T2 builds on T1; T3 shares T2's file and is ordered against neither.
 PLAN_HELD = PLAN_TWO.replace("scope: mul.py\ndepends: none", "scope: mul.py\ndepends: T1") + """
@@ -44,14 +46,14 @@ def _end(env, dispatch_id):
 
 def _t2_submitted_and_held(env):
     """T2 submits on T1's first revision while T1 is back in changes: T2 cannot be accepted yet."""
-    approved_run(env, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
-    env.office("dispatch", "T1", env=EXTERNAL, check=0)
+    approved_run(env, unmarked=True, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", *CLAUDE_AS, env=EXTERNAL, check=0)
     w1, wt1 = _worker(env, "T1")
     (wt1 / "calc.py").write_text(GOOD_ADD)
     self_reviewed(wt1, "calc.py")
     env.office("submit", cwd=wt1, env=w1, check=0)
     assert task_row(env, "T1")["status"] == "changes_required"
-    env.office("dispatch", "T2", env=EXTERNAL, check=0)
+    env.office("dispatch", "T2", *CLAUDE_AS, env=EXTERNAL, check=0)
     w2, wt2 = _worker(env, "T2")
     (wt2 / "mul.py").write_text(GOOD_MUL)
     self_reviewed(wt2, "mul.py")
@@ -85,7 +87,7 @@ def test_status_does_not_call_a_task_with_no_session_live(env):
 
 @pytest.mark.review_contract("v3.1")
 def test_a_stacked_task_runs_once_its_holder_submitted_and_ended(env):
-    approved_run(env, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
+    approved_run(env, unmarked=True, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     w1, wt1 = _worker(env, "T1")
     (wt1 / "calc.py").write_text(GOOD_ADD)
@@ -110,7 +112,7 @@ def test_a_stacked_task_runs_once_its_holder_submitted_and_ended(env):
 def test_a_stacked_task_starts_when_its_holder_ends_through_finish(env, monkeypatch):
     """The end a supervisor records (`_finish`), not a hand-written row: it is what starts the stacked task (#508)."""
     from office import dispatch
-    approved_run(env, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
+    approved_run(env, unmarked=True, plan=PLAN_HELD, executor=[{}], code_reviewer=[{"reply": CHANGES}, {"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     w1, wt1 = _worker(env, "T1")
     (wt1 / "calc.py").write_text(GOOD_ADD)
@@ -134,7 +136,7 @@ def test_a_stacked_task_starts_when_its_holder_ends_through_finish(env, monkeypa
 
 
 def _contract_change_beside_an_ended_ack_session(env, **reviewers):
-    approved_run(env, plan=PLAN_TWO, executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
+    approved_run(env, unmarked=True, plan=PLAN_TWO, executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}}, "submit": True}],
                  code_reviewer=[{"reply": "VERDICT: PASS"}], **reviewers)
     env.office("dispatch", "T1", check=0)
     assert task_row(env, "T1")["status"] == "accepted"
@@ -167,10 +169,10 @@ def test_convergence_an_accepted_task_with_an_ended_session_does_not_block_a_con
 
 
 def test_an_ack_only_session_that_ends_leaves_the_task_resumable(env):
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"ack": "A1", "exit": 0}],
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}, {"ack": "A1", "exit": 0}],
                  code_reviewer=[{"reply": "VERDICT: PASS"}],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", *CLAUDE_AS, check=0)
     assert task_row(env)["status"] == "accepted"
     env.office("amend", "T1", "--", "also reject strings", check=0)
     con = env.con()

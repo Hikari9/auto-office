@@ -2,6 +2,7 @@
 from office import shipped_catalog, candidates, config, model_lineages, paths, scoring
 
 INDEX = "Artificial Analysis Intelligence Index v4.3.2"
+EI = "Artificial Analysis Engineering Index (2026-11)"
 
 
 def _seed_rows():
@@ -19,19 +20,19 @@ def test_aliases_invoke_latest_and_carry_scores():
 
 def test_executor_and_reviewer_floors_use_intelligence():
     roles = config.load_yaml(config.default_config_path())["roles"]
-    for role in ("executor", "plan_reviewer", "code_reviewer"):
+    for role, index in (("executor", EI), ("plan_reviewer", INDEX), ("code_reviewer", INDEX)):
         floor = roles[role]["floor"]
         assert floor["min_effort"] == "none"
-        assert floor["min_benchmark_index"] == {"index_name": INDEX, "min_score": 31}
+        assert floor["min_benchmark_index"] == {"index_name": index, "min_score": 31}
 
 
 def test_low_effort_high_intelligence_passes_executor_floor():
     floor = config.load_yaml(config.default_config_path())["roles"]["executor"]["floor"]
     ok, _ = scoring.evaluate_capability_floor(
-        {"effort": "low", "benchmark_indexes": {INDEX: 42}, "invocation_source": "documented: x"}, floor)
+        {"effort": "low", "benchmark_indexes": {EI: 42}, "invocation_source": "documented: x"}, floor)
     assert ok
     ok, reason = scoring.evaluate_capability_floor(
-        {"effort": "xhigh", "benchmark_indexes": {INDEX: 30}, "invocation_source": "documented: x"}, floor)
+        {"effort": "xhigh", "benchmark_indexes": {EI: 30, INDEX: 99}, "invocation_source": "documented: x"}, floor)
     assert not ok
 
 

@@ -20,13 +20,13 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-from office import adaptive, executor_slates, route_learning, route_policy, scoring
+from office import adaptive, executor_slates, harness_preference, hydrogen_trials, route_learning, route_policy, scoring
+from office import config as office_config
 from office.util import sha256_obj
 
 # Roles whose selection confers mutable or gate authority; they need derived trust.
 MUTABLE_TRUST_ROLES = {"executor", "code_reviewer", "browser_verifier", "closeout_verifier", "visual_reviewer",
                        "integration_reviewer"}
-DEFAULT_RESERVE_PERCENT = 5.0
 # Legacy planner/reviewer routing only. Executor and worker routing (#300) has no
 # money band; its cost safety valve is routing.adaptive.budget_ceiling_multiple.
 DEFAULT_MONEY_BAND_PERCENT = 20.0
@@ -48,10 +48,28 @@ def _using_executor_policy(policy: dict):
         _executor_policy_context.reset(token)
 
 
+# Rejections that mean a route was avoided for a hard quota or auth failure (#921). Others (trust, capability, concurrency,
+# a projected quota reserve, a runtime demotion whose reason is not quota or auth) are not recovered when their route becomes
+# available again. A projected quota reserve is never recovery evidence: recovery does not re-run the reserve gate, so a
+# probe pass does not show that the reserve admits the route.
+QUOTA_AUTH_CATEGORIES = frozenset({"rate-limited"})
+QUOTA_AUTH_REASON_CLASSES = frozenset({"auth-quota-blocked"})
+
+
+def quota_auth_rejection(rejection: dict) -> bool:
+    """Whether a rejection avoided its route for quota or auth (#921): a quota or auth cooldown category, or a
+    reason class of a failed exact probe. A projected quota reserve is not one."""
+    return rejection.get("category") in QUOTA_AUTH_CATEGORIES or rejection.get("reason_class") in QUOTA_AUTH_REASON_CLASSES
+
+
 def candidate_id(c):
     """Route identity `harness@major/model_id@effort`. Trust keys on the harness major,
     so a point release never resets it; the full `harness_version` stays in disclosure."""
     return f"{c.get('harness')}@{scoring.harness_major(c.get('harness_version'))}/{c.get('model_id')}@{c.get('effort')}"
+
+
+# Parses a candidate id back into its harness, model id and effort (#921).
+CANDIDATE_ID_RE = re.compile(r"(?P<harness>[^@/]+)@[^/]*/(?P<model>[^@]+)@(?P<effort>.+)\Z")
 
 
 def cooldown_key(harness: str | None, invocation_model_id: str | None) -> str:
@@ -85,12 +103,25 @@ def shared_quota_pool_key(harness: str | None, model: str | None) -> str | None:
     return None
 
 
+def verified_shared_quota_pool_key(c: dict) -> str | None:
+    """Only explicit provider+account+pool metadata proves sibling variants share quota."""
+    q = c.get("quota") or {}
+    if q.get("shared_pool_verified") is not True:
+        return None
+    parts = [q.get(k) for k in ("provider", "account_id", "pool_id")]
+    if not all(isinstance(v, str) and v.strip() for v in parts):
+        return None
+    # The exact identity, not a guess from model/effort/provider name, is the cooldown key.
+    return "verified-pool:" + sha256_obj(parts)
+
+
 def _demotion_keys(c: dict) -> tuple[str, ...]:
     model = c.get("invocation_model_id") or c.get("model_id")
     keys = (demotion_key(c.get("harness"), model, c.get("effort")),
             harness_demotion_key(c.get("harness")))
     pool = shared_quota_pool_key(c.get("harness"), model)
-    return keys + ((pool,) if pool else ())
+    verified = verified_shared_quota_pool_key(c)
+    return keys + ((pool,) if pool else ()) + ((verified,) if verified else ())
 
 
 def preferred_rank(c, preferred_seed):
@@ -107,7 +138,7 @@ def preferred_rank(c, preferred_seed):
             continue
         if p.get("harness") and p.get("harness") != c.get("harness"):
             continue
-        return i
+        return p.get("rung", i + 1) - 1
     return None
 
 
@@ -129,7 +160,7 @@ def invocation_provenance(candidate: dict) -> str:
     if not source:
         return "proven"
     source = str(source).strip()
-    if source.startswith("documented") or source == "unproven":
+    if source.startswith(("documented", "external-evidence")) or source == "unproven":
         return "documented"
     if source.startswith("local-evidence") or source.startswith("proven"):
         return "proven"
@@ -148,9 +179,15 @@ def selection_disclosure(role: str, chosen: dict, preferred_seed, cost_policy: s
     elif quota.get("status") != "ok" or quota.get("tightest_remaining_percent") is None:
         reasons.append("was selected with quota headroom explicitly unknown")
     if rank is not None:
-        reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
+        if any("rung" in row for row in preferred_seed or []):
+            reasons.append(f"matched preferred rung #{rank + 1}; adaptive quality/cost/speed/quota still decide")
+        else:
+            reasons.append(f"matched preferred seed #{rank + 1}, which decided the advisory ranking")
     else:
         reasons.append(f"won the {cost_policy} cost and local-evidence comparison")
+    if bias := next((row for row in preferred_seed or [] if row.get("frontend_bias")), None):
+        reasons.append(f"frontend-heavy task ({bias['frontend_bias']}): {bias.get('harness')}/{bias['model_id']}"
+                       f"@{bias.get('effort')} moved to rung 1 for this task only; no route added, no gate lifted")
     invocation = chosen.get("invocation_model_id")
     prov = invocation_provenance(chosen)
     if not invocation or prov == "none":
@@ -342,6 +379,73 @@ def _concurrency_snapshot(request: dict, con: sqlite3.Connection | None) -> None
                 }
 
 
+BUDGET_WARN_AT = 0.8
+
+
+def local_midnight_utc() -> str:
+    """Today's local midnight as a UTC ISO timestamp, comparable with recorded `started_at` values."""
+    from datetime import datetime, timezone
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(timezone.utc).isoformat()
+
+
+def budget_for(candidate: dict, budgets: dict) -> tuple[str, int] | None:
+    """(key, budget) of the most specific `quota.daily_dispatch_budget` entry naming this route, or None."""
+    h = candidate.get("harness")
+    for model in dict.fromkeys(m for m in (candidate.get("model_id"), candidate.get("invocation_model_id")) if m):
+        for key in (f"{h}/{model}@{candidate.get('effort')}", f"{h}/{model}"):
+            n = budgets.get(key)
+            if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+                return key, n
+    return None
+
+
+def dispatches_today(con: sqlite3.Connection, candidate: dict, key: str) -> int:
+    """Dispatches started on this route since local midnight, across every run on this machine."""
+    model = candidate.get("invocation_model_id") or candidate.get("model_id")
+    sql = "SELECT COUNT(*) FROM dispatches WHERE harness=? AND model=? AND started_at>=?"
+    args: list = [candidate.get("harness"), model, local_midnight_utc()]
+    if "@" in key:
+        sql, args = sql + " AND effort=?", [*args, candidate.get("effort")]
+    return int(con.execute(sql, args).fetchone()[0])
+
+
+def _daily_budget_snapshot(request: dict, con: sqlite3.Connection | None) -> None:
+    """Read a route's opt-in daily dispatch budget as quota headroom (#831): used/N of the budget is spent, and at N
+    the route is quota-exhausted so the role's chain falls through. Recorded once, so a replay reads the same counts."""
+    budgets = (request.get("policy") or {}).get("daily_dispatch_budget") or {}
+    if not budgets:
+        return
+    snapshot = request.get("daily_budget_snapshot")
+    if snapshot is None:
+        snapshot = {}
+        if con is not None:
+            for c in request.get("candidates", []):
+                hit = budget_for(c, budgets)
+                if hit:
+                    snapshot[candidate_id(c)] = {"key": hit[0], "budget": hit[1],
+                                                 "used": dispatches_today(con, c, hit[0])}
+        request["daily_budget_snapshot"] = snapshot
+    for c in request.get("candidates", []):
+        b = snapshot.get(candidate_id(c))
+        if not b:
+            continue
+        left = max(0.0, (b["budget"] - b["used"]) * 100.0 / b["budget"])
+        q = dict(c.get("quota") or {})
+        cause = f"daily-dispatch-budget {b['used']}/{b['budget']} ({b['key']})"
+        # The budget only ever lowers headroom: a wall, cooldown, cap or unavailable probe keeps its own state.
+        gated = q.get("cause") in ("concurrency-cap", "rate-limited", "route-demoted")
+        known = q.get("status") == "ok" and q.get("tightest_remaining_percent") is not None
+        if not gated and q.get("status", "unknown") == "unknown":
+            q.update(status="ok", tightest_remaining_percent=left, cause=cause)
+        elif not gated and known and left < float(q["tightest_remaining_percent"]):
+            q.update(tightest_remaining_percent=left, cause=cause)
+        elif not gated and left == 0:
+            q.update(status="ok", tightest_remaining_percent=0.0, cause=cause)  # spent: exhausted whatever else
+        q["daily_budget"] = b
+        c["quota"] = q
+
+
 def route(request: dict, discovery_input: dict | None = None, *,
           connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
@@ -361,7 +465,8 @@ def route(request: dict, discovery_input: dict | None = None, *,
         required = set(policy["required_capabilities"])
     else:
         required = set(_default_required_capabilities(role))
-    reserve = float(policy.get("quota_reserve_percent", DEFAULT_RESERVE_PERCENT))
+    # The caller's policy carries the reserve resolved for this role; without one, the shipped per-role default.
+    reserve = float(policy.get("quota_reserve_percent", office_config.shipped_quota_reserve_percent(role)))
     band_percent = float(policy.get("balanced_money_band_percent", DEFAULT_MONEY_BAND_PERCENT))
     cost_policy = request.get("cost_policy", policy.get("cost_policy", "balanced"))
     allow_advisory_undercut = bool(request.get("allow_advisory_undercut", True))
@@ -372,6 +477,17 @@ def route(request: dict, discovery_input: dict | None = None, *,
     stage = []
 
     db_path = request.get("runs_db")
+    # A current XS-XL task whose planner has not classified its size must not
+    # inherit a convenient L route (or the historical unsized role floor).
+    ctx = request.get("context") or {}
+    declared_size = request.get("size_class") or ctx.get("size_class")
+    # A newly configured executor must classify even if the gear field itself
+    # is absent/unknown. Legacy unsized route requests retain their old path.
+    needs_classification = request.get("require_classified_executor_size", ctx.get("gear") in executor_slates.SIZES)
+    if role == "executor" and needs_classification and declared_size not in executor_slates.SIZES:
+        return {"status": "size_unclassified", "selected": None, "rejected": [],
+                "reason": "executor task size is unknown: classify XS/S/M/L/XL before routing",
+                "action": "classify the task and re-run routing; no L inference"}
 
     # Hard stop (§7.5.3): an override request without a valid, recorded authorization
     # halts before any candidate is evaluated. Pinned here (not only in the T2 shim)
@@ -402,6 +518,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
     con = connection if connection is not None else _connect(db_path)
     try:
         _concurrency_snapshot(request, con)
+        _daily_budget_snapshot(request, con)
         # 1 hard exclusions, then the user's denied and overkill policy (#494). Denial blocks
         # every role and every route, manual or automatic. Overkill skips a route only in
         # automatic selection and only where its role and size scope match.
@@ -419,9 +536,36 @@ def route(request: dict, discovery_input: dict | None = None, *,
         for c in request.get("candidates", []):
             cid = candidate_id(c)
             role_rule = route_policy.effective_role_state(c, role, policies, new_policy_size)
-            if role_rule["state"] == "deny" and (receipt_id := (request.get("policy_overrides") or {}).get(cid)):
+            # Ordinary signed policy overrides must never waive this model's
+            # hard planner-only qualification boundary.
+            if (not route_policy.fable_role_block(c, role) and role_rule["state"] == "deny"
+                    and (receipt_id := (request.get("policy_overrides") or {}).get(cid))):
                 role_rule = {"state": "allow", "source": f"user override receipt {receipt_id}", "overrides": role_rule}
             role_states[cid] = role_rule
+            # Permanent hard veto: no benchmark waiver, role override, generic
+            # 'allow', or adaptive exploration can turn Hydrogen into a normal
+            # executor. Trial candidates stay in the unqualified discovery pool.
+            # A user's exact-route allow is admitted like a manual route: exact probe pass, no canary.
+            user_allow = hydrogen_trials.is_hydrogen(c) and hydrogen_trials.user_allowed(role_rule)
+            if user_allow or c.get("hydrogen_user_allow"):
+                c = {**{k: v for k, v in c.items() if k != "hydrogen_user_allow"},
+                     **({"hydrogen_user_allow": True} if user_allow else {})}
+            exact_only = bool(request.get("manual_route")) or user_allow
+            hydro_denial = hydrogen_trials.route_refusal(
+                c, role=role, size=new_policy_size,
+                manual=bool(request.get("manual_route")), user_allowed=user_allow,
+                config=request.get("hydrogen_policy"), risk=request.get("hydrogen_risk"),
+                descriptor=request.get("hydrogen_descriptor"))
+            if not hydro_denial and hydrogen_trials.is_hydrogen(c) and exact_only:
+                hydro_denial = hydrogen_trials.manual_conformance(
+                    con, c, role=role, size=new_policy_size, user_allowed=user_allow)
+            if (not hydro_denial and hydrogen_trials.is_hydrogen(c) and not exact_only
+                    and not request.get("hydrogen_independent_review")):
+                hydro_denial = "Hydrogen automatic trial needs independent code review"
+            if hydro_denial:
+                rejected.append({"candidate": cid, "stage": 1, "category": "hydrogen-safety",
+                                 "reason": hydro_denial})
+                continue
             if (scope := c.get("user_allow_sizes")) is not None and new_policy_size not in scope:
                 # A size-scoped allow lifted the catalog disable for these sizes only (#850).
                 rejected.append({"candidate": cid, "stage": 1, "reason": f"not dispatchable: the user's allow covers "
@@ -447,6 +591,10 @@ def route(request: dict, discovery_input: dict | None = None, *,
                        (request.get("declared_route"), request.get("exact_route")))):
                 rejected.append({"candidate": cid, "stage": 1, "reason": restriction,
                                  "category": "size-model-restriction"})
+            elif hydrogen_trials.is_hydrogen(c) and not exact_only:
+                # Even a future dispatchable catalog row must not bypass the
+                # reserved-trial path. A probe pass alone is not launch consent.
+                pool.append(c)
             elif c.get("route_status", "available") != "available" and not (
                     c.get("route_status") == "probe-passed" and cid == request.get("declared_route")):
                 # A route the user declared (--as, amend route) whose exact probe passed is a pinned route,
@@ -498,6 +646,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
         nxt = []
         for c in stage:
             cid = candidate_id(c)
+            if hydrogen_trials.is_hydrogen(c) and (request.get("manual_route") or c.get("hydrogen_user_allow")):
+                # Only a manual route or exact user allow with fresh exact model+effort proof
+                # passed the hard stage-1 gate. Missing v4 AA score is disclosed, never
+                # invented; neither is an automatic trial.
+                eligibility[cid]["qualification"] = ("explicit manual exact conformance; AA v4 may be unscored"
+                                                     if request.get("manual_route") else
+                                                     "user allow with exact conformance; AA v4 may be unscored")
+                nxt.append(c)
+                continue
             waiver = (executor_slates.floor_exception(c, new_policy_size, role, executor_policy)
                       if role in ADAPTIVE_ROLES else None)
             passed, reason = scoring.evaluate_capability_floor(c, floor, unbenchmarked_ok=bool(waiver))
@@ -571,17 +728,19 @@ def route(request: dict, discovery_input: dict | None = None, *,
             if status != "ok" or q.get("tightest_remaining_percent") is None:
                 unknown.append(c); continue
             remaining = float(q["tightest_remaining_percent"]); burn = float(q.get("projected_burn_percent") or 0)
-            (safe if remaining - burn >= reserve else unsafe).append(c)
+            (safe if _within_reserve(remaining, burn, reserve) else unsafe).append(c)
         if not (safe or unknown or unsafe):
             _reject_pool(pool, rejected, "no route survived the earlier gates, so none is left to select (a discovery trial would have no fallback)")
             return {"selected": None, "status": "no_qualifying_candidate", "rejected": rejected}
         if safe:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "projected quota crosses reserve while safe alternative exists"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
+                                 "reason": "projected quota crosses reserve while safe alternative exists"})
             stage = safe + unknown
         elif unknown:
             for c in unsafe:
-                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason": "known quota crosses reserve; only unknown candidates remain"})
+                rejected.append({"candidate": candidate_id(c), "stage": 6, "reason_class": "quota-reserve",
+                                 "reason": "known quota crosses reserve; only unknown candidates remain"})
             stage = unknown
         else:
             _reject_pool(pool, rejected, "protected quota blocks every qualifying route")
@@ -663,9 +822,15 @@ def route(request: dict, discovery_input: dict | None = None, *,
             else:
                 stage.sort(key=lambda c: (quota_burn(c), wall(c), reward_key(c), candidate_id(c)))
 
+        preference = None if request.get("manual_route") else harness_preference.decide(request, stage)
+        if preference and preference["route"] is not stage[0]:
+            stage = [preference["route"], *(c for c in stage if c is not preference["route"])]
         chosen = stage[0]
         cid = candidate_id(chosen)
         disclosure = selection_disclosure(role, chosen, preferred_seed, cost_policy)
+        if preference:
+            disclosure["harness_preference"] = harness_preference.public(preference)
+            disclosure["reason"] += f"; harness preference: {preference['why']}"
         for stage_no in (2, 4, 7):
             if override_applies(cid, stage_no):
                 disclosure["override"] = {
@@ -679,6 +844,7 @@ def route(request: dict, discovery_input: dict | None = None, *,
             "selected": cid, "status": "selected", "candidate": chosen, "rejected": rejected,
             "selection_disclosure": disclosure,
             "decision_hash": sha256_obj({"role": role, "playbook": playbook, "selected": cid, "policy": policy, "candidate": chosen}),
+            **({"harness_preference": harness_preference.public(preference)} if preference else {}),
         }
     finally:
         if connection is None and con is not None:
@@ -695,12 +861,18 @@ def _pool_category(c: dict) -> tuple[str, str]:
     return "untried", c.get("status_reason") or "no fresh exact probe pass yet"
 
 
+def _probe_fields(c: dict) -> dict:
+    """The reason class of a failed exact probe, for the rejection of its route (#921)."""
+    probe = c.get("probe") or {}
+    return {"reason_class": probe.get("reason_class")} if probe.get("result") == "fail" else {}
+
+
 def _reject_pool(pool: list[dict], rejected: list, why: str | None = None) -> None:
     """Every discovery candidate leaves the eligible slate with a category; none is dropped silently."""
     for c in pool:
         category, reason = _pool_category(c)
         rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category,
-                         "reason": f"{reason}; {why}" if why else reason})
+                         "reason": f"{reason}; {why}" if why else reason, **_probe_fields(c)})
 
 
 def _pool_gate(c: dict, required: set, floor, playbook, quarantined: set,
@@ -753,9 +925,17 @@ def _quota_gate(c: dict, reserve: float) -> tuple[int, str, str] | None:
                 "concurrency-cap")
     if q.get("status", "unknown") == "ok" and q.get("tightest_remaining_percent") is not None:
         remaining, burn = float(q["tightest_remaining_percent"]), float(q.get("projected_burn_percent") or 0)
-        if remaining - burn < reserve:
+        if not _within_reserve(remaining, burn, reserve):
             return 6, "projected quota crosses the protected reserve", "quota"
     return None
+
+
+def _within_reserve(remaining: float, burn: float, reserve: float) -> bool:
+    """A route keeps the protected reserve and still has headroom left after this dispatch. With the reserve
+    pinned at 0, an exhausted route (0% left, e.g. Codex weekly at 100% used) once passed `0 >= 0` and stayed
+    the first reviewer (rsvp runs, 2026-11-02): no headroom is never within any reserve."""
+    left = remaining - burn
+    return left > 0 and left >= reserve
 
 
 def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], required: set, floor,
@@ -785,11 +965,12 @@ def _discovery(request: dict, role: str, playbook, rec: dict, pool: list[dict], 
     def drop(c, blocked, *, category="untried", stage=2, reason=None):
         block["blocked"] = blocked
         rejected.append({"candidate": candidate_id(c), "stage": stage, "category": category,
-                         "reason": reason or f"discovery: {blocked}"})
+                         "reason": reason or f"discovery: {blocked}", **_probe_fields(c)})
 
     def other(c):  # a candidate this decision is not trying
         category, reason = _pool_category(c)
-        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category, "reason": reason})
+        rejected.append({"candidate": candidate_id(c), "stage": 2, "category": category, "reason": reason,
+                         **_probe_fields(c)})
 
     for c in pool:
         if c not in scoped:
@@ -974,8 +1155,40 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # owner-authorized floor exception in its durable routing receipt.
         if waiver := executor_slates.floor_exception(c, size, role, executor_policy):
             audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
+    canary = request.get("hydrogen_canary") if role == "executor" and not trial else None
+    ranked = {r["route"] for r in rec["rows"]}  # still qualifying after adaptive's own removals
+    canary_id = next((rid for rid, c in by_id.items()
+                      if rid in ranked and c.get("hydrogen_user_allow") and c.get("effort") == "medium"
+                      and hydrogen_trials.is_hydrogen(c)), None) if canary else None
+    if canary_id:
+        # #1168: the owner-approved S canary only reorders a user-allowed route that
+        # already passed every gate above; it never admits one. Booked at dispatch.
+        progress = f"hydrogen canary {canary['spent'] + 1}/{canary['budget']}"
+        entry = next((e for e in slate if e["route"] == canary_id), None) or {
+            "route": canary_id, "label": adaptive.label(by_id[canary_id]), "utility": None,
+            "strength": "user allow with exact conformance", "weakness": "no local quality evidence yet"}
+        entry = {**entry, "reason": progress}
+        slate = [entry, *[e for e in slate if e["route"] != canary_id]][:max(adaptive.SLATE_SIZE, len(slate))]
+        slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(slate)]
+        audit["slate"] = slate
+        audit["hydrogen_canary"] = {**canary, "route": canary_id}
     if disc:
         audit["discovery"] = disc
+    preference = None if trial or canary_id or request.get("manual_route") else harness_preference.decide(
+        request, [*(by_id[e["route"]] for e in slate), *(c for rid, c in by_id.items()
+                                                         if rid in ranked and rid not in {e["route"] for e in slate})])
+    if preference:
+        audit["harness_preference"] = harness_preference.public(preference)
+        picked = candidate_id(preference["route"])
+        if picked != slate[0]["route"]:
+            entry = next((e for e in slate if e["route"] == picked), None) or {
+                "route": picked, "label": adaptive.label(preference["route"]), "utility": None,
+                "reason": "harness preference", "strength": "same model and effort as the lead route",
+                "weakness": "ranked below the lead route"}
+            slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(
+                [{**entry, "reason": f"harness preference: {preference['why']}"},
+                 *(e for e in slate if e["route"] != picked)][:max(adaptive.SLATE_SIZE, len(slate))])]
+            audit["slate"] = slate
     for row in audit["candidates"]:
         row["eligibility"] = eligibility.get(row["route"]) or {"source": "factual gates"}
     chosen = by_id[slate[0]["route"]]
@@ -983,7 +1196,11 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     disclosure = selection_disclosure(role, chosen, preferred_seed, policy.get("cost_policy", "balanced"))
     if (executor_slates.new_gear_size(request, executor_policy) == "M" and not request.get("manual_route")
             and (chosen.get("alias_resolved_to") or chosen.get("model_id")) == "claude-sonnet-5-5"
-            and chosen.get("effort") == "medium"):
+            and chosen.get("effort") == "medium"
+            # Only the #861 policy led M with Haiku High; under #1143 Sonnet Medium
+            # is the M lead itself, so the "temporary fallback" text would be false.
+            and (executor_slates.ideal_seed("M", executor_policy)[:1] or [{}])[0].get("model_id")
+            == "claude-haiku-5-5"):
         disclosure["operational_fallback"] = (
             "Temporary Sonnet Medium M fallback (#861); Haiku High is preferred only "
             "after exact harness/model/effort conformance and availability qualify")
@@ -1018,6 +1235,10 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
     if disc:
         # In the hash only when discovery is active, so discovery-off decisions hash exactly as before.
         hashed["discovery"] = disc
+    if canary_id:
+        hashed["hydrogen_canary"] = audit["hydrogen_canary"]
+    if preference:
+        hashed["harness_preference"] = audit["harness_preference"]
     if audit.get("lineage_supersession"):
         # Likewise only when a predecessor was superseded, so other decisions hash as before.
         hashed["lineage_supersession"] = audit["lineage_supersession"]
@@ -1031,4 +1252,6 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         "qualifying_candidates": by_id,
         "routing": audit,
         **({"discovery": disc} if disc else {}),
+        **({"hydrogen_canary": audit["hydrogen_canary"]} if canary_id else {}),
+        **({"harness_preference": audit["harness_preference"]} if preference else {}),
     }

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from office import adaptive, candidates, model_lineages, paths, route_learning, routing, scoring
+from office import adaptive, candidates, model_lineages, paths, route_learning, route_policy, routing, scoring
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
 LINEAGES = {"sol": ("gpt-5.6-sol", "gpt-6.1-sol"), "terra": ("gpt-5.6-terra", "gpt-6.1-terra")}
@@ -71,18 +71,34 @@ def test_terra_and_sol_generations_share_a_lineage_and_order_numerically():
         assert a["lineage_key"] == b["lineage_key"] and a["release_status"] == b["release_status"] == "released"
         assert model_lineages.version_parts(b["generation_version"]) > model_lineages.version_parts(a["generation_version"])
     active = {r["model_id"] for r in model_lineages.partition(candidates.catalog_rows())["active"]}
-    assert {m for pair in LINEAGES.values() for m in pair} <= active
+    # gpt-6.2-sol takes the second slot, so gpt-5.6-sol leaves the latest-two window (it stays in the catalog as archived).
+    assert {"gpt-6.1-sol", "gpt-6.2-sol", "gpt-5.6-terra", "gpt-6.1-terra"} <= active
+    assert "gpt-5.6-sol" not in active
+    assert model_lineages.identify("gpt-6.2-sol")["lineage_key"] == model_lineages.identify("gpt-5.6-sol")["lineage_key"]
 
 
-def test_terra_61_rows_match_the_documented_scores_and_stay_gated():
-    expected = {"max": 48, "xhigh": 45, "high": 44, "medium": 41, "low": 36, "none": 33}
-    got = {e: ROWS[("gpt-6.1-terra", e)]["benchmark_indexes"][IDX] for e in expected}
-    assert got == expected
-    for e in expected:
-        row = ROWS[("gpt-6.1-terra", e)]
-        # Benchmark presence is not execution proof: unprobed rows stay out of the eligible slate.
-        assert row["dispatchable"] is False and row["discovery"] == "eligible"
-        assert row["source_effort"] == ("non-reasoning" if e == "none" else e)
+def _effort_of(source_effort):
+    """The catalog effort a benchmark source label denotes ("High Effort" -> high, "non-reasoning" -> none)."""
+    label = source_effort.lower().strip().removesuffix(" effort")
+    return "none" if label in {"non-reasoning", "no reasoning"} else label
+
+
+def test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available():
+    # Effective-policy property over the shipped data: no model, score or effort roster is named here.
+    rows = candidates.catalog_rows()
+    assert rows
+    labelled = [r for r in rows if r.get("source_effort") is not None]
+    assert labelled
+    for row in rows:
+        route = (row["model_id"], row["effort"])
+        if row.get("source_effort") is not None:
+            assert _effort_of(row["source_effort"]) == row["effort"], route
+        status = route_policy.row_status(row)["status"]
+        if row.get("dispatchable") is False:
+            # Benchmark presence is not execution proof: a gated row stays out of the eligible slate.
+            assert status != "available", route
+        else:
+            assert status == "available", route
 
 
 def test_shipped_executor_has_no_medium_only_generation_seed():

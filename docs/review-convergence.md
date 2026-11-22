@@ -47,7 +47,7 @@ office start ──> plan ──> initial plan review ────────�
                                                                         │
           approve plan ──> dispatch tasks (parallel / stacked) <────────┘
                                │
-         executor: build in envelope -> checks -> four-lens self-review (<=3 rounds) -> preflight -> submit
+         executor: build in envelope -> checks -> focused self-review (1 round; v3.1: four lenses, <=3) -> preflight -> submit
                                │
                     task accepted on deterministic checks (no per-task independent review)
                                │
@@ -97,6 +97,12 @@ scope gap for the orchestrator. The lane identifies any owning tasks elsewhere a
 a non-owning producer. Coordinate the owning lane's repair or amend the ownership contract before
 requesting another review; the recorded finding still blocks convergence.
 
+A scope gap does not hold back the findings that do have an owner: in the same RECHECK those owners
+are reopened (`changes_required`) and the lane detail names them beside the gap (#1220). After an
+amendment changes a lane task's scope, open blocking gap findings are re-attributed to the owners the new
+envelopes resolve and the lane settles again, reopening them (#1135). `office disposition ... fix` on a
+blocking finding is refused and points at `office rerun <owner>`.
+
 Severity (`high | medium | low`) says how serious a finding is. Blocking (`blocking | non-blocking`)
 says whether progression must wait for another independent review. They are decided separately: a
 high finding can be non-blocking and a low one blocking.
@@ -106,7 +112,8 @@ Runtime or evidence status is separate from both. Only `COMPLETED` carries a ver
 | Status | Meaning | Spends a round |
 |---|---|---|
 | `COMPLETED` | The reviewer answered with a readable verdict. | Yes, if it is a substantive round (section 8). |
-| `UNAVAILABLE` | No reviewer route could review (tooling, quota, provider failure) after walking the whole fallback chain. | No |
+| `UNAVAILABLE` | No reviewer route could review (tooling, quota, provider failure) after walking the whole fallback chain and the one automatic re-dispatch (section 8). | No |
+| `REVOKED` | The orchestrator stopped the reviewer (`office revoke`). Not a reviewer failure: no route is excluded and no fallback runs. | No |
 | `EVIDENCE_BLOCKED` | The evidence the review needs could not be produced (for example a visual capture). | No |
 | `INVALID_RESULT` | The reviewer answered but left no readable reply. | No |
 
@@ -246,9 +253,16 @@ Plan findings are dispositioned with `office disposition plan:<P-id> fixed|dismi
   envelope. The seams (declared interfaces, dependencies, `accept:`, requirements, authority, other
   tasks' scope) are not theirs: when doing the work right needs a seam to move, they ask (`QUESTIONS`)
   instead of working around it.
-- Each task runs its deterministic checks and a four-lens self-review (security, edge cases,
-  platform and build, test strength) with a 3-round cap. `office preflight` enforces the ledger and
-  the cap; this mechanism is unchanged from 3.2.
+- Each task of a new run runs its deterministic checks and one focused self-review round (edge cases
+  and test strength, plus platform and build when the diff touches it). Security is not an executor lens:
+  the one convergence review of a lane that changes a security-sensitive path (matched by whole
+  path-segment words, so `product.py` and `writer.py` do not match) is told to cover it, and a sensitive
+  lane gets that review even when the run would not otherwise fund one. Office proves each medium or high
+  fix's named test by running it alone on a disposable copy of the commit with the task's non-test source
+  reverted: only a test failure counts as red (a collection error, timeout or missing command does not),
+  and it must pass unreverted. No named test or no pytest command in the task's checks records an
+  exemption instead of blocking. A run pinned to v3.1 keeps the four-lens self-review with a 3-round cap
+  and its tiers.
 - A task is accepted on its own deterministic checks. There is no routine per-task independent code
   review and no per-task visual gate; both moved to the lane.
 - **Pre-existing check failures.** When a task check fails, Office runs the same command on a checkout
@@ -278,6 +292,13 @@ one composed commit and runs, on that same commit and in parallel:
   (`independent_code_review` in the gear preset, recorded on the run as `code_review`);
 - one specialist visual review, when a task in the lane has user-visible acceptance. Shared scopes
   get no visual review.
+  The orchestrator walks a UI lane itself while these reviews run (in parallel, never as a gate before them)
+  and routes its own findings with the reviewers' (#1077, Rico 2026-11-04).
+  The visual reviewer's reply lists one `OBSERVATION <screenshot> | <what is on screen>` line per screenshot it was given,
+  calling out empty widgets, unexplained disabled controls and contradictory data. A verdict missing any
+  of them is invalid and is re-prompted, with no round spent, so a bare APPROVED cannot pass (#1078).
+  The reviewer also infers the UI sections and states from the acceptance and plan text, as a person would, and
+  reports any that no screenshot shows as a finding.
 
 A shared scope is queued after all its member lanes converged, and gets one more convergence review of
 the shared composition. Integration starts only after every lane and shared scope converged
@@ -336,11 +357,37 @@ Plan review).
 These never spend a round:
 
 - a reviewer or provider failure: Office walks the whole configured fallback chain automatically;
+- a revoked reviewer (`REVOKED`);
 - a malformed or missing reply (`INVALID_RESULT`);
 - a capture retry or evidence recovery (`EVIDENCE_BLOCKED`);
 - `office resume`, which retries unavailable, attention and evidence-blocked reviews on the same
   composed revision.
 
+Reviewer dispatch (what runs between a gate opening and its verdict):
+- Automatic fallback. A reviewer attempt that does not settle the review (launch failure, quota, auth or silent wall,
+  no reply) queues one `review_fallback` job that re-runs the same review on the next eligible route. Which routes
+  failed is read from the gate's recorded dispatches. When every eligible route has failed, a convergence review (and
+  an integration review of any run) is re-dispatched on a fresh chain, once by default (`gates.review_redispatch_max`),
+  before `UNAVAILABLE` is recorded. A pinned reviewer never substitutes another route within an attempt, but a pinned
+  route that already failed the same gate with a route failure (quota or auth wall, `model_not_found`, 402, an empty
+  reply) is dropped for the next attempt: the next fallback runs and a route notice names the dropped pin. A
+  self-review subagent whose reviewer launched and did not complete is retryable through the same bounded fallback.
+- One pin. Every reviewer role (plan, code, visual, integration) reads its pin through the same helper, so
+  `--review-as`, `office review --as` and rerun pins behave alike. A pin is `by: user` only when its command carried
+  the user's `--quote`; otherwise it is `by: orchestrator`. Storing a task or lane pin records a `route.changed` event
+  (kind `repin`) by that actor. A pin dropped by the role gate (its route cannot serve that role), or covering only some
+  tasks of a lane, prints a notice naming the uncovered tasks.
+- Lane review recovery. `office review <lane>` re-runs a lane gate that returned no verdict, one left `EVIDENCE_BLOCKED`
+  by a reviewer or self-review subagent failure, and a visual gate left `EVIDENCE_BLOCKED` unless its evidence is a plan
+  `SPEC_DEFECT`. `office review <lane> --report` still covers only gates that returned no verdict.
+- Async launch. The review job launches the reviewer with its packet, lease and session id and does not wait; a
+  `review_supervise` job waits for the dispatch to end and settles it. A launched reviewer is released when its gate
+  closes, goes stale or is revoked, and a revoked reviewer's late submit is refused.
+- One completion transport. `office review submit` is how a reviewer with a shell hands back its review (see the
+  reviewer skill); the reply file and log are recorded fallbacks. Reviewers run on a detached snapshot of the
+  reviewed commit and the worktree guard covers only their own writes.
+- `scripts/review_no_verdict_rate.py --db runs.db [--since D] [--until D]` reports, read-only, the done review gates in
+  a window and the share with no verdict, split by revoked, launch failure, invalid, evidence blocked and other.
 ## 9. The round cap and operator decisions
 
 This section is about lanes and shared scopes. Plan review has no operator decision: at its cap the
@@ -443,7 +490,7 @@ orchestrator exercises it without landing authority, and it never grants any.
 |---|---|---|
 | User | Always | `office approve waive L-T1:convergence\|visual --quote "<user's words>" --reason "<why>"` |
 | Orchestrator | Only when landing was delegated: intake end state `merge` or `e2e`, or a recorded `office approve merge` | `office approve waive L-T1:convergence --as orchestrator --reason "<why>"` |
-| Orchestrator, at the round cap only (#423) | Needs no landing authority; is not landing authority | `office waive L-T1 --reason "<why>"` |
+| Orchestrator, at the round cap (#423) or any earlier RECHECK round (#1228; routed repairs that have not started are recalled) | Needs no landing authority; is not landing authority | `office waive L-T1 --reason "<why>"` |
 | Planner, executor, reviewer dispatch | Never | refused |
 
 A waiver:
@@ -504,7 +551,7 @@ office amend plan --contract -- "<what changed>"  submit a plan revision after R
 office amend plan --no-review --reason "<why>" -- "<delta>"   while plan review is open: ordinary amendment, not reviewed
 office rerun <task> --resume|--fresh [--reroute]  run a routed repair (RECHECK or disposition fix)
 office start "<goal>" --review-rounds N          the lane/shared/visual round cap (default 3; config review.max_rounds)
-office waive <scope> --reason "<why>"             at the round cap: the orchestrator accepts residual risk (not landing authority)
+office waive <scope> --reason "<why>"             at any RECHECK round: the orchestrator accepts residual risk (not landing authority)
 office decide <scope> escalate|continue|waive|stop --quote "<user's words>" [--reason "<why>"]   (lanes only)
 office review plan --quote "<user's words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code>[,<code>] fix|fixed|dismissed|follow-up -- "<note>"

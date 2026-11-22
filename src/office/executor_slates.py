@@ -12,7 +12,7 @@ from string import Formatter
 
 import yaml
 
-from office import paths, shipped_catalog
+from office import paths, planfile, shipped_catalog
 
 SIZES = ("XS", "S", "M", "L", "XL")
 EFFORTS = frozenset(("none", "low", "medium", "high", "xhigh", "max"))
@@ -85,16 +85,29 @@ def load_policy(root: Path | None = None) -> dict:
         for size, entries in slates.items():
             if not isinstance(entries, list) or not entries:
                 raise ExecutorPolicyError(f"{source}: {field}.{size} must be nonempty")
+            if field == "executor_preferred" and any(isinstance(row, dict) and "rung" in row for row in entries) \
+                    and not all(isinstance(row, dict) and "rung" in row for row in entries):
+                raise ExecutorPolicyError(f"{source}: {field}.{size} mixes rungs and flat entries")
             seen = set()
+            last_rung = 0
             for item in entries:
                 if (not isinstance(item, dict) or not {"model_id", "effort"} <= set(item) or
-                        set(item) - {"model_id", "effort", "harness", "conditional"} or
+                        set(item) - {"model_id", "effort", "harness", "conditional", "rung"} or
                         not isinstance(item.get("model_id"), str) or not item["model_id"].strip() or
                         not isinstance(item.get("effort"), str) or item["effort"] not in EFFORTS or
                         ("conditional" in item and not isinstance(item["conditional"], bool)) or
                         (item.get("harness") is not None and (not isinstance(item["harness"], str) or
                                                               not item["harness"].strip()))):
                     raise ExecutorPolicyError(f"{source}: invalid {field}.{size} route")
+                if "rung" in item:
+                    rung = item["rung"]
+                    if field != "executor_preferred" or type(rung) is not int or rung < 1 or (
+                            (last_rung and rung not in (last_rung, last_rung + 1)) or
+                            (not last_rung and rung != 1)):
+                        raise ExecutorPolicyError(f"{source}: invalid {field}.{size} preference rung")
+                    last_rung = rung
+                elif field == "executor_preferred" and last_rung:
+                    raise ExecutorPolicyError(f"{source}: {field}.{size} mixes rungs and flat entries")
                 key = (item["model_id"], item["effort"], item.get("harness"))
                 if key in seen:
                     raise ExecutorPolicyError(f"{source}: duplicate {field}.{size} route {key}")
@@ -182,7 +195,7 @@ def policy_provenance(policy: dict = POLICY) -> dict:
 
 
 def _seed_entry(row: dict) -> dict:
-    return {key: row[key] for key in ("model_id", "effort", "harness") if row.get(key) is not None}
+    return {key: row[key] for key in ("model_id", "effort", "harness", "rung") if row.get(key) is not None}
 
 
 def planner_seed(gear: str | None, policy: dict = POLICY) -> list[dict]:
@@ -203,6 +216,48 @@ def new_gear_size(request: dict, policy: dict = POLICY) -> str | None:
 
 def ideal_seed(task_size: str | None, policy: dict = POLICY) -> list[dict]:
     return [_seed_entry(row) for row in policy["executor_preferred"].get(task_size, ())]
+
+
+# AA v5 frontend bias: a frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only.
+FRONTEND_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".sass", ".less", ".html", ".astro")
+FRONTEND_PATH_PERCENT = 60
+
+
+def _is_test_path(path: str) -> bool:
+    parts = path.lower().split("/")
+    name = parts[-1]
+    return (any(part in ("test", "tests", "__tests__", "e2e") for part in parts[:-1])
+            or name.startswith("test_") or ".test." in name or ".spec." in name or name.endswith(("_test.py", "_spec.rb")))
+
+
+def frontend_reason(descriptor: dict | None, scope: list | None) -> str | None:
+    """Why a task is frontend-heavy, or None: descriptor domain ui, or >= 60% of its declared file paths are frontend
+    files. Any other domain (mixed, backend, unset) is judged on its paths alone. A `+` shared-path marker is not part
+    of the path, and directories and test paths are not declared work files, so they are not counted."""
+    if (descriptor or {}).get("domain") == "ui":
+        return "descriptor domain is ui"
+    paths = [p for p in dict.fromkeys(p.lstrip("+").strip() for p in scope or [] if isinstance(p, str))
+             if p and not planfile.entry_is_dir(p) and not _is_test_path(p)]
+    frontend = sum(1 for p in paths if p.lower().endswith(FRONTEND_EXTENSIONS))
+    if paths and frontend * 100 >= FRONTEND_PATH_PERCENT * len(paths):
+        return f"{frontend} of {len(paths)} declared file paths are frontend files"
+    return None
+
+
+def frontend_bias(seed: list[dict], descriptor: dict | None, scope: list | None) -> list[dict] | None:
+    """The slate with its agy gemini-* rung moved to rung 1, or None when the bias does not apply.
+
+    It only reorders routes already on the slate: it adds no route and lifts no gate (a conditional Hydrogen
+    rung still needs its own gate). The moved entry carries `frontend_bias`, the reason the selection
+    disclosure repeats."""
+    moved = next((row for row in seed or [] if row.get("harness") == "agy"
+                  and str(row.get("model_id", "")).startswith("gemini-") and row.get("rung", 1) > 1), None)
+    reason = frontend_reason(descriptor, scope) if moved else None
+    if not reason:
+        return None
+    return [{**moved, "rung": 1, "frontend_bias": reason}] + [
+        {**row, **({"rung": row["rung"] + 1} if "rung" in row and row["rung"] < moved["rung"] else {})}
+        for row in seed if row is not moved]
 
 
 def model_restriction(candidate: dict, size: str | None, policy: dict = POLICY) -> str | None:
@@ -278,7 +333,9 @@ def route_summary(preferences: list[dict], candidates: list[dict],
         status = ("selected" if any(selected.get(routing.candidate_id(c)) == "PRIMARY" for c in qualifying)
                   else "in-slate" if any(routing.candidate_id(c) in selected for c in qualifying)
                   else "qualified-outscored" if qualifying else "unqualified" if matches else "not-in-catalog")
-        out.append({"ideal_rank": rank + 1, "route": ref, "status": status,
+        out.append({"ideal_rank": preference.get("rung", rank + 1),
+                    **({"ideal_position": rank + 1} if "rung" in preference else {}),
+                    "route": ref, "status": status,
                     "qualified_routes": [routing.candidate_id(c) for c in qualifying],
                     "rejections": failures,
                     "reason": ("adaptive fit may change ideal order" if qualifying else

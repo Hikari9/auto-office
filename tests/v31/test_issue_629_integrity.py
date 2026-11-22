@@ -188,19 +188,20 @@ def test_integration_check_mutation_blocks_composed_acceptance(env):
     assert "calc.py" in checks[-1]["summary"], checks
 
 
-def test_integration_check_identical_failure_on_base_is_disclosed_nonblocking(env):
+def test_integration_check_identical_failure_on_base_alone_does_not_accept(env):
     plan=PLAN_ONE.replace("blast_radius: repo\n",f"blast_radius: repo\nchecks: {OLD}\n")
     approved_run(env,plan=plan,executor=[{"write":{"calc.py":GOOD_ADD},"submit":True}],
                  convergence_reviewer=[{"reply":"VERDICT: APPROVED\nNEXT proceed"}])
     env.office("dispatch","T1",check=0)
-    run_id=_rows(env,"SELECT id FROM runs")[0]["id"]
     landing=json.loads(_rows(env,"SELECT landing_json FROM runs")[0]["landing_json"])
-    assert landing["integration"]["status"]=="accepted",landing
+    assert landing["integration"]["status"]=="blocked",landing
+    assert "run checks CHANGES_REQUIRED" in landing["integration"]["detail"],landing
     checks=_rows(env,"SELECT * FROM gates WHERE subject='integration' AND kind='checks'")
-    assert len(checks)==1 and checks[0]["verdict"]=="PASS",checks
+    assert len(checks)==1 and checks[0]["verdict"]=="CHANGES_REQUIRED",checks
     assert "pre-existing" in checks[0]["summary"].lower(),checks
     assert _rows(env,"SELECT * FROM evidence WHERE kind='preexisting_check_output'"),"no baseline proof"
     assert _rows(env,"SELECT * FROM events WHERE kind='integration.preexisting'"),"no visible classification"
+    assert not _rows(env,"SELECT * FROM events WHERE kind='integration.accepted'"),"READY emitted without a passing check"
 
 
 def test_integration_mixed_base_and_introduced_failure_remains_blocked(env):

@@ -69,7 +69,7 @@ No production code changed. Every change is under `tests/`, `docs/`, `pyproject.
 
 | Replaced | Cases | By |
 | --- | --- | --- |
-| tier table, irreversible/size/high, unparsable risk, unknown gear, unrecognized blast, full gear | 143 | 5 properties on `self_review_tier` (inline only when all clear, clean low gear is inline, any high signal is deep, gear `full` is deep, unusable record is single) plus one through `resolve_risk`, with an `@example` per single high signal; the `_expected_tier` oracle is gone |
+| tier table, irreversible/size/high, unparsable risk, unknown gear, unrecognized blast, full gear | 143 | 5 properties on `self_review_tier` (inline only when all clear, clean low gear is inline, any high signal is deep, gear `XL` is deep, unusable record is single) plus one through `resolve_risk`, with an `@example` per single high signal; the `_expected_tier` oracle is gone |
 | fix-round tier per gear/blast | 4 integration | 1 unit property over generated gear and risk |
 | risk floor under every preset | 12 | 1 property over the config's own presets and generated risk |
 | schema migration, one case per shared column, plus "newer version not lowered" | 112 | 1 property over column subsets and recorded versions |
@@ -91,7 +91,7 @@ No production code changed. Every change is under `tests/`, `docs/`, `pyproject.
 
 66 property tests (`@given`) across 12 files, listed in the pull request. New coverage: route qualification, rejection stage,
 quota reserve, advisory anchor and money band (`test_routing_properties.py`); the capability floor, reward tie-break,
-harness major and preferred seed for both the packaged and the retained 3.0 scorer; admission capacity (exactly full, never over),
+harness major and preferred seed for the packaged scorer; admission capacity (exactly full, never over),
 ready order, and reserve handling in the scheduler; well-formed ledgers round-trip; and boundary examples the mutation run showed
 generation alone missed.
 

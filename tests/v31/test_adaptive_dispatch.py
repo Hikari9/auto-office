@@ -11,7 +11,8 @@ from office import adaptive, route_learning
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PRIMARY, FB1, FB2 = "claude/claude-opus-5-5@medium", "codex/gpt-6-astra@low", "claude/claude-opus-5-5@high"
-PLANNED = PLAN_ONE.replace("visual: none", f"visual: none\nroute: {PRIMARY}, {FB1}, {FB2}", 1)
+PLANNED = PLAN_ONE.replace(
+    "visual: none", f"visual: none\nroute: {PRIMARY}, {FB1}, {FB2}\nroute_why: the fixture pins its declared primary", 1)
 
 
 def _quota(env, **remaining):
@@ -20,16 +21,18 @@ def _quota(env, **remaining):
     return {**EXTERNAL, "OFFICE_QUOTA_FIXTURE": json.dumps(remaining)}
 
 
-def _approve(env, plan=PLANNED):
+def _approve(env, plan=PLANNED, gear=None):
+    """Start and approve a run. With no gear the run is the unmarked (pre-gear) state these planner-slate and
+    reroute mechanics were written against; pass an XS-XL gear to get a run-gear-1 run."""
     env.trust()
-    out = start_inline(env, plan=plan)
+    out = start_inline(env, plan=plan, **({"gear": gear} if gear else {"unmarked": True}))
     env.office("approve", "plan", "--quote", "approved", check=0)
     return out
 
 
 def test_plan_shows_the_planner_slate_and_dispatch_follows_its_primary(env):
     out = _approve(env)
-    assert "ROUTING  (planner choice)" in out and PRIMARY in out, out
+    assert "ROUTING  (planner choice" in out and PRIMARY in out, out  # T2 appends ", departs from ranking; ..." to the header
     code, out = env.office("dispatch", "T1", env=_quota(env))
     assert code == 0 and "executor/claude@1/claude-opus-5-5@medium" in out, out
     con = env.con()
@@ -50,8 +53,11 @@ def test_fresh_quota_forces_the_recorded_fallback_and_says_why(env):
 
 def test_an_exhausted_slate_returns_for_reroute_and_never_picks_an_unplanned_route(env):
     _approve(env)
-    code, out = env.office("dispatch", "T1", env=_quota(env, claude=1, codex=1))
+    # agy joins the exhausted harnesses: T2's ranked slate carries gemini-4-neon as a planned fallback.
+    code, out = env.office("dispatch", "T1", env=_quota(env, claude=1, codex=1, agy=1))
     assert code != 0 and "every planned route is unavailable" in out and "--reroute" in out, out
+    # The only route left outside claude and codex is agy Flash, retired by a shipped deny (2026-11-19); the user lifts it.
+    env.office("route", "neutral", "agy/gemini-3.8-flash", "--wildcard", "--role", "executor")
     code, out = env.office("dispatch", "T1", "--reroute", env=_quota(env, claude=1, codex=1))
     assert code == 0 and "rerouted from current evidence" in out, out
     assert "claude@" not in out.split("executor/")[1].split()[0] and "codex@" not in out.split("executor/")[1].split()[0]

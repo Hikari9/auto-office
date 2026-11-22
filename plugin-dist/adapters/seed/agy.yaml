@@ -1,0 +1,120 @@
+id: agy
+verified_state: valid-unverified
+version_fingerprint:
+  command: [agy, --version]
+  parser: first-line
+model_source:
+  type: cli
+  command: [agy, models]
+effort_mapping:
+  none: null
+  low: low
+  medium: medium
+  high: high
+  xhigh: xhigh
+  max: null
+benchmark_slug_mapping: {}
+invocation:
+  executable: agy
+  argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}", "--print={prompt}"]
+  prompt_transport: argv-bound
+  cwd_transport: add-dir-plus-prompt-pin
+  effort_readback:
+    source: stream-json-init
+    command: [agy, -p, "<prompt>", --output-format, stream-json, --model, "{model}", --effort, "{effort}"]
+    notes: Conformance probes only; dispatch argv never gains these flags. The first NDJSON event is init with the model slug the harness resolved, and its tier suffix is the effort, which agy enforces against --effort (a contradiction exits nonzero). The reply text is never read for identity.
+safe_prompt_passing:
+  shell: false
+  supports_prompt_file: true
+  notes: Bind prompt value directly to --print; do not use stdin. Effort support is model-dependent and must be probed/mapped.
+dispatch_forms: [cli]
+trusted_for: [discovery, read-only-investigation, prototype, reversible-sandbox-worker, conformance]
+quota_probe:
+  type: external-primitive
+  command: [python3, scripts/agy-usage.py, --json]
+  unknown_is_unlimited: false
+shallow_review:
+  supported: true
+  minimum_effort: medium
+agentic_capability:
+  default: unknown
+failure_signatures:
+  - {id: swallowed-prompt, attribution: adapter, pattern: "greeting or --print consumed a flag"}
+  - {id: quota-stall, attribution: quota/account, pattern: "narration then no work/no writes"}
+  - {id: slug-vs-display-name-silent-fallback, attribution: adapter, pattern: "--model <slug> accepted without error but session silently launches on account default model"}
+  - {id: effort-unsupported-hard-fail, attribution: adapter, pattern: "--effort is not supported for model \"<slug>\" (Claude/gpt-oss routes)"}
+  - {id: stdin-pipe-ignored, attribution: adapter, pattern: "prompt piped on stdin is not consumed; must bind to --print/--prompt="}
+  - {id: interactive-survey-blocks-status-unreported, attribution: adapter, pattern: "feedback survey blocks the agent mid-session while status still reads idle or working; dismiss with send-keys 0 and re-prompt, the agent has lost its task"}
+  - {id: start-prompt-not-landed, attribution: adapter, pattern: "prompt sent immediately after agent start returns did not land; confirm an observed transition to working plus pane output before treating the task as in flight"}
+  - {id: status-disagrees-with-pane, attribution: false-negative-liveness, pattern: "reported status reads idle while the pane shows active work (e.g. Searching... / Running command... / esc to cancel); status is not a liveness signal for agy, and a monitor must key finish on the delivery artifact or on sustained absence of esc to cancel"}
+conformance:
+  deterministic: pending
+  live: pending
+source_notes: Current office-skills Agy mechanics seeded for migration; exact model display names are dynamic and must come from local discovery. The quota probe reports independent Gemini and Claude family results and retains a harness-wide compatibility value.
+# 3.1: agy is the Gemini route on accounts where the Gemini CLI reports
+# IneligibleTierError. agy has no verified read-only sandbox, so it is a code
+# or plan reviewer only through the route-scoped `reviewer` profile below (H4, #1178; H5);
+# visual judgment runs in plan mode in the run's private evidence directory.
+# Executor (builder) since 2026-09-28 (#183): the worker profile runs in the
+# dispatch worktree, where write access is the point.
+# How Office learns this harness's session id (resume needs it). agy takes no id at
+# launch, sends no hook payload and declares no resume form: `office inspect` says so.
+session:
+  id: none
+capabilities: [builder, review]
+office_profiles:
+  worker:
+    argv: [--dangerously-skip-permissions, --print-timeout, 45m, --model, "{model}", --add-dir, "{cwd}"]
+    # Supervisor hard cap: --print-timeout has failed to fire (idle 3.5h waiting on a background task).
+    max_minutes: 50
+    prompt: argv-bound
+    prompt_flag: "--print="
+    output: stdout
+    herdr_kind: agy
+    interactive:
+      # The model is the combined native-Gemini slug (gemini-3.8-flash-medium); a
+      # separate --effort is the claude/codex convention and must not be added.
+      argv: [--dangerously-skip-permissions, --model, "{model}", --add-dir, "{cwd}"]
+  # Code and plan reviewer (H4, #1178; H5; Rico 2026-11-15): only the exact user-allowed Hydrogen@high route, the one
+  # that ran the planted-bug set. `routes` scopes the profile, so every other agy model still has no
+  # reviewer launch form. It launches in a Herdr pane like the worker (#1027 parity) and falls back to the headless
+  # form when Herdr is unusable. Plan mode refuses editing tools, so the reviewer cannot write a reply file: the pane
+  # hosts the same headless `--mode plan --print` run (`interactive.supervisor`), and Office captures its stdout as
+  # the reply. No agy permission setting is relied on (agy's `--settings` allow rules are not documented), and the
+  # `--print` run raises no feedback survey, so nothing can stall the pane; `wall_cap` and max_minutes bound it.
+  # `--mode plan` is agy's read-only mode and no permission bypass is passed; agy has no verified sandbox,
+  # so Office fingerprints the worktree before and after and fails a review that changed HEAD, the tracked
+  # diff or untracked files. Gitignored files and .git/ are outside that check; plan mode is the write barrier.
+  reviewer:
+    submit: file
+    argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
+    include_arg: [--add-dir, "{dir}"]
+    routes: [gemini-4-hydrogen-high@high]
+    max_minutes: 35
+    prompt: argv-bound
+    prompt_flag: "--print="
+    output: stdout
+    verify_worktree_unchanged: true
+    herdr_kind: agy
+    interactive:
+      supervisor: true
+      wall_cap: true
+      argv: [--mode, plan, --model, "{model}", --add-dir, "{cwd}", "{include_dirs}"]
+  # Visual reviewer (Rico 2026-11-19: Hydrogen@high first, Flash second). Read-only `--mode plan` with no
+  # permission bypass, like the reviewer profile: plan mode is the write barrier, so the pane hosts the headless
+  # run (`interactive.supervisor`) and Office captures its stdout as the reply. Hydrogen@high and Flash@low both
+  # read prompt-path images in plan mode (local check 2026-11-19, agy 1.5.12).
+  vision:
+    submit: file
+    argv: [--mode, plan, --print-timeout, 30m, --model, "{model}", "{include_dirs}"]
+    max_minutes: 35
+    include_arg: [--add-dir, "{dir}"]
+    prompt: argv-bound
+    prompt_flag: "--prompt="
+    image_transport: prompt-path
+    output: stdout
+    herdr_kind: agy
+    interactive:
+      supervisor: true
+      wall_cap: true
+      argv: [--mode, plan, --model, "{model}", "{include_dirs}"]

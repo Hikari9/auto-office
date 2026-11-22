@@ -20,10 +20,8 @@ INJECT_MAX_BYTES = 1024
 EVENT_ALIASES = {
     "SessionStart": "session.start", "UserPromptSubmit": "prompt.submit", "PreToolUse": "tool.pre",
     "PostToolUse": "tool.post", "Stop": "turn.stop", "PreCompact": "compact.pre", "SessionEnd": "session.end",
-    "BeforeAgent": "prompt.submit", "BeforeTool": "tool.pre", "AfterTool": "tool.post", "AfterAgent": "turn.stop",
-    "PreCompress": "compact.pre",
 }
-DENY_CAPABLE = {"claude", "gemini"}
+DENY_CAPABLE = {"claude"}
 
 
 def _primary_checkout(start: Path) -> Path | None:
@@ -131,6 +129,20 @@ def main(argv: list[str]) -> int:
     runs = _active_runs(primary)
     if not runs:
         return 0
+    # Claude Stop's asyncRewake hook is deliberately process-bound. The Stop
+    # payload has a native session ID, but no pre-existing .office/sessions file
+    # for that ID: the verified `office resume` bound the ancestor Claude process.
+    # Never select a run merely because it is the sole active run here.
+    if harness == "claude" and event in ("turn.stop", "prompt.submit") and not _disabled(primary):
+        try:
+            from office import root_wake
+            if event == "turn.stop":
+                return root_wake.native_stop_hook(payload)
+            root_wake.native_prompt_started(payload)
+        except Exception as exc:
+            _log_error(primary, event, harness, exc)
+            if event == "turn.stop":
+                return 0  # fail open: never accidentally block Claude's turn
     bound_files = [p for p in _session_files(primary, harness, session) if p.exists()]
     worker = bool(os.environ.get("OFFICE_DISPATCH_ID"))
     if not bound_files and not worker:
@@ -309,9 +321,7 @@ def _budget(lines: list[str]) -> str:
 def _say(harness: str, event: str, text: str) -> None:
     if not text:
         return
-    if harness == "gemini":
-        print(json.dumps({"hookSpecificOutput": {"additionalContext": text}}))
-    elif harness in ("claude",):
+    if harness in ("claude",):
         print(text)
     elif harness == "codex":
         # No verified injection channel on Codex: say nothing into context.

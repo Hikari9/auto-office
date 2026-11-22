@@ -4,12 +4,14 @@ This is the normative runtime boundary for **new runs**. It complements—not re
 
 ## Pinned run gears (complexity is not risk)
 
+For **new work** (a new project, or a new component with nothing it must fit into) that benefits from one continuous strong builder instead of many handoffs, the separately selected `--gear greenfield` provides **2-3 internal phases inside one XL-routed executor task, with one end-of-build convergence review**. It is never auto-fitted, and the risk/authorization/checks floors remain. See [greenfield / lean gear](greenfield-lean-gear.md).
+
 | Run gear | Planner | Producer mode | Producer self-review | Independent plan review | Independent convergence | Verification |
 | --- | --- | --- | --- | --- | --- | --- |
 | XS | Minimal inline plan | Orchestrator-inline, bounded low-risk by default | Four-lens inline ledger | Only if risk requires | Only if risk requires | Deterministic and applicable acceptance checks |
-| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Four-lens ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Ledger plus **one genuine runtime subagent** (four-lens) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
-| L | Deeper coordinated plan | Dedicated executor(s) | Ledger plus **up to 4 runtime specialist subagents** per task | One independent reviewer | Yes | Deterministic and applicable integration checks |
+| S | Compact plan | Dedicated executor; inline only on recorded cost-to-success evidence | Ledger with an in-session subagent per lens (no Office audit, #1233) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| M | Structured plan | Dedicated executor; documented single-task inline exception possible | Ledger with an in-session subagent per lens (no Office audit, #1233) | Risk floor only | Yes | Deterministic and applicable acceptance checks |
+| L | Deeper coordinated plan | Dedicated executor(s) | Ledger with an in-session subagent per lens (no Office audit, #1233) | One independent reviewer | Yes | Deterministic and applicable integration checks |
 | XL | Dedicated architecture/decomposition | Multiple coordinated waves, independent task sizing | Ledger plus **up to 4 runtime specialist subagents** per task | Independent **lead + 3 mandatory Goldfish**; up to 2 evidence-triggered hazard audits | Yes | Full applicable integration/visual/recovery verification |
 
 A new run's **complexity** gear is pinned by the orchestrator at intake (or explicit authorized creation) from scope, coupling, uncertainty and multiwave coordination; the **risk** classification and floor remain independent. The planner may recommend size but cannot silently weaken the run's effective gates. Risk amendments need the existing authorization path; any change to accepted user scope needs its existing approval. The plan reviewer is **not** a gear-policy reviewer and has no L-to-XL reviewer-triggered escalation or reviewer-managed swarm.
@@ -17,6 +19,10 @@ A new run's **complexity** gear is pinned by the orchestrator at intake (or expl
 Historical gear aliases are still accepted only when explicitly selected for compatibility. Such starts retain the original legacy funding contract, emit a compatibility notice, and cannot be mistaken for new XS-XL runs. CLI help advertises XS-XL as the default; removing explicit aliases would break established legacy start integrations. Existing pinned runs resume unchanged.
 
 ### Self-review subagents (`self_review_subagents.py`)
+
+#1233 (Rico, 2026-11-17): a run started after #1233 funds Office's per-task audit on **XL only** (`review.self_review_audit_gears`, pinned at start). S, M and L tasks get no separate audit session: the executor's focused self-review fans out one in-session subagent per lens, as before #809. A run started earlier keeps auditing S, M, L and XL.
+
+For convergence-v1 runs each funded gear gets exactly **one** `combined` subagent per task: edge cases and test strength in one read-only pass, with platform/build only when the scope touches it. Security is covered by the convergence reviewer. The paragraph below describes the funding a run pinned to v3.1 keeps.
 
 Only pinned `run-gear-1` runs fund them, and each is an independently launched reviewer session on the task's accepted revision, advisory only and never a convergence verdict or round. XS funds none (the executor's inline four-lens ledger is all of it). S and M fund one `four-lens` subagent per task. L and XL fund **up to four specialists per task**: `edge-cases` and `test-strength` always, `security` when the run risk is elevated or irreversible, the blast radius is production, or the task scope names auth, security, permission, secret, token, crypt or credential paths, and `platform` when the scope touches scripts, CI, packaging or manifests or the descriptor domain is infrastructure. A missing, invalid or wrong-commit report blocks convergence review (fail closed) and spends no round. A report for the same revision, commit and rubric is reused.
 
@@ -34,6 +40,39 @@ Inline rules (`task_sizing.execution_mode`), applied per task, each recording ow
 | L, XL, legacy gears | never | dedicated executor |
 
 Elevated risk always delegates. An inline task keeps its fenced lease, scope, self-review subagents, convergence review and landing.
+
+Runs started after #1297 pin a fastlane policy and decide through it (see [Fastlane](#fastlane-1297)); the table above is what runs pinned before it keep.
+
+## Fastlane (#1297)
+
+Fastlane means the **orchestrator leads a task with its own strategy**, instead of Office routing and dispatching an executor. It may implement inline or use its own in-session subagents, with no model floor on those subagents (Rico, 2026-11-21). **One independent code review is always mandatory**, at every gear including XS, with the usual 3-round cap. The gear still decides planning and plan review. Fastlane removes only Office executor routing.
+
+The policy is pinned at `office start` in `gates.fastlane`:
+
+| Policy | Set by | Who leads a task |
+| --- | --- | --- |
+| `on` | `--fastlane` | The orchestrator, at any XS-XL gear, any task size and any risk. The invoker's flag always wins. |
+| `off` | `--no-fastlane` | An Office executor. |
+| `auto` | default | XS gear with an XS or S task on low risk: the orchestrator. Otherwise the orchestrator only when Office is sure: low risk, a known task size, and all three checks below pass. "Not sure" delegates. |
+
+The three `auto` checks compare orchestrator-led with its own strategy against Office-routed executors:
+
+- **Quality:** the task's `inline_quality:` descriptor starts with the orchestrator's own route, `<harness>/<model>@<effort>: <why>`. Office looks the route up in the catalog and applies the executor floor for the task's size (#809). A route that is missing from the catalog or below the floor fails the check, and the plan review judges whether the named route is the real orchestrator.
+
+An orchestrator-led task does not depend on an executor route qualifying. When none qualifies, dispatch records the task on the orchestrator's own route from `inline_quality`, which is also the overflow handoff target. If that route is missing or unusable too, dispatch refuses and says why.
+- **Time:** no two live tasks could run in parallel (one task, or a dependency chain).
+- **Cost:** `inline_advantage: inline=<n> dedicated=<n> <unit>: <evidence>` is strictly cheaper. "inline" counts the orchestrator plus its subagents.
+
+Each decision is recorded in the task's route record (`execution_mode`, `decision_version: execution-mode-2`, `fastlane`, `fastlane_checks`). Greenfield and runs started before #1297 have no fastlane gate and keep their execution rules.
+
+**Too big:** while an orchestrator-led task is live, two triggers record `gates.fastlane.overflow`:
+
+- the orchestrator's context crosses `orchestrator_context.threshold_tokens` (default 250000; the same measurement and `ctx-high` notice Office already had)
+- the task touches files outside its scope, or more than 2x the base-tree files its scope matches
+
+From then on every task decision delegates. That covers remaining tasks, tasks added by amendment, and `office rerun <task>` of the led task. The `ctx-high` line tells the orchestrator to commit a checkpoint and hand the rest to executors. Inside Herdr it then runs `/compactable` and compacts on `COMPACT NOW`; rico-mode's SO81 watcher prompts the same deduped check. Anywhere else the line is a one-line suggestion to compact. It never blocks or fails a gate.
+
+**Cost:** with `economics.collect: true`, `office economics ingest` also reads Claude subagent transcripts (`<session>/subagents/*.jsonl`) as role `root-subagent`, and attributes root turns inside a led task's dispatch window to that task. With collection off, the route record says `cost_measured: false`: the cost is unknown, never zero.
 
 ## Per-task sizing, profiles and adaptive routing
 
@@ -67,22 +106,21 @@ Legacy pinned run presets retain their historical contracts.
 | L | 44 |
 | XL | 47 |
 
-User-approved soft **ideal executor ordering**, assuming all exact model+effort+harness
-routes qualify and quota is available. This is **not** a command to launch unavailable
-models, override factual gates, or prefer an expensive model regardless of task fit.
+The soft ideal executor slates live in [`catalog/executor-policy.yaml`](../catalog/executor-policy.yaml).
+Read the effective policy with:
 
-| Size | Preferred | Immediate same-model harness self-fallback | Next qualified alternative | Last qualified alternative |
-| --- | --- | --- | --- | --- |
-| XS | Claude Haiku 5.5 medium (34; conditional) | — | Gemini 3.8 Flash low (33) | GPT-6.1 Terra low (36; conditional) |
-| S | Gemini 3.8 Flash medium (40) | — | Claude Haiku 5.5 high (38; conditional) | GPT-6.1 Terra medium (41; conditional) |
-| M | **Claude Code** Sonnet 5.5 medium (41; currently non-dispatchable) | **agy** Sonnet 5.5 medium (41; exact same model/effort) | GPT-6.1 Terra medium (41; conditional) | OpenCode GLM-5.3-Flash max (42; conditional) |
-| L | **Claude Code** Sonnet 5.5 high (47) | **agy** Sonnet 5.5 high (47; same effort) | GPT-6.1 Terra high (44; conditional) | Gemini 4 Argon **medium** (conditional, exact score not yet verified) |
-| XL | Claude Code Opus 5.5 medium (51) | — | Codex GPT-6.1 Sol medium (48; discovery-only) | Gemini 4 Argon **high** (53; conditional) |
+```bash
+office route policy --effective --role executor
+```
 
-**Required guardrails:** Sonnet 5.5 Claude Code → agy is the only same-model
-harness fallback, at the **same effort**, immediately before switching model family.
-Claude Code Sonnet Medium cannot dispatch until its missing exact invocation/effort
-evidence is verified; a currently qualified agy variant may be selected instead.
+These preferences do not guarantee that a route is eligible or available.
+
+**Required guardrails:** For new gears, when eligible Claude Code and agy Sonnet 5.5
+routes have the same effort, the adaptive ordering places agy immediately after Claude
+Code if Claude Code is within the displayed slate and agy does not already precede it.
+The displayed slate can truncate agy when Claude Code occupies its last position.
+Adaptive selection may still choose another model for task fit; legacy runs retain
+their ordering. This applies to M and L as well as other new-gear task sizes.
 Reserve Opus 5.5 automatic executor routing for **genuinely XL subtasks**, even inside
 an XL parent run. No active MiMo routes. Haiku 5.5, Sol 6.1, Terra 6.1, Argon and
 GLM conditional rows are never promoted merely because they appear here.
@@ -155,19 +193,15 @@ Every Office-launched Herdr pane for a task, executor or reviewer, shows the tas
 
 ## Legacy migration and pin safety
 
-The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) continue to parse and retain their prior gating. Their `gear_model_version` is `legacy-pinned`; they are never silently mapped to XS–XL, and `direct` risk-raising amendments retain their old `express`/`full` upgrade contract. The new `run-gear-1` is only for a newly selected XS–XL run. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
+The historical six presets (`direct`, `direct+review`, `light`, `quick`, `express`, `full`) were removed with the 3.0 runtime without a compatibility path: `office start --gear direct` is an invalid choice, and a run still pinned to one fails on resume, status and dispatch with the `gear-removed` error (pick XS/S/M/L/XL and start a new run). `run-gear-1` is the only gear model. Older descriptors without a task size retain their original run-size fallback during routing. Historical event, revision, review, learner and catalog data are never rewritten. In every version, explicit user authorization, scope/lease fencing, immutable revision-bound review, checks, integration and real merge/deployment approvals stay authoritative.
 
 
 ## M executor Haiku High transition (#861, October 28, 2026)
 
-For new M subtasks, the ideal slate is Claude Code Haiku 5.5 High, OpenCode
-GLM-5.3 Flash Max, then Codex GPT-6.1 Terra Medium. GLM is preferred F1,
-but currently has no qualified exact shipped catalog route: report its
-missing/unqualified status and skip to Terra F2 when eligible. Never claim
-GLM was selected or dispatched when absent. Sonnet Medium is no longer a
-preferred M route, but stays a disclosed operational fallback until qualified
-preferred routes are available. Other sizes, planner/reviewer funding and
-historical pinned runs are unchanged.
+For new M subtasks, Sonnet Medium remains a disclosed operational fallback.
+The effective policy shows the current preferred slate; never claim a route
+was selected or dispatched when it is absent or unqualified. Other sizes,
+planner/reviewer funding and historical pinned runs are unchanged by #861.
 
 The exact `claude/claude-haiku-5-5@high` M executor/worker route has a
 narrow owner-authorized AA v4.3.2 38-vs-40 size-floor exception. The real

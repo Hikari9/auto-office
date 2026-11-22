@@ -33,10 +33,10 @@ which closes only panes it finds in the ledger.
 `echo $HERDR_ENV` prints the parent's value and empty under an `env -i` child, where `herdr` is
 also off `PATH` — so such a dispatch never appears in `herdr agent list`.
 
-Carry the environment through instead of discarding it, and prefer the spawner that records the pane:
+Carry the environment through instead of discarding it, and prefer a launch that records the pane in the ledger (`scripts/herdr-ledger.mjs add`):
 
 ```bash
-scripts/office_spawn.sh --pane-id <pane> --agent-name <name> …   # pane-hosted, in the ledger
+herdr agent start <name> --kind codex --pane <pane> -- …           # pane-hosted, then add the ledger row
 env -i HOME="$HOME" PATH="$PATH" TERM=dumb HERDR_ENV="$HERDR_ENV" codex exec …  # bare, if required
 ```
 
@@ -83,3 +83,4 @@ Read the resume banner's `workdir:` line before letting it run — a resume issu
 `-c model_reasoning_effort=` is required on resume too — a resume inherits the session's context but **not** its effort, and silently degrades to the config default without it.
 
 Attribute invocation/stdio bugs and false liveness reads to adapter, resume/workdir inheritance to harness, quota walls to quota/account, and logical implementation defects to the producer model/role only when evidence supports it.
+- Executor routing (AA v5): codex Terra is the rung 3 executor for XS low, S medium and M high, and Sol is rung 2 for L medium and XL high. Floors follow the Artificial Analysis Engineering Index (2026-11). Hydrogen is a conditional rung 2 for XS-M and is not a code reviewer: code review is Luna high then Opus low.

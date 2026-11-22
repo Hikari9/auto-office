@@ -1,0 +1,255 @@
+"""#938: the revert-and-fail proof of a new run's self-review, run by Office, never by the executor.
+Each medium or high fix in the ledger names one test. Office runs that test alone on two disposable
+checkouts of the task's commit: with the task's modified non-test source reverted it must fail (a test
+failure; any collection error, usage error, timeout or missing command does not count), and unreverted it must pass.
+Source files the task adds are never deleted by the revert. A fix that lives in one of them cannot be reverted,
+so when the test passes with the revert and the task adds non-test source, the proof is exempt, not passed.
+A task with no named test or no pytest command to run it with records an exemption: nothing
+is left to prove, so nothing is blocked. The executor's worktree and index are never touched.
+"""
+from __future__ import annotations
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import tempfile
+import uuid
+from pathlib import Path
+from office import briefs, contract, db, gates, paths, state, submit
+from office.util import now_iso, sha256_obj
+_SOURCE_SUFFIXES = frozenset((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
+                              ".c", ".cc", ".cpp", ".h", ".cs", ".rb", ".php", ".swift",
+                              ".sh", ".bash", ".sql", ".vue", ".svelte", ".html", ".css", ".scss", ".sass",
+                              ".astro", ".dart", ".graphql", ".proto",
+                              ".lava", ".liquid", ".j2", ".jinja", ".jinja2", ".hbs", ".mustache", ".erb",
+                              ".twig", ".njk", ".ejs", ".tpl"))
+_PYTEST = re.compile(r"\bpytest\b")
+# Selectors and workers: the named test runs alone, in-process. xdist's distribution options go with -n.
+_DROP_WITH_VALUE = frozenset(("-k", "-m", "-n", "--numprocesses", "--dist", "--maxprocesses", "--tx"))
+_KEEP_WITH_VALUE = frozenset(("-p", "-c", "-o", "-W", "-r", "--rootdir", "--override-ini", "--confcutdir",
+                              "--import-mode", "--basetemp", "--ignore", "--ignore-glob", "--deselect", "--maxfail",
+                              "--durations", "--tb", "--color", "--log-level", "--log-cli-level", "--log-file",
+                              "--log-format", "--junitxml", "--capture", "--timeout", "--cov-report", "--cov-config",
+                              "--reruns", "--randomly-seed", "--html", "--hypothesis-profile",
+                              "--hypothesis-seed"))  # options whose next word is theirs
+_FLAGS = frozenset(("--lf", "--last-failed", "--ff", "--failed-first", "--nf", "--new-first", "--sw", "--stepwise",
+                    "--exitfirst", "--strict-markers", "--strict-config", "--strict", "--no-header", "--no-summary",
+                    "--showlocals", "--runxfail", "--verbose", "--quiet", "--all", "--disable-warnings",
+                    "--cache-clear", "--setup-show", "--fulltrace", "--no-cov", "--doctest-modules",
+                    "--integration", "--slow", "--legacy"))  # long options known to take no value
+_ENVIRONMENT_EXITS = frozenset((126, 127))  # a command that cannot run or is not found
+_PYTEST_ENVIRONMENT_EXITS = frozenset((2, 3, 4))  # pytest's interrupted, internal and usage errors
+_TAIL_LINES = 20
+_SHELL_OPERATORS = frozenset(("&&", "||", ";", "|"))
+_MAX_SECONDS = 120
+_MAX_TESTS = 5
+_PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"
+_VERSION = "main-proof-7"
+def applicable(run: dict) -> bool:
+    return contract.is_convergence(run)
+def _sources(changed: list[str]) -> list[str]:
+    from office.preflight import _is_test_path
+    return sorted(p for p in changed
+                  if not _is_test_path(p) and Path(p).suffix.lower() in _SOURCE_SUFFIXES)
+def named_tests(ledger_text: str | None) -> list[str]:
+    """The distinct tests the ledger's medium and high fixes name, in ledger order."""
+    from office.preflight import parse_ledger
+    if not ledger_text:
+        return []
+    led, _ = parse_ledger(ledger_text)
+    tests = []
+    for f in led["findings"]:
+        if f["kind"] == "fixed" and f["severity"] in ("high", "medium") and f["arg"]:
+            test = f["arg"].split()[0]
+            if test not in tests:
+                tests.append(test)
+    return tests
+_PACKAGE_OPTIONS = ("--with", "-w", "--with-editable", "--from")  # uv/uvx options whose value is a package
+def _words(check: str) -> list[str]:
+    """Shell words of a check. Operators are their own tokens even when glued to a word: `pytest -q;echo`."""
+    lex = shlex.shlex(check, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+def _looks_like_selection(word: str) -> bool:
+    """A path or node id that selects tests, as opposed to an unknown option's value (`--dist loadscope`)."""
+    return ("/" in word or "::" in word or "." in word or "*" in word
+            or word in ("tests", "test", "testing", "spec", "src"))
+def _runner(task: dict) -> list[str] | None:
+    """The pytest invocation the task's own checks use, minus test selection, or None."""
+    for check in task.get("checks") or []:
+        if not isinstance(check, str) or "validate.sh" in check or not _PYTEST.search(check):
+            continue
+        try:
+            words = _words(check)
+        except ValueError:
+            continue
+        # The pytest *command* word, not the value of an option that names a package to install:
+        # `uv run --with pytest pytest ...` names it twice (#1072). Boolean flags (`--frozen`) take no value.
+        commands = [i for i, w in enumerate(words) if (w == "pytest" or w.endswith("/pytest"))
+                    and not (i > 0 and words[i - 1] in _PACKAGE_OPTIONS)]
+        if not commands:
+            continue
+        start = commands[0]
+        cmd_start = max([i + 1 for i, w in enumerate(words[:start]) if w in _SHELL_OPERATORS], default=0)
+        kept, pending = words[cmd_start:start + 1], None
+        for word in words[start + 1:]:
+            if word in _SHELL_OPERATORS or word == "--":
+                break
+            if not word:
+                continue
+            if word.startswith("-") and word != "-":
+                pending = None
+                if word in _DROP_WITH_VALUE:
+                    pending = "drop"
+                elif (not word.startswith("--") and word[:2] in _DROP_WITH_VALUE) \
+                        or word.split("=", 1)[0] in _DROP_WITH_VALUE:
+                    continue
+                else:
+                    kept.append(word)
+                    if word in _KEEP_WITH_VALUE:
+                        pending = "keep"
+                    elif word.startswith("--") and "=" not in word and word not in _FLAGS:
+                        pending = "maybe"  # an option this list does not know may take a value
+            else:  # a value of the option before it, or a path / node id that selects tests
+                if pending == "keep" or (pending == "maybe" and not _looks_like_selection(word)):
+                    kept.append(word)
+                pending = None
+        return kept
+    return None
+def _safe_test(checkout: Path, test: str) -> bool:
+    file = test.split("::", 1)[0]
+    if not file or file.startswith("-") or os.path.isabs(file) or ".." in Path(file).parts:
+        return False
+    try:
+        (checkout / file).resolve().relative_to(checkout.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return (checkout / file).is_file()
+def _run(wt: Path, command: str, run: dict) -> tuple[int, str]:
+    env = gates._check_env(run)
+    env.pop("PYTEST_ADDOPTS", None)  # as gates._run_commands does for a pytest command: no ambient -k, -m or -n
+    env.pop("PYTEST_PLUGINS", None)
+    return gates._run_check(command, wt, _MAX_SECONDS, env)
+def _tail(output: str) -> str:
+    return "\n".join(str(output).strip().splitlines()[-_TAIL_LINES:])[-3000:]
+def _detail(command: str, checkout: Path, output: str) -> str:
+    return f"\ncommand: {command}\ncheckout: {checkout}\noutput tail:\n{_tail(output)}"
+def _environment_error(code: int) -> bool:
+    return code in _ENVIRONMENT_EXITS or code in _PYTEST_ENVIRONMENT_EXITS
+def _resolve_interpreter(runner: list[str], wt: Path, checkout: Path) -> list[str]:
+    """A repo-relative interpreter the task's commit does not track (`.venv/bin/python`) lives in the task
+    worktree only. A disposable checkout lacks it, so point the command at the worktree's copy (#1124)."""
+    first = runner[0]
+    if "/" in first and not os.path.isabs(first) and not (checkout / first).exists() and (wt / first).exists():
+        return [str((wt / first).absolute()), *runner[1:]]
+    return runner
+def _paths_with_status(checkout: Path, base: str, head: str, paths_: list[str], status: str) -> list[str]:
+    """The paths in `paths_` the task changes with git diff status `status` (A added, M modified, D deleted)."""
+    if not paths_:
+        return []
+    out = subprocess.run(["git", "-C", str(checkout), "diff", "--name-only", "-z", "--no-renames",
+                          f"--diff-filter={status}", base, head, "--", *paths_], capture_output=True, text=True)
+    return [p for p in out.stdout.split("\0") if p]  # -z: names are never quoted, so they match the changed list
+def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str], tests: list[str],
+          run: dict) -> dict:
+    sources = _sources(changed)
+    parent = Path(tempfile.mkdtemp(prefix="office-proof-"))
+    red_checkout, green_checkout = parent / "reverted", parent / "restored"
+    attached = []
+    try:
+        for checkout in (red_checkout, green_checkout):
+            made = subprocess.run(["git", "-C", str(wt), "worktree", "add", "--detach", str(checkout), head],
+                                  capture_output=True, text=True)
+            if made.returncode:
+                return {"ok": False, "status": "blocked",
+                        "reason": "cannot isolate source for the proof: " + made.stderr[-300:]}
+            attached.append(checkout)
+        # A source the task adds stays in place. Deleting it would fail the test at collection on its import,
+        # which proves nothing about the fix. Only sources the base already had are reverted.
+        added = _paths_with_status(red_checkout, base, head, sources, "A")
+        reverted = [s for s in sources if s not in added]
+        if reverted:
+            patch = subprocess.run(["git", "-C", str(red_checkout), "diff", "--binary", "--no-ext-diff",
+                                    "--no-renames", base, head, "--", *reverted], capture_output=True)
+            if patch.returncode or not patch.stdout:
+                return {"ok": False, "status": "blocked", "reason": "cannot compute a reversible source-only diff"}
+            undone = subprocess.run(["git", "-C", str(red_checkout), "apply", "--reverse", "--binary"],
+                                    input=patch.stdout, capture_output=True)
+            if undone.returncode:
+                return {"ok": False, "status": "blocked",
+                        "reason": "source-only revert failed: " + undone.stderr.decode(errors="replace")[-300:]}
+        exempt = []
+        for test in tests:
+            if not _safe_test(green_checkout, test):
+                return {"ok": False, "status": "blocked",
+                        "reason": f"named test {test} is not a file of the submitted commit"}
+            command = " ".join(shlex.quote(w) for w in [*_resolve_interpreter(runner, wt, green_checkout), test])
+            red, red_out = _run(red_checkout, command, run)
+            if red != _PYTEST_TEST_FAILED:
+                if red == 0 and added:
+                    exempt.append(test)  # the fix may live in a file the revert cannot touch
+                else:
+                    if red == 0:
+                        why = "passes without the fix"
+                    elif _environment_error(red):
+                        why = (f"exited {red}, an environment error that is not a test failure "
+                               "(a collection error, a usage error or a missing command)")
+                    else:
+                        why = f"exited {red}, which is not a test failure (a timeout or an unusual exit)"
+                    return {"ok": False, "status": "blocked",
+                            "reason": f"revert-and-fail proof: {test} with the source reverted {why}"
+                                      + _detail(command, red_checkout, red_out)}
+            green, green_out = _run(green_checkout, command, run)
+            if green != 0:
+                what = (f"hit an environment error on the submitted commit (exited {green}, not a test result)"
+                        if _environment_error(green) else f"fails on the submitted commit (exit {green})")
+                return {"ok": False, "status": "blocked",
+                        "reason": f"revert-and-fail proof: {test} {what}"
+                                  + _detail(command, green_checkout, green_out)}
+        if exempt:
+            return {"ok": True, "status": "exempt",
+                    "reason": "revert-and-fail proof exempt: fix may live in a file new in the task; "
+                              f"revert-and-fail cannot prove it ({', '.join(exempt)} passes with the revert)"}
+        return {"ok": True, "status": "passed",
+                "reason": f"revert-and-fail proof: {', '.join(tests)} failed reverted and passed restored"}
+    finally:
+        for checkout in attached:
+            subprocess.run(["git", "-C", str(wt), "worktree", "remove", "--force", str(checkout)],
+                           capture_output=True, timeout=30)
+        shutil.rmtree(parent, ignore_errors=True)
+def gate(con, run: dict, task: dict, wt: Path, base: str, head: str, changed: list[str],
+         *, execute: bool) -> dict:
+    """Prove once per exact commit and test set. Submit only trusts a recorded pass or exemption."""
+    if not applicable(run) or not _sources(changed) or not task.get("scope"):
+        return {"ok": True, "status": "not-required", "reason": "no non-test source change to revert"}
+    tests = named_tests(submit._read_untracked_text(wt, briefs.LEDGER_FILE, briefs.LEDGER_MAX_CHARS))
+    runner = _runner(task)
+    if not tests or runner is None:
+        why = ("the ledger names no test for a medium or high fix" if not tests
+               else "the task's checks hold no pytest command to run a named test with")
+        return {"ok": True, "status": "exempt", "reason": f"revert-and-fail proof exempt: {why}"}
+    if len(tests) > _MAX_TESTS:  # proving only some of them would let the rest pass unproven
+        return {"ok": False, "status": "blocked",
+                "reason": f"revert-and-fail proof: the ledger names {len(tests)} tests for medium or high fixes; "
+                          f"the proof runs at most {_MAX_TESTS}, so name only the tests that prove each fix"}
+    key = sha256_obj({"task": task["id"], "base": base, "head": head, "changed": sorted(changed),
+                      "tests": tests, "runner": runner, "version": _VERSION})
+    row = con.execute("SELECT verdict, summary FROM gates WHERE run_id=? AND task_id=? AND kind='self_review_proof' "
+                      "AND input_key=? AND status='done' AND verdict IN ('PASS', 'EXEMPT') "
+                      "ORDER BY created_at DESC LIMIT 1", (run["id"], task["id"], key)).fetchone()
+    if row:  # an exemption is recorded as EXEMPT, so a cached exemption is never reported as a pass
+        return {"ok": True, "status": "passed" if row["verdict"] == "PASS" else "exempt", "reason": row["summary"]}
+    if not execute:
+        return {"ok": False, "status": "blocked", "reason": "run office preflight for the revert-and-fail proof"}
+    result = prove(wt, base, head, changed, runner, tests, run)
+    if result["ok"]:
+        passed = result["status"] == "passed"
+        with db.transaction(con):
+            con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, verdict, summary,"
+                        " created_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        ("G" + uuid.uuid4().hex[:10], run["id"], task["id"], task["id"], "self_review_proof",
+                         key, "done", "PASS" if passed else "EXEMPT", result["reason"], now_iso(), now_iso()))
+            state.emit(con, run, "self_review.proof", result["reason"], task_id=task["id"],
+                       payload={"commit": head, "passed": passed, "status": result["status"], "tests": tests})
+    return result

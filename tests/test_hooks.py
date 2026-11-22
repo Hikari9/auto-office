@@ -15,7 +15,7 @@ class TestHooks(unittest.TestCase):
         self.state_dir.mkdir()
         runtime_dir = self.repo / 'scripts'
         runtime_dir.mkdir()
-        (runtime_dir / 'office_runtime.py').symlink_to(ROOT / 'scripts' / 'office_runtime.py')
+        (runtime_dir / 'office_runtime.py').write_text('# stand-in for the removed 3.0 runtime path the hook still recognises\n')
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)

@@ -1249,7 +1249,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
     v12 = {"predecessor_dispatch_id", "first_executor_dispatch_id", "accepted_producer_dispatch_id",
            "members_json", "attribution_basis", "attributed_task", "clone_of",
            # v14 (#701/#722): passive progress-watchdog state on dispatches.
-           "watchdog_progress_hash", "watchdog_progress_since"}
+           "watchdog_progress_hash", "watchdog_progress_since",
+           # v20 (#939): per-executor context-cap handoff on dispatches.
+           "context_handoff_json"}
     for table, (cols, rows) in now_dump.items():
         keep = [c[0] for c in cols if c[1] in v12]
         now_dump[table] = ([c for c in cols if c[1] not in v12],
@@ -1264,7 +1266,9 @@ def test_s12_db_changes_are_additive_and_the_previous_runtime_keeps_working_on_t
                    # T2: quota-wall cooldowns are additive shared routing state.
                    "route_cooldowns",
                    # #783: durable closeout-cleanup receipts (new table only).
-                   "cleanup_runs"}
+                   "cleanup_runs",
+                   # #1143: append-only Hydrogen canary opportunity ledger (new table only).
+                   "hydrogen_trial_opportunities"}
     assert all(after.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0 for t in new)
     after.close()
     again = old.connect(path)  # the previous runtime still opens it and keeps writing its own tables
@@ -1293,17 +1297,3 @@ def test_s12_cli_a_v31_run_started_before_discovery_never_discovers_after_it_is_
         assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
     (d,) = [dict(r) for r in con.execute("SELECT triple FROM dispatches WHERE role='executor'")]
     assert SOL not in d["triple"]
-
-
-def test_s12_cli_a_legacy_3_0_run_is_served_by_its_pinned_runtime_with_discovery_enabled(env):
-    from office import runtime_default
-    from test_discovery_pinning import _legacy_run
-    (env.tmp / "user-config.yaml").write_text("routing:\n  discovery:\n    enabled: true\n    max_trial_percent_rolling_20: 100\n")
-    run_id, sdir = _legacy_run(env, runtime_default.LEGACY_V3_FINAL)
-    code, out = env.office("list")
-    assert "3.0 legacy" in out and run_id[:8] in out
-    code, out = env.office("resume", run_id[:8])
-    assert code == 0 and "stays on its pinned runtime" in out, out
-    con = env.con()
-    for table in ("route_probes", "route_probe_reservations", "route_trials", "route_discovery_events"):
-        assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table

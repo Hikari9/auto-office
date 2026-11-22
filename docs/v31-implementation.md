@@ -25,7 +25,6 @@ Where the earlier [CLI architecture](office-cli-architecture.md) disagrees, the 
 | Route requests built by the runtime | `candidates.py`, `adapters.py` |
 | Run discovery and session binding | `discovery.py` |
 | Version-pinned front door | `frontdoor.py`, `runtime_default.py` |
-| 3.0 run detection and exact-commit retention | `legacy.py` |
 | start / resume / close / abandon / list | `lifecycle.py` |
 | PLAN.md parsing | `planfile.py` |
 | Plans and rolling plan review | `plans.py` |
@@ -38,10 +37,10 @@ Where the earlier [CLI architecture](office-cli-architecture.md) disagrees, the 
 | Image-capability conformance | `conformance.py` |
 | User authority (`approve`) | `authority.py` |
 | Durable jobs without a daemon | `jobs.py` |
+| The run on its display-only herdr-projects board card | `board_card.py` |
 | Status and the `next:` line | `guide.py` |
 | `inspect` | `inspect_cmd.py` |
 | `prune` | `prune.py` |
-| `raw` compatibility window | `compat.py` |
 | Hooks, install, doctor | `hooks.py`, `install.py`, `doctor.py` |
 | CLI transport | `cli.py` |
 
@@ -50,8 +49,7 @@ Where the earlier [CLI architecture](office-cli-architecture.md) disagrees, the 
 `runs.db` (SQLite, WAL) is the only lifecycle authority. Every semantic transition runs inside
 `db.transaction` (`BEGIN IMMEDIATE`), so preconditions read inside the block cannot change before
 commit. The v3 recorder tables (`runs`, `dispatches`, `findings`, `validations`, `leases`, …) keep
-their definitions and gain only nullable columns, so a retained 3.0 runtime keeps writing to the
-same file. New tables: `requirements`, `authorizations`, `plans`, `tasks`, `revisions`, `gates`,
+their definitions and gain only nullable columns (the retired `compat_calls` table stays, unused). New tables: `requirements`, `authorizations`, `plans`, `tasks`, `revisions`, `gates`,
 `amendments`, `deliveries`, `events`, `cursors`, `outbox`, `evidence`, `session_bindings`,
 `capability_proofs`, `compat_calls`, `visual_refs`, `deviations`, `schema_meta`.
 
@@ -98,10 +96,8 @@ later one is a `gate.duplicate_result` audit event and changes nothing.
   requirements, plans, tasks, gates, amendments and authorizations unchanged. Rollback is
   `office upgrade <run> --to <previous line> --apply`, allowed only to a line the run was on.
   `office doctor` and `office status` print the upgrade command for a run on an older line.
-- A 3.0 run (its `state.json` has no `office_version`) is pinned to its `plugin_commit`. The
-  runtime materializes exactly that commit with `git archive` into `runtimes/legacy-<sha>` and
-  serves the run from there (`office resume`, `office raw`, and the guard in
-  `scripts/office_runtime.py` all route there). Missing commits are an actionable blocker.
+- The 3.0 runtime (and its `state.json` runs, `office raw`, retained commits) was removed with the 3.0 runtime.
+  Nothing routes a 3.0 run any more; `office list` and `office resume` know only runs.db runs.
 
 ## 4. Discovery and binding
 
@@ -183,7 +179,7 @@ from the default branch). The integration worktree is recreated from git on ever
 holds no installed dependencies. The repo declares its install once as `worktree.setup` in
 `.auto-office/config.yaml` (pinned into the run policy at `office start`, with `setup_timeout_s` and
 `applies_to`, default task, integration, and check); Office runs that command once in each new task,
-integration, and check worktree and logs it to `setup.log`. Without it, run-level checks install in
+integration, and check worktree and logs it to `setup.log`. A failed task setup is a notice and the agent still launches, except exit 127 (the command is not on PATH), which stops the dispatch with an `office doctor` hint because it fails the same way in every worktree (#364). Without it, run-level checks install in
 the command (`pnpm install --frozen-lockfile && pnpm lint`). A check that is not found reports
 UNAVAILABLE with that instruction. Office runs only the command the repo declares; it never chooses a
 package manager itself. Checks must not mutate the tree: a
@@ -205,7 +201,7 @@ form, because both travel in the stored route.
 
 `office amend route T1 --as <route> --quote "<user's words>"` can record the next executor's route while
 T1 is accepted. It launches nothing and preserves the submitted producer's route and all accepted
-evidence. The next legal reopen uses the declared route. Revoking an amendment worker preserves the
+evidence. The next legal reopen uses the declared route. `office amend route T1 --auto --quote "<user's words>"` clears a declared route on a task with no live agent and records the change; its next dispatch routes from the approved plan's slate again, and a rerun of a task that already ran takes `--fresh --reroute` (#977). Revoking an amendment worker preserves the
 need to satisfy newly added acceptance criteria; only the previously accepted revision remains audit evidence.
 Reused routes are checked against current factual gates before a new lease or launch is scheduled,
 including the run repository's live denial policy when a background caller runs elsewhere.
@@ -276,8 +272,9 @@ spent). No reference means "fidelity unmeasured". Visual input keys hash only pr
 the reference bytes, the viewport/state contract and the environment, so unrelated edits reuse the
 verdict and a reference change invalidates it.
 
-Judgment uses the `visual_reviewer` role. The preference is Gemini 3.8 Flash medium via agy,
-then Sonnet 5.5 high, then Luna. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
+Judgment uses the `visual_reviewer` role. The shipped preference is agy Hydrogen@low (conditional: it needs the user's exact
+allow), then Terra low and Opus low. Gemini 3.8 Flash is retired in every role (Rico 2026-11-19).
+agy's vision launch is read-only plan mode. `model_family_floors` holds default Gemini routing to 3.7 or newer (an explicit
 `--route` is exempt). A route qualifies
 only after `conformance.probe_vision` — a generated image with random digits and a coloured square,
 sent through that exact harness/model/effort/adapter path in a separate session — returns the right
@@ -297,33 +294,28 @@ per-run lifecycle rows. Idempotent; locked or unsafe candidates are skipped and 
 
 ## 10. Hooks, install, doctor
 
-`office install` registers the current runtime, retains the 3.0 runtime, and writes
+`office install` registers the current runtime and writes
 `--office-managed` hook entries for Claude Code and Gemini CLI (`session.start`, `prompt.submit`,
 `tool.pre`), backing up each config first. Codex, agy and Hermes hooks are not written (their
 schemas or denial paths are unverified); explicit commands cover them. The unbound hook path only
 reads the environment and stats files. `tool.pre` denies a bound worker's writes outside its own
 worktree on Claude and Gemini. `office doctor` checks the runtime registry, pinned runtimes for
-every active run (3.1 and 3.0), hooks, the known harness defects, adapters, Playwright, vision
-proofs, compatibility-call counts, and hook errors.
+every active run, hooks, the known harness defects, adapters, Playwright, vision
+proofs, and hook errors.
 
-## 11. Compatibility window (3.1.x only)
+## 11. Compatibility window (closed)
 
-`scripts/` is the retained 3.0 helper surface. It refuses to write a 3.1 run, refuses to create new
-runs, and forwards a 3.0 state directory to that run's exact retained commit. `office raw
-<subcommand>` warns, records every call in `compat_calls`, answers read-only verbs from canonical
-state, runs pure helpers unchanged, and refuses state-writing verbs with their semantic
-replacement. Removal in 3.2.0 deletes `scripts/`'s lifecycle helpers, the `raw` command and the 3.0
-spokes once `office doctor` shows no remaining consumers.
+The 3.0 helper surface (`scripts/office_runtime.py` and its helpers), `office raw`, `legacy.py` and
+`compat.py` were removed with the 3.0 runtime. `scripts/` keeps hooks, validation and report helpers only.
 
 ## 12. Cutover and rollback
 
 1. Merge with 3.1 as the default for new runs (`runtime.new_runs` defaults to `3.1`).
-2. `uv tool install auto-office` (or `--editable` from the checkout), `office install`, `office doctor`.
-3. Active 3.0 runs drain on their retained commits; they are never rewritten.
-4. **Rollback** (future runs only): set `runtime: {new_runs: "3.0"}` in
-   `~/.config/auto-office/config.yaml`. `office start` then refuses and names the retained 3.0
-   runtime; every existing 3.1 run keeps working on 3.1.
-5. Keep each released runtime registered while any run pinned to it is active (`office doctor`
+2. `uv tool install git+https://github.com/Hikari9/auto-office` (or `--editable` from the checkout), `office install`, `office doctor`.
+3. Rollback to 3.0 is gone: `runtime: {new_runs: "3.0"}` is refused as removed. Pin an earlier 3.1+ line
+   with `runtime.new_runs` if needed. An existing run keeps its pinned line unless it is pinned to a removed gear
+   (direct, direct+review, light, quick, express, full): those fail with `gear-removed` and can only be abandoned.
+4. Keep each released runtime registered while any run pinned to it is active (`office doctor`
    lists them).
 
 ## 13. Provisional values
@@ -369,7 +361,6 @@ adoption. Session binding keys add the Herdr pane and harness ancestor process t
 | Tombstone kept, artifacts removed | `prune._prune_one` | `test_prune::test_force_prunes_terminal_only_and_keeps_tombstone` |
 | `prune --run` selects only that run | `prune.select_run` | `test_prune::test_run_flag_restricts_prune_to_that_run` |
 | Rollback affects future runs only | `runtime_default` | `test_discovery_pinning::test_rollback_changes_future_runs_only` |
-| Legacy/raw never a second authority | `compat`, `scripts/office_runtime.py` guard | `test_compat_hooks_install::test_raw_…`, `…legacy_helper_cannot_write_a_31_run` |
 | No gate green from skipped/unavailable/stale | `gates` | `test_gates::test_missing_check_command_is_never_pass`, `test_rolling_review::test_unavailable_plan_reviewer_blocks_dispatch` |
 | Rolling review S1–S3, N1–N3, N11 | `plans`, `amend` | `test_rolling_review.py` |
 | Parallel tasks, shared scope, stacking, integration | `dispatch`, `integration` | `test_gates::test_parallel_…`, `…shared_scope…`, `…stacked…`, `…integration_conflict…` |

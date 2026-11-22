@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from office import adaptive, candidates, contract, paths, plans, route_learning, route_policy, routing, state
+from office import adaptive, candidates, contract, harness_preference, paths, plans, route_learning, route_policy, routing, state
 from office import risk as risk_mod
 from office.result import Result
 from office.state import Usage
@@ -99,6 +99,9 @@ def _run(con, run) -> Result:
     integ = (run.get("landing") or {}).get("integration")
     if integ:
         lines.append(f"integration {integ.get('status')} {integ.get('branch', '')} {integ.get('detail', '')}")
+    if judged := (run.get("gates") or {}).get("greenfield_detection"):
+        lines.append(f"new work (judged by {judged.get('judged_by')}): {'yes' if judged.get('new_work') else 'no'}, "
+                     f"{judged.get('why')}")
     return Result(lines=lines, data={"run": {k: v for k, v in run.items() if not k.endswith("_json")},
                                      "requirements": req["frozen"], "plan_review": rs, "risk": risk_mod.summary(run)})
 
@@ -111,8 +114,11 @@ def _task(con, run, tid) -> Result:
              f"scope {', '.join(t['scope'])} | depends {', '.join(t['depends']) or 'none'}",
              f"contract p{t['contract_version']} acceptance p{t['acceptance_version']} escalations {t['escalations_used']}"]
     if t.get("review_override"):
-        lines.append(f"review pinned by user: {t['review_override']['as']}"
-                     + (" (external)" if t["review_override"].get("external") else ""))
+        from office import gates
+        inert = gates.review_pin_inert(run)
+        lines.append(f"review pinned by {t['review_override'].get('by') or 'user'}: {t['review_override']['as']}"
+                     + (" (external)" if t["review_override"].get("external") else "")
+                     + (f"; no effect: {inert}" if inert else ""))
     for d in con.execute("SELECT id, role, triple, status, terminal_classification, exit_code, applied_plan_version, worktree, "
                          "launcher, override_json, " + _optional_cols(con) + " FROM dispatches WHERE run_id=? AND task_id=? "
                          "ORDER BY started_at",
@@ -234,7 +240,7 @@ def _route(con, run, role_or_task) -> Result:
     lines += _rejections(decision)
     categories = _categories(decision)
     config = state.pinned_config(run)
-    policies = [*candidates.current_user_policies(run.get("repo_root")), route_policy.user_policy(config)]
+    policies = candidates.current_user_policies(run.get("repo_root"))
     lines += _discovery_lines(decision, categories, config, policies)
     trials = _trial_rows(con, run, role=role)
     lines += _trial_lines(trials) + _attempt_lines(route_learning.attempt_history(con, run_id=run["id"], role=role, include_unbound=True))
@@ -291,6 +297,7 @@ def _route_task(con, run, tid) -> Result:
     rows = [dict(r) for r in con.execute("SELECT * FROM route_audit WHERE run_id=? AND task_id=? ORDER BY created_at, rowid",
                                          (run["id"], tid)).fetchall()]
     lines, audits = _effective_route_lines(con, run, tid), []
+    prefs = harness_preference.settings(state.pinned_config(run))
     for row in rows:
         audit = loads(row["disclosure_json"], {})
         audits.append({**{k: v for k, v in row.items() if k != "disclosure_json"}, "disclosure": audit})
@@ -305,7 +312,12 @@ def _route_task(con, run, tid) -> Result:
             lines.append(f"planner reason: {planner['why']}")
         if planner.get("planner_error"):
             lines.append(f"planner route ignored: {planner['planner_error']}")
+        if planner.get("planner_notice"):
+            lines.append(planner["planner_notice"])
         lines += _matrix(a["disclosure"])
+    if prefs:
+        lines += _preference_lines(prefs, next((p for a in reversed(audits)
+                                                if (p := a["disclosure"].get("harness_preference"))), None))
     for a in (x for x in audits if x["phase"] != "plan"):
         d = a["disclosure"].get("dispatch") or {}
         taken = "; ".join(f"{t['route']}: {t['reason']}" for t in d.get("fallbacks_taken") or [])
@@ -334,6 +346,17 @@ def _route_task(con, run, tid) -> Result:
     if trials or attempts:
         data.update(trials=trials, attempts=attempts)
     return Result(lines=lines, data=data)
+
+
+def _preference_lines(prefs: dict, pick: dict | None) -> list[str]:
+    """The run's pinned harness weights and, for the latest recorded decision, which harness they picked and why."""
+    lines = ["harness preference (pinned): " + "; ".join(
+        f"{scope} " + ", ".join(f"{h}={w:g}" for h, w in weights.items()) for scope, weights in prefs.items())]
+    if pick:
+        lines.append(f"  pick {pick['pick']} for {pick['model']}@{pick['effort']} via {pick['scope']}: {pick['why']}")
+    else:
+        lines.append("  no weights applied to the lead route's model; the ranked order stands")
+    return lines
 
 
 def _effective_route_lines(con, run, tid) -> list[str]:

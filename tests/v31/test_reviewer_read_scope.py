@@ -127,40 +127,54 @@ def test_doctor_reports_rules_present_and_missing(scope):
     assert f"reviewer read rules {total}/{total}" in out and "ok" in out, out
 
 
-def _reviewer_argv(adapters, adapter_id, kind, env, **kw):
+RUN = "r1233abc-0000"
+
+
+def _reply(env):
+    """A reply file where Office puts one: under the run's own state dir."""
+    out = env.state / "runs" / RUN / "dispatches" / "D1" / "reply.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _reviewer_argv(adapters, adapter_id, kind, env, out=None, **kw):
     adapter = adapters.load_all()[adapter_id]
-    out = env.tmp / "dispatch" / "reply.txt"
-    return adapters.build_argv(adapter, kind, model="m", effort="high", cwd=env.repo, output=out,
+    out = out or env.tmp / "dispatch" / "reply.txt"
+    # A route-scoped profile (H4, #1178: agy reviews only as Hydrogen@high) renders only for its own route.
+    model, effort = (adapters.profile(adapter, kind).get("routes") or ["m@high"])[0].split("@")
+    return adapters.build_argv(adapter, kind, model=model, effort=effort, cwd=env.repo, output=out,
                                include_dirs=[env.repo], **kw)[0]
 
 
-@pytest.mark.parametrize("adapter_id,flag", [("claude", "--add-dir"), ("gemini", "--include-directories")])
+@pytest.mark.parametrize("adapter_id,flag", [("claude", "--add-dir"), ("agy", "--add-dir")])
 @pytest.mark.parametrize("kind", ["reviewer", "vision"])
 def test_reviewer_argv_includes_read_roots(scope, adapter_id, flag, kind):
     env, adapters, read_scope = scope
     if kind not in (adapters.load_all()[adapter_id].get("office_profiles") or {}):
         pytest.skip(f"{adapter_id} has no {kind} profile")
-    argv = _reviewer_argv(adapters, adapter_id, kind, env)
+    argv = _reviewer_argv(adapters, adapter_id, kind, env, out=_reply(env))
     granted = [argv[i + 1] for i, a in enumerate(argv) if a == flag]
     assert str(env.repo) in granted
-    for d in read_scope.add_dirs():
+    for d in read_scope.add_dirs(_reply(env)):
         assert str(d) in granted, (d, argv)
-    assert str(env.state) in granted and str(env.home / ".claude" / "rules") in granted
+    # #1239: the run's own state dir, never the whole Office state or data home (Claude Code asks to trust each).
+    assert str(env.state / "runs" / RUN) in granted and str(env.home / ".claude" / "rules") in granted
+    assert str(env.state) not in granted and str(env.data) not in granted
 
 
 def test_agy_vision_argv_includes_read_roots(scope):
     env, adapters, read_scope = scope
-    argv = _reviewer_argv(adapters, "agy", "vision", env)
+    argv = _reviewer_argv(adapters, "agy", "vision", env, out=_reply(env))
     granted = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
-    assert [str(d) for d in read_scope.add_dirs()] == [g for g in granted if g != str(env.repo)]
+    assert [str(d) for d in read_scope.add_dirs(_reply(env))] == [g for g in granted if g != str(env.repo)]
 
 
 def test_interactive_reviewer_argv_includes_read_roots(scope):
     env, adapters, read_scope = scope
     adapter = adapters.load_all()["claude"]
     args, _ = adapters.interactive_argv(adapter, "reviewer", model="m", effort="high", cwd=env.repo,
-                                        include_dirs=[env.repo], output=env.tmp / "d" / "reply.txt")
-    assert str(env.state) in args and str(env.tmp / "d") in args
+                                        include_dirs=[env.repo], output=_reply(env))
+    assert str(env.state / "runs" / RUN) in args and str(env.state) not in args
 
 
 def test_read_roots_skip_missing_directories(scope):
@@ -171,7 +185,7 @@ def test_read_roots_skip_missing_directories(scope):
     assert f"Read({env.home}/.claude/skills/**)" in read_scope.allow_rules()
 
 
-@pytest.mark.parametrize("adapter_id", ["claude", "codex", "gemini", "agy", "hermes"])
+@pytest.mark.parametrize("adapter_id", ["claude", "codex", "agy", "hermes"])
 def test_worker_argv_is_unchanged(scope, adapter_id):
     env, adapters, read_scope = scope
     adapter = adapters.load_all()[adapter_id]
@@ -211,7 +225,9 @@ def test_claude_reviewer_cannot_edit_the_checkout_or_office_data(scope):
     out = env.tmp / "dispatch" / "reply.txt"
     argv = _reviewer_argv(adapters, "claude", "reviewer", env)
     denied = argv[argv.index("--disallowedTools") + 1].split(",")
-    assert {"Edit", "Bash", "NotebookEdit"} <= set(denied)
+    # #1030/#1186: no blanket Bash deny (it would override the submit allow); which commands are denied
+    # depends on the sandbox posture, pinned in test_issue_1030_submit_grant and test_issue_1186_reviewer_shell.
+    assert {"Edit", "NotebookEdit"} <= set(denied) and "Bash" not in denied
     # `Edit(path)` denies also block the Write tool; the reply file stays writable.
     assert f"Edit(/{env.repo}/**)" in denied and f"Edit(/{env.data}/**)" in denied
     assert f"Edit(/{env.state}/worktrees/**)" in denied
@@ -326,3 +342,10 @@ def test_claude_worker_is_not_restricted(scope):
     env, adapters, _ = scope
     argv, _ = adapters.build_argv(adapters.load_all()["claude"], "worker", model="m", effort="high", cwd=env.repo)
     assert "--restricted" not in argv
+
+
+def test_a_reply_outside_the_runs_dir_adds_no_office_state(scope):
+    env, _, read_scope = scope
+    assert read_scope.run_state_dir(env.tmp / "elsewhere" / "reply.txt") is None
+    assert read_scope.run_state_dir(None) is None
+    assert all(env.state not in (d, *d.parents) for d in read_scope.add_dirs(env.tmp / "elsewhere" / "reply.txt"))

@@ -761,8 +761,8 @@ RULES = ("OFFICE_SELF_REVIEW.md", "severity as found", "do not trigger a re-revi
 
 def _brief(tier: str) -> str:
     from office import briefs
-    gear, risk = {"inline": ("direct", '{"blast_radius": "local"}'), "single": ("quick", '{"blast_radius": "local"}'),
-                  "deep": ("full", '{"blast_radius": "production"}')}[tier]
+    gear, risk = {"inline": ("XS", '{"blast_radius": "local"}'), "single": ("M", '{"blast_radius": "local"}'),
+                  "deep": ("L", '{"blast_radius": "production"}')}[tier]
     packet = {"task_id": "T1", "title": "x", "scope": ["a.py"], "plan_version": 1, "requirements_version": 1,
               "base_commit": "abc123"}
     return briefs.executor_brief(None, {"gear": gear, "risk_json": risk}, packet)
@@ -796,7 +796,7 @@ def test_fix_round_brief_carries_the_same_ledger_block():
                     return []
             return _R()
 
-    brief = briefs.executor_brief(_Con(), {"id": "r", "gear": "full", "risk_json": None}, packet)
+    brief = briefs.executor_brief(_Con(), {"id": "r", "gear": "L", "risk_json": None}, packet)
     assert "FIX ROUND for revision R1" in brief
     for rule in RULES:
         assert rule in brief, rule
@@ -836,6 +836,7 @@ def _dispatch(env, plan=None):
     return wenv, wt, d
 
 
+@pytest.mark.review_contract("v3.1")
 @pytest.mark.integration
 def test_preflight_walks_missing_stale_open_then_ready_and_submit_consumes_the_ledger(env):
     from conftest import PLAN_ONE
@@ -1080,3 +1081,15 @@ def test_issue_576_archive_rejects_preexisting_symlink(repo, tmp_path, monkeypat
         submit._stage_self_review({}, {"id": "D1"}, "R1", wt, receipt, staged)
     assert not staged
     assert dest.is_symlink() and target.read_text() == "do not change"
+
+
+def test_a_stale_ledger_message_never_prints_two_identical_shas(tmp_path):
+    """#806: the stale-ledger line named the same 12-hex value for COMMIT and HEAD."""
+    from office import preflight
+    head = "abcdef012345" + "1" * 28
+    near = "abcdef012345" + "2" * 28
+    _, fix = preflight.check_ledger(ledger_text(near), head, [], ["calc.py"], tmp_path)
+    (line,) = [f for f in fix if "review is stale" in f]
+    assert near in line and head in line, line
+    _, fix = preflight.check_ledger(ledger_text(head), head + "\n", [], ["calc.py"], tmp_path)
+    assert not [f for f in fix if "review is stale" in f], fix

@@ -88,7 +88,7 @@ def test_authority_terms_still_match_standalone_actions(text):
     assert AUTHORITY_TERMS.search(text) is not None, text
 
 
-_ACTIONS = ["deploy", "publish", "release", "email", "delete", "charge", "payment", "credentials"]
+_ACTIONS = ["deploy", "publish", "release", "delete", "charge", "payment", "credentials"]  # email: outbound only (#543)
 _names = st.text(alphabet="abcdefghijklmnop", min_size=1, max_size=8)
 
 
@@ -103,6 +103,34 @@ def test_an_action_word_inside_a_compound_identifier_names_a_thing_not_an_action
 def test_the_same_action_word_standing_alone_is_an_authority_term(action, before, after):
     from office.amend import AUTHORITY_TERMS
     assert AUTHORITY_TERMS.search(f"{before} {action} {after}") is not None
+
+
+@pytest.mark.parametrize("text", [
+    "the email field rejects an invalid address", "validate the Email input", "show EmailRequired when empty",
+    "the user's email is stored lowercase", "an email address with a plus sign is valid", "the form's email field",
+    "keep production code untouched", "no production behaviour changes",
+])
+def test_naming_an_email_field_or_production_is_not_an_authority_action(text):
+    """#543: describing data or code is not emailing anyone or touching production."""
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is None, text
+
+
+@pytest.mark.parametrize("text", [
+    "email the users their receipts", "email all members", "send email to the team", "bulk email the list",
+    "a mass email to donors", "emails to customers go out at 9", "email out the invitations", "run the email campaign",
+    "email everyone the link", "send an email to attendees", "emailing all customers", "emailed the subscribers",
+    "then emails the team", "emailing out the receipts",
+])
+def test_outbound_email_phrasing_is_still_an_authority_action(text):
+    from office.amend import AUTHORITY_TERMS
+    assert AUTHORITY_TERMS.search(text) is not None, text
+
+
+def test_an_email_field_acceptance_edit_is_an_ordinary_amendment(env):
+    _running(env)
+    code, out = env.office("amend", "plan", "--", "the email field rejects an invalid address", env=EXTERNAL)
+    assert code == 0 and "contract-level-change" not in out, out
 
 
 def test_a_delta_naming_a_compound_identifier_is_an_ordinary_amendment(env):

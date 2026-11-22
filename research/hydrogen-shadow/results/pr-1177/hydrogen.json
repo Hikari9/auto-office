@@ -1,0 +1,14 @@
+{
+  "case": "pr-1177",
+  "commit": "0cd6ac46132e02c48bc71f37e9b8e8af5d91cb54",
+  "exit": 0,
+  "findings": [],
+  "raw_reply": "{\"verdict\": \"APPROVED\", \"findings\": []}\n",
+  "reviewer": "hydrogen",
+  "route": "agy/gemini-4-hydrogen@high",
+  "source": "pr",
+  "status": "ok",
+  "stderr_tail": "",
+  "verdict": "APPROVED",
+  "wall_seconds": 41.8
+}

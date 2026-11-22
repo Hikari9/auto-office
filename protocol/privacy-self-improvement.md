@@ -10,6 +10,6 @@ evidence confidence. Search open and closed issues first and reuse a match. Issu
 `Hikari9/auto-office` is the sole permitted remote write. Weak suspicions stay private. A failure to file
 never blocks the primary run.
 
-Legacy 3.0 dream/pattern and catalog proposal workflows (`scripts/office_propose.py`,
+Legacy 3.0 dream/pattern and catalog proposal workflows (the removed `office_propose.py`,
 `references/self-improvement-graduation-bar.md`, `docs/v3-self-improvement-evidence.md`) are historical evidence,
 NOT instructions for current runs or for this skill. They must never run from `auto-self-improve`.

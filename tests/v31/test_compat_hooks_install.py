@@ -17,36 +17,6 @@ def _db_fingerprint(env):
             for t in ("runs", "tasks", "plans", "requirements", "outbox")]
 
 
-def test_raw_on_a_31_run_warns_records_and_writes_nothing(env):
-    start_inline(env)
-    con = env.con()
-    run = dict(con.execute("SELECT id, state_dir FROM runs").fetchone())
-    before = _db_fingerprint(env)
-    code, out = env.office("raw", "increment-plan", "--state-dir", run["state_dir"])
-    assert code == 4 and "deprecated" in out and "office amend plan" in out, out
-    code, out = env.office("raw", "state-load", "--state-dir", run["state_dir"])
-    assert code == 0 and '"_authority": "runs.db"' in out
-    assert _db_fingerprint(env) == before
-    outcomes = [r[0] for r in con.execute("SELECT outcome FROM compat_calls ORDER BY at")]
-    assert outcomes == ["refused-3.1-run", "answered-from-canonical"], outcomes
-
-
-def test_legacy_helper_cannot_write_a_31_run(env):
-    start_inline(env)
-    con = env.con()
-    run = dict(con.execute("SELECT id, state_dir FROM runs").fetchone())
-    before = _db_fingerprint(env)
-    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "office_runtime.py"), "increment-plan", "--state-dir",
-                           run["state_dir"]], capture_output=True, text=True, env={**os.environ})
-    # A 3.1 run dir holds only a read-only view; the helper refuses either way.
-    assert proc.returncode != 0, proc.stdout
-    assert _db_fingerprint(env) == before
-    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "office_runtime.py"), "start", "--goal", "x", "--playbook",
-                           "Change"], capture_output=True, text=True, cwd=env.repo, env={**os.environ})
-    assert proc.returncode == 5 and "new_runs_use_office" in proc.stdout
-    assert con.execute("SELECT outcome FROM compat_calls ORDER BY at DESC").fetchone()[0] == "refused-new-run"
-
-
 def test_hook_fast_path_is_quiet_and_fast_when_no_runs(env):
     payload = json.dumps({"session_id": "s", "cwd": str(env.repo), "source": "startup"})
     t = time.time()
@@ -107,7 +77,7 @@ def test_install_is_idempotent_backs_up_and_uninstall_removes_only_managed(env, 
     assert "already current" in out
     assert json.loads(settings.read_text()) == data
     code, out = env.office("doctor")
-    assert "claude: 3 office hook(s)" in out, out
+    assert "claude: 4 office hook(s)" in out, out
     code, out = env.office("uninstall")
     data = json.loads(settings.read_text())
     assert data["hooks"]["SessionStart"] == [user_hook]
@@ -117,7 +87,7 @@ def test_dedicated_planner_flow_needs_no_orchestrator_plumbing(env):
     env.trust()
     env.script(planner=[{"plan": PLAN_ONE, "submit": True}], plan_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    code, out = env.office("start", "add numbers", "--gear", "full")
+    code, out = env.office("start", "add numbers", "--gear", "L", "--planner", "dedicated")
     assert code == 0 and "planner P1 queued" in out, out
     code, data = env.ojson("status")
     assert data["data"]["plan_version"] == 1 and data["data"]["plan_review"]["ended"] is True, data

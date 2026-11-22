@@ -379,6 +379,9 @@ python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
     env.git("commit", "-qm", "fixture: actual scoped validation")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
     plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    # The scoped-gate digests are monkeypatched in this process, so the executor's submit must run in it too: agy
+    # executors run as a real process the patch cannot reach.
+    env.hide_agy = True
     approved_run(env, plan=plan,
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
                                               "T2": {"mul.py": GOOD_MUL}}, "submit": True}],
@@ -448,9 +451,8 @@ def pytest_collection_modifyitems(config, items):
     })
     # Keep the gate's surrounding ecosystem checks lightweight in this fixture.
     (scripts / "check_ecosystem.py").write_text("print('fixture ecosystem')\n")
-    (scripts / "office_runtime.py").write_text("print('fixture adapter')\n")
     (env.repo / "adapters/seed").mkdir(parents=True)
-    (env.repo / "adapters/seed/fixture.yaml").write_text("id: fixture\n")
+    shutil.copy2(source / "adapters/seed/agy.yaml", env.repo / "adapters/seed/fixture.yaml")  # a real, valid adapter file
     shutil.copy2(source / "pyproject.toml", env.repo / "pyproject.toml")
     fixture_venv = env.tmp / "gate-venv"
     fixture_venv.mkdir()
@@ -465,6 +467,9 @@ def pytest_collection_modifyitems(config, items):
     env.git("update-ref", "refs/remotes/origin/main", "HEAD")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: scripts/validate.sh --pr\n")
     plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
+    # The scoped-gate digests are monkeypatched in this process, so the executor's submit must run in it too: agy
+    # executors run as a real process the patch cannot reach.
+    env.hide_agy = True
     approved_run(env, plan=plan,
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD},
                                               "T2": {"mul.py": GOOD_MUL}}, "submit": True}],

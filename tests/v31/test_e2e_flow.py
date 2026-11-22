@@ -39,7 +39,7 @@ def test_code_review_failure_then_fix(env):
     approved_run(env, executor=[{"write": {"calc.py": BAD_ADD}, "submit": True},
                            {"write": {"calc.py": GOOD_ADD}, "submit": True}],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
-    code, out = env.office("dispatch", "T1")
+    code, out = env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium")  # the next step offers resume only on a claude session
     assert code == 0, out
     code, data = env.ojson("status")
     # The first submission failed its deterministic check. Findings wait for the

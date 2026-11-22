@@ -95,7 +95,15 @@ claude plugin install auto-office@auto-office
 codex plugin marketplace add Hikari9/auto-office
 ```
 
-Then enable `auto-office` from the Codex plugin directory. Claude reads `.claude-plugin/marketplace.json`; Codex reads `.agents/plugins/marketplace.json` and the root `plugin.json`. The release version lives only in `src/office/_version.py`; `pyproject.toml` reads it and the plugin manifests carry no version. `scripts/check_ecosystem.py` enforces it.
+Both marketplaces install the generated `./plugin-dist` package, which exposes **exactly 16 skills**, including the full root `auto-office`. Verified against Claude Code 2.1.316 and codex-cli 0.163.0: a plugin skill is invoked only by its namespaced name, so the root skill is `/auto-office:auto-office` in Claude Code. A bare `/auto-office` is not available from a plugin (a same-named `commands/` entry or a plugin-root `SKILL.md` was tried and does not add it), and the plugin does not claim it. The skill documentation in the `/auto-office` form applies to a standalone skill install. The skill is discoverable before the `office` CLI is installed.
+
+`disable-model-invocation: true` (Claude Code) keeps the full hub, Lean, Intake and Takeover manual-only. `/auto-review` sets it too: it stays explicitly invocable, and model auto-invocation is disabled. Codex may not honor this flag; that is untested.
+
+Without the CLI, the root skill asks once whether to install it or use Lean. It hands off to Lean only on the user's choice, and saves that choice until reset.
+
+The repo-root `SKILL.md` and `skills/` are canonical. `python3 scripts/build_plugin_distribution.py --sync` regenerates `plugin-dist/`, the marketplace source; `--check` and `scripts/check_ecosystem.py` fail when it drifts. Eight retired skills keep their source paths for pinned runs but are not in the plugin.
+
+Verify after install: `claude plugin details auto-office@auto-office` lists 16 skills including `auto-office`. Plugin installation does not install the `office` CLI; run `office doctor` separately.
 
 ### 1. Install the CLI
 
@@ -104,6 +112,8 @@ Install from this repository. The `auto-office` name on PyPI is a different proj
 ```bash
 uv tool install git+https://github.com/Hikari9/auto-office
 ```
+
+Auto Office is not on PyPI: the `auto-office` name there belongs to an unrelated project, so never `uv tool install auto-office` or `pip install auto-office`.
 
 For browser capture and visual gates:
 
@@ -126,12 +136,11 @@ office install
 office doctor
 ```
 
-`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The `/auto-office` skill installs with `--no-hooks` and offers the current harness's integration during first-run onboarding.
+`office install` is idempotent. It registers the current runtime and installs the harness integrations that Auto Office can verify safely. Existing config is backed up before Office-managed entries are changed. `office install --only <harness>` limits it to one harness, `--item <id>` (repeatable: `session.start`, `prompt.submit`, `tool.pre`, `read-rules`) to the integration items you accept, and `--no-hooks` registers the runtime without writing any harness config. The separately installed `/auto-office` skill offers `office install --no-hooks` during its explicit first-run onboarding. `office install` registers the CLI runtime and optional harness hooks, **not plugin skills**.
 
 | Agent / harness | After `office install` |
 |---|---|
 | **Claude Code** | Installs managed `SessionStart`, `UserPromptSubmit`, and write-guard `PreToolUse` hooks in `~/.claude/settings.json`. |
-| **Gemini CLI** | Installs managed `SessionStart`, `BeforeAgent`, and write-guard `BeforeTool` hooks in `~/.gemini/settings.json`. |
 | **Codex** | No config is written; explicit `office` commands are the contract. |
 | **agy / Antigravity** | No session-start hook is available; the agent uses explicit `office` commands/status. |
 | **Hermes** | No automatic hook installation; use explicit `office` commands. |
@@ -157,7 +166,7 @@ codex	skills/codex-cli/SKILL.md	models/codex.json
 agy	skills/agy-cli/SKILL.md	models/agy.json
 ```
 
-The shipped template also includes `pi`, `hermes`, `kilo`, `opencode` and `gemini`.
+The shipped template also includes `pi`, `hermes`, `kilo` and `opencode`. The Gemini CLI harness was removed (Google retired it; agy replaces it, #1028).
 A `skills/...` path resolves against the packaged/source Office resources, while
 `models/...` resolves against the TSV's directory (normally `~/.config/auto-office`).
 Absolute and `~/...` paths are supported for user-managed files. `office harness
@@ -177,7 +186,7 @@ checks remain authoritative. See `skills/auto-adapter/SKILL.md` for registration
 
 `office doctor` verifies the installed runtime, hook state, pinned runtimes, visual prerequisites, and known harness defects. If it reports `install: STALE`, reinstall the checkout rather than trusting the version string alone. `office doctor --fix` repairs Office-managed integration drift while preserving and backing up unrelated configuration.
 
-`office update --check` checks PyPI and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from PyPI, then refreshes the runtime registration and runs `office doctor`.
+`office update --check` checks the release on GitHub `main` and, for source installs, compares the checkout with its tracked upstream without installing updates. `office update` pulls a clean Auto Office source checkout and reinstalls it, or upgrades the `auto-office` tool when installed from GitHub, then refreshes the runtime registration and runs `office doctor`.
 
 > **For coding agents:** do not silently install or rewrite global harness configuration. If `office` is missing, ask the human before running `uv tool install ...` or `office install`; once installed, use the CLI contract below.
 
@@ -358,7 +367,7 @@ flowchart TB
 
 The runtime then evaluates the current revision through the gates funded by the run:
 
-- deterministic task checks (the executor has already self-reviewed on four lenses, capped at 3 rounds);
+- deterministic task checks (the executor has already self-reviewed: one focused round for a new run, four lenses and 3 rounds for a run pinned to v3.1; Office has also proved each named fix test by reverting source);
 - dependency/current-amendment checks;
 - once every task of its lane is accepted, one independent convergence review of the composed lane, plus visual capture + visual review when the acceptance contract is user-visible;
 - later, run-level integration checks.
@@ -727,9 +736,11 @@ office submit                         planner/executor: submit a plan or work
 office revoke <task|dispatch|integration|<scope>:convergence|visual>   end a task's session, or cancel a running lane review
 office rerun <task> --resume|--fresh [--as <harness>/<model>[@effort]] [--review-as <route>]   run a routed repair on a named route
 office amend <scope> -- "<delta>"     ordinary, --contract, or requirements amendment
+office amend options --prs|--no-prs --quote "<user approval>" --confirm   amend live task PR publishing
 office amend <T> --add-check|--add-accept|--set ...   edit the task contract (enforced, audited)
 office ack <amendment-id>             worker: confirm delivered amendment is applied
 office land                           compose/verify and follow the run's landing policy
+office land --batch batch.json          ordered run/PR lanes, one version owner, one full suite before any merge
 office close                          finish after acceptance + landing/handoff
 
 office inspect run|plan|task|gate|evidence|events|route|convergence [id]
@@ -737,7 +748,9 @@ office approve plan|merge|trust|waive|visual ... --quote "<user words>"
 office decide <scope> escalate|continue|waive|stop|review --quote "<user words>"
 office review plan --quote "<user words>" [--rounds N]   the user's request for another plan review
 office disposition <scope>:<code> fix|fixed|dismissed|follow-up -- "<note>"   dismissed of a blocking finding: --quote "<user words>"
-office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles and routing from config
+office config --run <id> --apply-routing --quote "<user words>"   re-pin a run's roles, routing and quota from config
+office config --run <id> --apply-verification --quote "<user words>"   re-pin a run's check timeouts and check concurrency
+office config --run <id> <key> [--show-origin]   the value a run pinned at start (what its gates use)
 office review <scope>:convergence|visual --report <file>   degraded fallback review
 office benchmarks brief|submit ...
 office list
@@ -745,6 +758,16 @@ office doctor [--fix]
 office prune [-f]
 office cleanup --older|--run <id> [--apply|--decline]
 ```
+
+The `--no-prs` choice at `office start` is no longer permanent. If write access arrives while
+an Office run is in progress, the user can explicitly authorize
+`office amend options --prs --quote "<user's exact approval>" --confirm` (omit `--confirm` on an interactive
+terminal to accept the `y/N` prompt). Office records the old/new settings and authorization in `runs.db`
+(`office inspect events` / `office inspect run`), and queues PR synchronization for work already submitted.
+To switch **off**, use `office amend options --no-prs` with the same confirmation: Office refuses if an
+executor is still working with PR instructions or any PR/PR-sync operation already exists. Other start-only
+options remain frozen; a refused amendment explains why without changing the run. GitHub availability is
+checked before enabling, but a later push can still fail if repository write permissions are missing.
 
 Use `--verbose` or `--json` for machine/debug detail. Normal output stays short on purpose.
 
@@ -822,10 +845,11 @@ The README is the developer entrypoint; the detailed contracts live here:
 - [`docs/v31-rolling-review-gates.md`](docs/v31-rolling-review-gates.md) — review and amendment semantics of runs pinned to the `v3.1` review contract.
 - [`references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md`](references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md) — lifecycle rationale and invariants.
 - [`references/OFFICE-SKILLS-V3-SPEC.md`](references/OFFICE-SKILLS-V3-SPEC.md) — routing policy and role contracts.
+- [`docs/board-card.md`](docs/board-card.md) — the run on a display-only herdr-projects board card: key, states, routes, reviews.
 - [`CONTEXT.md`](CONTEXT.md) — project terminology and design context.
 
 ## Migrating from 3.0
 
-Runs started by 3.0 stay on 3.0. `office list` marks them as legacy and `office resume <id>` routes them through the exact retained runtime. The `scripts/` helper surface remains available through `office raw <subcommand>` with deprecation tracking; it cannot write a 3.1+ run.
+The 3.0 runtime and `office raw` were removed with the 3.0 runtime. The old gear presets (`direct` to `full`) were removed with it: a run pinned to one fails with `gear-removed`, so start a new run with `--gear XS|S|M|L|XL`.
 
 New runs use the installed current runtime by default. A configured rollback changes **future** runs; it does not rewrite runs that already exist.

@@ -174,6 +174,36 @@ def test_a_dependant_is_reopened_but_not_launched_before_its_dependency_is_accep
     assert _rows(env, "SELECT status FROM deliveries WHERE task_id='T2'"), "the delta waits for its next session"
 
 
+def test_a_dependant_is_told_whose_contract_changed_not_to_apply_it(both_accepted):
+    """#960: the ripple delivery names the task whose contract changed and says it is not the dependant's."""
+    env = both_accepted
+    code, out = _amend(env, "--contract", "--set", "interfaces=calc.add", delta="T1 now exports calc.add")
+    assert code == 0, out
+    (content,) = [r["content"] for r in _rows(env, "SELECT content FROM deliveries WHERE task_id='T2'")]
+    assert "T1 changed its contract, not yours" in content, content
+    assert "a task you build on changed its contract" not in content
+    (own,) = [r["content"] for r in _rows(env, "SELECT content FROM deliveries WHERE task_id='T1'")]
+    assert "not yours" not in own, own
+
+
+def test_a_live_dependant_is_prompted_with_whose_contract_changed(both_accepted, monkeypatch):
+    from office import amend, db, gates, state
+    env = both_accepted
+    monkeypatch.setattr(gates, "worker_live", lambda con, did: True)
+    con = env.con()
+    try:
+        run = state.get_run(con, _rows(env, "SELECT id FROM runs")[0]["id"])
+        with db.transaction(con):
+            amend._deliver(con, run, "A9", ["T2"], "delta (note)", run["plan_version"] + 1, hold=["T2"], owners=["T1"])
+            amend._deliver(con, run, "A9", ["T1"], "delta", run["plan_version"] + 1)
+        texts = {json.loads(r["payload_json"])["task_id"]: json.loads(r["payload_json"])["text"] for r in
+                 con.execute("SELECT payload_json FROM outbox WHERE kind='notify_worker'")}
+    finally:
+        con.close()
+    assert texts["T2"].startswith("AMENDMENT A9 changed the contract of T1, not yours"), texts
+    assert texts["T1"].startswith("AMENDMENT A9: run office status, apply it"), texts
+
+
 def test_ripple_finds_dependants_through_an_edge_the_edit_removed(both_accepted):
     from office import amend, db, state
     env = both_accepted

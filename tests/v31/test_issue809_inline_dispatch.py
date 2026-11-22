@@ -107,7 +107,7 @@ def test_the_missing_estimate_reason_names_the_gear():
 def test_execution_gear_acts_only_on_a_run_pinned_to_the_xs_xl_model():
     assert task_sizing.execution_gear({"gear": "S", "gates": {"gear_model_version": "run-gear-1"}}) == "S"
     for run in ({"gear": "S", "gates": {}}, {"gear": "M", "gates": {"gear_model_version": "legacy-pinned"}},
-                {"gear": "express", "gates": {"gear_model_version": "legacy-pinned"}}, {"gear": "M"}):
+                {"gear": "M"}):
         assert task_sizing.execution_gear(run) is None
 
 
@@ -123,8 +123,8 @@ def test_m_is_inline_only_for_a_single_task_run_and_an_estimate_is_not_enough():
     assert task_sizing.execution_mode("M", _desc("M", inline_advantage=EST), LOW, task_count=2)["mode"] == "delegated"
 
 
-@pytest.mark.parametrize("gear", ["L", "XL", "express", None])
-def test_l_xl_and_legacy_gears_never_run_inline(gear):
+@pytest.mark.parametrize("gear", ["L", "XL", None])
+def test_l_xl_and_unset_gears_never_run_inline(gear):
     assert task_sizing.execution_mode(gear, _desc("XS", inline_advantage=EST), LOW, task_count=1)["mode"] == "delegated"
 
 
@@ -162,7 +162,8 @@ def _xs_plan():
 def _m_plan(estimate=EST):
     return PLAN_ONE.replace("visual: none", "visual: none\ntask_size: M\n"
                             "task_size_rationale: bounded one-task implementation with no shared interfaces\n"
-                            f"inline_advantage: {estimate}\n", 1)
+                            f"inline_advantage: {estimate}\n"
+                            "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n", 1)
 
 
 def _row(env, tid="T1"):
@@ -222,7 +223,8 @@ def test_the_diagram_shows_owner_reason_and_outcome(env):
 
 def test_an_s_run_with_a_measured_estimate_dispatches_inline_and_shows_the_savings(env):
     body = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S\ntask_size_rationale: one bounded file, no interfaces\n"
-                            f"inline_advantage: {EST}\n", 1)
+                            f"inline_advantage: {EST}\n"
+                            "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n", 1)
     _approved(env, body, "S")
     code, out = env.office("dispatch", "T1")
     assert code == 0 and "EXECUTION T1: inline" in out and "estimated savings 8 minutes" in out, out
@@ -303,26 +305,30 @@ def test_a_relaunch_of_a_delegated_m_task_never_becomes_inline(env):
     assert _mode(env)["mode"] == "delegated"
 
 
-def test_a_multi_task_s_run_dispatches_inline_on_a_measured_estimate_and_delegates_without_one(env):
+def test_a_multi_task_s_run_with_parallel_tasks_delegates_even_with_a_measured_estimate(env):
+    """#1297: a new run decides through fastlane, whose time check fails when Office executors could run two
+    tasks side by side; a measured cost estimate alone no longer leads a parallel task inline."""
     with_estimate = PLAN_TWO.replace("visual: none\n\n### T2", f"visual: none\ntask_size: S\n"
                                      "task_size_rationale: one bounded function in one file\n"
-                                     f"inline_advantage: {EST}\n\n### T2", 1)
+                                     f"inline_advantage: {EST}\n"
+                                     "inline_quality: claude/claude-opus-5-5@high: the orchestrator model meets this task size executor floor\n\n### T2", 1)
     with_estimate = with_estimate.replace("visual: none\n", "visual: none\ntask_size: S\n"
                                           "task_size_rationale: one bounded function in one file\n", 3)
     _approved(env, with_estimate, "S")
     env.office("dispatch", "T1", check=0)
-    assert _mode(env)["mode"] == "inline" and _mode(env)["estimated_savings"]["savings"] == 8
+    mode = _mode(env)
+    assert mode["mode"] == "delegated" and "time" in mode["why"] and mode["fastlane_checks"]["time"] is False, mode
     env.office("dispatch", "T2", check=0)
     con = env.con()
     rows = {r["id"]: json.loads(r["route_json"])["execution_mode"]["mode"]
             for r in con.execute("SELECT id, route_json FROM tasks")}
-    assert rows == {"T1": "inline", "T2": "delegated"}, rows
+    assert rows == {"T1": "delegated", "T2": "delegated"}, rows
 
 
 def test_m_with_two_tasks_is_delegated(env):
     _approved(env, PLAN_TWO, "M")
     env.office("dispatch", "T1", check=0)
-    assert _mode(env)["mode"] == "delegated" and "single-task" in _mode(env)["why"]
+    assert _mode(env)["mode"] == "delegated" and "not sure" in _mode(env)["why"]  # #1297: fastlane's three checks fail
 
 
 def test_an_explicit_launch_override_beats_inline(env):
@@ -348,7 +354,8 @@ def test_an_inline_task_keeps_checks_self_review_convergence_and_the_lease(env):
                                                   "OFFICE_DISPATCH_ID": d["id"]})
     assert code == 0, out
     roles = _roles(env)
-    assert roles.count("code_reviewer") == 1, "the M gear's self-review subagent runs for an inline task too"
+    # #1233: an M run funds no Office per-task audit; the executor's in-session self-review is its per-task check.
+    assert roles.count("code_reviewer") == 0, "an M run launches no separate per-task audit, inline or not"
     assert roles.count("convergence_reviewer") == 1 and "executor" not in roles
     (conv,) = _gates(env, "convergence_review")
     assert conv["verdict"] == "APPROVED"
@@ -380,3 +387,93 @@ def test_a_relaunch_of_an_inline_task_stays_inline_with_its_reason(env):
     assert code == 0 and "orchestrator-inline lease/worktree prepared" in out, out
     after = _mode(env)
     assert after["mode"] == "inline" and after["why"] == before["why"] and after["owner"] == "orchestrator"
+
+
+# ------------------------------------------------------------------ #1318: a RECHECK after acceptance
+
+RECHECK = "VERDICT: RECHECK\nFINDING P1 | high | blocking | T1 | add has no contract | add one\nNEXT fix it"
+
+
+def _inline_submit(env, d, text):
+    wt = d["worktree"]
+    (Path(wt) / "calc.py").write_text(text)
+    subprocess.run(["git", "-C", wt, "add", "calc.py"], check=True)
+    subprocess.run(["git", "-C", wt, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "work"], check=True)
+    write_clean_ledger(wt)
+    return env.office("submit", cwd=wt, env={"OFFICE_RUN_ID": d["run_id"], "OFFICE_TASK_ID": "T1",
+                                             "OFFICE_DISPATCH_ID": d["id"]})
+
+
+def _inline_rechecked(env):
+    """An inline T1 accepted on its own checks, then reopened by a convergence RECHECK, its session still live."""
+    env.script(convergence_reviewer=[{"reply": RECHECK}, {"reply": APPROVED}], code_reviewer=[{"reply": APPROVED}])
+    _approved(env, _m_plan(), "M")
+    env.office("dispatch", "T1", check=0)
+    d = _q(env, "SELECT * FROM dispatches WHERE role='executor'")[0]
+    code, out = _inline_submit(env, d, GOOD_ADD)
+    assert code == 0, out
+    (conv,) = _gates(env, "convergence_review")
+    assert conv["verdict"] == "RECHECK", conv
+    assert _row(env)["status"] == "changes_required"
+    return d
+
+
+def test_a_recheck_after_acceptance_re_lets_the_live_inline_session_so_its_fix_submits(env):
+    d = _inline_rechecked(env)
+    live = _q(env, "SELECT l.* FROM leases l JOIN dispatches d ON d.lease_id=l.id WHERE d.id=?", (d["id"],))[0]
+    assert live["released_at"] is None and live["revoked_at"] is None, "the repair holder has a live lease"
+    code, out = _inline_submit(env, d, GOOD_ADD + "\n# contract: add(a, b) returns a + b\n")
+    assert code == 0 and "lease-lost" not in out, out
+    assert _row(env)["status"] == "accepted"
+    assert [g["verdict"] for g in _gates(env, "convergence_review")] == ["RECHECK", "APPROVED"]
+
+
+def test_a_recheck_that_cannot_re_let_the_lease_queues_findings_instead_of_prompting_a_fenced_session(env, monkeypatch):
+    from office import dispatch
+    # An overlapping live scope appears once T1 is accepted, before the RECHECK reopens it.
+    monkeypatch.setattr(dispatch, "scope_holder", lambda con, run, task: "T9" if task.get("accepted_revision_id") else None)
+    d = _inline_rechecked(env)
+    assert _q(env, "SELECT released_at FROM leases WHERE id=(SELECT lease_id FROM dispatches WHERE id=?)",
+              (d["id"],))[0]["released_at"], "no lease was re-let"
+    assert not _q(env, "SELECT 1 FROM outbox WHERE kind='notify_worker' AND payload_json LIKE '%convergence findings%'")
+    queued = _q(env, "SELECT summary FROM events WHERE kind='task.findings_queued'")
+    assert any("holds no lease" in r["summary"] and "office revoke T1" in r["summary"] for r in queued), queued
+
+
+def test_revoke_ends_an_inline_session_whose_lease_acceptance_released_and_relaunch_works(env):
+    """The 3.31.4 loop: rerun refused worker-live, revoke said revoked, dispatch refused worker-live again."""
+    d = _inline_rechecked(env)
+    con = env.con()
+    # The state before the relet: acceptance released the live inline session's lease and nothing re-let it.
+    con.execute("UPDATE leases SET released_at='2026-11-22T00:00:00+00:00' WHERE dispatch_id=? AND revoked_at IS NULL",
+                (d["id"],))
+    con.commit()
+    code, out = env.office("rerun", "T1", "--fresh")
+    assert code != 0 and "worker-live" in out and "office revoke T1" in out, out
+    code, out = env.office("revoke", "T1")
+    assert code == 0 and f"ended {d['id']}" in out, out
+    ended = _q(env, "SELECT * FROM dispatches WHERE id=?", (d["id"],))[0]
+    assert ended["ended_at"] and ended["terminal_classification"] == "revoked"
+    assert _q(env, "SELECT revoked_at FROM leases WHERE id=?", (ended["lease_id"],))[0]["revoked_at"]
+    code, out = env.office("rerun", "T1", "--fresh")
+    assert code == 0 and "worker-live" not in out, out
+    new = _q(env, "SELECT * FROM dispatches WHERE role='executor' AND id!=?", (d["id"],))
+    assert len(new) == 1 and json.loads(new[0]["override_json"])["inline"] is True
+    code, out = _inline_submit(env, new[0], GOOD_ADD + "\n# contract: add(a, b) returns a + b\n")
+    assert code == 0 and "lease-lost" not in out, out
+
+
+def test_revoke_leaves_a_non_inline_external_session_running_but_fenced(env):
+    _approved(env, _xs_plan(), "XS")
+    code, out = env.office("dispatch", "T1", "--external")
+    assert code == 0, out
+    d = _q(env, "SELECT * FROM dispatches WHERE role='executor'")[0]
+    con = env.con()
+    con.execute("UPDATE leases SET released_at='2026-11-22T00:00:00+00:00' WHERE dispatch_id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("revoke", "T1")
+    assert code == 0 and "ended" not in out, out
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id=?", (d["id"],))[0]["ended_at"] is None
+    assert _q(env, "SELECT revoked_at FROM leases WHERE dispatch_id=?", (d["id"],))[0]["revoked_at"]
+    code, out = env.office("dispatch", "T1", "--external")
+    assert code == 0 and "worker-live" not in out, out

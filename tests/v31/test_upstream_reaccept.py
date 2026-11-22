@@ -141,8 +141,8 @@ def test_a_reaccepted_upstream_reopens_the_accepted_dependent_and_the_rerun_rest
     approved_run(env, plan=PLAN_STACK, integration_reviewer=[PASS], code_reviewer=[PASS],
                  convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}],
                  executor=[{"write_by_task": {"T1": {"calc.py": GOOD_ADD}, "T2": {"mul.py": GOOD_MUL}}, "submit": True}])
-    env.office("dispatch", "T1", check=0)
-    env.office("dispatch", "T2", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # T2 is resumed later: the fake harness resumes claude only
+    env.office("dispatch", "T2", "--as", "claude/claude-opus-5-5@medium", check=0)
     assert [task_row(env, t)["status"] for t in ("T1", "T2")] == ["accepted", "accepted"]
     t2_rev, t2_commit = task_row(env, "T2")["accepted_revision_id"], _accepted_commit(env, "T2")
     gates_before = env.con().execute("SELECT COUNT(*) FROM gates WHERE revision_id=?", (t2_rev,)).fetchone()[0]

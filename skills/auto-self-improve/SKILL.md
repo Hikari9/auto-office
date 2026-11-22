@@ -16,4 +16,4 @@ The runtime does not investigate or file. It prints a non-blocking `bug?:` line 
 5. **Sanitize.** Write expected vs actual behavior, impact and safe reproduction steps. Leave out person, repository, path, account, credential and customer identifiers (`protocol/privacy-self-improvement.md`).
 6. **File.** `gh issue create --repo Hikari9/auto-office`, directly or through the subagent. Report the issue URL; never claim a filing without one.
 
-Filing never blocks delivery: landing and closeout continue whether or not an issue is filed. A failure to file is not a new incident to investigate. Read `protocol/privacy-self-improvement.md` for the privacy rules. The legacy `scripts/office_propose.py` and related proposal material are historical only.
+Filing never blocks delivery: landing and closeout continue whether or not an issue is filed. A failure to file is not a new incident to investigate. Read `protocol/privacy-self-improvement.md` for the privacy rules.

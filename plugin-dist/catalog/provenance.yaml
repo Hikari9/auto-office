@@ -1,0 +1,1708 @@
+rows:
+  claude/sonnet@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: normative-seed-preference
+      notes: v3.1 visual-review preference 2
+    supersession_metadata: null
+  claude/haiku@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: normative-seed-preference
+      notes: Haiku 5.5 medium is Anthropic default; alias may enter routing but mutable roles still require trust
+    supersession_metadata: null
+  claude/opus@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: normative-seed-preference
+    supersession_metadata: null
+  codex/astra@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: normative-seed-preference
+    supersession_metadata: null
+  codex/luna@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: normative-seed-preference
+    supersession_metadata: null
+  claude/claude-sonnet-5-5@high:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-09-29'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-high
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-29T04:10:00Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-sonnet-5-5@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-max
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-30T18:20:04Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, Max Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-sonnet-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-30T18:20:04Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, Xhigh Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-sonnet-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-medium
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-30T18:20:04Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-haiku-5-5@max:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-10-07'
+      prompt_token_threshold: 100000
+      above_threshold_input_per_mtok: 0.5
+      above_threshold_output_per_mtok: 2.5
+      cache_read_per_mtok: 0.01
+      above_threshold_cache_read_per_mtok: 0.05
+      cache_write_5m_per_mtok: 0.125
+      above_threshold_cache_write_5m_per_mtok: 0.625
+      cache_write_1h_per_mtok: 0.2
+      above_threshold_cache_write_1h_per_mtok: 1.0
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark+vendor-pricing
+      url: https://artificialanalysis.ai/models/claude-haiku-5-5
+      release_url: https://artificialanalysis.ai/models/releases/claude-haiku-5-5
+      pricing_url: https://platform.claude.com/docs/en/models/haiku-5-5/overview
+      fetched_at: '2026-10-08T01:03:19Z'
+      notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
+        about 30% larger than Haiku 4.5
+    supersession_metadata: null
+  claude/claude-haiku-5-5@xhigh:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-10-07'
+      prompt_token_threshold: 100000
+      above_threshold_input_per_mtok: 0.5
+      above_threshold_output_per_mtok: 2.5
+      cache_read_per_mtok: 0.01
+      above_threshold_cache_read_per_mtok: 0.05
+      cache_write_5m_per_mtok: 0.125
+      above_threshold_cache_write_5m_per_mtok: 0.625
+      cache_write_1h_per_mtok: 0.2
+      above_threshold_cache_write_1h_per_mtok: 1.0
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark+vendor-pricing
+      url: https://artificialanalysis.ai/models/claude-haiku-5-5-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/claude-haiku-5-5
+      pricing_url: https://platform.claude.com/docs/en/models/haiku-5-5/overview
+      fetched_at: '2026-10-08T01:03:19Z'
+      notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
+        about 30% larger than Haiku 4.5
+    supersession_metadata: null
+  claude/claude-haiku-5-5@high:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-10-07'
+      prompt_token_threshold: 100000
+      above_threshold_input_per_mtok: 0.5
+      above_threshold_output_per_mtok: 2.5
+      cache_read_per_mtok: 0.01
+      above_threshold_cache_read_per_mtok: 0.05
+      cache_write_5m_per_mtok: 0.125
+      above_threshold_cache_write_5m_per_mtok: 0.625
+      cache_write_1h_per_mtok: 0.2
+      above_threshold_cache_write_1h_per_mtok: 1.0
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark+vendor-pricing
+      url: https://artificialanalysis.ai/models/claude-haiku-5-5-high
+      release_url: https://artificialanalysis.ai/models/releases/claude-haiku-5-5
+      pricing_url: https://platform.claude.com/docs/en/models/haiku-5-5/overview
+      fetched_at: '2026-10-08T01:03:19Z'
+      notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
+        about 30% larger than Haiku 4.5
+    supersession_metadata: null
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office doctor --probe-route claude/claude-haiku-5-5@high'
+      harness_version: claude 2.1.329
+      evidence: 'model claude-haiku-5-5 at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified'
+  claude/claude-haiku-5-5@medium:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-10-07'
+      prompt_token_threshold: 100000
+      above_threshold_input_per_mtok: 0.5
+      above_threshold_output_per_mtok: 2.5
+      cache_read_per_mtok: 0.01
+      above_threshold_cache_read_per_mtok: 0.05
+      cache_write_5m_per_mtok: 0.125
+      above_threshold_cache_write_5m_per_mtok: 0.625
+      cache_write_1h_per_mtok: 0.2
+      above_threshold_cache_write_1h_per_mtok: 1.0
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark+vendor-pricing
+      url: https://artificialanalysis.ai/models/claude-haiku-5-5-medium
+      release_url: https://artificialanalysis.ai/models/releases/claude-haiku-5-5
+      pricing_url: https://platform.claude.com/docs/en/models/haiku-5-5/overview
+      fetched_at: '2026-10-08T01:03:19Z'
+      notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
+        about 30% larger than Haiku 4.5
+    supersession_metadata: null
+  claude/claude-haiku-5-5@low:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-10-07'
+      prompt_token_threshold: 100000
+      above_threshold_input_per_mtok: 0.5
+      above_threshold_output_per_mtok: 2.5
+      cache_read_per_mtok: 0.01
+      above_threshold_cache_read_per_mtok: 0.05
+      cache_write_5m_per_mtok: 0.125
+      above_threshold_cache_write_5m_per_mtok: 0.625
+      cache_write_1h_per_mtok: 0.2
+      above_threshold_cache_write_1h_per_mtok: 1.0
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark+vendor-pricing
+      url: https://artificialanalysis.ai/models/claude-haiku-5-5-low
+      release_url: https://artificialanalysis.ai/models/releases/claude-haiku-5-5
+      pricing_url: https://platform.claude.com/docs/en/models/haiku-5-5/overview
+      fetched_at: '2026-10-08T01:03:19Z'
+      notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
+        about 30% larger than Haiku 4.5
+    supersession_metadata: null
+  codex/gpt-5.6-sol@max:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 96.4
+      ttft_ms: 91390
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:45Z'
+      page_title: GPT-5.6 Sol (max)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-sol@xhigh:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 91.9
+      ttft_ms: 23590
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:45Z'
+      page_title: GPT-5.6 Sol (xhigh)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-sol@high:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 84.5
+      ttft_ms: 7480
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:56Z'
+      page_title: GPT-5.6 Sol (high)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-sol@medium:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 87.5
+      ttft_ms: 3080
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:59Z'
+      page_title: GPT-5.6 Sol (medium)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-sol@low:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 83.6
+      ttft_ms: 2420
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:59Z'
+      page_title: GPT-5.6 Sol (low)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-sol@none:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 84.3
+      ttft_ms: 1020
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-sol-non-reasoning
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-sol
+      fetched_at: '2026-09-27T14:55:53Z'
+      page_title: GPT-5.6 Sol (Non-reasoning)
+      score_estimated_by_source: true
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-sol
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-terra@max:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 100.5
+      ttft_ms: 140520
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:55:57Z'
+      page_title: GPT-5.6 Terra (max)
+    supersession_metadata: null
+  codex/gpt-5.6-terra@xhigh:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 87.0
+      ttft_ms: 23100
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:55:59Z'
+      page_title: GPT-5.6 Terra (xhigh)
+    supersession_metadata: null
+  codex/gpt-5.6-terra@high:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 88.5
+      ttft_ms: 2770
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:56:13Z'
+      page_title: GPT-5.6 Terra (high)
+    supersession_metadata: null
+  codex/gpt-5.6-terra@medium:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 84.8
+      ttft_ms: 1690
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:56:07Z'
+      page_title: GPT-5.6 Terra (medium)
+    supersession_metadata: null
+  codex/gpt-5.6-terra@low:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 91.4
+      ttft_ms: 1750
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:56:15Z'
+      page_title: GPT-5.6 Terra (low)
+    supersession_metadata: null
+  codex/gpt-5.6-terra@none:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 12.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 87.2
+      ttft_ms: 810
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-terra-non-reasoning
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-terra
+      fetched_at: '2026-09-27T14:56:21Z'
+      page_title: GPT-5.6 Terra (Non-reasoning)
+    supersession_metadata: null
+  codex/gpt-5.6-luna@max:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 129.1
+      ttft_ms: 111960
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:16Z'
+      page_title: GPT-5.6 Luna (max)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-luna@xhigh:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 135.6
+      ttft_ms: 34090
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:11Z'
+      page_title: GPT-5.6 Luna (xhigh)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-luna@high:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 128.6
+      ttft_ms: 7010
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:14Z'
+      page_title: GPT-5.6 Luna (high)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-luna@medium:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 123.5
+      ttft_ms: 2760
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:20Z'
+      page_title: GPT-5.6 Luna (medium)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-luna@low:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 122.4
+      ttft_ms: 1580
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:20Z'
+      page_title: GPT-5.6 Luna (low)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  codex/gpt-5.6-luna@none:
+    price_fields:
+      input_per_mtok: 0.2
+      output_per_mtok: 1.2
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 123.0
+      ttft_ms: 730
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-6-luna-non-reasoning
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-6-luna
+      fetched_at: '2026-09-27T14:56:23Z'
+      page_title: GPT-5.6 Luna (Non-reasoning)
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-6-luna
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  agy/gemini-3.8-flash@high:
+    price_fields:
+      input_per_mtok: 0.75
+      output_per_mtok: 3.75
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 306.0
+      ttft_ms: 29760
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-3-8-flash
+      release_url: https://artificialanalysis.ai/models/releases/gemini-3-8-flash
+      fetched_at: '2026-09-27T14:55:14Z'
+      page_title: Gemini 3.8 Flash (high)
+    supersession_metadata: null
+  agy/gemini-3.8-flash@medium:
+    price_fields:
+      input_per_mtok: 0.75
+      output_per_mtok: 3.75
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: null
+      ttft_ms: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-3-8-flash-medium
+      release_url: https://artificialanalysis.ai/models/releases/gemini-3-8-flash
+      fetched_at: '2026-09-27T14:55:28Z'
+      page_title: Gemini 3.8 Flash (medium)
+    supersession_metadata: null
+  agy/gemini-3.8-flash@low:
+    price_fields:
+      input_per_mtok: 0.75
+      output_per_mtok: 3.75
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: null
+      ttft_ms: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-3-8-flash-low
+      release_url: https://artificialanalysis.ai/models/releases/gemini-3-8-flash
+      fetched_at: '2026-09-27T14:55:21Z'
+      page_title: Gemini 3.8 Flash (low)
+    supersession_metadata: null
+  agy/gemini-4-argon@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-page
+      url: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+      fetched_at: '2026-10-17T00:00:00Z'
+      page_title: 'Gemini 4 Argon: low, medium and high reasoning efforts (#690)'
+    supersession_metadata: null
+  agy/gemini-4-argon@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: user-approved-routing-exception
+      url: https://github.com/Hikari9/auto-office/issues/809#issuecomment-6433994337
+      fetched_at: '2026-10-28T01:19:00Z'
+      page_title: '#809 Argon Medium L-only floor exception'
+    supersession_metadata: null
+  agy/gemini-4-argon@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-argon
+      fetched_at: '2026-10-28T01:19:00Z'
+      page_title: Gemini 4 Argon (high)
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@low:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-low
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (low)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@medium:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-medium
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (medium)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@high:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen-high
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (high)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  agy/gemini-4-hydrogen@xhigh:
+    price_fields:
+      input_per_mtok: 1.50
+      output_per_mtok: 7.50
+      currency: USD
+      as_of: '2026-11-12'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-hydrogen
+      release_url: https://artificialanalysis.ai/models/releases/gemini-4-hydrogen
+      page_title: Gemini 4 Hydrogen (xhigh)
+      reference_index: Artificial Analysis Intelligence Index v5.0.1
+      notes: Shipped v4.3.2 score remains null; local agy/effort conformance unproven
+    supersession_metadata: null
+  pi/gpt-5-codex@high:
+    price_fields:
+      input_per_mtok: 1.25
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: null
+      ttft_ms: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-5-codex
+      release_url: https://artificialanalysis.ai/models/releases/gpt-5-codex
+      fetched_at: '2026-09-27T14:56:24Z'
+      page_title: GPT-5 Codex (high)
+      score_estimated_by_source: true
+    supersession_metadata:
+      supersedes: null
+      superseded_by: gpt-5-1-codex
+      reason: deprecated-by-vendor-per-artificial-analysis-model-page
+  claude/claude-opus-5-5@max:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: null
+      ttft_ms: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:03Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Max Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-opus-5-5@xhigh:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 89.1
+      ttft_ms: 141480
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:04Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Xhigh Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-opus-5-5@high:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 81.7
+      ttft_ms: 33220
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-high
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
+    supersession_metadata: null
+    exact_probe:
+      result: passed
+      at: '2026-11-22'
+      command: 'office doctor --probe-route claude/claude-opus-5-5@high'
+      harness_version: claude 2.1.330
+      evidence: 'model claude-opus-5-5 at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified (attempt e1e142e6-5439aaeca99a4588d71ec939). Supersedes the 2026-11-20 isolation-missing failure (edb171d0), caused by an unreaped zombie child of a Claude hook daemon outside the probe (#1296).'
+  claude/claude-opus-5-5@medium:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 81.4
+      ttft_ms: 14050
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-medium
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)
+    supersession_metadata: null
+  claude/claude-opus-5-5@low:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 80.4
+      ttft_ms: 6560
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-low
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Low Effort, Default Fallback)
+    supersession_metadata: null
+  agy/claude-sonnet-5-5@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: no-published-benchmark
+      notes: No published Claude Sonnet 5.5 benchmark exists at low effort.
+    supersession_metadata: null
+  agy/claude-sonnet-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-medium
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-30T18:20:04Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)
+    supersession_metadata: null
+  agy/claude-sonnet-5-5@high:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-09-29'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-sonnet-5-5-high
+      release_url: https://artificialanalysis.ai/models/releases/claude-sonnet-5-5
+      fetched_at: '2026-09-29T04:10:00Z'
+      page_title: Claude Sonnet 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
+    supersession_metadata: null
+  agy/claude-opus-5-5@low:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 80.4
+      ttft_ms: 6560
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-low
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Low Effort, Default Fallback)
+    supersession_metadata: null
+  agy/claude-opus-5-5@medium:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 81.4
+      ttft_ms: 14050
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-medium
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, Medium Effort, Default Fallback)
+    supersession_metadata: null
+  agy/claude-opus-5-5@high:
+    price_fields:
+      input_per_mtok: 4.0
+      output_per_mtok: 20.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 81.7
+      ttft_ms: 33220
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/claude-opus-5-5-high
+      release_url: https://artificialanalysis.ai/models/releases/claude-opus-5-5
+      fetched_at: '2026-09-27T14:55:06Z'
+      page_title: Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)
+    supersession_metadata: null
+  codex/gpt-6-luna@max:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 163.4
+      ttft_ms: 90640
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:57Z'
+      page_title: GPT-6 Luna (max)
+    supersession_metadata: null
+  codex/gpt-6-luna@xhigh:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 152.0
+      ttft_ms: 17280
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:57Z'
+      page_title: GPT-6 Luna (xhigh)
+    supersession_metadata: null
+  codex/gpt-6-luna@high:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 145.5
+      ttft_ms: 6540
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:59Z'
+      page_title: GPT-6 Luna (high)
+    supersession_metadata: null
+  codex/gpt-6-luna@medium:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: null
+      ttft_ms: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:59Z'
+      page_title: GPT-6 Luna (medium)
+    supersession_metadata: null
+  codex/gpt-6-luna@low:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 142.0
+      ttft_ms: 2160
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:58Z'
+      page_title: GPT-6 Luna (low)
+    supersession_metadata: null
+  codex/gpt-6-luna@none:
+    price_fields:
+      input_per_mtok: 0.1
+      output_per_mtok: 0.5
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 142.7
+      ttft_ms: 730
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-luna-non-reasoning
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-luna
+      fetched_at: '2026-09-27T14:54:58Z'
+      page_title: GPT-6 Luna (Non-reasoning)
+    supersession_metadata: null
+  codex/gpt-6-astra@max:
+    price_fields:
+      input_per_mtok: 10.0
+      output_per_mtok: 50.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 63.5
+      ttft_ms: 323830
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-astra
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-astra
+      fetched_at: '2026-09-27T14:54:59Z'
+      page_title: GPT-6 Astra (max)
+    supersession_metadata: null
+  codex/gpt-6-astra@xhigh:
+    price_fields:
+      input_per_mtok: 10.0
+      output_per_mtok: 50.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 56.5
+      ttft_ms: 94490
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-astra-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-astra
+      fetched_at: '2026-09-27T14:55:01Z'
+      page_title: GPT-6 Astra (xhigh)
+    supersession_metadata: null
+  codex/gpt-6-astra@high:
+    price_fields:
+      input_per_mtok: 10.0
+      output_per_mtok: 50.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 60.1
+      ttft_ms: 39010
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-astra-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-astra
+      fetched_at: '2026-09-27T14:55:00Z'
+      page_title: GPT-6 Astra (high)
+    supersession_metadata: null
+  codex/gpt-6-astra@medium:
+    price_fields:
+      input_per_mtok: 10.0
+      output_per_mtok: 50.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 54.8
+      ttft_ms: 4850
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-astra-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-astra
+      fetched_at: '2026-09-27T14:55:02Z'
+      page_title: GPT-6 Astra (medium)
+    supersession_metadata: null
+  codex/gpt-6-astra@low:
+    price_fields:
+      input_per_mtok: 10.0
+      output_per_mtok: 50.0
+      currency: USD
+      as_of: '2026-09-27'
+    speed_fields:
+      output_tok_per_s: 55.0
+      ttft_ms: 2490
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-astra-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-astra
+      fetched_at: '2026-09-27T14:55:02Z'
+      page_title: GPT-6 Astra (low)
+    supersession_metadata: null
+  codex/gpt-6.1-sol@max:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-10-08'
+    speed_fields:
+      output_tok_per_s: 55.2
+      ttft_ms: 326940
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-sol
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-sol
+      fetched_at: '2026-09-30T18:20:04Z'
+      metrics_as_of: '2026-10-08'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: GPT-6.1 Sol (max)
+    supersession_metadata: null
+  codex/gpt-6.1-sol@xhigh:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-10-08'
+    speed_fields:
+      output_tok_per_s: 53.3
+      ttft_ms: 148300
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-sol
+      fetched_at: '2026-09-30T18:20:04Z'
+      metrics_as_of: '2026-10-08'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: GPT-6.1 Sol (xhigh)
+    supersession_metadata: null
+  codex/gpt-6.1-sol@high:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-10-08'
+    speed_fields:
+      output_tok_per_s: 51.7
+      ttft_ms: 59310
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-sol-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-sol
+      fetched_at: '2026-09-30T18:20:04Z'
+      metrics_as_of: '2026-10-08'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: GPT-6.1 Sol (high)
+    supersession_metadata: null
+  codex/gpt-6.1-sol@medium:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-10-08'
+    speed_fields:
+      output_tok_per_s: 50.0
+      ttft_ms: 6430
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-sol-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-sol
+      fetched_at: '2026-09-30T18:20:04Z'
+      metrics_as_of: '2026-10-08'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: GPT-6.1 Sol (medium)
+    supersession_metadata: null
+  codex/gpt-6.1-sol@low:
+    price_fields:
+      input_per_mtok: 2.0
+      output_per_mtok: 10.0
+      currency: USD
+      as_of: '2026-10-08'
+    speed_fields:
+      output_tok_per_s: 48.8
+      ttft_ms: 3190
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-sol-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-sol
+      fetched_at: '2026-09-30T18:20:04Z'
+      metrics_as_of: '2026-10-08'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: GPT-6.1 Sol (low)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@max:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 90.9
+      ttft_ms: 77960
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (max)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@xhigh:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 90.9
+      ttft_ms: 13320
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (xhigh)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@high:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 90.9
+      ttft_ms: 5660
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra-high
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (high)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@medium:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 90.9
+      ttft_ms: 1430
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra-medium
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (medium)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@low:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 91.0
+      ttft_ms: 1280
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra-low
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (low)
+    supersession_metadata: null
+  codex/gpt-6.1-terra@none:
+    price_fields:
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      currency: USD
+      as_of: '2026-10-26'
+    speed_fields:
+      output_tok_per_s: 91.1
+      ttft_ms: 1270
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-1-terra-non-reasoning
+      release_url: https://artificialanalysis.ai/models/releases/gpt-6-1-terra
+      fetched_at: '2026-10-27T04:29:56Z'
+      metrics_as_of: '2026-10-27'
+      metrics_context: AA v4.3.2 score and first-party API speed; not Codex CLI conformance
+      page_title: GPT-6.1 Terra (non-reasoning)
+    supersession_metadata: null
+  opencode/muse-spark-1.3-contributor-free@xhigh:
+    price_fields:
+      input_per_mtok: 1.25
+      output_per_mtok: 4.25
+      currency: USD
+      as_of: '2026-10-14'
+    speed_fields:
+      output_tok_per_s: 220.9
+      ttft_ms: 28990
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/muse-spark-1-3-xhigh
+      release_url: https://artificialanalysis.ai/models/releases/muse-spark-1-3
+      fetched_at: '2026-10-14T12:50:00Z'
+      metrics_as_of: '2026-10-14'
+      metrics_context: AA first-party API performance; not local CLI conformance
+      page_title: Muse Spark 1.3 (Xhigh)
+  kilo/step-5-preview-free@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: local-harness-launch-evidence
+      command_date: '2026-10-14'
+      notes: Free Kilo Gateway model launch; exit 0 is not model conformance because model identity is not read back
+    supersession_metadata: null
+  claude/claude-fable-5-2@low:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@medium:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@high:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@xhigh:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  claude/claude-fable-5-2@max:
+    price_fields:
+      input_per_mtok: 8.0
+      output_per_mtok: 40.0
+      currency: USD
+      as_of: '2026-11-09'
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-model-documentation
+      url: https://platform.claude.com/docs/en/models/fable-5-2/overview
+      effort_url: https://platform.claude.com/docs/en/build-with-claude/effort
+      benchmark_reference_url: https://artificialanalysis.ai/models/releases/claude-fable-5-2
+      benchmark_reference_index: Artificial Analysis Intelligence Index v5.0.1
+      metrics_context: AA v5.0.1 score is reference-only; shipped v4.3.2 score remains null and Claude Code conformance is unverified
+      as_of: '2026-11-11'
+      page_title: Claude Fable 5.2
+    supersession_metadata: null
+  agy/gemini-4-neon@low:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-low
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (low)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  agy/gemini-4-neon@medium:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-medium
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (medium)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office doctor --probe-route agy/gemini-4-neon@medium'
+      harness_version: agy 1.5.13
+      evidence: 'model gemini-4-neon-medium at effort medium read back from the harness metadata; reply, write, write boundary and process cleanup verified'
+    supersession_metadata: null
+  agy/gemini-4-neon@high:
+    price_fields:
+      input_per_mtok: 3
+      output_per_mtok: 15
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.15
+    speed_fields:
+      output_tok_per_s: 110.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon-high
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (high)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: passed
+      at: '2026-11-20'
+      command: 'office doctor --probe-route agy/gemini-4-neon@high'
+      harness_version: agy 1.5.13
+      evidence: 'model gemini-4-neon-high at effort high read back from the harness metadata; reply, write, write boundary and process cleanup verified'
+    supersession_metadata: null
+  agy/gemini-4-neon@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gemini-4-neon
+      fetched_at: '2026-11-19T02:44:58Z'
+      page_title: Gemini 4 Neon (xhigh)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  codex/gpt-6.2-sol@low:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-low
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (low)
+      engineering_index_edition: not stated by AA
+    supersession_metadata: null
+  codex/gpt-6.2-sol@medium:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-medium
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (medium)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: pass
+      at: '2026-11-21'
+      command: 'office doctor --probe-route codex/gpt-6.2-sol@medium'
+      harness_version: codex-cli 0.170.0
+      attempt: b9e67a36-6650b24118d88b3077c3afb2
+      evidence: 'pass (model and effort read back from codex 0.170.0 harness metadata; reply, write, write boundary and process cleanup verified) via the orchestrator''s unbound probe from the composed T3 worktree, attempt b9e67a36-6650b24118d88b3077c3afb2'
+    supersession_metadata: null
+  codex/gpt-6.2-sol@high:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-high
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (high)
+      engineering_index_edition: not stated by AA
+    exact_probe:
+      result: pass
+      at: '2026-11-21'
+      command: 'office doctor --probe-route codex/gpt-6.2-sol@high'
+      harness_version: codex-cli 0.170.0
+      attempt: e735e502-3afbb8071cbf28d1601a6937
+      evidence: 'pass (model and effort read back from codex 0.170.0 harness metadata; reply, write, write boundary and process cleanup verified) via the orchestrator''s unbound probe from the composed T3 worktree, attempt e735e502-3afbb8071cbf28d1601a6937'
+    supersession_metadata: null
+  codex/gpt-6.2-sol@xhigh:
+    price_fields:
+      input_per_mtok: 2
+      output_per_mtok: 10
+      currency: USD
+      as_of: '2026-11-19'
+      cache_read_per_mtok: 0.1
+    speed_fields:
+      output_tok_per_s: 79.0
+    source_snapshot_metadata:
+      kind: vendor-independent-benchmark-page
+      url: https://artificialanalysis.ai/models/gpt-6-2-sol-xhigh
+      fetched_at: '2026-11-19T02:45:02Z'
+      page_title: GPT-6.2 Sol (xhigh)
+      engineering_index_edition: not stated by AA
+  hermes/claude-sonnet-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-sonnet-5-5@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-sonnet-5-5@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-opus-5-5@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-opus-5-5@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-haiku-5-5@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-haiku-5-5@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-haiku-5-5@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-haiku-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-sol@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-sol@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6.1-terra@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6.1-terra@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-luna@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-luna@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@low:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@low route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@medium:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@medium route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@xhigh route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gpt-6-astra@max:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gpt-6-astra@max route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/gemini-4-argon@high:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical gemini-4-argon@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null

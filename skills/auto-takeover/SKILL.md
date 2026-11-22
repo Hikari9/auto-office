@@ -1,6 +1,7 @@
 ---
 name: auto-takeover
 description: Auto Office 3.2 orchestrator mode for when the office runtime itself is the bottleneck (repeated submit refusals, plan re-review pausing live work, exhausted escalation, quota stalls). Only an explicit user request starts it; the orchestrator may only suggest it. The orchestrator stops driving work through office, composes one integration branch, fans the remaining work into file-disjoint Herdr lanes, keeps every Office invariant (independent review by a fresh agent session, mutation-verified tests, checks on the integrated tree, the user's merge boundary), and exits through `office close --landed-externally`.
+disable-model-invocation: true
 ---
 
 # Auto Takeover

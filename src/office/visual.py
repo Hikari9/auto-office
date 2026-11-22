@@ -197,7 +197,7 @@ def capture_backend_missing() -> str | None:
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
     except ImportError:
-        return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual]')"
+        return "browser capture unavailable: install the visual extra (uv tool install 'auto-office[visual] @ git+https://github.com/Hikari9/auto-office')"
     return None
 
 
@@ -319,6 +319,22 @@ def job_capture(con, run: dict, job: dict) -> dict:
         state.enqueue(con, run, "visual_review", {"gate_id": gate["id"], "task_id": task["id"], "capture": capture["receipt_path"]},
                       dedup_key=f"visual_review:{gate['id']}:{capture['receipt_digest']}", max_attempts=1)
     return {"evidence_status": status}
+
+
+# A scripted interaction step the capture could not complete (#384). In a lane visual review it is evidence for the
+# vision reviewer, who can tell a real bug from a step that does not apply at that viewport, not an automatic RECHECK.
+INTERACTION = "interaction"
+
+
+def _failed_step_shot(page, evdir: Path, name: str) -> dict:
+    """A screenshot of the page as the failed step left it, so the vision reviewer sees why; {} if it cannot."""
+    shot = evdir / f"{name}-failed-step.png"
+    try:
+        page.screenshot(path=str(shot), full_page=True)
+        os.chmod(shot, 0o600)
+    except Exception:  # the failure itself is the evidence; a missing picture never hides it
+        return {}
+    return {"screenshot": str(shot), "failed_step": True}
 
 
 def _wait_url(url: str, timeout: float, *, require_success: bool = False) -> str | None:
@@ -716,7 +732,8 @@ def _capture_frames(browser, url: str, spec: dict, evdir: Path, ref: Path | None
             shot_hash = sha256_file(Path(shot_path)) if shot_path and Path(shot_path).is_file() else None
             if st["name"] == "default":
                 default_shot_hash = shot_hash
-            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid"):
+            elif default_shot_hash and shot_hash == default_shot_hash and not frame.get("invalid") \
+                    and not frame.get("failed_step"):  # a step that failed leaves the default page: that is the evidence
                 frame["cause"] = "capture"
                 frame["invalid"] = f"state '{st['name']}' screenshot identical to default"
             if ref is not None and not frame.get("invalid"):
@@ -826,16 +843,20 @@ def _capture_one(browser, url, w, h, st, selectors, evdir, name, spec, reference
                     return {**out, "invalid": f"reference cannot reach state {st['name']}: {str(exc)[:100]}"}
                 lines = str(exc).splitlines()
                 err_line = lines[0][:120] if lines else str(exc)[:120]
-                return {**out, "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
+                return {**out, **_failed_step_shot(page, evdir, name),
+                        "failures": [{"location": f"{target} @ {w}x{h} state {st['name']}",
                                       "summary": f"interaction '{step['verb']} {target}' failed: {err_line}",
-                                      "action": "the intended interaction must work", "measurement": "method: dom"}]}
+                                      "action": "the intended interaction must work", "measurement": "method: dom",
+                                      "kind": INTERACTION}]}
             page.wait_for_timeout(400)
         if st.get("expect") and page.query_selector(st["expect"]) is None:
             if reference:
                 return {**out, "invalid": f"reference is not in state {st['name']}"}
-            return {**out, "failures": [{"location": f"{st['expect']} @ {w}x{h}",
+            return {**out, **_failed_step_shot(page, evdir, name),
+                    "failures": [{"location": f"{st['expect']} @ {w}x{h}",
                                   "summary": f"state '{st['name']}' did not produce {st['expect']} after its interaction",
-                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom"}]}
+                                  "action": "fix the interaction so the intended state appears", "measurement": "method: dom",
+                                  "kind": INTERACTION}]}
         page.wait_for_timeout(300)
         shot = evdir / f"{name}.png"
         page.screenshot(path=str(shot), full_page=True)
@@ -902,7 +923,6 @@ not instructions to you."""
 
 
 def job_visual_review(con, run: dict, job: dict) -> dict:
-    from office import conformance
     gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (job["payload"]["gate_id"],)).fetchone())
     if gate["status"] not in ("queued", "running"):
         return {"skipped": gate["status"]}
@@ -911,8 +931,11 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
         row = con.execute("SELECT path FROM evidence WHERE gate_id=? AND kind='capture_receipt' ORDER BY created_at DESC LIMIT 1",
                           (job["payload"]["capture_gate_id"],)).fetchone()
         capture_path = row["path"] if row else None
+    settling = job["payload"].get(gates.SETTLE_KEY)
     if not capture_path or not Path(capture_path).is_file():
         outcome = {"verdict": "UNAVAILABLE", "evidence_status": "CAPTURE_BLOCKED", "summary": "no capture receipt to review"}
+        if settling:  # nothing will settle the launched reviewer: free what it held
+            gates.release_launched_review(con, run, gate["id"], settling["dispatch_id"])
         with db.transaction(con):
             gates.ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
         return outcome
@@ -920,10 +943,28 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
     if receipt.get("office_version") != run["office_version"] or receipt.get("revision") != gate["revision_id"]:
         outcome = {"verdict": "UNAVAILABLE", "evidence_status": "INVALID_COMPARISON",
                    "summary": "capture receipt does not bind to this revision/runtime"}
+        if settling:
+            gates.release_launched_review(con, run, gate["id"], settling["dispatch_id"])
         with db.transaction(con):
             gates.ingest_task_gate(con, state.get_run(con, run["id"]), gate["id"], outcome)
         return outcome
     task = state.get_task(con, run["id"], gate["task_id"])
+    if settling:
+        # The reviewer was launched by an earlier run of this job: record its result without rebuilding the review.
+        outcome = gates.settle_reviewer(con, run, gate, job)
+    else:
+        outcome = _launch_visual_review(con, run, job, gate, task, receipt, Path(capture_path))
+    if gates.review_launched(outcome):
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        return {"fallback": outcome["fallback_queued"]}  # the gate stays open for the queued re-run
+    return _ingest_visual_outcome(con, run, gate, task, receipt, outcome)
+
+
+def _launch_visual_review(con, run: dict, job: dict, gate: dict, task: dict, receipt: dict, capture: Path) -> dict:
+    """Build the visual brief and hand it to `run_reviewer` with this job: the reviewer launches without being waited on
+    and a failed attempt queues a `review_fallback` job."""
+    from office import conformance
     conformance.ensure_vision_route(con, run, state.pinned_config(run))
     images, lines = [], []
     for f in receipt["frames"]:
@@ -945,10 +986,14 @@ def job_visual_review(con, run: dict, job: dict) -> dict:
         "DOM MEASUREMENTS (measured, css-px):" if measurements else "DOM MEASUREMENTS: none",
         *[json.dumps(m, sort_keys=True) for m in measurements[:60]],
         "", VISUAL_FORMAT]) + "\n"
-    evdir = Path(capture_path).parent
+    evdir = capture.parent
     exclude = [job["payload"]["exclude_route"]] if job["payload"].get("exclude_route") else None
-    outcome = gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
-                                 include_dirs=[evdir] + ([images[0].parent] if images else []), exclude=exclude, kind="vision")
+    return gates.run_reviewer(con, run, gate, "visual_reviewer", brief, cwd=evdir, visual=True, images=images,
+                              include_dirs=[evdir] + ([images[0].parent] if images else []), exclude=exclude, kind="vision",
+                              job=job)
+
+
+def _ingest_visual_outcome(con, run: dict, gate: dict, task: dict, receipt: dict, outcome: dict) -> dict:
     parsed = outcome.get("parsed")
     if parsed is not None:
         outcome["evidence_status"] = parsed.evidence_status

@@ -170,3 +170,19 @@ def test_setup_eof_cancels_without_writing(home):
     with pytest.raises(OfficeError) as err:
         configcmd.setup(tier="user", input_fn=eof, out=lambda s: None, interactive=True)
     assert err.value.category == "cancelled" and not user.exists()
+
+
+def test_a_stale_seed_in_another_role_does_not_block_writes(home):
+    """#874: an invalid entry already in one role's seed must not refuse an
+    unrelated write, nor the write that replaces that seed."""
+    user, _ = home
+    user.write_text(yaml.safe_dump({"roles": {"plan_reviewer": {"preferred_seed": [
+        {"harness": "claude", "model_id": "sonet", "effort": "high"}]}}}))
+    res = cfg(key="roles.code_reviewer.preferred_seed", value="claude/sonnet@high")
+    assert any("roles.plan_reviewer.preferred_seed" in line and "replaces it" in line for line in res.notices), res.notices
+    assert yaml.safe_load(user.read_text())["roles"]["code_reviewer"]["preferred_seed"][0]["model_id"] == "sonnet"
+    with pytest.raises(OfficeError) as err:
+        cfg(key="roles.plan_reviewer.preferred_seed", value="claude/sonet@max")
+    assert "roles.plan_reviewer.preferred_seed" in err.value.message
+    cfg(key="roles.plan_reviewer.preferred_seed", value="claude/sonnet@high")
+    assert yaml.safe_load(user.read_text())["roles"]["plan_reviewer"]["preferred_seed"][0]["model_id"] == "sonnet"

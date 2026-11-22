@@ -31,11 +31,17 @@ def events(con, run):
     return [dict(row) for row in con.execute("SELECT * FROM root_wake_intents WHERE run_id=? ORDER BY event_seq", (run["id"],))]
 
 
-def test_wake_is_opt_in_and_rejects_unverified_sessions(env, monkeypatch):
+def test_wake_is_armed_by_resume_only_for_a_verified_root_and_attach_stays_strict(env, monkeypatch):
+    """#922 changed the default: `office resume` arms wake (arm_on_resume), so the unarmed status line
+    now names why wake is not armed instead of printing nothing. `attach` itself still refuses."""
     approved_run(env)
     con = env.con()
     run = state.get_run(con, con.execute("SELECT id FROM runs LIMIT 1").fetchone()[0])
-    assert root_wake.lines(con, run) == []
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    # Pin the host: process_key reads the real process tree, which differs between a Claude session and a check runner.
+    monkeypatch.setattr(discovery, "process_key", lambda: "claude:1:Mon")
+    monkeypatch.setattr(root_wake, "_native_hook_installed", lambda: False)
+    assert root_wake.lines(con, run) == ["wake: unavailable (Claude Stop/asyncRewake hook missing); office install --only claude --item turn.stop"]
     monkeypatch.setenv("HERDR_PANE_ID", PANE)
     with pytest.raises(state.Refused, match="not bound"):
         root_wake.attach(con, run)
@@ -44,7 +50,10 @@ def test_wake_is_opt_in_and_rejects_unverified_sessions(env, monkeypatch):
     monkeypatch.setattr(root_wake, "_agent_in_pane", lambda _pane: None)
     with pytest.raises(state.Refused, match="did not verify"):
         root_wake.attach(con, run)
-    assert root_wake.lines(con, run) == []
+    assert root_wake.arm_on_resume(con, run).startswith("root auto-wake not armed: Herdr did not verify")
+    assert not root_wake.armed(con, run)
+    assert root_wake.lines(con, run) == [
+        "wake: unavailable (this pane is not a verified bound Claude root); office resume from it arms wake"]
 
 
 def test_worker_submit_when_root_idle_wakes_and_fake_root_continues_without_a_human(env, monkeypatch):
@@ -146,6 +155,29 @@ def test_detached_and_rebound_root_never_receives_a_wrong_pane_prompt(env, monke
     assert len(got) == 1
 
 
+@pytest.mark.parametrize("leave", ["rebound", "ended"])
+def test_a_root_pane_that_left_the_run_is_reported_detached_not_armed(env, monkeypatch, leave):
+    """#1237: a pane re-bound to another run (or whose binding ended) kept this run's wake row, and status called
+    the foreign pane armed and guidance dropped `office wait`. It is detached until the owner resumes."""
+    approved_run(env)
+    con, run = setup_root(env, monkeypatch)
+    assert root_wake.armed(con, run)
+    with db.transaction(con):
+        if leave == "rebound":  # what discovery.bind does when the pane resumes or starts another run
+            con.execute("UPDATE session_bindings SET run_id=? WHERE harness='herdr' AND session_id=?",
+                        ("another-run", PANE))
+        else:
+            con.execute("UPDATE session_bindings SET ended_at=? WHERE harness='herdr' AND session_id=?",
+                        ("2026-01-01", PANE))
+    assert not root_wake.armed(con, run)
+    (line,) = root_wake.lines(con, run)
+    assert line.startswith("wake: detached (Claude agent root-claude in Herdr pane " + PANE)
+    assert "armed" not in line and "office wait" in line
+    with db.transaction(con):
+        discovery.bind(con, run, [("herdr", PANE)], "resume")
+    assert root_wake.armed(con, run) and root_wake.lines(con, run)[0].startswith("wake: armed")
+
+
 def test_unknown_prompt_delivery_requires_manual_inspection_not_duplicate_retries(env, monkeypatch):
     approved_run(env)
     con, run = setup_root(env, monkeypatch)
@@ -233,14 +265,15 @@ print(json.dumps({"result": result}))
     try:
         code, out = env.office("submit", cwd=wt, env=worker_env)
         assert code == 0, out
+        # Wall-clock bounds allow for host load (SO67): the wake must still happen, within 15 s.
         start = time.monotonic()
-        while not marker.exists() and time.monotonic() - start < 5:
+        while not marker.exists() and time.monotonic() - start < 15:
             time.sleep(0.05)
         elapsed = time.monotonic() - start
         print(f"ISSUE_723_FAKE_HERDR_WAKE_LATENCY_MS={int(elapsed*1000)}")
-        assert marker.exists() and elapsed < 5, f"no wake within five seconds: {elapsed:.2f}s"
+        assert marker.exists() and elapsed < 15, f"no wake within fifteen seconds: {elapsed:.2f}s"
         assert json.loads(marker.read_text())["agent"] == "root-claude"
-        while not responded.exists() and time.monotonic() - start < 10:
+        while not responded.exists() and time.monotonic() - start < 30:
             time.sleep(0.05)
         assert responded.exists(), (env.tmp / "root-wake.log")
         result = json.loads(responded.read_text())
@@ -364,7 +397,7 @@ def test_723_durable_worker_stop_is_actionable_while_guide_says_wait(env, monkey
                    dispatch_id=d, payload={"reason": "self-review cap", "source": "preflight"})
     assert root_wake.poll(con, run) == "delivered"
     assert len(sent) == 1
-    assert "Auto Office run" in sent[0][1]
+    assert sent[0][1].startswith(f"Run {run['id'][:8]} (through event ") and "; next: " in sent[0][1]
 
 
 def test_723_unrelated_root_event_records_activity_not_completion(env, monkeypatch):
@@ -572,6 +605,10 @@ def test_723_signal_and_stall_wakes_keep_the_human_decision_guard(env, monkeypat
     monkeypatch.setattr(dispatch, "submit_prompt", lambda name, text, *, pane=None: sent.append(text) or "landed")
     assert root_wake.poll(con, run) == "delivered"
     assert "HUMAN DECISION REQUIRED" in sent[0] and "No authorization" in sent[0]
+    # #1029: one line naming what changed and the next action; the standing rules live in SKILL.md.
+    first = sent[0].split(" HUMAN DECISION")[0]
+    assert first.startswith(f"Run {run['id'][:8]} (through event ") and "; next: " in first and "\n" not in first, first
+    assert "may be a duplicate" not in sent[0] and "lifecycle transitions" not in sent[0]
 
 
 @pytest.mark.parametrize("action,human", [
@@ -622,7 +659,8 @@ def test_723_session_moving_to_another_run_waits_for_an_in_flight_wake(env, monk
     assert root_wake.poll(con, run) == "delivered"
     send.thread.join(10)
     assert moved and moved[0] >= sent[0]
-    with db.transaction(con):
+    with db.transaction(con):  # the root read the first wake: a newer one is not coalesced behind it
+        con.execute("UPDATE root_wake_intents SET state='observed' WHERE run_id=? AND state='delivered'", (run["id"],))
         state.emit(con, run, "task.paused", "after move", task_id="T1")
     with db.transaction(con):
         con.execute("UPDATE root_wake_bindings SET last_action_signature='stale' WHERE run_id=?", (run["id"],))

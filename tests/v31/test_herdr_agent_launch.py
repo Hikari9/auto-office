@@ -307,6 +307,8 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
     ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
     ddir.mkdir(parents=True, exist_ok=True)
     (ddir / "brief.md").write_text("You are a code reviewer\n")
+    # The fake pane never shows the prompt land; without this each launch sleeps out the landing deadline (#1302).
+    monkeypatch.setattr(dispatch, "_prompt_landed", lambda *a, **kw: "landed")
     out = ddir / "reply.txt"
     for adapter_id, kind in (("claude", "claude"), ("codex", "codex")):
         rd = {**d, "adapter_id": adapter_id, "model": "fake-model", "effort": "high"}
@@ -320,9 +322,17 @@ def test_reviewer_dispatch_launches_in_herdr_able_to_write_its_reply(env, monkey
         # R12: a reviewer may write its reply file, and gets that file's directory.
         assert str(out.parent) in args, args
         if kind == "claude":
-            assert args[args.index("--disallowedTools") + 1].startswith("Edit,Bash,NotebookEdit,Edit(/")
+            # #1187: safe read commands such as ls are allowed, so the deny list starts at the mutating ones.
+            denied = args[args.index("--disallowedTools") + 1]
+            assert denied.startswith("Edit,NotebookEdit,Bash(rm),Bash(rm *),") and "Bash(ls)" not in denied
             # Writes are allowed to the dispatch dir alone; dontAsk denies the rest.
-            assert args[args.index("--allowedTools") + 1] == f"Read,Grep,Glob,Edit(/{out.parent}/**)"
+            # #1187: the exact submit comes first; the safe test runners follow (tests/v31/test_issue_1186_reviewer_shell.py).
+            runners = ("pytest", "python -m pytest", "python3 -m pytest", ".venv/bin/python -m pytest", ".venv/bin/pytest",
+                       "pnpm test", "npm test", "node --test")
+            assert args[args.index("--allowedTools") + 1] == ",".join([
+                "Read", "Grep", "Glob", f"Edit(/{out.parent}/**)",
+                f"Bash(office review submit --file {out.parent}/review-submit.txt)",
+                *(f"Bash({r}{tail})" for r in runners for tail in ("", " *"))])
             assert args[args.index("--permission-mode") + 1] == "dontAsk"
             assert str(env.tmp) in args
         else:
@@ -417,12 +427,14 @@ def test_unlanded_prompt_is_retried_by_typing_it(env, monkeypatch):
 
 
 @pytest.mark.approved
-def test_prompt_that_never_lands_is_reported_not_relaunched(env, monkeypatch):
-    # `working` alone is not proof: codex reports it while a trust dialog holds the composer.
-    state_file, run, d, _, res = launch_in_herdr(env, monkeypatch, gets=["working"], reads=["> composer empty"])
+def test_unconfirmed_prompt_on_a_working_agent_is_not_relaunched_or_reported(env, monkeypatch):
+    # #583 (#1058): the pointer left the composer and herdr says working, so the agent most likely took the
+    # brief. The landing stays unconfirmed (not relaunched) and no did-not-land advice would deliver it twice.
+    # An idle agent with an empty composer is still reported (tests/v31/test_herdr_landing.py).
+    state_file, run, d, ddir, res = launch_in_herdr(env, monkeypatch, gets=["working"], reads=["> composer empty"])
     assert res["launcher"] == "herdr" and res["prompt_landed"] is False
-    events = _launch_events(env, run)
-    assert len(events) == 1 and "did not land" in events[0] and res["agent"] in events[0]
+    assert _launch_events(env, run) == []
+    assert json.loads((ddir / "launch.json").read_text()).get("landing_unconfirmed_working") is True
 
 
 @pytest.mark.approved
@@ -868,3 +880,30 @@ def test_an_osc_link_before_the_cursor_glyph_is_stripped():
     from office import dispatch
     assert dispatch._selected_option("Trust this folder?\n\x1b]8;;u\x07❯ Yes, I trust this folder") == \
         "Yes, I trust this folder"
+
+
+@pytest.mark.approved
+def test_agy_hydrogen_reviewer_launches_in_a_plan_mode_pane_and_falls_back_headless(env, monkeypatch):
+    """The route-scoped agy reviewer hosts its plan-mode supervisor in a Herdr pane; no Herdr runs it headless."""
+    state_file = _fake(env, monkeypatch, reads=[BUSY])
+    run, d = _live_dispatch(env, monkeypatch)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
+    monkeypatch.setenv("OFFICE_LAUNCHER", "herdr")
+    from office import dispatch, paths
+    monkeypatch.setattr(dispatch.frontdoor, "current_argv", lambda: (["true"], {}))
+    ddir = paths.run_dir(run["id"]) / "dispatches" / d["id"]
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / "brief.md").write_text("You are a code reviewer\n")
+    out = ddir / "reply.txt"
+    rd = {**d, "adapter_id": "agy", "harness": "agy", "model": "gemini-4-hydrogen-high", "effort": "high"}
+    res = dispatch.launch(run, rd, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
+    assert res["launcher"] == "herdr", res
+    calls = _calls(state_file)
+    assert not [c for c in calls if c[:2] == ["agent", "start"]]  # no interactive agent session, so no write allowance
+    line = [c for c in calls if c[:2] == ["pane", "run"] and "_supervise" in c[-1]][-1][-1]
+    assert f"_supervise {d['id']}" in line and "--settings" not in line and "--dangerously-skip-permissions" not in line
+    # No Herdr: the headless plan-mode form runs as before.
+    monkeypatch.delenv("HERDR_ENV")
+    res = dispatch.launch(run, {**rd, "id": d["id"]}, "reviewer", ddir, cwd=env.repo, output=out, include_dirs=[env.tmp])
+    assert res["launcher"] == "process", res

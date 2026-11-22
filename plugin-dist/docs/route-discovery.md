@@ -1,0 +1,192 @@
+# Route discovery
+
+Discovery (#494) lets one explicitly discovery-eligible, unverified executor or worker route be proven by one exact conformance probe and then tried once, bounded, with a known-working fallback. This page is the operating runbook. Routing authority is [protocol/routing.md](../protocol/routing.md); [adapter trust](../protocol/adapters.md) and [learning](../protocol/telemetry-learning.md) stay separate authorities for their own evidence. The tests, replay and live run behind the statements below are in [docs/benchmarks/issue-494-evidence.md](benchmarks/issue-494-evidence.md).
+
+## Shipped state
+
+- `routing.discovery.enabled` is **`true`** in the shipped config, for `executor` and `worker` only. A run pins its policy at `office start`, so only runs started after this release discover.
+- Runs pinned before #494, `v3.1` review-contract runs and 3.0 legacy runs keep discovery off and never discover. A config without the key also reads as off.
+- Replay of the maintainer's recorded history (696 executor/worker decisions, 27 runs, all pinned before discovery) found discovery-off decisions identical to the recorded hashes. With discovery on, none of the 64 recorded dispatch decisions would have drawn a probe: most tasks failed the risk gate, and the rest were stopped by the margin bound or the cold rolling window. `scripts/route_replay.py` is the replay tool: it counts a decision it cannot rebuild by cause (for example `refused:policy-unreadable`), reports pinned decisions that differ from discovery-off, and exits 3 when every recorded decision was skipped, so an empty replay cannot read as a pass.
+- Live evidence is two isolated attempts, both in the evidence doc. The first passed one real exact probe (`codex/gpt-6.1-sol@medium`, 14 s) and ran a real trial, but that trial row ended **`abandoned`**: a headless launch (no Herdr pane) did not write the dispatch's `agent.env`, which the brief and `office preflight` tell the executor to source before `office submit`, so the executor could not submit and the operator wrote the file and submitted by hand. That defect is fixed: a headless launch now writes `agent.env` before the agent starts (regression test `tests/v31/test_headless_agent_env.py`). A second isolated live trial on the same route then reached `trial-submitted` and `trial-accepted` with no manual `agent.env` write and no manual submit. Its probe was a `cached-fresh` hit, so no second probe ran. `trial-accepted` is recorded when the run closes. One probe and one trial ran, with no trust act and no override. A failing probe, an unsupported effort, the fallback launch and the `abandoned` path were not exercised live and are covered by the scripted scenario suite only.
+- Probing is limited today. A real probe needs an OS-enforced write boundary, which is implemented only with macOS `sandbox-exec`, and an authoritative model and effort readback, which only the `codex`, `claude` and `agy` adapters expose. The `agy` adapter adds `--output-format stream-json` and `--effort <effort>` to the probe launch only, reads the model from the first NDJSON `init` event and derives the effort from that slug's tier suffix (agy enforces it against `--effort`); the reply text is never identity evidence. The `claude` adapter reads the model and effort back from the session transcript's first assistant record (`message.model` and `effort`), which the harness writes (the probe's own agent can also write there, so the record is checked against the one first observed while the harness ran; that narrows a forgery to a rewrite inside one poll interval and does not exclude it); the probe keeps Claude's real config directory (its login is keyed by it) and opens only that probe working directory's transcript folder for writing. Other platforms and harnesses with no readback refuse with `no-write-boundary` or `no-identity-readback` and route as before. A claude row is probe-able only when the catalog marks it `discovery: eligible` (today the Haiku efforts; `claude-opus-5-5@low` was probed this way and is now dispatchable on that recorded evidence); a pass is invocation conformance only, grants no trust, and does not clear a user-overlay disable or `dispatchable: false`.
+- Nothing here promotes trust, trials reviewers or planners, or removes a route for cost.
+
+## What a route can prove
+
+| Evidence | Meaning | Boundary |
+| --- | --- | --- |
+| Invocation support / probe pass | This exact invocation and required conformance worked | No quality inference, model-family inference or trust grant |
+| Learned effectiveness / eligibility | Comparable accepted task outcomes support task fitness under maturity and replay rules | Does not promote adapter trust or clear quarantine |
+| Role policy | `allow` / `neutral` / `deny` per role, from user config or shipped defaults | Probes and learning never set or change policy; legacy trust acts are audit history only |
+
+Role policy (#837) replaces trust promotion: a new route is `neutral` (eligible) for every role, and the user sets `allow` or `deny` per role with `office route allow|deny|neutral|clear <harness/model@effort> --role <role>`. Aliases resolve to one exact identity. Remaining technical gates (conformance probe required, discovery off or blocked, not dispatchable) are reported per route with their remedy and are separate from policy.
+
+**An allow skips all of this (#845).** A route the user has allowed for a role (or listed exactly in that role's `preferred_seed`) is `available` at once: it needs no probe and no discovery trial, and `dispatchable: false` in the catalog or the user catalog overlay no longer hides it. If it then fails at runtime, Office logs `route.failed`, demotes it for a TTL and falls back to the next eligible route. Hydrogen is an exception: an exact user allow skips the enabled flag, S/M, risk, and canary reservation limits, but it needs the exact size and effort and a fresh exact probe pass. Hydrogen serves three roles only (AA v5 table, Rico 2026-11-19). As an executor it runs automatically at exactly one effort per size: XS `low`, S `medium`, M `high`, and none for L or XL (an L `high` route still dispatches when named with `--as` or kept by the user's exact role allow, either way behind a fresh exact probe). It is a `plan_reviewer` only as the exact `agy/gemini-4-hydrogen@high` route, the effort that ran the planted-bug set, and a `visual_reviewer` only as `agy/gemini-4-hydrogen@low`. It is not a code reviewer: code review is Luna high then Opus low. Each review route needs the user's exact allow for the role (`office route allow agy/gemini-4-hydrogen@high --role plan_reviewer`, or `agy/gemini-4-hydrogen@low --role visual_reviewer`); a `preferred_seed` entry or a manual `--review-as` alone does not admit it (H4, #1178). It launches through agy's route-scoped `reviewer` profile: read-only `--mode plan`, headless, with the worktree fingerprinted before and after, and `routes: [gemini-4-hydrogen-high@high]` keeps every other agy model without a reviewer launch form. The visual reviewer runs through agy's `vision` profile in read-only `--mode plan` with no permission bypass. It is never a planner, worker, or integration reviewer. Discovery below is for routes the user has not allowed.
+
+**Hydrogen reviewer launch form (H4, #1178).** The route-scoped agy `reviewer` profile opens a Herdr pane like the worker. The pane runs the same headless `agy --mode plan --print` form (never a permission bypass, `--mode auto` or `accept-edits`) under `office _supervise`, and Office captures its stdout as the reply, so nothing depends on an agy permission setting; with Herdr unusable or no pane opened it runs as a detached process. A stalled pane ends at `max_minutes` as a reported no-verdict result. Office fingerprints the worktree after a pane review too and fails a changed one as degraded. The adapter hash changes with the profile, so rerun `office doctor --probe-route agy/gemini-4-hydrogen@high` after the reinstall.
+
+**Hydrogen S canary (#1168).** `routing.hydrogen_trials.canary_tasks` (an integer from 0 to 10, default 0) sets a budget of S tasks that prefer the user-allowed `agy/gemini-4-hydrogen@medium` route. While fewer canary dispatches than the budget are booked, an S task whose run pins `routing.hydrogen_trials.enabled: true`, admits the route through an exact user allow, has independent code review on and is bounded, reversible and low-risk puts Hydrogen first. The exact probe pass and the normal code review still gate every task, and each run gets at most one canary. Each canary dispatch is an append-only `hydrogen_trial_opportunities` row with `canary=1`. At the budget, routing returns to ordinary scoring. The budget is read from the live user/repo config rather than the run's pinned snapshot, because it is one cap shared by all runs and counted in `runs.db`. A run started before it was set still sees it. It only reorders routes the run's pinned policy already allows and never admits a new one. `office route policy` shows the progress as `S canary k/N` or `S canary complete k/N`.
+
+A catalog route becomes probe-able only when the catalog marks it `discovery: eligible` with a concrete invocation model ID and a documented or local-evidence reason. `dispatchable: false` alone does not establish that it can run. Benchmark-only, confirmed-unsupported and archived retired rows stay excluded. Aliases carry the target's availability and reason. Unknown support is distinct from a confirmed unsupported invocation.
+
+Availability states are `available`, `discovered-unconfirmed`, `probe-pending`, `probe-passed`, `temporarily-unavailable` and `confirmed-unsupported`. Availability still leaves role, permission, capability, trust, task and quota gates to check.
+
+Dispatches that end on a harness quota or rate-limit wall temporarily block that harness invocation across effort variants, runs, and Office processes. A reset time reported in the output sets the expiry; otherwise `quota.cooldown_minutes` applies (15 minutes by default). A successful dispatch of the same invocation clears its cooldown early. Other models on the same harness remain eligible.
+
+## Policy and config
+
+### Concurrent free-model routes
+
+Catalog rows may set `max_concurrent` to cap simultaneous dispatches for a harness/model pair. That row value takes precedence over an adapter's `free_model_max_concurrent`, which applies to free-model rows only. Effort variants share the same count. Routing counts only unended `launching` or `running` dispatches across runs; ended, failed and superseded dispatches do not consume capacity. A full route is refused at stage 6 with its live count and cap, and a recorded concurrency snapshot keeps replay deterministic. Uncapped routes perform no dispatch-count query.
+
+Config precedence is explicit run/prompt > repo > user > shipped defaults. The run pins the effective values, their provenance and a policy digest at start. Read and set keys with `office config` (`office config <key>`, `--show-origin` for the source tier, `--repo` for the repo file, `--edit` for list values such as the denial list). Do not create another preference store.
+
+| Key | Shipped value and meaning |
+| --- | --- |
+| `routing.discovery.enabled` | `true`. Switch for automatic builder discovery |
+| `routing.discovery.roles` | `[executor, worker]`; no other role is valid |
+| `routing.discovery.max_probes_per_run` | 2 |
+| `routing.discovery.max_trials_per_run` | 1 |
+| `routing.discovery.max_trial_percent_rolling_20` | 15 percent of the last 20 builder dispatch decisions across all runs |
+| `routing.discovery.trial_size_classes` | `[S, M]` |
+| `routing.discovery.trial_blast_radius` | `[local, repo]` |
+| `routing.discovery.trial_bounded_production_tasks` | `true` for new runs (absent in a run pinned earlier means off). A `production` run (never `production-data`, never irreversible) may trial a route on one task declared `task_size` S/M, `bounds: bounded`, not `domain: infrastructure`. Review floors, the known-working fallback and every prod-write gate are unchanged |
+| `routing.discovery.require_known_fallback` | `true` |
+| `routing.discovery.probe_ttl_days` | 7 |
+| `routing.discovery.probe_timeout_s` | 120 |
+| `routing.user_policy.denied_models` | `[]`. User-only hard denial |
+| `routing.user_policy.overkill_rules` | `[]`. User-only automatic-selection preference, optionally scoped by role and size |
+| `routing.adaptive.budget_ceiling_usd` | `null`. A hard ceiling only when a user, repo or run supplies it |
+
+Denial entries accept `harness/model[@effort]`, `model` or `harness:<name>`. Overkill entries use `{route, roles?, size_classes?}`.
+
+**User-denied is hard.** A denied route is blocked from automatic routing, probing (including `office doctor --probe-route`), plan `route:`, `--as`, `--review-as`, `amend route` and `--route`. Nothing is reserved or launched. A denial written after `office start` still stops a probe, because probing reads the live user and repo policy. Only an explicit user policy change re-enables the route.
+
+**An unreadable policy refuses, it does not default.** If the user or repo config cannot be parsed, or its `routing` or `routing.user_policy` value has the wrong type (the config merge would drop it, and it may have held a denial), routing refuses with `policy-unreadable` for every role and for declared routes. Probes record `probe-refused` with the same reason, a pre-launch recheck stops rather than falling back to a route it cannot show is permitted, and a recorded trial fallback that cannot be confirmed is not started. Nothing is offered while a denial cannot be ruled out. Fix the file (`office config --user` or `--repo`) and retry.
+
+**Overkill is automatic-only and scoped.** A rule removes a route only from automatic selections that match its role and size. Manual selection and automatic selection outside the scope stay valid, subject to the factual gates. The system never invents overkill from cost, age, benchmark absence or missing verification.
+
+**Ceiling provenance.** Without a genuine user ceiling, expected cost to success ranks routes and removes none. The shipped `cost_scale_usd` ranks only and is never a ceiling. A hard ceiling discloses its tier (`run`, `repo` or `user`) in the decision and in inspect. A run pinned before #494 keeps the ceiling its own config carried (25 unless it set another). Unsupported invocation, unsafe or invalid adapters, quarantine, missing capability or isolation, protected quota exhaustion and documented safety or permission violations still block execution.
+
+### Shipped role policy and size scope (#850)
+
+The shipped allow and deny rules live in one file, `catalog/role-policy.yaml`, grouped by role, then
+`harness[@major]/model`, then state, then effort, with the task sizes each applies to (`all` or a list of
+XS to XL). A route not listed is neutral and stays eligible. The order in which routes are preferred is not
+in that file: executors use `executor_slates.IDEAL`, reviewers and the visual reviewer use
+`roles.<role>.preferred_seed` in `config.default.yaml`.
+
+A rule with sizes only applies when the task size is known, so a role check with no size (a reviewer, a
+legacy run) ignores it. Your own `routing.user_policy.role_rules` outrank the shipped file and accept the same
+`sizes: [XS, S]` list; a size-scoped rule of yours outranks an unsized one, and a deny outranks an allow only
+within the same scope.
+
+```
+office route allow claude/claude-sonnet-5-5@high --role executor --size L,XL
+office route clear claude/claude-sonnet-5-5@high --role executor --size L,XL
+office route policy --effective --role executor --size XL
+```
+
+## Probe before a trial
+
+The exact probe fingerprint is **harness, full harness version, adapter hash, launch profile (`worker`), invocation model ID and effort**. This is stricter than the major-version trust and history identity. A change to any field is a new key, so a pass for one effort, model, harness version, adapter or profile never qualifies another.
+
+`office doctor --probe-route <harness/model@effort>` runs one bounded manual probe. It uses provider quota, so run it only within the task's authorization. It works with discovery off, but a denied route is still refused. With a run named explicitly (`--run <id>` or `OFFICE_RUN_ID` set) it counts against that run's probe cap and records its plan version. Otherwise it is unbound: manual provenance, effective policy and fingerprint are recorded and the run, plan, task and dispatch fields are null. Exit code 0 means pass. A probe grants no override and no trust.
+
+The probe checks model and effort readback from the harness's own output and a well-formed reply under the worker launch profile. It also proves a permitted write in a disposable isolated git worktree and no write outside it, with an OS-enforced boundary. It installs nothing and escalates no permission.
+
+| Failure class | Interpretation | Cached for |
+| --- | --- | --- |
+| `unsupported-model-effort` | This exact invocation is unsupported (`confirmed-unsupported`) | Until the fingerprint changes |
+| `conformance-failed` | Identity, response or required behavior failed (`confirmed-unsupported`) | `probe_ttl_days` |
+| `isolation-missing` | Required permission or worktree isolation is missing | `probe_ttl_days` |
+| `transient` | Temporary transport or environment failure (`temporarily-unavailable`) | At most 1 hour |
+| `auth-quota-blocked` | Authentication, account or quota prevents invocation (`temporarily-unavailable`) | At most 1 hour |
+
+A harness message that only says a model is "unavailable" is not read as an unsupported invocation: `unsupported-model-effort` needs an explicit not-found, not-supported or invalid-effort message, so a temporary outage does not cache a lasting `confirmed-unsupported`. A pass is cached for `probe_ttl_days`. A pending reservation is fresh for `probe_timeout_s` plus a 30 s grace, then expires. A failed probe never becomes a trial. Failure is exact-route scoped: other efforts and harnesses stay routable. Probe slots are reserved atomically before launch, concurrent callers for one fingerprint share one launch, and failed, abandoned and expired reservations still count against the run cap. Expiring a dead reservation records the expiry and never launches a replacement as cleanup.
+
+A probe that is not allocated records `probe-refused` with one of these reasons: `route-denied`, `policy-unreadable`, `archived`, `unknown-route`, `not-eligible`, `already-available`, `no-profile`, `not-installed`, `no-fingerprint`, `no-identity-readback`, `no-write-boundary`, `discovery-disabled`, `role-not-eligible`, `quota-reserve`, `probe-in-flight`, `probe-cap`, `db-busy`. Each leaves the known-working route in place.
+
+## Bounded assignment and recovery
+
+Only automatic `executor`/`worker` selection can allocate a trial. The task must be bounded, reversible S/M work with local or repo blast radius in an isolated worktree, with safe permissions, normal submission, tests, independent review and verification. Production-data, irreversible, high-risk and protected-write tasks are excluded. A `production` run is excluded too unless the pinned `trial_bounded_production_tasks` is true and the task is itself S/M, `bounds: bounded` and not infrastructure; a run pinned before that key existed never gets it. Planner, plan reviewer, code reviewer, integration, visual, browser and closeout verifier, and final gate roles keep their stricter rules and never take a trial.
+
+Discovery draws only when ordinary exploration is not active in the same decision. An untried candidate must pass every non-probe gate and the allocation bounds: a seeded draw at the rolling rate, then the margin and relative-cost bounds. The first decision can only choose a probe candidate (`intent: probe`) and keeps the known-working route as primary. After a fresh exact pass, the preflight recompute rechecks permissions, capabilities, quota, risk, caps and fallback for that same candidate and may then make it the trial primary. It never draws a different untried route.
+
+The recorded fallback must be the top-ranked qualifying route, `available`, not denied for the executor role, and a factual working invocation, and it must differ from the trial route. Another trial or an unprobed route cannot be the fallback. Without one the decision is blocked `no-fallback`.
+
+Caps are 2 probes per run, 1 trial per run and 15 percent of the last 20 builder decisions. The rolling window counts the decision being made, so a cold history allows no trial until six builder decisions are recorded (inspect shows `warming up`). The trial reservation and the dispatch row commit in one transaction after the caps are rechecked, so two concurrent dispatches cannot both take the last rolling slot. Block tokens in inspect include `risk`, `trial-cap`, `rolling-cap`, `no-fallback`, `exploration-active`, `probe-cap`, `margin`, `cost`, `ceiling`, `probe-stale`, `quarantined` and `quota-reserve`. A failed or refused probe or a failed recheck takes the known-working fallback without a trial session or lease.
+
+If a trial launch fails before meaningful work, Office records the precise failure and confirms the failed worker's entire process tree has exited before releasing its lease and session and starting the recorded fallback under existing authority. Unconfirmed exit blocks replacement. Work that already started is preserved and reported for explicit recovery, and Office never runs a second live writer. A trial whose worker ends without a submission and without a recovery is recorded `abandoned`. Explicit manual pins (`--as`, `--review-as`, `amend route`, `--route`, declared or recorded routes) skip discovery and never switch silently.
+
+## Inspect and audit
+
+`office inspect route <task>` shows, per decision, the discovery intent, primary, fallback, probe state and freshness, the three caps, the preference source tiers (denied, overkill, budget ceiling) and candidates by category: `denied`, `overkill`, `unsupported`, `untried`, `probe-candidate`, `probe-pending`, `probe-passed`, `probe-failed` and `trial-eligible`. It then lists `trials:` (route, fallback, status, outcome, and whether the fallback ran after a recovered launch) and `attempts (route_discovery_events):` with each attempt's events in order. `--json` adds `audits` (the full decision disclosure), `trials`, `attempts`, `effective_route` and `route_changes`. `office inspect learner` shows learned task outcomes and, separately, trial evidence with the route's adapter trust beside it.
+
+Each attempt gets an `attempt_id` before a dispatch exists. Immutable `route_discovery_events` record every probe reservation, result, cache reuse, refusal, expiry and abandonment and every trial lifecycle step, with policy digest and version, exact fingerprint, reason, freshness, allocation snapshot, primary and fallback, outcome and the available run, plan, task and dispatch identity. A cache reuse links its producing attempt with `source_attempt_id`, and dispatch linking appends an event. Later probes and policy changes append evidence and never rewrite earlier attempts. The probe cache (`route_probes`) and current trial projection (`route_trials`) are mutable and are not the evidence ledger.
+
+An accepted trial revision teaches effectiveness through the existing attribution, maturity and held-out replay rules. A single accepted trial does not grant learned eligibility. Launch, harness, adapter, environment, quota and brief failures keep their actual cause and are not charged to the model. `trial-accepted` is written by the learner when the run closes. A trial row that ended `abandoned` records no `trial-accepted` event even if someone else later submits and the task is accepted. The learner still reads that dispatch as landed. Discovery never writes `adapter_trust_acts`, grants `proven` or clears quarantine.
+
+## Quota reserve by role
+
+A route is skipped for a role when its projected quota would fall below that role's protected reserve. The reserve is read from `quota.reserve_percent_by_role`, keyed by role family:
+
+- `executor`: `executor`, `worker` and `planner` (shipped default 20)
+- `reviewer`: `plan_reviewer` and `code_reviewer` (shipped default 5)
+
+A role not listed, or a missing key, uses `quota.reserve_percent` (shipped default 5). A blank value (`executor:` with no number), or a blank `reserve_percent_by_role:` block, counts as not set.
+
+Each family's reserve resolves in this order, first match wins:
+
+1. A user-set `quota.reserve_percent_by_role.<family>` (user, repo or `--set` tier).
+2. A user-set `quota.reserve_percent`, 0 included. It sets every family without a user by-role value, including `executor` and `reviewer`.
+3. The shipped `quota.reserve_percent_by_role.<family>` (executor 20, reviewer 5).
+4. The shipped `quota.reserve_percent` (5).
+
+So `quota.reserve_percent: 0` alone gives both families a reserve of 0, and `executor: 30` with `reserve_percent: 0` gives executor 30 and reviewer 0. Setting only `quota.reserve_percent: 7` gives both families 7, because it overrides the shipped by-role defaults. To keep the shipped family values while changing the base, set the by-role key itself. Discovery trials use the executor reserve.
+
+Each run pins the `quota` block at start, so a run's reserves are the values in effect then. The protected-reserve notice names the role and its pinned value. A live run picks up an edit through `--apply-routing`.
+
+## Harness preference
+
+The same model can launch through more than one harness (for example `claude` and `hermes` both run Sonnet). `routing.harness_preference` sets how often each harness wins among routes that already qualified for one model and effort. It is unset by default, and then routing is unchanged.
+
+```yaml
+routing:
+  harness_preference:
+    anthropic: {claude: 95, hermes: 5}           # a vendor (the lineage provider)
+    claude-sonnet-5-5: {claude: 50, hermes: 50}  # one model; beats its vendor key
+```
+
+- Weights are non-negative numbers over known harness ids. A negative, non-numeric or NaN weight, or an unknown harness, is refused when the config resolves.
+- The pick is a deterministic hash of the run id, task id, scope and model, so one (run, task) always lands on the same harness, and many tasks split in proportion to the weights.
+- The pick only chooses among candidates that survived every gate: role deny, quota, cooldown, demotion, missing auth and an uninstalled harness still remove a harness first. A harness weighted 0 or not listed is never drawn first, but serves as the fallback when no weighted harness is left.
+- Effort is never mixed: the pick is among harnesses offering the lead route's model at its effort. A manually named route (`--route`, `--as`) is not re-picked.
+- The weights are pinned with the run's routing; a live run picks up an edit through `--apply-routing`.
+- `office inspect route <task>` shows the pinned weights, the harness picked and the draw. The decision record carries a `harness_preference` entry only when weights applied.
+
+## Rollback and pinned runs
+
+Set `routing.discovery.enabled: false` at the user tier (`office config routing.discovery.enabled false`) or the repo tier (add `--repo`) to disable discovery for future runs. A repo-tier value wins over the user tier, so read back the effective value and its source with `office config routing.discovery.enabled --show-origin`. This leaves stored evidence and trust state intact and needs no code change.
+
+Existing runs keep their pinned config, except user policy. The `routing.user_policy` keys `role_rules`, `denied_models`, `overkill_rules`, `version_ceilings` and `strict_allow_roles` apply to a running run at its next routing decision. A cleared `role_rules` entry (`office route clear`) is dropped at that decision too, except in a run that pinned it at start: that run keeps the cleared rule until `office config --run <id> --apply-routing --quote "<words>"` re-pins it. If the user authorizes any other live-run change, `office config --run <id> --apply-routing --quote "<words>"` re-pins its roles, routing and quota (including `quota.reserve_percent`) from the current config files, and `--apply-verification` re-pins its check timeouts and concurrency. Inspect the result before further dispatch. A config edit outside `routing.user_policy` alone does not change a live run or stop a live worker.
+
+A credit-limited route can carry an opt-in daily dispatch budget, `quota.daily_dispatch_budget: {"<harness>/<model>[@effort]": N}` (#831). Dispatches started on that route since local midnight, across all runs, spend it: the route's quota reads as the unspent share, so at N it is quota-exhausted and a reviewer chain falls through to its next route. The first dispatch at 80% records a `route.budget_warning`. There is no default budget. A running run picks up a change through `--apply-routing`, which re-pins `quota`. Token budgets are a follow-up: Office keeps no per-dispatch token counts.
+
+Pre-#494 runs retain discovery-off behavior and their old ceiling. Their 3.0 and v3.1 paths and stored decisions stay readable and replayable, and discovery-off decisions preserve their prior hashes. Rolling back discovery does not rewrite history, resurrect retired models or waive a safety gate.
+
+## Executor routing table (AA v5)
+
+Executor routing (AA v5, policy `owner-xs-xl-engineering-index-2026-11-20`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
+
+| Size | Rung 1 | Rung 2 | Rung 3 |
+|---|---|---|---|
+| XS | claude Haiku 5.5 high | agy Hydrogen low (conditional) | codex Terra low |
+| S | claude Sonnet 5.5 medium | agy Hydrogen medium (conditional) | codex Terra medium |
+| M | claude Sonnet 5.5 high | agy Hydrogen high (conditional) | codex Terra high |
+| L | claude Opus 5.5 medium | codex Sol medium | agy Neon medium |
+| XL | claude Opus 5.5 high | codex Sol high | agy Neon high |
+
+Dispatchability follows `catalog/routes.tsv`: codex Sol medium and high passed their exact probes on 2026-11-21, and claude Opus 5.5 high passed on 2026-11-22. Its 2026-11-20 `isolation-missing` failure came from an unreaped zombie child of a Claude hook daemon outside the probe, which probe cleanup now ignores because a zombie runs nothing (#1296). All three XL rungs are dispatchable.
+
+Hydrogen is conditional: it dispatches only through the Hydrogen gate, at exactly one effort per size (XS low, S medium, M high) and none for L or XL, and it is not a code reviewer (code review is Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only (the frontend bias rule); no route is added. Argon stays executor-eligible through the argon-medium-l floor exception but sits in no slate.

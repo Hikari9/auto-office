@@ -28,9 +28,7 @@ def _fresh_cmd(tid: str) -> str:
 
 
 def _last_ended_executor(con, run: dict, tid: str) -> dict | None:
-    row = con.execute("SELECT id FROM dispatches WHERE run_id=? AND task_id=? AND role='executor' AND ended_at IS NOT NULL "
-                      "ORDER BY ended_at DESC, started_at DESC LIMIT 1", (run["id"], tid)).fetchone()
-    return state.get_dispatch(con, row["id"]) if row else None
+    return state.last_ended_executor(con, run, tid)
 
 
 def modes(con, run: dict, tid: str) -> str:
@@ -90,6 +88,47 @@ def recovery_hint(con, run: dict, tid: str, *, fresh: bool = False) -> str:
     return f"office rerun {tid} " + ("--fresh" if fresh else modes(con, run, tid))
 
 
+def _route_refusal(con, run: dict, task: dict, route: dict) -> tuple[str, str] | None:
+    """`(category, why)` when the next rerun would refuse `route` now, else None (#752).
+
+    The observed qualification reads policy and capability only, so the quota reserve is read here too:
+    a rerun that quota refuses must not be offered as ready. Reads evidence, launches nothing."""
+    try:
+        decision = dispatch.qualify_recorded_route(con, run, task, route, observe=True)
+    except (Refused, Usage) as exc:
+        return getattr(exc, "category", None) or "route-unavailable", exc.message
+    except sqlite3.Error as exc:
+        return "route-unavailable", f"route evidence could not be read: {exc}"
+    why = candidates.reserve_block(decision["candidate"], state.pinned_config(run), "executor")
+    return ("route-unavailable", why) if why else None
+
+
+def refused_route_next(con, run: dict, tid: str, *, amend_route: bool = False) -> str | None:
+    """What to name instead of `office rerun --resume|--fresh` when the next rerun would refuse the task's
+    recorded route for quota or availability, else None (#752).
+
+    The user names another route (`--fresh --as ... --quote`, or `office amend route` when `amend_route`) or the
+    orchestrator reroutes from evidence. On a user deny the rerun re-picks from the plan (#1106), so only `--fresh`
+    is named: the re-picked route cannot resume the denied route's session."""
+    task = state.get_task(con, run["id"], tid)
+    if not task:
+        return None
+    recorded = state.recorded_route(task)
+    route = recorded if recorded.get("declared") and dispatch._route_quote(recorded) \
+        else (_last_ended_executor(con, run, tid) or {}).get("route") or recorded
+    refusal = _route_refusal(con, run, task, route) if route.get("candidate") else None
+    if refusal is None:
+        return None
+    if refusal[0] == "route-denied":
+        # The rerun re-picks another route from the plan (#1106); a resume cannot switch routes, so only --fresh works.
+        return (f"route {routing.candidate_id(route['candidate'])} is now denied ({refusal[1]}); the rerun re-picks "
+                f"from the plan and cannot resume: {_fresh_cmd(tid)}")
+    named = f'{_fresh_cmd(tid)} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
+    other = f'office amend route {tid} --as <harness>/<model>[@effort] --quote "<user\'s words>"' if amend_route \
+        else f"office dispatch {tid} --reroute"
+    return f"route {routing.candidate_id(route['candidate'])} cannot run now ({refusal[1]}); {named} or {other}"
+
+
 def agent_alive(d: dict) -> bool | None:
     """True, False, or None when liveness cannot be known (herdr unreachable).
     A pane-hosted agent is asked through herdr; a headless one by its pid."""
@@ -108,6 +147,26 @@ def agent_alive(d: dict) -> bool | None:
         return bool(agent)
     body = (proc.stdout or "") + (proc.stderr or "")
     return False if "not_found" in body else None
+
+
+def own_pane_text(text: str, d: dict) -> str:
+    """The pane text below this dispatch's own setup line (`... && touch <its dir>/shell-ready`).
+    A reused pane still shows an earlier agent's output above it, and a usage limit printed by a
+    revoked executor must not stall the dispatch that took the pane over (#753). When the setup
+    line has scrolled off, the earlier agent's output has too, so the text is returned as is."""
+    if not d.get("run_id") or not d.get("id"):
+        return text
+    marker = str(paths.run_dir(d["run_id"]) / "dispatches" / d["id"] / "shell-ready")
+    raw = text.splitlines()
+    flat, ends = "", []
+    for line in raw:  # the setup line may wrap at the pane's width
+        flat += dispatch._ANSI_SEQ.sub("", line).strip()
+        ends.append(len(flat))
+    at = flat.rfind(marker)
+    if at < 0:
+        return text
+    end = at + len(marker)
+    return "\n".join(raw[next(i for i, e in enumerate(ends) if e >= end) + 1:])
 
 
 def agent_activity(d: dict) -> dict | None:
@@ -129,6 +188,7 @@ def agent_activity(d: dict) -> dict | None:
     text = dispatch._herdr_agent_text(name)
     if text is None:
         return None
+    text = own_pane_text(text, d)
     try:
         proc = subprocess.run(["herdr", "agent", "get", name], capture_output=True, text=True, timeout=30)
         agent = (json.loads(proc.stdout or "{}").get("result") or {}).get("agent") or {}
@@ -268,7 +328,9 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
     if not pending:
         if accepted:
             try:
-                base = integration.combine(run, accepted)
+                base = integration.combine(run, accepted, shared={
+                    dep: integration.shared_paths(state.get_task(con, run["id"], dep)) for dep, _ in accepted
+                    if dep in task["depends"]})
             except (integration.CombineConflict, paths.GitError) as exc:
                 raise Refused("rebase-conflict" if rebased else "dependency-conflict",
                               f"{task['id']} cannot combine the current base with accepted dependencies: {exc}",
@@ -297,18 +359,21 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
                                       capture_output=True, text=True, env=env)
                 if proc.returncode != 0:
                     subprocess.run(["git", "-C", str(scratch), "merge", "--abort"], capture_output=True)
-                    if rebased:
-                        raise Refused("rebase-conflict", f"{task['id']} cannot restack onto {dep} {sha[:12]} on "
-                                      "rebased default branch; executor not launched",
+                    if rebased and dep == "rebased default branch":
+                        raise Refused("rebase-conflict", f"{task['id']} cannot restack onto {dep} {sha[:12]}; "
+                                      "executor not launched",
                                       preserved="original task HEAD and worktree",
-                                      next_step=f"resolve dependency and rerun {task['id']} --fresh")
+                                      next_step=f"merge {sha[:12]} into the task branch by hand in its worktree, "
+                                                f"commit the resolution, then office rerun {task['id']} --fresh")
                     return {"base": None, "merged": [], "conflict": {"task": dep, "revision": rev_id,
                             "commit": sha}, "unmerged": [
                             {"task": t, "revision": r, "commit": c} for t, r, c in pending],
                             "reopened": reopened, "line": f"restack onto {dep} conflicts; task HEAD unchanged"}
                 merged.append({"task": dep, "revision": rev_id, "commit": sha})
             try:
-                base = integration.combine(run, accepted)
+                base = integration.combine(run, accepted, shared={
+                    dep: integration.shared_paths(state.get_task(con, run["id"], dep)) for dep, _ in accepted
+                    if dep in task["depends"]})
             except (integration.CombineConflict, paths.GitError) as exc:
                 if rebased:
                     raise Refused("rebase-conflict", f"{task['id']} cannot combine rebased base: {exc}",
@@ -491,10 +556,29 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
         if resume:
             raise Refused("resume-impossible", f"{task['id']}'s route was changed since {parent['id']}; a resumed "
                           "session keeps its own", scope=task["id"], next_step=_fresh_cmd(task["id"]))
-    route = rec if declared else parent.get("route") or {}
+    if not declared and state.returned_to_automatic(task):  # `amend route --auto` dropped the parent's reroute (#1106)
+        decision = dispatch.replan_from_slate(con, run, task)
+    else:
+        decision = _reused_route(con, run, task, parent, rec if declared else parent.get("route") or {})
+    cand = decision["candidate"]
+    if resume and (cand["harness"], cand.get("invocation_model_id"), cand.get("effort")) != (
+            parent.get("adapter_id") or parent.get("harness"), parent.get("model"), parent.get("effort")):
+        raise Refused("resume-impossible", f"cannot resume {task['id']}: {parent['id']}'s session keeps its "
+                      f"harness, model and effort ({parent.get('harness')}/{parent.get('model')}@{parent.get('effort')})",
+                      scope=task["id"], preserved="the task worktree", next_step=_fresh_cmd(task["id"]))
+    return decision
+
+
+def _reused_route(con, run: dict, task: dict, parent: dict, route: dict, *, observe: bool = False) -> dict:
+    """Requalify the route a rerun reuses. A user deny that now rejects it drops the route: the rerun
+    re-picks from the approved plan and records the change (#1106). Other refusals stay route-unavailable."""
     try:
-        decision = dispatch.qualify_recorded_route(con, run, task, route)
+        return dispatch.qualify_recorded_route(con, run, task, route, observe=observe)
     except Refused as exc:
+        if exc.category == "route-denied":
+            return dispatch.replan_from_slate(con, run, task, denied=(routing.candidate_id(route["candidate"]),
+                                                                     exc.data.get("reason") or exc.message),
+                                              observe=observe)
         fix = f"{_fresh_cmd(task['id'])} --reroute routes from current evidence"
         if dispatch._route_quote(route):
             fix += f'; or {_fresh_cmd(task["id"])} --as <harness>/<model>[@effort] --quote "<user\'s words>"'
@@ -504,13 +588,37 @@ def _route_decision(con, run: dict, task: dict, parent: dict, *, as_model: str |
         raise Refused("route-unavailable",
                       f"{task['id']}'s original route {original} cannot run now: {exc.message}",
                       scope=task["id"], preserved="the task worktree and its route history", next_step=fix) from exc
-    cand = decision["candidate"]
-    if resume and (cand["harness"], cand.get("invocation_model_id"), cand.get("effort")) != (
-            parent.get("adapter_id") or parent.get("harness"), parent.get("model"), parent.get("effort")):
-        raise Refused("resume-impossible", f"cannot resume {task['id']}: {parent['id']}'s session keeps its "
-                      f"harness, model and effort ({parent.get('harness')}/{parent.get('model')}@{parent.get('effort')})",
-                      scope=task["id"], preserved="the task worktree", next_step=_fresh_cmd(task["id"]))
-    return decision
+
+
+def observed_route(con, run: dict, task: dict) -> dict | None:
+    """The executor route an unfinished task's next launch takes, for `office status` (#1106 F6).
+
+    Read-only: no quota probe and no write. A task with a dispatch reuses its recorded route as a rerun
+    does (`_reused_route`), and a user deny that rejects it re-picks from the plan. Any other task takes
+    the planned slate in order (`dispatch.planned_route`). Returns {"decision"} for the route that will
+    run; {"route", "planned", "failure"} when the selection fails, naming the route status reports and
+    why it was rejected; None when the task has neither a plan slate nor a recorded route."""
+    tid = task["id"]
+    rec = state.recorded_route(task)
+    slate = dispatch._planned_slate(con, run, tid)
+    if not rec and not slate:
+        return None
+    primary = (slate or {}).get("primary") or routing.candidate_id(rec["candidate"])
+    returned = state.returned_to_automatic(task)
+    try:
+        if rec and task.get("current_dispatch_id") and not returned:
+            decision = _reused_route(con, run, task, {}, rec, observe=True)
+        else:
+            decision = dispatch.planned_route(con, run, {**task, "route_json": None} if returned else task,
+                                              observe=True)
+    except Refused as exc:
+        if exc.category == "route-unavailable":
+            return {"route": routing.candidate_id(rec["candidate"]), "planned": False, "failure": exc.message}
+        return {"route": primary, "planned": bool(slate), "failure": exc.message.removeprefix(f"{tid}: ")}
+    if decision.get("status") != "selected":
+        return {"route": primary, "planned": bool(slate),
+                "failure": dispatch._route_failure(tid, decision).removeprefix(f"{tid}: ")}
+    return {"decision": decision}
 
 
 def _mode_required(tid: str) -> Usage:
@@ -555,7 +663,8 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         raise Refused("task-done", f"{tid} is {task['status']}; nothing to rerun", scope=tid)
     if review_as is not None and gates.unavailable_review_block(con, run, task):
         # The revision is final and only its review is missing: the rerun is the review, never an executor.
-        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external)
+        res = gates.review_only(con, run, tid, review_as=review_as, review_cli=review_cli, review_external=review_external,
+                                quote=quote)
         ignored = [f"--{f}" for f, on in (("resume", resume), ("fresh", fresh), ("reroute", reroute), ("as", as_model),
                                           ("cli", cli), ("external", external)) if on]
         if ignored:
@@ -640,8 +749,15 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
         if decision:
             dispatch._record_routing(con, run, decision)
             dispatch.note_route(con, run, task, decision)
+        pin_lines: list[str] = []
         if review_as is not None:
-            state.update_task(con, run["id"], tid, review_override=gates.review_pin(review_as, review_cli, review_external))
+            pin = gates.review_pin(review_as, review_cli, review_external, quote=quote)
+            gates.store_review_pin(con, run, tid, [tid], pin)
+            from office import convergence
+            lane = next((sc for sc in convergence.all_scopes(con, run) if tid in sc["tasks"]), None) \
+                if contract.is_convergence(run) else None
+            if lane:  # the lane reviewer reads this pin: say which of its tasks it does not cover
+                pin_lines = gates.pin_notices(con, run, lane["tasks"], pin, [])
         did = dispatch.request_launch(con, run, tid, role="executor", fix_of=task.get("current_revision_id"),
                                       extra=extra, base=(restack or {}).get("base"), decision=launch)
         if restack and (restack["merged"] or restack["conflict"]):
@@ -672,6 +788,7 @@ def _rerun_locked(con, run: dict, tid: str, *, resume: bool, fresh: bool, rerout
                         f" on {route} ({note}) launching"]
                  + ([f"{tid} {restack['line']}"] if restack else []))
     res.lines.extend(f"  {line}" for line in dispatch.launch_instructions(run, state.get_dispatch(con, did)))
+    res.notices.extend(pin_lines)
     res.next = "exceptions only; office status"
     return res
 

@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from office import db, frontdoor, paths, portable, state, version
+from office import config as cfg
 from office.util import ALIVE, DEAD, UNKNOWN, claim_identity, claim_liveness, dumps, now_iso, process_start
 
 KICK_THROTTLE_SECONDS = 10
@@ -60,18 +61,24 @@ LOCK_WAIT_SECONDS = 2.0
 
 
 def _handlers():
-    from office import convergence, dispatch, gates, plans, prs, visual, integration, land, landing_recovery
+    from office import (board_card, convergence, dispatch, executor_context, gates, plans, prs, visual, integration,
+                        land, landing_recovery)
     return {
+        "card_publish": board_card.job_publish,
         "converge": convergence.job_converge,
         "convergence_review": convergence.job_convergence_review,
         "lane_visual": convergence.job_lane_visual,
         "pr_sync": prs.job_pr_sync,
         "launch_agent": dispatch.job_launch_agent,
+        "rotate_executor": executor_context.job_rotate,
         "trial_recovery": dispatch.job_trial_recovery,
         "route_fallback": dispatch.job_route_fallback,
         "notify_worker": dispatch.job_notify_worker,
         "run_checks": gates.job_run_checks,
         "review": gates.job_review,
+        "review_fallback": gates.job_review_fallback,
+        "review_supervise": gates.job_review_supervise,
+        "integration_review": integration.job_integration_review,
         "plan_review": plans.job_plan_review,
         "visual_capture": visual.job_capture,
         "visual_review": visual.job_visual_review,
@@ -79,6 +86,11 @@ def _handlers():
         "auto_rebase": land.job_auto_rebase,
         "landing_verify": landing_recovery.job_verify,
     }
+
+
+def handler(kind: str):
+    """The function that runs a job of `kind`."""
+    return _handlers()[kind]
 
 
 def mode() -> str:
@@ -330,6 +342,22 @@ def on_permanent_failure(con, run: dict, job: dict, err: str) -> None:
         state.emit(con, run, "task.blocked", f"{task_id} route fallback could not run: {err[:120]}; "
                    f"office dispatch {task_id} --reroute", task_id=task_id)
         return
+    if job["kind"] == "rotate_executor":
+        did = job["payload"].get("dispatch_id")
+        d = state.get_dispatch(con, did) if did else None
+        task = state.get_task(con, run["id"], d["task_id"]) if d else None
+        if task and task["current_dispatch_id"] == did and task["status"] in ("running", "launching"):
+            state.update_task(con, run["id"], task["id"], status="blocked",
+                              pause_reason=f"context rotation failed: {err[:180]}")
+            handoff = json.loads(d.get("context_handoff_json") or "{}")
+            if handoff:
+                handoff["phase"], handoff["error"] = "blocked", err[:300]
+                con.execute("UPDATE dispatches SET context_handoff_json=? WHERE id=?",
+                            (dumps(handoff), did))
+            state.emit(con, run, "executor.handoff_blocked",
+                       f"{task['id']} context rotation failed: {err[:120]}; no replacement launched",
+                       task_id=task["id"], dispatch_id=did)
+        return
     if job["kind"] == "launch_agent" and task_id:
         from office import dispatch
         if dispatch.trial_launch_failed(con, run, job["payload"].get("dispatch_id"), f"launch failed: {err}"):
@@ -537,11 +565,16 @@ def _run_attempt(con, job_id: str, token: str) -> int:
             raise state.Refused("runtime-version-mismatch",
                                 f"runtime {version.current()} will not execute a job for a run pinned to "
                                 f"{run['office_version']}")
+        if run.get("gear") and run["gear"] not in cfg.GEARS:
+            # A run pinned to a gear this release removed: user commands refuse it, so its queued work must too.
+            raise state.Refused("gear-removed", f"job {job_id} belongs to a run pinned to gear {run['gear']!r}, "
+                                "which Office no longer has; end it with office close --abandon")
         handler = _handlers()[job["kind"]]
         result = handler(con, run, job) or {}
         with db.transaction(con):
-            cur = con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL, "
-                              "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' AND claim_token=?",
+            # The terminal row keeps its claim token as provenance; only the live pid is released.
+            cur = con.execute("UPDATE outbox SET status='done', result_json=?, finished_at=?, claimed_pid=NULL "
+                              "WHERE id=? AND status='claimed' AND claim_token=?",
                               (dumps(result), now_iso(), job_id, token))
             if cur.rowcount == 0:
                 raise db.StaleAttempt(f"job {job_id} attempt {token} no longer owns its claim")
@@ -560,9 +593,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
                     raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim or its run closed")
                 permanent = isinstance(exc, state.Refused) or row["attempts"] >= row["max_attempts"]
                 if permanent:
-                    cur = con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL, "
-                                      "claimed_by=NULL, claim_token=NULL WHERE id=? AND status='claimed' "
-                                      "AND claim_token=?", (err[:2000], now_iso(), job_id, token))
+                    cur = con.execute("UPDATE outbox SET status='failed', error=?, finished_at=?, claimed_pid=NULL "
+                                      "WHERE id=? AND status='claimed' AND claim_token=?",
+                                      (err[:2000], now_iso(), job_id, token))
                     if cur.rowcount == 0:
                         raise db.StaleAttempt(f"job {job_id} attempt {token} lost its claim")
                     state.emit(con, run, "job.failed", f"{job['kind']} failed: {err[:160]}",
@@ -584,6 +617,9 @@ def _run_attempt(con, job_id: str, token: str) -> int:
                 kick(con, run["id"])  # a failure may have queued its own recovery
         return 1
     state.write_projection(con, run["id"])
+    from office import board_card
+    with db.unfenced():
+        board_card.sweep(con, state.get_run(con, run["id"]))  # the run's board card, if it has one
     if mode() != "inline":
         with db.unfenced():
             kick(con, run["id"])

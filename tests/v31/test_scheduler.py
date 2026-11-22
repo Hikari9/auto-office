@@ -409,3 +409,46 @@ def test_scheduler_and_intake_config_defaults_and_settable(env):
     with pytest.raises(Exception):
         configcmd.config(key="scheduler.cpu_pressure", value="high", tier="user", cwd=env.repo)
     assert yaml.safe_load(cfg.default_config_path().read_text())["scheduler"]["cpu_pressure"] == 0.9
+
+
+def test_pausing_a_run_holds_its_integration_checks_until_resume(two_task_run, monkeypatch):
+    """#800: `office queue pause run:<id>` holds the run's automatic integration checks (an external load
+    hold), even before the run has a queue item; `office queue resume` releases and kicks them."""
+    from office import jobs, state
+    env, con, run_id = two_task_run
+    kicked = []
+    monkeypatch.setattr(jobs, "kick", lambda con_, rid=None, *a, **k: kicked.append(rid))
+    run = state.get_run(con, run_id)
+    with con:
+        state.enqueue(con, run, "integrate", {"key": "k1"}, dedup_key=f"integrate:{run_id}:k1", max_attempts=2)
+    res = queuecmd.pause(con, item=f"run:{run_id[:8]}")
+    assert any("integration checks" in line for line in res.lines), res.lines
+
+    def held():
+        return [r[0] for r in con.execute("SELECT not_before FROM outbox WHERE run_id=? AND kind='integrate' "
+                                          "ORDER BY rowid", (run_id,))]
+    assert held() == [queuecmd.INTEGRATION_HELD]
+    with con:  # a job queued while paused is held too
+        state.enqueue(con, run, "integrate", {"key": "k2"}, dedup_key=f"integrate:{run_id}:k2", max_attempts=2,
+                      not_before=queuecmd.integration_hold(con, run_id))
+    assert held() == [queuecmd.INTEGRATION_HELD] * 2
+    res = queuecmd.resume(con, item=f"run:{run_id}")
+    assert held() == [None, None] and kicked == [run_id], (held(), kicked)
+    assert queuecmd.integration_hold(con, run_id) is None
+
+
+def test_pausing_one_task_leaves_integration_alone(two_task_run):
+    env, con, run_id = two_task_run
+    from office import state
+    run = state.get_run(con, run_id)
+    with con:
+        state.enqueue(con, run, "integrate", {"key": "k1"}, dedup_key=f"integrate:{run_id}:k1", max_attempts=2)
+    queuecmd.pause(con, run_arg=run_id, task="T1")
+    assert con.execute("SELECT not_before FROM outbox WHERE run_id=? AND kind='integrate'", (run_id,)).fetchone()[0] is None
+
+
+def test_a_run_item_name_with_a_task_flag_is_refused(two_task_run):
+    from office.state import Usage
+    env, con, run_id = two_task_run
+    with pytest.raises(Usage):
+        queuecmd.pause(con, item=f"run:{run_id[:8]}", task="T1")

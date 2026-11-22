@@ -25,7 +25,7 @@ from office import paths
 # Bump when SHARED_COLUMNS or the DDL changes. The version is a record, not the
 # gate: every open also runs the additive column pass (see `migrate`), so a
 # column added without a bump still reaches existing databases.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 
 LEGACY_DDL = """
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, family_id TEXT, created_at TEXT, plugin_commit TEXT, policy_hash TEXT, catalog_hash TEXT, adapter_hash TEXT, config_hash TEXT, status TEXT);
@@ -75,6 +75,8 @@ SHARED_COLUMNS = {
         "stall_kind TEXT", "resets_at TEXT", "limit_label TEXT", "limit_fingerprint TEXT",
         # v12: the executor dispatch this one replaced (same run, same task).
         "predecessor_dispatch_id TEXT",
+        # #939: context-cap handoff state, per executor (never a shared run transcript).
+        "context_handoff_json TEXT",
         # #701/#722: passive progress-watchdog state; not lifecycle authority.
         "watchdog_progress_hash TEXT", "watchdog_progress_since TEXT",
     ],
@@ -124,6 +126,8 @@ SHARED_COLUMNS = {
     # Every claim writes a new one; a requeue clears it. A row claimed by an
     # older runtime has none and keeps that runtime's pid liveness rule.
     "outbox": ["claim_token TEXT"],
+    # #1168: 1 = a counted S canary dispatch, 0 = a canary-path launch over budget, NULL = a trial-path opportunity.
+    "hydrogen_trial_opportunities": ["canary INTEGER"],
 }
 
 OFFICE_DDL = """
@@ -172,6 +176,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS route_probe_inflight ON route_probe_reservatio
 CREATE INDEX IF NOT EXISTS route_probe_run ON route_probe_reservations(run_id);
 CREATE TABLE IF NOT EXISTS route_trials(id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, dispatch_id TEXT, role TEXT, route TEXT, probe_key TEXT, fallback_route TEXT, policy_digest TEXT, reason TEXT, status TEXT CHECK(status IN ('reserved','launched','launch-failed','fell-back','submitted','accepted','rejected','abandoned')), outcome TEXT, created_at TEXT, updated_at TEXT);
 CREATE INDEX IF NOT EXISTS route_trial_run ON route_trials(run_id, role);
+CREATE TABLE IF NOT EXISTS hydrogen_trial_opportunities(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL, selected_route TEXT NOT NULL, experimental INTEGER NOT NULL CHECK(experimental IN (0,1)), created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS hydrogen_trial_run ON hydrogen_trial_opportunities(run_id,experimental);
+CREATE INDEX IF NOT EXISTS hydrogen_trial_window ON hydrogen_trial_opportunities(seq);
 CREATE TABLE IF NOT EXISTS cleanup_runs(run_id TEXT PRIMARY KEY, status TEXT NOT NULL, receipt_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS route_discovery_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, attempt_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('probe-reserved','probe-result','probe-cache-hit','probe-refused','probe-expired','probe-abandoned','dispatch-linked','trial-reserved','trial-launched','trial-launch-failed','trial-fell-back','trial-submitted','trial-accepted','trial-rejected','trial-abandoned')), origin TEXT NOT NULL CHECK(origin IN ('preflight','manual','dispatch','recovery','job')), run_id TEXT, plan_version INTEGER, task_id TEXT, dispatch_id TEXT, role TEXT, policy_digest TEXT NOT NULL, policy_version TEXT NOT NULL, probe_key TEXT NOT NULL, fingerprint_json TEXT NOT NULL, candidate_route TEXT NOT NULL, primary_route TEXT, fallback_route TEXT, reason TEXT NOT NULL, probe_freshness TEXT NOT NULL CHECK(probe_freshness IN ('fresh-run','cached-fresh','stale','none')), source_attempt_id TEXT, allocation_json TEXT NOT NULL, outcome TEXT, reason_class TEXT, detail TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS route_discovery_attempt ON route_discovery_events(attempt_id,seq);
@@ -188,6 +195,11 @@ WHEN NEW.run_id IS NOT NULL AND NEW.dispatch_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM dispatches WHERE id = NEW.dispatch_id)
 BEGIN SELECT RAISE(ABORT, 'finding references an unrecorded dispatch'); END;
 """
+
+HYDROGEN_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS hydrogen_opportunity_no_update BEFORE UPDATE ON hydrogen_trial_opportunities BEGIN SELECT RAISE(ABORT, 'hydrogen trial opportunities are append-only'); END;",
+    "CREATE TRIGGER IF NOT EXISTS hydrogen_opportunity_no_delete BEFORE DELETE ON hydrogen_trial_opportunities BEGIN SELECT RAISE(ABORT, 'hydrogen trial opportunities are append-only'); END;",
+)
 
 DISCOVERY_TRIGGERS = ("""
 CREATE TRIGGER IF NOT EXISTS route_discovery_no_update BEFORE UPDATE ON route_discovery_events
@@ -259,7 +271,7 @@ def migrate(con: sqlite3.Connection) -> None:
                 if col.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         con.execute(TRIGGERS)
-        for trigger in DISCOVERY_TRIGGERS:
+        for trigger in DISCOVERY_TRIGGERS + HYDROGEN_TRIGGERS:
             con.execute(trigger)
         con.execute("CREATE INDEX IF NOT EXISTS runs_repo ON runs(git_common_dir, phase)")
         con.execute("CREATE INDEX IF NOT EXISTS findings_task ON findings(run_id, task_id, state)")
@@ -321,7 +333,8 @@ _TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", LEGACY_DDL + OFFICE_DD
 _ROUTE_INDEXES = {"route_probe_inflight", "route_probe_run", "route_trial_run", "route_discovery_attempt",
                   "route_discovery_run", "route_discovery_probe", "route_discovery_trial_terminal",
                   "dispatches_route_concurrency"}
-_ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace"}
+_ROUTE_TRIGGERS = {"route_discovery_no_update", "route_discovery_no_delete", "route_discovery_no_replace",
+                   "hydrogen_opportunity_no_update", "hydrogen_opportunity_no_delete"}
 
 
 def _drifted(con: sqlite3.Connection) -> bool:

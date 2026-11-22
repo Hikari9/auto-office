@@ -69,7 +69,7 @@ visual: none
 
 def test_submit_replaces_run_checks_instead_of_merging(env):
     env.trust()
-    code, out = env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(PLAN_RC_A)
     code, out = env.office("submit", check=0)
@@ -88,7 +88,7 @@ def test_submit_replaces_run_checks_instead_of_merging(env):
 
 def test_amend_contract_rederives_run_checks(env):
     env.trust()
-    code, out = env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(PLAN_RC_A)
     code, out = env.office("submit", check=0)

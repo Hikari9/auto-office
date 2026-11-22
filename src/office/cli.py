@@ -22,7 +22,7 @@ Auto Office {ver}
 
   office start "<goal>"             create a run; queues the planner when policy requires one
   office resume [run]               bind this session to a run and show where it stands
-  office resume --auto-wake         opt in to safe Claude/Herdr root wake-up (only when bound in its pane)
+  office resume --wake-off          turn off root wake-up; wake is on by default when bound in a Claude Herdr pane
   office status                     what matters now, ending with the next legal action
   office wait [--timeout S]         block until something needs you (exit 0), a stall (3), an agent's
                                     question (5), or timeout (124)
@@ -33,16 +33,23 @@ Auto Office {ver}
   office raise [--kind question|blocker|scope-request] [--path P ...] -- "<text>"
                                     executor: stop for a decision or a blocker without submitting (office raise --help)
   office amend <scope> -- "<delta>" change the plan (scope: plan, T2, or T2,T3)
+  office amend options --prs|--no-prs --quote "<user approval>" --confirm
+                                    amend live task PR publishing with user confirmation
   office amend <task> --add-check "<cmd>" | --add-accept "<text>" | --set depends=T1  change the task's enforced contract
   office amend <scope> --no-review --reason "<why>" -- "<delta>"   ordinary amendment, no plan review
                                     (only matters while plan review is open; a closed review never reopens)
   office amend route <task> --as <harness>/<model>[@effort] --quote "<words>" [--restart]
                                     declare a pending task's route, or re-record a live dispatch's model
                                     (same harness); --restart relaunches it
+  office amend route <task> --auto --quote "<words>"
+                                    clear a pending task's declared route: it routes automatically again
   office ack <amendment-id>         worker: record that you applied a delivered amendment
   office rerun <task> --resume|--fresh [--stash-wip] [--reroute | --as <harness>/<model>[@effort] [--cli ARGV | --external]]
                                     [--review-as <harness>/<model>[@effort] [--review-cli ARGV | --review-external]]
                                     after a worker ends: continue its session, or start a new one with the findings
+  office executor-context <task> rotate|continue|threshold <tokens>
+                                    answer an executor's context signal: rotate to a fresh session on the same
+                                    worktree, keep going (not repeated until the next episode), or set this task's cap (0 disables)
   office prompt <task|dispatch> -- "<message>"
                                     message a live pane agent and confirm it was submitted (never herdr pane run)
   office answer <task|dispatch> <n> | -- "<text>" | --choice <n>|--keys <keys> [--expect <fp>]
@@ -51,6 +58,8 @@ Auto Office {ver}
   office dismiss <task|dispatch|--all>
                                     close the kept panes of ended dispatches (final text is saved first)
   office self-improve               print the manual bug-filing workflow and the run's bug? signals
+  office land --batch batch.json [--dry-run|--retry-full]
+                                    land ordered run/PR lanes; full suite on the composed lanes before any merge
   office close                      finish the run after acceptance and landing
                                     (--landed-externally <pr>: its work merged through another PR)
   office benchmarks brief|submit <f> opted-in runs: one background refresh of missing benchmark scores
@@ -59,15 +68,17 @@ Auto Office {ver}
   office route policy --effective --role <role> [--size XL] | allow|neutral|deny|clear <route> --role <role> [--size XS,S]
                                     role-scoped user allow/neutral/deny (no active run required)
   office route override <route> --role <role> --run <id> --reason "<why>"
-                                    user-issued one-off deny override (interactive terminal only)
+                                    user-issued one-off deny override (terminal, or --rico-quote/--quoted-at)
   office route migrate [--apply|--rollback]
                                     dry-run, apply or roll back the legacy trust/deny -> role policy migration
-  office model add|list|disable|enable|registry|policy|ceiling|unceil
+  office model add|list|disable|enable|verify|registry|policy|ceiling|unceil
                                     catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics|efficiency] [id]
   office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
+  office card status|sync | link <card>|--create
+                                    the run's display-only herdr-projects board card (docs/board-card.md)
   office economics ingest [--file F [--from-harness H] [--from-session S] [--role R]]
                                     opt-in (economics.collect): record measured token/cache usage
   office decide <lane> escalate|continue|waive|stop --quote "<user's words>"
@@ -91,9 +102,13 @@ Auto Office {ver}
                                     while plan review is open: re-pin the plan reviewer and re-run only that review
   office config [<key> [<value>]]   read or set preferences like git config (--list, --unset, --edit, --repo)
   office config --run <id> --apply-routing --quote "<user's words>"
-                                    re-pin one run's roles and routing from the current config files
+                                    re-pin one run's roles, routing and quota from the current config files
+  office config --run <id> --apply-verification --quote "<user's words>"
+                                    re-pin one run's check timeouts and check concurrency
+  office config --run <id> <key>    the value that run pinned at start (what its gates use)
   office queue list|add|pause|resume|priority|demote|auto
-                                    the machine-level scheduler queue (--run <id> [--task T] for a run)
+                                    the machine-level scheduler queue (--run <id> [--task T] for a run);
+                                    pausing a whole run also holds its queued integration checks until resume
   office web start|stop|status|serve [--port N] [--fixture small|large]
                                     the local Office web UI (loopback only)
   office setup                      interactive: choose preferred agents, models, and cost policy
@@ -102,6 +117,8 @@ Auto Office {ver}
                                     record onboarding answers as user-level preferences (or keep them all)
   office onboard [--enable-free-models | --disable-free-models]
                                     opt in to catalog models marked free (default off)
+  office onboard --harness-preference office|keep|recommended [--harness-budget PROVIDER:HARNESS=USD ...]
+                                    answer which harness to prefer where harnesses share a model (budgets derive weights)
   office doctor                     check the installation, hooks, and runtimes
   office update [--check]           update Auto Office itself; --check looks for release/source updates
   office upgrade [run] [--to X.Y]   move a run to a newer release line (dry run; --apply)
@@ -150,6 +167,9 @@ not cover is refused. Empty and read-only work is exempt on its own. On a low-ri
 a trivial or mechanical change may submit without a ledger:
   office submit --self-review-exempt trivial|mechanical -- "<reason>"
 The exemption is recorded on the revision. Independent review applies either way.
+
+A task with accept criteria is refused when the tree equals its base (make the change, or `office raise` if the
+criteria already hold). To acknowledge that they already hold: office submit --no-change -- "<why>"
 
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
@@ -204,6 +224,18 @@ def _redirect(args) -> dict | None:
             "requirement": args.requirement, "reviewer": args.reviewer}
 
 
+# `amend route` takes only --as, --quote, --restart, and --auto. These amend the plan, so `amend route` refuses them
+# instead of dropping them (#896).
+_ROUTE_AMEND_ONLY_FLAGS = {
+    "contract": "--contract", "requirements": "--requirements", "no_review": "--no-review", "reason": "--reason",
+    "drop_criterion": "--drop-criterion", "add_criterion": "--add-criterion", "drop_non_goal": "--drop-non-goal",
+    "add_non_goal": "--add-non-goal", "add_accept": "--add-accept", "drop_accept": "--drop-accept",
+    "add_check": "--add-check", "drop_check": "--drop-check", "set_fields": "--set", "redirect": "--redirect",
+    "root_cause": "--root-cause", "requirement": "--requirement", "reviewer": "--reviewer",
+    "prs": "--prs", "no_prs": "--no-prs", "confirm": "--confirm",
+}
+
+
 def _parser() -> argparse.ArgumentParser:
     def flags(**default):
         f = argparse.ArgumentParser(add_help=False)
@@ -225,8 +257,12 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("start", parents=[common], add_help=True)
     s.add_argument("goal", nargs="?")
-    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "direct", "direct+review", "light", "quick", "express", "full"], metavar="{XS,S,M,L,XL}",
-                   help="New run gear (XS-XL); historical aliases are explicit compatibility presets")
+    s.add_argument("--gear", choices=["XS", "S", "M", "L", "XL", "greenfield"], metavar="{XS,S,M,L,XL}",
+                   help="New run gear (XS-XL); greenfield is explicit opt-in for one cohesive build")
+    s.add_argument("--new-work", nargs=2, metavar=("yes|no", "WHY"),
+                   help="the orchestrator's intake judgement: is this new work (a new project, or a new component "
+                        "with nothing it must fit into), and why; new work with no --gear is refused until the "
+                        "invoker picks greenfield or XS-XL")
     s.add_argument("--playbook", default="Change", choices=["Change", "Restructure", "Investigate", "Prototype", "Visual"])
     s.add_argument("--blast-radius", choices=["local", "repo", "production", "production-data"])
     s.add_argument("--size-class", choices=["XS", "S", "M", "L", "XL"])
@@ -235,10 +271,14 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--interview", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--adversarial", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--set", action="append", help="config override key.path=value")
-    s.add_argument("--base", help=argparse.SUPPRESS)
+    s.add_argument("--base", help="Git ref to start from (use with --no-prs for an existing PR branch)")
     s.add_argument("--planner", choices=["dedicated", "inline"], help="override who writes the plan")
     s.add_argument("--issue", help="the tracking GitHub issue (number or URL)")
     s.add_argument("--no-prs", action="store_true", help="keep task work local: no pushes or per-task PRs")
+    card_opt = s.add_mutually_exclusive_group()
+    card_opt.add_argument("--card", metavar="ID", help="show this run on that herdr-projects board card "
+                          "(default: $OFFICE_BOARD_CARD; with the board installed, Office adds its own)")
+    card_opt.add_argument("--no-card", action="store_true", help="no board card for this run")
     s.add_argument("--benchmark-refresh", action="store_true",
                    help="the user's intake opt-in: refresh missing benchmark scores in the background")
     s.add_argument("--end-state", choices=["ask", "preview", "merge", "e2e"],
@@ -251,6 +291,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-rounds", type=int, metavar="N",
                    help="at most N substantive rounds per lane or shared-scope convergence review (default 3; "
                         "config review.max_rounds)")
+    fast = s.add_mutually_exclusive_group()
+    fast.add_argument("--fastlane", dest="fastlane", action="store_const", const=True, default=None,
+                      help="the orchestrator leads every task with its own strategy (inline or its own subagents) "
+                           "instead of Office executor routing, at any size; that size's reviews still apply")
+    fast.add_argument("--no-fastlane", dest="fastlane", action="store_const", const=False,
+                      help="never fastlane: Office routes executors (XS otherwise defaults to fastlane)")
     s.add_argument("--from-run", metavar="RUN",
                    help="start a new run carrying an earlier run's requirements and plan draft (e.g. to move "
                         "v3.1 work onto the current review contract); the earlier run is not changed")
@@ -258,7 +304,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("resume", parents=[common])
     s.add_argument("target", nargs="?")
     wake = s.add_mutually_exclusive_group()
-    wake.add_argument("--auto-wake", action="store_true", help="opt in to verified Claude/Herdr root continuation")
+    wake.add_argument("--auto-wake", action="store_true",
+                      help="accepted for compatibility; root wake is armed by default (see --wake-off)")
     wake.add_argument("--wake-off", action="store_true", help="turn off autonomous root wake-up for this run")
     sp.add_parser("status", parents=[common])
     s = sp.add_parser("wait", parents=[common])
@@ -281,6 +328,10 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review-cli", metavar="ARGV", help="with --review-as: start exactly this reviewer argv in herdr")
     s.add_argument("--review-external", action="store_true",
                    help="with --review-as: you start the reviewer; Office reads its review file")
+    s = sp.add_parser("executor-context", parents=[common])
+    s.add_argument("task")
+    s.add_argument("action", choices=["rotate", "continue", "threshold"])
+    s.add_argument("tokens", nargs="?", help="with threshold: whole tokens; 0 disables this task's rotation")
     sp.add_parser("preflight", parents=[common])
     s = sp.add_parser("submit", parents=[common], add_help=False,
                       description="Visual selectors: must be plain CSS (document.querySelector), not Playwright-only selectors; state steps may use Playwright selectors.")
@@ -292,6 +343,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--self-review-exempt", choices=["trivial", "mechanical"], metavar="TYPE",
                    help="executor: submit with no self-review ledger because the change is trivial or mechanical "
                         "(low-risk tasks only; reason after --)")
+    s.add_argument("--no-change", action="store_true", dest="no_change",
+                   help="executor: acknowledge that the accept criteria already hold with no change (reason after --); "
+                        "goes to independent review")
     s.add_argument("reason", nargs="*", help=argparse.SUPPRESS)
     _redirect_args(s)
     s = sp.add_parser("raise", parents=[common], add_help=False)
@@ -312,9 +366,16 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--requirements", action="store_true", help="a user-originated requirements change")
     s.add_argument("--quote", help="the user's words (requirements changes, defect redirects, route changes)")
     s.add_argument("--as", dest="route_as", metavar="HARNESS/MODEL[@EFFORT]",
-                   help="amend route: the live dispatch's new model/effort (same harness)")
+                   help="amend route: the live dispatch's new model/effort (same harness); refused on any other amendment")
     s.add_argument("--restart", action="store_true",
-                   help="amend route: interrupt the agent and relaunch it on the new route")
+                   help="amend route: interrupt the agent and relaunch it on the new route; refused on any other amendment")
+    s.add_argument("--auto", dest="route_auto", action="store_true",
+                   help="amend route: clear the task's declared route so it routes automatically again; refused on any other amendment")
+    prs_mode = s.add_mutually_exclusive_group()
+    prs_mode.add_argument("--prs", action="store_true", help="amend options: enable task PR publishing")
+    prs_mode.add_argument("--no-prs", action="store_true", help="amend options: disable task PR publishing")
+    s.add_argument("--confirm", action="store_true",
+                   help="amend options: confirm the quoted user authorization (required without a TTY)")
     s.add_argument("--drop-criterion", action="append", default=[], metavar="TEXT",
                    help="requirements: remove the frozen done criterion this names")
     s.add_argument("--add-criterion", action="append", default=[], metavar="TEXT",
@@ -341,6 +402,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--quote", help="the user's words choosing this end state (ask mode)")
     s.add_argument("--detect", action="store_true", help="propose deploy commands for intake")
     s.add_argument("--rebase", action="store_true", help="move the run onto the newer default branch first")
+    s.add_argument("--batch", metavar="MANIFEST.json",
+                   help="merge ordered run/PR lanes with one version owner and one full suite before any merge")
+    s.add_argument("--dry-run", action="store_true", help="with --batch: validate and show order without merging")
+    s.add_argument("--retry-full", action="store_true",
+                   help="with --batch: rerun a red full suite without new fix lanes")
     s.add_argument("--redeploy", action="store_true", help="with --e2e: deploy prod again from the merged tree")
     s.add_argument("--mark-deployed", action="store_true",
                    help="with --e2e: the operator confirms the merged tree is already live in prod")
@@ -355,6 +421,10 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("benchmarks", parents=[common])
     s.add_argument("action", choices=["brief", "submit"])
     s.add_argument("file", nargs="?")
+    s = sp.add_parser("card", parents=[common], help="the run's display-only herdr-projects board card")
+    s.add_argument("action", choices=["status", "link", "sync"])
+    s.add_argument("target", nargs="?", metavar="CARD", help="link: the board card id (as rico-mode created it)")
+    s.add_argument("--create", action="store_true", help="link: add the run's own card, or adopt the one it has")
     s = sp.add_parser("context", parents=[common])
     s.add_argument("--since", type=int, metavar="SEQ", help="also list run events after this event cursor (bounded)")
     s = sp.add_parser("economics", parents=[common])
@@ -382,6 +452,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", help="override: why this denied route should run")
     s.add_argument("--ttl", help="override: lifetime of the receipt, 1m to 24h (default 30m)")
     s.add_argument("--revoke", metavar="ID", help="override: revoke a receipt")
+    s.add_argument("--rico-quote", help="override: the user's verbatim words authorizing it (non-worker callers, no terminal)")
+    s.add_argument("--quoted-at", help="override: when the user said it, 'YYYY-MM-DD HH:MM' Manila time (within 24h)")
     s.add_argument("--list", dest="list_receipts", action="store_true", help="override: list receipts")
     s.add_argument("--apply", action="store_true", help="migrate: write the migration (default is a dry run)")
     s.add_argument("--rollback", action="store_true", help="migrate: restore the pre-migration user config")
@@ -390,12 +462,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--wildcard", action="store_true", help="deliberately apply broad route/role rule")
     s.add_argument("--size", help="task size scope: XS|S|M|L|XL (policy: show that size; allow/neutral/deny/clear: comma list)")
     s = sp.add_parser("model", parents=[common])
-    s.add_argument("action", choices=["add", "list", "disable", "enable", "registry", "policy", "ceiling", "unceil"])
+    s.add_argument("action", choices=["add", "list", "disable", "enable", "verify", "registry", "policy", "ceiling", "unceil"])
     s.add_argument("ident", nargs="?", help="add: harness/slug; disable/enable: harness/model[@effort]; ceiling: provider/lineage")
     s.add_argument("--effort", action="append", help="add: an effort (repeat or comma-separate)")
     s.add_argument("--model-id", help="add: the catalog model id (default: the slug's last segment)")
+    s.add_argument("--role", action="append", help="add: also allow the new rows for executor or reviewer (code and plan review); repeat or comma-separate")
     s.add_argument("--reason", help="disable: why the row is off")
     s.add_argument("--through", help="ceiling: inclusive generation (e.g. 5.6)")
+    s.add_argument("--evidence", action="append",
+                   help="verify: <run>/<task> an accepted, independently reviewed task this route produced (repeat or comma-separate)")
     s = sp.add_parser("inspect", parents=[common])
     s.add_argument("what", nargs="?")
     s.add_argument("ident", nargs="?")
@@ -412,13 +487,15 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--show-origin", dest="origin", action="store_true")
     s.add_argument("--force", action="store_true", help="set a key the shipped config does not define")
     s.add_argument("--apply-routing", action="store_true",
-                   help="with --run: re-pin roles and routing from the current config files into that run")
-    s.add_argument("--quote", help="with --apply-routing: the user's words authorizing the re-pin")
+                   help="with --run: re-pin roles, routing and quota from the current config files into that run")
+    s.add_argument("--apply-verification", action="store_true",
+                   help="with --run: re-pin the check timeouts and check concurrency from the current config files")
+    s.add_argument("--quote", help="with --apply-routing or --apply-verification: the user's words authorizing the re-pin")
     s = sp.add_parser("queue", parents=[common])
     s.add_argument("action", choices=["list", "add", "pause", "resume", "priority", "demote", "auto"])
     s.add_argument("target", nargs="?", help="queue item id, issue ref (add), priority (priority) or on|off|status (auto)")
     s.add_argument("value", nargs="?", help="the new priority (priority)")
-    s.add_argument("--task", help="with --run: one task of the run")
+    s.add_argument("--task", help="with --run: one task of the run (pausing the whole run also holds its integration checks)")
     s.add_argument("--title")
     s.add_argument("--priority", choices=["urgent", "high", "normal", "low"])
     s.add_argument("--reason")
@@ -438,6 +515,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--executor", help="office | keep | harness/model@effort")
     s.add_argument("--reviewer", help="office | keep | harness/model@effort (plan and code review)")
     s.add_argument("--skip", action="store_true", help="keep every preference and mark onboarding complete")
+    s.add_argument("--harness-preference", dest="harness_preference", metavar="office|keep|recommended",
+                   help="answer the harness overlap question: office clears its weights, keep leaves them, "
+                        "recommended derives them from --harness-budget")
+    s.add_argument("--harness-budget", dest="harness_budget", action="append", metavar="PROVIDER:HARNESS=USD",
+                   help="monthly USD a harness may spend on a provider in an overlap (repeat per pair; with recommended)")
     free_models = s.add_mutually_exclusive_group()
     free_models.add_argument("--enable-free-models", dest="enable_free_models", action="store_const", const=True,
                              help="explicitly allow catalog models marked free; default is off")
@@ -450,7 +532,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--probe-route", metavar="HARNESS[@MAJOR]/MODEL@EFFORT",
                    help="run one exact-route conformance probe (uses quota; counts against --run's probe cap)")
     s = sp.add_parser("update", parents=[common])
-    s.add_argument("--check", action="store_true", help="check PyPI and a source checkout's upstream without installing updates")
+    s.add_argument("--check", action="store_true", help="check the release on GitHub main and a source checkout's upstream without installing updates")
     s = sp.add_parser("upgrade", parents=[common])
     s.add_argument("target", nargs="?", help="the run (default: this session's run)")
     s.add_argument("--to", metavar="X.Y", help="the release line (default: this runtime's)")
@@ -502,10 +584,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("note", nargs="*")
     s.add_argument("--quote", help="dismissed: the user's own words, which dismiss an open blocking lane finding")
     s = sp.add_parser("review", parents=[common])
-    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, or plan (the user's request "
-                                  "for another plan review)")
+    s.add_argument("target", help="a task (T1) or lane (L-T1[:convergence|visual]) to re-review, plan (the user's request "
+                                  "for another plan review), or submit (a reviewer hands back its review: stdin or --file)")
+    s.add_argument("--file", dest="review_file", help="submit: the review file (default: stdin)")
     s.add_argument("--report", help="<scope>:<kind>: your review, in the reviewer reply format")
-    s.add_argument("--quote", help="plan: the user's own words asking for another plan review")
+    s.add_argument("--quote", help="plan: the user's own words asking for another plan review; with --as: the user's words for the reviewer pin (without them the pin is the orchestrator's)")
     s.add_argument("--rounds", type=int, help="plan: at most this many substantive rounds (default 3)")
     s.add_argument("--inspected", nargs="*", default=[], help="visual: every screenshot you inspected")
     s.add_argument("--as", dest="review_as", metavar="HARNESS/MODEL[@EFFORT]",
@@ -546,8 +629,6 @@ def _parser() -> argparse.ArgumentParser:
     s = sp.add_parser("dismiss", parents=[common])
     s.add_argument("target", nargs="?")
     s.add_argument("--all", dest="dismiss_all", action="store_true")
-    s = sp.add_parser("raw", add_help=False)
-    s.add_argument("rest", nargs=argparse.REMAINDER)
     s = sp.add_parser("hook", add_help=False)
     s.add_argument("event")
     s.add_argument("--harness", dest="hook_harness", default="claude")
@@ -626,11 +707,24 @@ def emit_error(err: OfficeError, args, bug_hints: list[str] | None = None) -> in
 
 # ------------------------------------------------------------------ dispatch
 
+def _rebuilding_reason(argv: list[str]) -> str | None:
+    """A bad OFFICE_VERSION_OVERRIDE is configuration: `hook` keeps its fast path instead of raising (#920)."""
+    try:
+        return version.rebuilding_reason()
+    except RuntimeError:
+        if argv[:1] == ["hook"]:
+            return None
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "raw":
-        from office import compat
-        return compat.raw(argv[1:])
+    # Before the fast paths, so `hook` fails fast during a rebuild too (#920). The root-wake supervisor skips
+    # the probe: it is a background process whose ticks already classify a failed import, and the probe would delay
+    # its first wake.
+    if argv[:1] != ["_wake_supervise"] and (reason := _rebuilding_reason(argv)):
+        print(version.rebuild_line(reason), file=sys.stderr)
+        return version.REBUILD_EXIT_CODE
     if argv and argv[0] == "hook":
         from office import hooks
         return hooks.main(argv[1:])
@@ -644,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unrecognized arguments: {run_like[0]} (name the run with --run: "
                          f"office --run {run_like[0]} {args.cmd} ...)")
         parser.parse_args(argv)  # raises the usage error
-    if args.cmd == "submit" and args.reason and not (args.request_scope or args.self_review_exempt):
+    if args.cmd == "submit" and args.reason and not (args.request_scope or args.self_review_exempt or args.no_change):
         # The reason text belongs to --request-scope or --self-review-exempt; a stray argument is still a usage error.
         parser.error(f"unrecognized arguments: {' '.join(args.reason)}")
     if args.version:
@@ -748,13 +842,6 @@ def _target(con, args, require_run=True):
     return target
 
 
-def _legacy_result(target) -> Result:
-    from office import legacy
-    msg, nxt = legacy.guidance(target.legacy)
-    res = Result(lines=[msg], next=nxt, exit_code=0)
-    return res
-
-
 # Commands that never read runs.db, so they never sweep it either.
 _NO_SWEEP = ("route", "config", "setup", "onboard", "update", "install", "uninstall", "web")
 
@@ -790,6 +877,8 @@ def _run(args, unknown) -> int:
                               issue=args.issue, no_prs=args.no_prs, end_state=args.end_state,
                               benchmark_refresh=args.benchmark_refresh, from_run=args.from_run,
                               plan_review_rounds=args.plan_review_rounds, review_rounds=args.review_rounds,
+                              card=args.card, no_card=args.no_card, fastlane=args.fastlane,
+                              new_work=args.new_work,
                               deploy={k: v for k in ("preview", "prod", "verify")
                                       if (v := getattr(args, f"deploy_{k}"))})
         return emit(res, args)
@@ -807,9 +896,8 @@ def _run(args, unknown) -> int:
         try:
             target = discovery.resolve(con, run_arg=args.target or args.run_arg, state_dir=args.state_dir,
                                        harness=args.harness, session=args.session)
-            if target.legacy is not None:
-                raise OfficeError("legacy-run", f"run {target.legacy.run_id[:8]} is a 3.0 run pinned to its plugin_commit; "
-                                  "it is not upgraded", next_step="finish it on its pinned runtime (office resume)")
+            from office import config as cfg
+            cfg.require_supported_gear(target.run.get("gear"))
             return emit(upgrade.upgrade(con, target.run, to=args.to, apply=args.apply), args)
         finally:
             con.close()
@@ -839,20 +927,34 @@ def _run(args, unknown) -> int:
         if args.action == "override":
             return emit(routecmd.override(route=args.ident, role=args.role, run=getattr(args, "run_arg", None),
                                           reason=args.reason, ttl=args.ttl, revoke=args.revoke,
-                                          list_receipts=args.list_receipts), args)
+                                          list_receipts=args.list_receipts, rico_quote=args.rico_quote,
+                                          quoted_at=args.quoted_at), args)
         if args.action == "migrate":
             return emit(routecmd.migrate(apply=args.apply, rollback=args.rollback), args)
         if args.effective:
             raise OfficeError("usage", "--effective applies to route policy inspection only", exit_code=2)
         return emit(routecmd.change(args.action, role=args.role, route=args.ident, wildcard=args.wildcard,
                                     sizes=[v.strip().upper() for v in args.size.split(",")] if args.size is not None else None), args)
-    if cmd == "config" and args.apply_routing:
+    if cmd == "config" and (args.apply_routing or args.apply_verification):
         from office import configcmd
-        if args.key or args.value or args.unset or args.list_ or args.edit or args.path:
-            raise OfficeError("usage", "--apply-routing re-pins a run; it takes only --run and --quote", exit_code=2)
+        flag = "--apply-routing" if args.apply_routing else "--apply-verification"
+        if args.key or args.value or args.unset or args.list_ or args.edit or args.path or \
+                (args.apply_routing and args.apply_verification):
+            raise OfficeError("usage", f"{flag} re-pins a run; it takes only --run and --quote", exit_code=2)
+        apply = configcmd.apply_run_routing if args.apply_routing else configcmd.apply_run_verification
         con = _con()
         try:
-            return emit(configcmd.apply_run_routing(con, getattr(args, "run_arg", None), args.quote), args)
+            return emit(apply(con, getattr(args, "run_arg", None), args.quote), args)
+        finally:
+            con.close()
+    if cmd == "config" and getattr(args, "run_arg", None) and args.key:
+        from office import configcmd
+        if args.value is not None or args.unset or args.tier:
+            raise OfficeError("usage", "a run's pinned config is read-only: office config --run <id> <key> reads it; "
+                              "--apply-routing or --apply-verification re-pins from the config files", exit_code=2)
+        con = _con()
+        try:
+            return emit(configcmd.run_get(con, args.run_arg, args.key, args.origin, cwd), args)
         finally:
             con.close()
     if cmd == "config":
@@ -882,11 +984,13 @@ def _run(args, unknown) -> int:
     if cmd == "model":
         from office import harnesscmd
         if args.action == "add":
-            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id)), args)
+            return emit(harnesscmd._with_affected(harnesscmd.model_add(args.ident, args.effort, model_id=args.model_id, roles=args.role)), args)
         if args.action == "disable":
             return emit(harnesscmd._with_affected(harnesscmd.model_disable(args.ident, reason=args.reason)), args)
         if args.action == "enable":
             return emit(harnesscmd._with_affected(harnesscmd.model_enable(args.ident)), args)
+        if args.action == "verify":
+            return emit(harnesscmd._with_affected(harnesscmd.model_verify(args.ident, args.evidence)), args)
         if args.action in ("ceiling", "unceil"):
             return emit(harnesscmd._with_affected(harnesscmd.model_ceiling(
                 args.ident, through=args.through if args.action == "ceiling" else None)), args)
@@ -912,8 +1016,11 @@ def _run(args, unknown) -> int:
     if cmd == "onboard":
         from office import onboarding
         answers = {"planner": args.planner, "executor": args.executor, "reviewer": args.reviewer}
-        if args.skip or any(answers.values()) or args.enable_free_models is not None:
-            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models, cwd=cwd), args)
+        if (args.skip or any(answers.values()) or args.enable_free_models is not None
+                or args.harness_preference is not None or args.harness_budget):
+            return emit(onboarding.apply(answers, skip=args.skip, enable_free_models=args.enable_free_models,
+                                         harness_answer=args.harness_preference, harness_budgets=args.harness_budget,
+                                         cwd=cwd), args)
         return emit(onboarding.status(harness=args.harness, cwd=cwd), args)
     if cmd == "doctor":
         from office import doctor
@@ -940,6 +1047,14 @@ def _run(args, unknown) -> int:
     if cmd == "uninstall":
         from office import install
         return emit(install.uninstall(purge=args.purge), args)
+    if cmd == "land" and args.batch:
+        from office import batch_landing
+        if any((args.land_mode, args.detect, args.rebase, args.redeploy, args.mark_deployed, args.quote)):
+            raise OfficeError("batch-flags", "--batch cannot be combined with run landing/deploy flags", exit_code=2)
+        return emit(batch_landing.land_batch(args.batch, cwd=cwd,
+                                             dry_run=args.dry_run, retry_full=args.retry_full), args)
+    if cmd == "land" and (args.dry_run or args.retry_full):
+        raise OfficeError("batch-flags", "--dry-run and --retry-full require --batch", exit_code=2)
     if cmd == "land" and args.detect:
         from office import land, paths
         ident = paths.repo_identity(cwd)
@@ -954,12 +1069,10 @@ def _run(args, unknown) -> int:
     con = _con()
     try:
         target = _target(con, args)
-        if target.legacy is not None:
-            res = _legacy_result(target)
-            if target.note:
-                res.notices.append(target.note)
-            return emit(res, args)
         run = target.run
+        from office import config as cfg
+        if not (cmd == "inspect" or (cmd == "close" and args.abandon)):
+            cfg.require_supported_gear(run.get("gear"))
         args._run_id = run["id"]
         from office import root_wake, state
         before_seq = con.execute("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", (run["id"],)).fetchone()[0]
@@ -971,6 +1084,8 @@ def _run(args, unknown) -> int:
         if cmd not in ("status", "resume", "preflight", "context"):
             from office import guide, state
             guide.piggyback(con, state.get_run(con, run["id"]), res)
+        from office import board_card
+        board_card.sweep(con, state.get_run(con, run["id"]))  # the run's board card, if it has one
         return emit(res, args)
     finally:
         con.close()
@@ -980,12 +1095,13 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
     cmd = args.cmd
     if cmd == "resume":
         from office import lifecycle, root_wake, state
-        res = lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd)
-        if args.auto_wake or args.wake_off:
-            res.notices.append(root_wake.attach(con, state.get_run(con, run["id"]), off=args.wake_off))
-            if args.auto_wake:
-                root_wake.ensure(state.get_run(con, run["id"]))
-        return res
+        def wake(con, current):
+            if args.wake_off:
+                return root_wake.attach(con, current, off=True)
+            if os.environ.get("OFFICE_DISPATCH_ID"):
+                return None
+            return root_wake.arm_on_resume(con, current, explicit=args.auto_wake)
+        return lifecycle.resume(con, target, harness=args.harness, session=args.session, cwd=cwd, wake=wake)
     if cmd == "status":
         from office import guide, jobs, lifecycle, db, state
         if not state.is_terminal(run):
@@ -1005,7 +1121,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         run = state.get_run(con, run["id"])
         if not os.environ.get("OFFICE_DISPATCH_ID"):
             root_wake.ensure(state.get_run(con, run["id"]))
-        return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
+        with guide.waiting(run["id"]):
+            return guide.wait(con, run, timeout=args.timeout, poll=args.poll)
     if cmd == "dispatch":
         from office import dispatch
         return dispatch.dispatch(con, run, args.tasks, parallel=args.parallel, route=args.route,
@@ -1022,12 +1139,38 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import submit
         return submit.submit(con, run, cwd=cwd, plan_path=args.plan, redirect=_redirect(args),
                              request_scope=args.request_scope, exempt=args.self_review_exempt,
-                             reason=" ".join(args.reason or []).strip())
+                             no_change=args.no_change, reason=" ".join(args.reason or []).strip())
+    if cmd == "amend" and args.scope == "options":
+        from office import run_options
+        unsupported = [*(args.delta or []), *[u for u in unknown if u != "--"]]
+        if (args.contract or args.requirements or args.no_review or args.reason or args.route_as or args.restart
+                or args.drop_criterion or args.add_criterion or args.drop_non_goal or args.add_non_goal
+                or args.add_accept or args.drop_accept or args.add_check or args.drop_check or args.set_fields
+                or args.redirect or args.root_cause or args.requirement or args.reviewer):
+            unsupported.append("contract/requirements/route/task flag")
+        mode = True if args.prs else False if args.no_prs else None
+        return run_options.amend(con, run, enable_prs=mode, quote=args.quote, confirm=args.confirm,
+                                 extra=unsupported)
+    if cmd == "amend" and (args.prs or args.no_prs or args.confirm):
+        from office.state import Usage
+        raise Usage("option-scope-required", "--prs, --no-prs and --confirm require office amend options",
+                    next_step="office amend options --prs|--no-prs --quote '<user approval>' --confirm")
     if cmd == "amend" and args.scope == "route":
         from office import routechange
+        from office.state import Refused
+        # An empty string is a given value (`--reason ""`), so only the unset defaults are skipped.
+        given = [flag for name, flag in _ROUTE_AMEND_ONLY_FLAGS.items() if getattr(args, name) not in (None, False, [])]
+        if given:
+            raise Refused("route-with-amendment-flags", f"{' '.join(given)} amend the plan, not a route; nothing was recorded",
+                          scope=args.delta[0] if args.delta else None, preserved="plan, contracts, and route unchanged",
+                          next_step=routechange.USAGE)
         rest = [*(args.delta or []), *[u for u in unknown if u != "--"]]
         return routechange.change_route(con, run, rest[0] if len(rest) == 1 else None, args.route_as, args.quote,
-                                        restart=args.restart)
+                                        restart=args.restart, cwd=cwd, auto=args.route_auto)
+    if cmd == "amend" and getattr(args, "route_auto", False):
+        from office.state import Refused
+        raise Refused("auto-without-route", "--auto applies to office amend route only; nothing was recorded",
+                      next_step='office amend route <task> --auto --quote "<user\'s words>"')
     if cmd == "amend":
         from office import amend
         delta = " ".join([*(args.delta or []), *[u for u in unknown if u != "--"]]).strip()
@@ -1040,7 +1183,8 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
                            quote=args.quote, cwd=cwd, redirect=_redirect(args),
                            drop_criteria=args.drop_criterion, add_criteria=args.add_criterion,
                            drop_non_goals=args.drop_non_goal, add_non_goals=args.add_non_goal,
-                           no_review=args.no_review, reason=args.reason, edits=edits)
+                           no_review=args.no_review, reason=args.reason, edits=edits, route_as=args.route_as,
+                           restart=args.restart)
     if cmd == "ack":
         from office import amend
         return amend.ack(con, run, args.amendment)
@@ -1065,6 +1209,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         if not args.file:
             raise OfficeError("usage", "name the delta file", next_step=benchmarks.SUBMIT_FORM, exit_code=2)
         return benchmarks.submit(con, run, args.file)
+    if cmd == "card":
+        from office import board_card
+        return board_card.command(con, run, args.action, args.target, create_card=args.create)
     if cmd == "context":
         from office import context_snapshot, root_wake
         res = context_snapshot.context(con, run, since=args.since)
@@ -1097,19 +1244,25 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         from office import convergence
         note = " ".join([*(args.note or []), *[u for u in unknown if u != "--"]]).strip()
         return convergence.disposition(con, run, args.finding, args.how, note, quote=args.quote)
+    if cmd == "review" and args.target.lower() == "submit":
+        from office import review_submit
+        text = (Path(args.review_file).expanduser().read_text(encoding="utf-8", errors="replace")
+                if args.review_file else sys.stdin.read())
+        return review_submit.submit(con, text)
     if cmd == "review" and args.target.lower() == "plan":
         from office import gates, plans
         from office.state import Usage
         if (args.review_cli or args.review_external) and not args.review_as:
             raise Usage("invalid-override", "--cli/--external need --as <harness>/<model>[@effort]")
         return plans.request_review(con, run, args.quote, args.rounds,
-                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external))
+                                    pin=gates.review_pin(args.review_as, args.review_cli, args.review_external,
+                                                   quote=args.quote))
     if cmd == "review":
         from office import convergence, gates
         from office.state import Usage
         if not args.report:  # no report: re-run only the review on another reviewer route
             return gates.review_only(con, run, args.target, review_as=args.review_as, review_cli=args.review_cli,
-                                     review_external=args.review_external)
+                                     review_external=args.review_external, quote=args.quote)
         if args.review_as or args.review_cli or args.review_external:
             raise Usage("invalid-override", "--as/--cli/--external name a reviewer route; --report is your own review",
                         next_step="office review <task|lane> --as <route>   or   office review <task|lane> --report <file>")
@@ -1128,6 +1281,9 @@ def _dispatch_command(con, run, args, unknown, cwd, target) -> Result:
         return rerun.rerun(con, run, args.task.upper(), resume=args.resume, fresh=args.fresh, stash_wip=args.stash_wip, reroute=args.reroute,
                            as_model=args.as_model, quote=args.quote, cli=args.cli, external=args.external, review_as=args.review_as,
                            review_cli=args.review_cli, review_external=args.review_external)
+    if cmd == "executor-context":
+        from office import executor_context
+        return executor_context.decide(con, run, args.task.upper(), args.action, args.tokens)
     if cmd == "dismiss":
         from office import rerun
         return rerun.dismiss(con, run, args.target, all_=args.dismiss_all)

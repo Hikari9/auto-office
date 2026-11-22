@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from office import config as cfg, portable
-from office import db, discovery, jobs, legacy, paths, planpath, root_wake, scoring, state, version
+from office import db, discovery, jobs, paths, planpath, root_wake, scoring, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, new_run_id, now_iso, pid_alive, sha256_obj, short
@@ -77,6 +77,19 @@ def _safe_start_base(repo: Path, explicit: str | None) -> str:
     return remote_base
 
 
+def greenfield_detection(new_work) -> dict | None:
+    """#1300: the orchestrator's intake judgement from `--new-work yes|no "<why>"`, or None when not given."""
+    if new_work is None:
+        return None
+    parts = list(new_work)
+    value, why = (" ".join(str(p).split()) for p in parts) if len(parts) == 2 else ("", "")
+    value = value.lower()  # the why is one line: it is echoed in start, refusal and inspect output
+    if value not in ("yes", "no") or not why:
+        raise Usage("bad-new-work", f"--new-work takes yes or no and a nonempty reason, got {list(new_work)!r}",
+                    next_step='office start --new-work yes|no "<why>" ...')
+    return {"judged_by": "orchestrator", "new_work": value == "yes", "why": why}
+
+
 def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbook: str = "Change",
           blast_radius: str | None = None, size_class: str | None = None, irreversible: bool = False,
           volume: bool = False, interview: bool = False, adversarial: bool = False,
@@ -84,7 +97,16 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
           base: str | None = None, planner: str | None = None, issue: str | None = None,
           no_prs: bool = False, end_state: str | None = None, deploy: dict | None = None,
           benchmark_refresh: bool = False, from_run: str | None = None,
-          plan_review_rounds: int | None = None, review_rounds: int | None = None) -> Result:
+          plan_review_rounds: int | None = None, review_rounds: int | None = None,
+          card: str | None = None, no_card: bool = False, fastlane: bool | None = None,
+          new_work: tuple[str, str] | list[str] | None = None) -> Result:
+    detection = greenfield_detection(new_work)
+    if detection and detection["new_work"] and gear is None:
+        # #1300 G4: new work with no gear is the invoker's choice, never an Office default.
+        raise Refused("greenfield-candidate", "the orchestrator judged this new work, so the invoker picks the gear "
+                      f"before the run starts ({detection['why']})",
+                      next_step="ask the invoker, then office start --gear greenfield (one cohesive build) or "
+                                "--gear XS|S|M|L|XL, keeping --new-work yes")
     source = None
     if from_run:
         # #337: moving old work onto the current review contract is an explicit,
@@ -118,22 +140,28 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         raise Usage("bad-config", f"config is invalid: {exc}",
                     next_step="fix ~/.config/auto-office/config.yaml or .auto-office/config.yaml, then retry")
     pinned = {**config, cfg.FILE_BLOCKS_KEY: cfg.file_blocks(caller_top, files)}
-    # For new XS-XL runs complexity is not a risk signal. Existing explicit
-    # legacy presets retain their exact historical size/risk interpretation.
-    legacy = gear in cfg.LEGACY_GEARS
-    risk = cfg.resolve_risk(config, blast_radius, size_class if legacy else None, irreversible)
-    if not legacy:
-        risk["size_class"] = size_class
-        risk["complexity_only"] = True
-        if size_class and not risk.get("classified_by"):
-            risk["classified_by"] = "intake"
+    # Complexity is not a risk signal: the size class is recorded beside the risk, not inside it.
+    risk = cfg.resolve_risk(config, blast_radius, None, irreversible)
+    risk["size_class"] = size_class
+    risk["complexity_only"] = True
+    if size_class and not risk.get("classified_by"):
+        risk["classified_by"] = "intake"
     gear = cfg.fit_gear(gear, risk, volume, interview, adversarial)
     if gear not in cfg.GEARS:
         raise Usage("bad-gear", f"unknown gear {gear!r}", next_step="use one of " + ", ".join(cfg.GEARS))
+    from office import fastlane as fastlane_mod
     try:
-        gates = cfg.resolve_gates(gear, risk, config)
+        fastlane_gate = fastlane_mod.pin(gear, fastlane)
+    except ValueError as exc:
+        raise Usage("fastlane-gear", str(exc), next_step="drop --fastlane/--no-fastlane, or use --gear XS|S|M|L|XL")
+    try:
+        gates = cfg.resolve_gates(gear, risk, config, fastlane=fastlane_gate)
     except ValueError as exc:
         raise Usage("bad-config", f"config is invalid: {exc}", next_step="fix review.contract, then retry")
+    if fastlane_gate is not None:
+        gates["fastlane"] = fastlane_gate  # #1297: pinned for the run's life
+    if detection:
+        gates["greenfield_detection"] = detection  # #1300: the orchestrator's intake judgement
     gates["run_gear_rationale"] = cfg.gear_rationale(gear, risk, volume=volume,
                                                       interview=interview, adversarial=adversarial)
     if plan_review_rounds is not None:
@@ -155,7 +183,8 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         gates["visual_review_max_rounds"] = gates["convergence_max_rounds"]
     # HEAD and relative refs belong to the caller, even when its linked
     # checkout is disposable. All later Git work uses the durable anchor.
-    base_sha = _safe_start_base(caller_top, base)
+    base_sha = (paths.git(caller_top, "rev-parse", f"{base or 'HEAD'}^{{commit}}")
+                if no_prs else _safe_start_base(caller_top, base))
     top = paths.repository_anchor(common, checkout=caller_top)
     if top is None:
         raise Usage("repository-unavailable", f"cannot locate a durable repository root for {common}",
@@ -241,6 +270,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
                 planner_note = "planner P1 queued"
         _ensure_local_exclude(common)
         state.write_projection(con, run_id)
+        # The run on its display-only board card (docs/board-card.md); None without one.
+        from office import board_card
+        card_line = board_card.attach_at_start(con, run_id, card=card, no_card=no_card,
+                                               setting=(config.get("board") or {}).get("card", "auto"))
         # Inline planners must be able to write the plan path advertised by next.
         # Keep PLAN.md absent until the orchestrator actually authors it.
         if planner_mode == "inline":
@@ -254,9 +287,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
         res = Result()
         res.add(f"{short(run_id)} planning | gear {gear} | {planner_note} | review contract {gates['review_contract']}")
         res.add(f"run gear why: {gates['run_gear_rationale']}")
-        if gear in cfg.LEGACY_GEARS:
-            res.add(f"compatibility notice: {gear} is a historical preset, not an XS-XL run gear; "
-                    "use --gear XS|S|M|L|XL for new work; original review/risk gates remain pinned")
+        if card_line:
+            res.add(card_line)
+        if fastlane_line := fastlane_mod.summary({"gates": gates}):
+            res.add(fastlane_line)
         res.add(f"funded gates: plan review={bool(gates['plan_review'])}, independent convergence="
                 f"{bool(gates['code_review'])}, browser={bool(gates['visual'])}; "
                 "scope, checks, authorization and landing remain mandatory")
@@ -277,6 +311,10 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
             from office import land
             res.notices += [f"warning: {w}" for w in land.deploy_path_warnings(
                 top, {f"deploy_{k}": v for k, v in deploy.items()}, land.env_files(config))]
+        if detection and gear == "greenfield" and not detection["new_work"]:
+            # #1300 G2: the invoker's explicit gear wins; the judgement is recorded beside it.
+            res.notices.append(f"warning: --gear greenfield, but the orchestrator judged this is not new work "
+                               f"({detection['why']}); recorded in gates.greenfield_detection, starting anyway")
         if risk["classification"] == "unknown":
             res.notices.append("risk is unclassified: independent code review is required until the plan declares "
                                "`blast_radius` (or `office start --blast-radius ...`); unknown risk is never low")
@@ -294,11 +332,9 @@ def start(goal: str, *, cwd: Path | None = None, gear: str | None = None, playbo
 
 
 def resume(con, target: discovery.Target, *, harness: str | None = None, session: str | None = None,
-           cwd: Path | None = None) -> Result:
-    if target.legacy is not None:
-        msg, nxt = legacy.guidance(target.legacy)
-        return Result(lines=[msg], next=nxt, data={"legacy": True, "run_id": target.legacy.run_id,
-                                                   "office_version": target.legacy.office_version})
+           cwd: Path | None = None, wake=None) -> Result:
+    """`wake(con, run) -> str | None` runs after the session is bound, before the status is built, so the
+    status reports the wake state as it now is."""
     run = target.run
     if state.is_terminal(run):
         raise Refused("run-terminal", f"{short(run['id'])} is {run['phase']}; a terminal run cannot resume",
@@ -345,8 +381,12 @@ def resume(con, target: discovery.Target, *, harness: str | None = None, session
                 if (current.get("plan_review") or {}).get("status") in ("unavailable", "attention") and current["plan_version"]:
                     plans.queue_plan_review(con, current, current["plan_version"])
     jobs.kick(con, run["id"])
+    notice = wake(con, state.get_run(con, run["id"])) if wake else None
     from office import guide
-    return guide.status(con, state.get_run(con, run["id"]), resumed=True)
+    res = guide.status(con, state.get_run(con, run["id"]), resumed=True)
+    if notice:
+        res.notices.append(notice)
+    return res
 
 
 def reconcile(con, run: dict) -> list[str]:
@@ -378,8 +418,11 @@ def reconcile(con, run: dict) -> list[str]:
     # A gate left open after its job failed has no owner and never finishes:
     # settle it the way a failed job does now (#404).
     for g, job in gates.orphaned_gates(con, run):
-        jobs.on_permanent_failure(con, run, job, job.get("error") or "worker process died")
-        notes.append(f"{g['task_id']} {g['kind']} gate {g['id']}: its job had failed; gate settled")
+        why = job.get("error") or ("its job ended without settling the review" if job.get("status") == "done"
+                                   else "worker process died")
+        jobs.on_permanent_failure(con, run, job, why)
+        notes.append(f"{g['task_id'] or g.get('scope') or g['subject']} {g['kind']} gate {g['id']}: its job had "
+                     f"{'ended' if job.get('status') == 'done' else 'failed'}; gate settled")
     return notes
 
 
@@ -432,12 +475,22 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
     landing = gates.landing_state(con, run, handoff)
+    by_hand: list[str] = []
+    if gates.is_pr_ref(handoff):
+        # The documented compose-by-hand recovery (#729): the handed-off PR is the integration.
+        blockers, by_hand = gates.composed_by_hand_blockers(blockers)
     if landing["status"] != "landed" and not handoff:
         blockers.append(f"landing not recorded: {landing['detail']}")
     if blockers:
+        _, settleable = gates.composed_by_hand_blockers(blockers)
+        nxt = guide.next_action(con, run)
+        if settleable and not gates.is_pr_ref(handoff):
+            nxt += ("; or, once you composed the integration by hand and opened its PR, "
+                    "office close --handoff <pr-url> records that and closes the run")
         raise Refused("close-blocked", "cannot close: " + "; ".join(blockers[:4]),
-                      scope=f"run {short(run['id'])}", preserved="all work, evidence and reviews",
-                      next_step=guide.next_action(con, run))
+                      scope=f"run {short(run['id'])}", preserved="all work, evidence and reviews", next_step=nxt)
+    if by_hand:
+        landing = {**landing, "integration_composed_by_hand": {"handoff": handoff, "settled": by_hand}}
     from office import deploy_artifacts
     deploy_artifacts.preserve_interrupted(run)
     with db.transaction(con):
@@ -450,10 +503,11 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         receipt = _archive_receipt(con, current, landing, handoff)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(), terminal_reason="closed",
-                         archive_digest=receipt["digest"], landing={**landing, "handoff": handoff})
+                         archive_digest=receipt["digest"], landing={**(current.get("landing") or {}), **landing, "handoff": handoff})
         cancelled_jobs = jobs.cancel_run_jobs_in_transaction(con, run["id"])
         _learn(con, current)
-        state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}")
+        state.emit(con, current, "run.closed", f"run closed, archive {receipt['digest'][7:19]}"
+                   + (f"; integration composed by hand in {handoff} ({'; '.join(by_hand)})" if by_hand else ""))
         _release_all(con, run["id"], "closed")
         _end_bindings(con, run["id"])
     stopped_jobs = jobs.stop_cancelled_jobs(con, cancelled_jobs)
@@ -462,8 +516,12 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+    from office import board_card
+    board_card.publish_terminal(con, run["id"])
     res = Result(lines=[f"{short(run['id'])} closed | archive receipt {receipt['digest'][7:15]}"],
                  data={"archive_digest": receipt["digest"]})
+    if by_hand:
+        res.add(f"integration composed by hand: {handoff} stands in for Office's integration ({'; '.join(by_hand)})")
     _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
@@ -478,6 +536,14 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
     warn = closeout.docs_warning(Path(run["repo_root"]), run.get("base_sha"), landing.get("commit") or landing.get("merge_commit"))
     if warn:
         res.notices.append(warn)
+    disclosures = closeout.visual_review_disclosures(con, run)
+    if disclosures:
+        res.lines.extend(disclosures)
+        res.data["visual_review_disclosures"] = disclosures
+    acceptance = closeout.acceptance_report(con, run, landing.get("commit") or landing.get("merge_commit"))
+    res.lines.extend(acceptance)
+    res.data["acceptance"] = acceptance
+    tail = "".join(f"; {line}" for line in disclosures)
     if handoff:
         owned = {str(t["pr"]["number"]) for t in state.tasks(con, run["id"])
                  if (t.get("pr") or {}).get("number")}
@@ -485,19 +551,19 @@ def _closeout(con, run: dict, landing: dict, res: Result, *, handoff: str | None
         if note:
             res.add(note)
         res.add("handed off: base sync and worktree removal left for after the user merges")
-        res.final = closeout.done(f"handed off {handoff}, worktrees kept")
+        res.final = closeout.done(f"handed off {handoff}, worktrees kept" + tail)
         return
     merged = pr or landing.get("target") or str(landing.get("detail", "")).startswith("task PRs merged")
     if not merged:
         res.add(f"not merged ({landing.get('detail')}): base sync and worktree removal skipped")
-        res.final = closeout.done(f"closed without a merge ({landing.get('detail')}), worktrees kept")
+        res.final = closeout.done(f"closed without a merge ({landing.get('detail')}), worktrees kept" + tail)
         return
     lines, ask, summary = closeout.finish(con, run, landing, pr=pr)
     res.lines.extend(lines)
     if ask:
         res.next = ask
     res.data["closeout"] = {"summary": summary, "ask": ask}
-    res.final = closeout.done(summary)
+    res.final = closeout.done(summary + tail)
 
 
 LANDED_FORM = 'office close --landed-externally <merged PR URL> [--quote "<user\'s words>"]'
@@ -587,7 +653,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
             current = state.get_run(con, run["id"])
             if current["phase"] != "closed":
                 raise Refused("run-terminal", "terminal run is not closed")
-            state.update_run(con, run["id"], landing={**landing, "handoff": None})
+            state.update_run(con, run["id"], landing={**(current.get("landing") or {}), **landing, "handoff": None})
         res = Result(lines=[f"{short(run['id'])} external landing verified: {pr['url']}"])
         _closeout(con, state.get_run(con, run["id"]), landing, res,
                   pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
@@ -614,7 +680,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
         scoring.label_run_outcomes(con, run["id"], "closed")
         state.update_run(con, run["id"], phase="closed", terminal_at=now_iso(),
                          terminal_reason=f"landed externally via {pr['url']}", archive_digest=receipt["digest"],
-                         landing={**landing, "handoff": pr["url"]})
+                         landing={**(current.get("landing") or {}), **landing, "handoff": pr["url"]})
         _learn(con, current)
         state.emit(con, current, "run.closed", f"run closed: landed externally via {pr['url']}, archive "
                    f"{receipt['digest'][7:19]}")
@@ -663,6 +729,8 @@ def _finish_terminal(con, run: dict, live: list, cancelled_jobs: list[dict]) -> 
     rerun.reclaim_all(run)  # snapshot, then close each dispatch pane
     dispatch.close_herdr_tab(run)
     planpath.remove(Path(run["repo_root"]), run)
+    from office import board_card
+    board_card.publish_terminal(con, run["id"])
     return stopped_jobs
 
 
@@ -776,19 +844,11 @@ def list_runs(con, *, all_runs: bool = False, cwd: Path | None = None) -> Result
         tag = "" if version.serves(r["office_version"], version.current()) else f"  [on {version.release_line(r['office_version'])}]"
         pr = " pruned" if r.get("pruned_at") else ""
         lines.append(f"{short(r['id'])}  {r['phase']:<10} {r['goal'][:60]}{tag}{pr}")
-    legacy_rows = []
-    if ident is not None:
-        for leg in legacy.legacy_runs(paths.primary_checkout(ident[1])):
-            if all_runs or leg.active:
-                legacy_rows.append(leg)
-                lines.append(f"{short(leg.run_id)}  {leg.phase:<10} {leg.goal[:60]}  [3.0 legacy]")
     if not lines:
         lines = ["no active Office runs here" if not all_runs else "no Office runs recorded"]
-    return Result(lines=lines, next="office resume <id> to bind one" if len(runs) + len(legacy_rows) > 1 else None,
+    return Result(lines=lines, next="office resume <id> to bind one" if len(runs) > 1 else None,
                   data={"runs": [{"id": r["id"], "phase": r["phase"], "goal": r["goal"],
-                                  "office_version": r["office_version"], "pruned_at": r.get("pruned_at")} for r in runs],
-                        "legacy": [{"id": l.run_id, "phase": l.phase, "office_version": l.office_version}
-                                   for l in legacy_rows]})
+                                  "office_version": r["office_version"], "pruned_at": r.get("pruned_at")} for r in runs]})
 
 
 def _learn(con, run: dict) -> None:

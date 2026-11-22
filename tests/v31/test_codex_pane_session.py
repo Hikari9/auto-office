@@ -253,7 +253,7 @@ APPROVED = "VERDICT: APPROVED\nNEXT proceed"
 def test_a_recheck_that_cannot_resume_its_reviewer_says_so_before_the_fresh_reviewer_starts(env, monkeypatch):
     env.trust()
     env.script(plan_reviewer=[{"reply": RECHECK}, {"reply": APPROVED}])
-    start_inline(env, plan=PLAN_ONE, gear="express")
+    start_inline(env, plan=PLAN_ONE, gear="L")
     env.office("approve", "plan", "--quote", "go", check=0)
     con = env.con()
     first = con.execute("SELECT reviewer_dispatch_id, route FROM gates WHERE kind='plan_review'").fetchone()

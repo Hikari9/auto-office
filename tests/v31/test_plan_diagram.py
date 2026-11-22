@@ -42,8 +42,8 @@ def test_submit_shows_parallel_lanes_routes_and_checkpoints(env):
 
 def test_depends_become_stacked_waves(env):
     env.trust()
-    out = start_inline(env, plan=PLAN_STACKED, gear="direct")
-    assert "review: " not in out and "wave 2 {T2 accepted [checks]}" in out, out
+    out = start_inline(env, plan=PLAN_STACKED, gear="XS")
+    assert "wave 2 {T2 accepted [checks" in out, out
     assert "wave 2" in out and "stacked on T1" in out, out
     code, out = env.office("inspect", "plan")
     assert code == 0 and "stacked on T1" in out, out
@@ -173,3 +173,13 @@ def test_dispatch_reports_drift_from_the_preview(env):
         assert authority["actor"] == "user" and authority["quote"] == quote
     finally:
         con.close()
+
+
+def test_567_diff_prints_the_reason_on_a_reviewer_route_change():
+    task = {"title": "x", "depends": [], "wave": 1, "base": None, "needs": [], "route": "codex/gpt-5.5@high",
+            "review": "codex/luna@high"}
+    cur = {"tasks": {"T4": {**task, "review": "claude/opus@low", "review_why": "luna quota exhausted"}}}
+    assert plan_view.diff({"tasks": {"T4": task}}, cur, 1) == [
+        "changes vs p1:", "  T4 review: codex/luna@high -> claude/opus@low (luna quota exhausted)"]
+    bare = {"tasks": {"T4": {**task, "review": "claude/opus@low"}}}
+    assert plan_view.diff({"tasks": {"T4": task}}, bare, 1)[1] == "  T4 review: codex/luna@high -> claude/opus@low"

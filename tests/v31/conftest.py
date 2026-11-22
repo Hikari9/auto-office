@@ -170,6 +170,7 @@ class Env:
         """`restored`: tmp already holds a repository copied from a snapshot. `contract`
         pins the review contract new runs start with (the user config's review.contract)."""
         self.approved = False
+        self.restored_from = None  # the builder a `dispatched` marker restored this Env's state from
         # A suite that patches an in-process seam (gates.run_reviewer) sets this to hide every agy row from routing.
         self.hide_agy = False
         self.trust_snapshots = None  # routes `trust()` has already worked out, by inputs; the env fixture sets it
@@ -183,7 +184,7 @@ class Env:
         for d in (self.home, self.data, self.state, self.bin):
             d.mkdir(parents=True, exist_ok=True)
         self.fakes = {}
-        for name in ("codex", "claude", "gemini", "agy"):
+        for name in ("codex", "claude", "agy"):
             self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
                                            f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
             (self.bin / name).write_text(self.fakes[self.bin / name])
@@ -454,6 +455,43 @@ def _approved_snapshot(tmp_path_factory, request):
 
 
 @pytest.fixture(scope="module")
+def _dispatched_snapshots():
+    """Per module: builder and contract -> the directory holding that builder's snapshot (#1302)."""
+    return {}
+
+
+def _restore_dispatched(request, monkeypatch) -> Env:
+    """`@pytest.mark.dispatched("build")`: an Env holding the state `build(env)` leaves, built once per module.
+
+    `build` names a function of the test module (a bare callable would make the marker a decorator).
+
+    `build` drives the full lifecycle (trust, start, approve, dispatch) the first time; every later test with the
+    same marker restores a copy at the same absolute directory. The Env's `restored_from` is `build`, so the
+    builder can return early when a test calls it again.
+    """
+    build = getattr(request.module, request.node.get_closest_marker("dispatched").args[0])
+    contract = _contract(request)
+    cache = request.getfixturevalue("_dispatched_snapshots")
+    key = (build.__module__, build.__qualname__, contract)
+    if key not in cache:
+        root = request.getfixturevalue("tmp_path_factory").mktemp("dispatched")
+        mp = pytest.MonkeyPatch()
+        try:
+            build(_activate(Env(root / "env", mp, contract=contract), mp))
+            shutil.copytree(root / "env", root / "snapshot", symlinks=True)
+        finally:
+            mp.undo()
+        cache[key] = root
+    live, snapshot = cache[key] / "env", cache[key] / "snapshot"
+    shutil.rmtree(live, ignore_errors=True)
+    shutil.copytree(snapshot, live, symlinks=True)
+    e = Env(live, monkeypatch, restored=True, contract=contract)
+    e.approved = True
+    e.restored_from = build
+    return e
+
+
+@pytest.fixture(scope="module")
 def _trust_snapshots():
     """The routes `Env.trust()` records, worked out by the first call of each module and inputs."""
     return {}
@@ -462,7 +500,9 @@ def _trust_snapshots():
 @pytest.fixture
 def env(request, tmp_path, monkeypatch):
     """An isolated Env. With `@pytest.mark.approved`, one whose default plan is already approved."""
-    if request.node.get_closest_marker("approved"):
+    if request.node.get_closest_marker("dispatched"):
+        e = _restore_dispatched(request, monkeypatch)
+    elif request.node.get_closest_marker("approved"):
         live, snapshot = request.getfixturevalue("_approved_snapshot")
         shutil.rmtree(live, ignore_errors=True)
         shutil.copytree(snapshot, live, symlinks=True)
@@ -498,28 +538,49 @@ def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low")
     user_catalog.save({"models": [{**row, "effort": effort, "dispatchable": True}]})
 
 
-def start_inline(env, plan=PLAN_ONE, gear="direct+review", extra=()):
+def strip_gear_model(env, resubmit_plan=None):
+    """Put a started run in the state of one that predates run gears: no pinned gear and none of the gear-model keys
+    in its gates. Routing then takes the flat-seed path these route and rerun mechanics were written against.
+    The runtime still reads that state defensively; no new run can be in it."""
+    con = env.con()
+    try:
+        for row in con.execute("SELECT id, gates_json FROM runs").fetchall():
+            gates = {k: v for k, v in json.loads(row["gates_json"] or "{}").items()
+                     if k not in ("gear_model_version", "run_gear", "run_gear_rationale")}
+            con.execute("UPDATE runs SET gear=NULL, gates_json=? WHERE id=?", (json.dumps(gates), row["id"]))
+        con.commit()
+    finally:
+        con.close()
+    if resubmit_plan is not None:  # a plan already submitted keeps the sizes it was routed with: submit it again
+        env.write_plan(resubmit_plan)
+        env.office("submit", check=0)
+        env.office("approve", "plan", "--quote", "approved", check=0)
+
+
+def start_inline(env, plan=PLAN_ONE, gear="S", extra=(), unmarked=False):
     code, out = env.office("start", "fixture goal", "--gear", gear, "--planner", "inline", *extra)
     assert code == 0, out
+    if unmarked:
+        strip_gear_model(env)
     env.write_plan(plan)
     code, out = env.office("submit")
     assert code == 0, out
     return out
 
 
-def approved_run(env, plan=PLAN_ONE, gear="direct+review", **script):
+def approved_run(env, plan=PLAN_ONE, gear="S", unmarked=False, **script):
     """Trust the fake routes, script the harnesses by role, start an inline run and approve its plan.
 
     An Env from a test marked `approved` already holds that state for the default
     plan and gear; only the scripting is left to do.
     """
     if env.approved:
-        assert (plan, gear) == (PLAN_ONE, "direct+review"), "an approved Env holds the default plan and gear"
+        assert (plan, gear) == (PLAN_ONE, "S"), "an approved Env holds the default plan and gear"
         env.script(**script)
         return
     env.trust()
     env.script(**script)
-    start_inline(env, plan=plan, gear=gear)
+    start_inline(env, plan=plan, gear=gear, unmarked=unmarked)
     env.office("approve", "plan", "--quote", "approved", check=0)
 
 

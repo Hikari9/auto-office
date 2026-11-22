@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import GOOD_ADD
 from test_convergence_contract import (APPROVED, PLAN_VISUAL, _fake_capture, _gates, _q, _run_row, _scope, _start,
                                        _status, recheck, finding)
@@ -15,6 +17,8 @@ WAIVE = ("approve", "waive", "L-T1:convergence", "--quote", "ship it", "--reason
 
 
 def _unavailable_lane(env, kind="convergence_review", **script):
+    if env.restored_from is _unavailable_lane and kind == "convergence_review" and not script:
+        return  # the `dispatched` marker restored this state
     _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}], convergence_reviewer=[{"exit": 1}], **script)
     env.office("dispatch", "T1", check=0)
     assert _gates(env, kind)[0]["review_status"] == "UNAVAILABLE"
@@ -49,6 +53,7 @@ def _gate(env, gid):
     return _q(env, "SELECT * FROM gates WHERE id=?", (gid,))[0]
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_revoking_a_lane_review_ends_its_reviewer_and_job_and_closes_the_gate_unavailable(env, tmp_path):
     """#453: revoke the reviewer, waive, fall back: the whole sequence, with no gate-busy."""
     _unavailable_lane(env)
@@ -79,6 +84,7 @@ def test_revoking_a_lane_review_ends_its_reviewer_and_job_and_closes_the_gate_un
     assert "no specialist reviewer returned a verdict" not in (_status(env).get("next") or "")
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_revoked_lane_review_can_be_reviewed_by_the_orchestrator_instead(env, tmp_path):
     _unavailable_lane(env)
     _rewind_to_running(env)
@@ -89,6 +95,7 @@ def test_a_revoked_lane_review_can_be_reviewed_by_the_orchestrator_instead(env, 
     assert _scope(env, "L-T1")["status"] == "approved"
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_lane_gate_whose_reviewer_ended_is_reaped_unavailable_and_is_not_gate_busy_for_waive(env):
     _unavailable_lane(env)
     gid = _rewind_to_running(env, live_reviewer=False, queued_job=False)
@@ -98,6 +105,7 @@ def test_a_lane_gate_whose_reviewer_ended_is_reaped_unavailable_and_is_not_gate_
     assert _scope(env, "L-T1")["status"] == "waived"
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_an_orphaned_lane_gate_is_closed_unavailable_and_settles_the_scope(env):
     """The reaper path (dispatch._close_orphaned_gate -> gates.mark_unavailable) sets review_status too."""
     _unavailable_lane(env)
@@ -112,6 +120,7 @@ def test_an_orphaned_lane_gate_is_closed_unavailable_and_settles_the_scope(env):
     assert st["status"] == "unavailable" and st["fallback_available"] is True, st
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_revoke_of_a_closed_or_unknown_lane_gate_changes_nothing(env):
     _unavailable_lane(env)
     code, out = env.office("revoke", "L-T1:convergence")
@@ -125,12 +134,14 @@ def test_revoke_of_a_closed_or_unknown_lane_gate_changes_nothing(env):
     assert code == 2 and "bad-revoke-target" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_task_id_still_routes_to_the_task_revoke(env):
     _unavailable_lane(env)
     code, out = env.office("revoke", "T1")
     assert code == 0 and "stays accepted" in out and "lease released" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     """One predicate: a gate of an earlier cycle is neither hinted nor accepted by `office review`."""
     _unavailable_lane(env)
@@ -152,6 +163,7 @@ def test_the_hint_and_the_review_agree_on_the_current_cycle(env, tmp_path):
     assert code != 0 and "fallback-not-allowed" in out, out
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_the_fallback_flag_is_cleared_on_recompose_and_on_decide(env, monkeypatch):
     from office import convergence, jobs
     _unavailable_lane(env)
@@ -178,7 +190,7 @@ def test_a_waived_gate_is_no_fallback_while_the_other_unavailable_gate_still_is(
     _fake_capture(monkeypatch, tmp_path)
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
            convergence_reviewer=[{"exit": 1}], visual_reviewer=[{"exit": 1}], probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the capture patch reaches only the in-process claude supervisor
     env.office(*WAIVE, check=0)
     st = _scope(env, "L-T1")
     assert st["status"] == "unavailable" and st["fallback_kind"] == "visual", st
@@ -210,9 +222,10 @@ def _capture_with(monkeypatch, tmp_path, failures):
 
 def _visual_run(env):
     _start(env, plan=PLAN_VISUAL, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
-           convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\n" + APPROVED}],
+           convergence_reviewer=[{"reply": APPROVED}], visual_reviewer=[{"reply": "EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED}],
            probe=[{"reply": "auto"}])
-    env.office("dispatch", "T1", check=0)
+    # The capture patches below only reach the in-process claude supervisor; the ranker no longer picks claude.
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)
 
 
 def test_a_product_failure_is_still_a_blocking_producer_finding(env, monkeypatch, tmp_path):
@@ -237,7 +250,7 @@ def test_a_spec_failure_is_unavailable_with_the_spec_named_and_no_producer_findi
     from office import convergence
     assert not convergence.summary(env.con(), _run_row(env))[0]["fallback_available"]
     report = tmp_path / "vis.txt"
-    report.write_text("EVIDENCE_STATUS: COMPARABLE\n" + APPROVED)
+    report.write_text("EVIDENCE_STATUS: COMPARABLE\nOBSERVATION desktop-default.png | the page renders its content\n" + APPROVED)
     code, out = env.office("review", "L-T1:visual", "--report", str(report), "--inspected", "desktop-default.png")
     assert code != 0 and "fallback-not-allowed" in out, out
     assert not _q(env, "SELECT 1 FROM findings WHERE gate_kind='visual'")
@@ -298,6 +311,7 @@ def test_an_invalid_frame_with_no_cause_is_still_recaptured(env, monkeypatch, tm
     assert int(gate["recaptures"]) == 1
 
 
+@pytest.mark.dispatched("_unavailable_lane")
 def test_a_worker_cannot_revoke_a_lane_review(env):
     """A dispatched producer or reviewer must not cancel the review that judges it: refused before any write."""
     _unavailable_lane(env)
@@ -309,3 +323,159 @@ def test_a_worker_cannot_revoke_a_lane_review(env):
     assert gate["status"] == "running" and gate["review_status"] is None, gate
     assert _q(env, "SELECT status FROM outbox WHERE id='Jrev'")[0]["status"] == "queued"
     assert _q(env, "SELECT ended_at FROM dispatches WHERE id='Drev'")[0]["ended_at"] is None
+
+
+def test_a_capture_only_amendment_recaptures_without_reopening_the_task(env, monkeypatch, tmp_path):
+    """#728: changing only visual.url (or start) after a spec-defect capture keeps T1 accepted, launches no
+    executor and creates no revision; the lane's visual capture re-runs on the same composition."""
+    from test_convergence_contract import PLAN_VISUAL as PLAN
+    _capture_with(monkeypatch, tmp_path, [{"cause": "spec", "location": "page @ desktop",
+                                           "summary": "port 3999 already bound"}])
+    _visual_run(env)
+    assert _gates(env, "visual")[0]["evidence_status"] == "SPEC_DEFECT"
+    dispatches = _q(env, "SELECT COUNT(*) AS n FROM dispatches WHERE task_id='T1'")[0]["n"]
+    revisions = _q(env, "SELECT COUNT(*) AS n FROM revisions WHERE task_id='T1'")[0]["n"]
+    _capture_with(monkeypatch, tmp_path, [])
+    env.write_plan(PLAN.replace("http://localhost:3999/", "http://localhost:4000/"))
+    code, out = env.office("amend", "T1", "--contract", "--", "capture port change")
+    assert code == 0 and "visual capture re-run" in out and "no executor launched" in out, out
+    task = _q(env, "SELECT status, visual_json FROM tasks WHERE id='T1'")[0]
+    assert task["status"] == "accepted" and "4000" in task["visual_json"], task
+    assert _q(env, "SELECT COUNT(*) AS n FROM dispatches WHERE task_id='T1'")[0]["n"] == dispatches
+    assert _q(env, "SELECT COUNT(*) AS n FROM revisions WHERE task_id='T1'")[0]["n"] == revisions
+    assert not _q(env, "SELECT 1 FROM deliveries WHERE task_id='T1'")
+    env.office("resume", check=None)
+    latest = _gates(env, "visual")[-1]
+    assert len(_gates(env, "visual")) == 2 and latest["evidence_status"] != "SPEC_DEFECT", latest
+
+
+def test_a_visual_change_beyond_the_capture_still_reopens_the_task(env, monkeypatch, tmp_path):
+    from test_convergence_contract import PLAN_VISUAL as PLAN
+    _capture_with(monkeypatch, tmp_path, [{"cause": "spec", "location": "page @ desktop", "summary": "bad"}])
+    _visual_run(env)
+    env.write_plan(PLAN.replace("viewports: desktop", "viewports: desktop, mobile"))
+    code, out = env.office("amend", "T1", "--contract", "--", "add mobile")
+    assert code == 0 and "visual capture re-run" not in out, out
+    assert _q(env, "SELECT status FROM tasks WHERE id='T1'")[0]["status"] != "accepted"
+
+
+def test_a_revoked_reviewer_is_not_a_route_failure_and_takes_no_fallback(env, monkeypatch):
+    """#1007: revoke stops the reviewer, and stop_dispatch records a signal exit before the revoke can classify it.
+    The reviewer's job still reads the end as the orchestrator's revoke: no fallback route, no second reviewer."""
+    from office import db, dispatch, state
+    real = dispatch.launch
+
+    def launch(run, d, kind, ddir, **kw):
+        if kind != "reviewer":
+            return real(run, d, kind, ddir, **kw)
+        con = db.connect()
+        try:  # the race: the revoke marker, then the process end recorded by stop_dispatch as a signal exit
+            with db.transaction(con):
+                state.emit(con, run, dispatch.REVOKED_KIND, f"{d['id']} revoked", audience="runtime", dispatch_id=d["id"])
+                con.execute("UPDATE dispatches SET status='failed', terminal_classification='signal', "
+                            "ended_at='2026-01-01T00:00:00+00:00' WHERE id=?", (d["id"],))
+        finally:
+            con.close()
+        return {}
+
+    monkeypatch.setattr(dispatch, "launch", launch)
+    _start(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+           convergence_reviewer=[{"reply": APPROVED}] * 3)
+    env.office("dispatch", "T1", "--as", "claude/claude-opus-5-5@medium", check=0)  # the launch patch reaches only the in-process claude supervisor
+    gate = _gates(env, "convergence_review")[0]
+    assert gate["review_status"] == "REVOKED" and "revoked by the orchestrator" in (gate["summary"] or ""), gate
+    assert len(_q(env, f"SELECT id FROM dispatches WHERE gate_id='{gate['id']}'")) == 1
+    assert not _q(env, "SELECT 1 FROM events WHERE kind='route.fallback'")
+
+
+def test_a_failed_scripted_step_is_evidence_for_the_vision_reviewer_not_a_recheck(env, monkeypatch, tmp_path):
+    """#384 step 1: a scripted interaction the capture could not complete reaches the vision reviewer as evidence
+    (its brief names it), and the reviewer's verdict decides; no round is spent on the script alone."""
+    from office import gates, visual
+    briefs = []
+    real = gates.run_reviewer
+
+    def spy(con, run, gate, role, brief, **kw):
+        briefs.append((role, brief))
+        return real(con, run, gate, role, brief, **kw)
+
+    monkeypatch.setattr(gates, "run_reviewer", spy)
+    _capture_with(monkeypatch, tmp_path, [{"location": "[aria-label=tools] @ 1440x900 state tools-open",
+                                           "summary": "interaction 'click [aria-label=tools]' failed: Timeout 30000ms",
+                                           "kind": visual.INTERACTION}])
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert gate["route"] != "deterministic-capture" and gate["verdict"] == "APPROVED", gate
+    vision = [b for role, b in briefs if role == "visual_reviewer"]
+    assert vision and "SCRIPTED STEP FAILURES" in vision[0] and "click [aria-label=tools]" in vision[0], vision
+
+
+def test_a_measured_failure_still_rechecks_without_spending_visual_judgment(env, monkeypatch, tmp_path):
+    from office import visual
+    _capture_with(monkeypatch, tmp_path, [
+        {"location": "page @ 390x844", "summary": "horizontal overflow: content is 600px"},
+        {"location": "x @ 390x844 state s", "summary": "interaction 'click x' failed", "kind": visual.INTERACTION}])
+    _visual_run(env)
+    gate = _gates(env, "visual")[0]
+    assert gate["route"] == "deterministic-capture" and gate["verdict"] == "RECHECK", gate
+
+
+@pytest.mark.dispatched("_unavailable_lane")
+@pytest.mark.parametrize("job_status", ["failed", "done"])
+def test_a_queued_lane_review_whose_job_ended_is_settled_not_left_queued(env, job_status):
+    """#1022: the lane review's job failed (or finished without settling it) while the gate stayed queued, with no
+    reviewer and no job left. Reconcile settles it UNAVAILABLE, so the scope's fallback and office resume apply."""
+    from office import db, lifecycle, state
+    _unavailable_lane(env)
+    gid = _rewind_to_running(env, live_reviewer=False, queued_job=False)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("UPDATE gates SET status='queued' WHERE id=?", (gid,))
+    con.execute("DELETE FROM dispatches WHERE gate_id=?", (gid,))
+    con.execute("INSERT INTO outbox(id, run_id, kind, dedup_key, payload_json, office_version, status, attempts, "
+                "max_attempts, created_at, finished_at, error) VALUES('Jend', ?, 'convergence_review', 'k-end', ?, ?, ?, "
+                "2, 2, '2026-01-01', '2026-01-01', ?)",
+                (run_id, json.dumps({"gate_id": gid, "scope": "L-T1"}), _run_row(env)["office_version"], job_status,
+                 "self-review subagent reviewer out of quota" if job_status == "failed" else None))
+    con.commit()
+    with db.transaction(con):
+        notes = lifecycle.reconcile(con, state.get_run(con, run_id))
+    assert any(gid in n for n in notes), notes
+    gate = _gate(env, gid)
+    assert (gate["status"], gate["review_status"]) == ("done", "UNAVAILABLE"), gate
+    assert _scope(env, "L-T1")["status"] == "unavailable"
+
+
+def _queue_subagent_gate(env, gid, commit, key_commit=None):
+    """A self-review subagent gate queued with a live dispatch but no supervise job yet (#1202)."""
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    con.execute("INSERT INTO gates(id, run_id, subject, task_id, kind, input_key, status, created_at) "
+                "VALUES(?, ?, 'T1', 'T1', 'self_review_subagent', ?, 'queued', '2026-01-01')",
+                (gid, run_id, f"R1:{key_commit or commit}:combined:runtime-self-review-1"))
+    con.execute("INSERT INTO dispatches(id, run_id, role, started_at, kind, status, launcher, gate_id) "
+                "VALUES(?, ?, 'code_reviewer', '2026-01-01', 'reviewer', 'running', NULL, ?)", ("D" + gid, run_id, gid))
+    con.commit()
+
+
+@pytest.mark.dispatched("_unavailable_lane")
+def test_revoking_a_lane_review_closes_its_unsupervised_self_review_subagent_gate(env):
+    """#1202: a subagent gate queued but not yet supervised has no supervise job naming it. Revoke closes it, ends
+    its dispatch, and close is not blocked by it; a subagent gate of another composition is left alone."""
+    from office import gates
+    _unavailable_lane(env)
+    _rewind_to_running(env)
+    commit = _scope(env, "L-T1")["commit"]
+    _queue_subagent_gate(env, "Gsub", commit)
+    _queue_subagent_gate(env, "Gother", "0" * 40)
+    blockers = gates.close_blockers(env.con(), _run_row(env))
+    assert any("Gsub (self_review_subagent)" in b for b in blockers), blockers
+    code, out = env.office("revoke", "L-T1:convergence")
+    assert code == 0, out
+    sub = _gate(env, "Gsub")
+    assert sub["status"] == "done" and sub["finished_at"], sub
+    assert _q(env, "SELECT terminal_classification FROM dispatches WHERE id='DGsub'")[0]["terminal_classification"] == "revoked"
+    blockers = gates.close_blockers(env.con(), _run_row(env))
+    assert not any("Gsub" in b for b in blockers), blockers
+    assert _gate(env, "Gother")["status"] == "queued"
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id='DGother'")[0]["ended_at"] is None

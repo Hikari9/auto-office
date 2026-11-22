@@ -1,12 +1,13 @@
 ---
 name: auto-intake
-description: Auto Office 3.0 reference spoke, not loaded by 3.1 runs (they use the office CLI). Internal Auto Office v3 intake spoke. Use when the planner runs the interactive requirements interview before freezing intent — covering the twelve-item floor in one or two batched question rounds (or a structured-question tool, per harness) and deriving the five frozen fields from the answers. This spoke is planner-owned and requires talking to the user directly. Do not use to ask about gear, which is declared, not interviewed.
+description: Explicit-invocation-only historical Auto Office v3 intake reference spoke. Use ONLY on /auto-intake or an explicit direct selection of this intake skill; do not auto-activate for routine planning or engineering. Preserve the original interviewer behavior for pinned old runs.
+disable-model-invocation: true
 ---
 
 # Auto Intake
 
 > **Auto Office 3.1:** this is 3.0 reference material. A 3.1 run is driven by the `office` CLI and runtime-delivered
-> role briefs; do not run the `office_runtime.py` helpers below for it. Follow `office status` and its `next:` line.
+> role briefs; the `office_runtime.py` helpers it names were removed with the 3.0 runtime. Follow `office status` and its `next:` line.
 
 The planner conducts this interview directly with the user, after repository reconnaissance and using the orchestrator's provisional intent only as a starting hypothesis it may revise. Use the harness's native question tool when it has one (the per-harness list is under "Asking the user" in the root `SKILL.md`; Claude Code: `AskUserQuestion`); batched plain text otherwise — either form satisfies intent coverage as long as all twelve items are covered before freezing.
 
@@ -29,7 +30,7 @@ Cover all twelve on every run, delivered as one or two batched question rounds, 
 
 ## Freezing the five fields
 
-`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived** from the twelve answers, not asked directly. Every frozen value traces back to an answer above; one that doesn't is the defect this spoke exists to prevent. Record the freeze with `python3 scripts/office_runtime.py freeze-intent --state-dir <dir> --intent <json>`; it is the only intake → planned transition, and `approve-plan` refuses any other phase.
+`goal`, `done_criteria`, `blast_radius`, `named_actions`, and `non_goals` are **derived** from the twelve answers, not asked directly. Every frozen value traces back to an answer above; one that doesn't is the defect this spoke exists to prevent.
 
 ## Irreversible steps become named_actions
 

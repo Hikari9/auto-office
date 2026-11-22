@@ -120,12 +120,14 @@ def _timeout_run(calls):
     return fake_run
 
 
-def test_timeout_on_quiet_host_is_unknown_without_retry(monkeypatch):
-    calls = []
+def test_timeout_on_quiet_host_retries_once_then_is_unknown(monkeypatch):
+    # #941: a quiet-host timeout retries once too; with no last good reading it stays unknown.
+    calls, sleeps = [], []
     monkeypatch.setattr(candidates.subprocess, "run", _timeout_run(calls))
+    monkeypatch.setattr(candidates.time, "sleep", sleeps.append)
     monkeypatch.setattr("office.gates.host_overloaded", lambda: None)
     result = candidates.probe_quota(_adapter(["probe"]))
-    assert result["status"] == "unknown" and len(calls) == 1
+    assert result["status"] == "unknown" and len(calls) == 2 and sleeps == [candidates.PROBE_RETRY_BACKOFF_S]
 
 
 def test_timeout_under_load_retries_once_then_unavailable(monkeypatch):

@@ -150,7 +150,13 @@ def test_dispatch_reroute_a_live_worker_must_refuse_without_false_success(env):
     assert con.execute("SELECT COUNT(*) FROM dispatches WHERE task_id='T1'").fetchone()[0] == 1
 
 
-def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env):
+def test_first_orchestrator_rerun_after_usage_limit_records_route_fallback(env, monkeypatch):
+    # The first dispatch must land on the planned Claude route, or the Claude-quota rerun below can only fall back
+    # onto the same route: the size slate's Neon (agy) and Sol 6.2 (codex) rungs are dispatchable in this env too.
+    from office import candidates
+    seed_rows = candidates.catalog_rows
+    monkeypatch.setattr(candidates, "catalog_rows", lambda: [
+        {**r, "dispatchable": False} if r.get("model_id") in ("gemini-4-neon", "gpt-6.2-sol") else r for r in seed_rows()])
     _approve_slate(env, plan=PLANNED)
     code, out = env.office("dispatch", "T1", env=_quota(env))
     assert code == 0, out
@@ -208,12 +214,12 @@ def test_actual_router_skips_same_pool_fallback_then_recovers_after_ttl():
         rows = [candidate("opencode", "glm-5.3-flash-free", "max"),
                 candidate("opencode", "deepseek-v4.1-flash-free", "max")]
         if independent:
-            rows.append(candidate("agy", "gemini-3.8-flash", "medium"))
+            rows.append(candidate("codex", "gpt-6-luna", "high"))
         return routing.route({
             "role": "code_reviewer", "candidates": rows, "allow_free_models": True,
             "preferred_seed": [{"model_id": "glm-5.3-flash-free"},
                                {"model_id": "deepseek-v4.1-flash-free"},
-                               {"model_id": "gemini-3.8-flash"}],
+                               {"model_id": "gpt-6-luna"}],
             "policy": {"required_capabilities": [], "cost_policy": "balanced"}
         }, connection=con)
 
@@ -221,7 +227,7 @@ def test_actual_router_skips_same_pool_fallback_then_recovers_after_ttl():
     con.execute("INSERT INTO route_cooldowns(route, expires_at, updated_at) VALUES(?,?,?)",
                 (key, "2999-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
     during = choose()
-    assert during["selected"] == "agy@1/gemini-3.8-flash@medium", during
+    assert during["selected"] == "codex@1/gpt-6-luna@high", during
     same_pool = [r for r in during["rejected"] if r.get("category") == "route-demoted"]
     assert len(same_pool) == 2 and all(r["candidate"].startswith("opencode@") for r in same_pool)
     exhausted = choose(independent=False)
@@ -229,3 +235,80 @@ def test_actual_router_skips_same_pool_fallback_then_recovers_after_ttl():
     con.execute("UPDATE route_cooldowns SET expires_at='2000-01-01T00:00:00+00:00' WHERE route=?", (key,))
     after = choose()
     assert after["selected"] == "opencode@1/glm-5.3-flash-free@max", after
+
+
+def test_repeated_usage_limits_with_no_known_reset_escalate_the_cooldown(env):
+    """#860 (553f1ddc on 3.15.29): a free pool with an unknown reset lapsed after its base TTL, was re-picked and
+    walled again within seconds, four times an afternoon. Each repeat today doubles the cooldown, capped at the next
+    local midnight; yesterday's hits do not count."""
+    from conftest import PLAN_ONE, approved_run, strip_gear_model
+    from office import guide
+    approved_run(env)
+    strip_gear_model(env, resubmit_plan=PLAN_ONE)
+    con = env.con()
+    run_id = con.execute("SELECT id FROM runs").fetchone()[0]
+    now = datetime.now(timezone.utc)
+    base = timedelta(minutes=route_policy.ROUTE_FAILURE_TTL_MINUTES)
+    pool, route = "pool:opencode:free", "opencode@1/glm-5.3-flash-free@max"
+    next_midnight = datetime.fromisoformat(routing.local_midnight_utc()) + timedelta(days=1)
+    cap = lambda ttl: min(ttl, max(base, next_midnight - now))  # noqa: E731
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base)
+
+    def hit(at):
+        con.execute("INSERT INTO events(run_id, kind, audience, summary, payload_json, office_version, created_at) "
+                    "VALUES(?, 'route.failed', 'orchestrator', 'x', ?, '3', ?)",
+                    (run_id, json.dumps({"reason": "usage_limit", "quota_pool": pool, "route": route}), at))
+        con.commit()
+
+    hit((datetime.fromisoformat(routing.local_midnight_utc()) - timedelta(hours=1)).isoformat())  # yesterday
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base)
+    hit(now.isoformat())
+    hit(now.isoformat())
+    assert guide._usage_limit_cooldown(con, now, pool, route) == cap(base * 4)
+    for _ in range(12):
+        hit(now.isoformat())
+    assert guide._usage_limit_cooldown(con, now, pool, route) == max(base, next_midnight - now)
+    # Another pool's hits never escalate this one.
+    assert guide._usage_limit_cooldown(con, now, "pool:other", "other@1/m@high") == cap(base)
+
+
+def test_agy_credit_wall_in_an_idle_pane_is_a_usage_limit_that_demotes_the_route_1194(env):
+    """#1194 (regression of #608): agy's empty-credits stop was reported as a plain idle stall,
+    so no cooldown was recorded and `--reroute` re-picked the walled route."""
+    _go(env)
+    session_env = _herdr(env, status="idle", pane="brief pointer landed\n⚠ Your AI credits balance is too low to continue.\n")
+    d = _as_herdr(env)
+    con = env.con()
+    con.execute("UPDATE dispatches SET harness='agy', adapter_id='agy', model='gemini-4-hydrogen', "
+                "invocation_model_id='gemini-4-hydrogen', effort='medium' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = _wait(env, session_env, timeout="3")
+    assert code == 3 and "usage_limit" in out and "idle" not in out.split("usage_limit")[0].split(":")[-1], (code, out)
+    route = routing.demotion_key("agy", "gemini-4-hydrogen", "medium")
+    rows = {row["route"] for row in con.execute("SELECT route FROM route_cooldowns")}
+    assert route in rows, rows
+    assert con.execute("SELECT count(*) FROM events WHERE kind='route.failed' AND dispatch_id=?",
+                       (d["id"],)).fetchone()[0] == 1
+
+
+def test_credit_balance_wall_text_matches_the_quota_signatures_1194():
+    from office import gates
+    wall = "⚠ Your AI credits balance is too low to continue."
+    assert dispatch._usage_limit(wall) is not None
+    assert gates._quota_signature(wall)
+    assert dispatch.route_failure("nonzero", wall)[0] == "quota"
+    # A prompt echo below the wall means the agent went on.
+    assert dispatch._usage_limit(wall + "\n> continue") is None
+
+
+PI_CREDIT_400 = ('400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too '
+                 'low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}')
+
+
+def test_pi_anthropic_credit_balance_400_is_quota_everywhere():
+    """#771: pi's exact Anthropic text is a quota wall in every classifier, not a model or auth fault."""
+    from office import gates
+    assert dispatch._usage_limit(PI_CREDIT_400)
+    assert gates._quota_signature(PI_CREDIT_400)
+    reason, _ = dispatch.route_failure("nonzero", PI_CREDIT_400)
+    assert reason == "quota"

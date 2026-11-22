@@ -15,6 +15,8 @@ changes that (#837). `smoke` writes launch evidence only, never conformance.
 """
 from __future__ import annotations
 
+import copy
+import contextlib
 import json
 import os
 import re
@@ -29,7 +31,7 @@ import yaml
 from office import adapters, cli_runtimes, paths, portable, shipped_catalog, user_catalog
 from office.result import Result
 from office.state import OfficeError
-from office.util import now_iso
+from office.util import loads, now_iso
 
 ID_RE = re.compile(r"^[a-z0-9-]+$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -52,9 +54,40 @@ UNSAFE_TRUST_FLAGS: dict[str, re.Pattern[str]] = {
     "trust_level=trusted": re.compile(r"trust_level\s*=\s*\\?\"?trusted"),
 }
 _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+SMOKE_MARKER = "READY"
 SMOKE_PROMPT = ("This is an Auto Office launch smoke test in a throwaway repository. "
-                "Reply with the single word READY. Do not edit, create or delete any files.")
+                f"Reply with the single word {SMOKE_MARKER}. Do not edit, create or delete any files.")
 SMOKE_TIMEOUT_S = 300
+
+
+def _strings(value) -> list[str]:
+    """Every string leaf of a parsed JSON value."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _answered(text: str) -> bool:
+    """True when a line of the reply is the smoke marker alone (case, markup and end punctuation aside).
+
+    Exit 0 with output is not an answer: a harness that never read its prompt still prints a banner and a goodbye
+    and exits cleanly (#1321). The prompt's own line is never the marker alone, so echoing it does not pass either.
+    A harness that prints JSON (one document, or one event per line, like `kilo run --format json`) is searched by
+    the text inside its string values."""
+    texts = [text or ""]
+    try:
+        texts.extend(_strings(json.loads(text)))
+    except (TypeError, ValueError):
+        for line in (text or "").splitlines():
+            try:
+                texts.extend(_strings(json.loads(line)))
+            except ValueError:
+                continue
+    return any(ln.strip().strip("*_`'\".!:> ").upper() == SMOKE_MARKER for t in texts for ln in t.splitlines())
 
 
 def _usage(message: str, next_step: str | None = None) -> OfficeError:
@@ -376,6 +409,8 @@ def check_full(adapter: dict, rows: list[dict] | None = None) -> tuple[list[str]
         problems.append(f"invocation.executable {exe} is a shell: a prompt would pass through shell parsing")
     if (adapter.get("safe_prompt_passing") or {}).get("shell") is True:
         problems.append("safe_prompt_passing.shell is true: the prompt must never pass through a shell")
+    if (bad := adapters.readonly_args_problem(adapter)):
+        problems.append(bad)
     profiles = adapter.get("office_profiles")
     if not isinstance(profiles, dict) or not profiles:
         problems.append("office_profiles declares no launch form (worker, reviewer or vision)")
@@ -420,17 +455,25 @@ def check_full(adapter: dict, rows: list[dict] | None = None) -> tuple[list[str]
                 continue
             output = None if kind == "worker" else cwd / "dispatch" / "reply.md"
             images = [cwd / "probe.png"] if kind == "vision" else None
-            for effort in efforts:
+            routes = prof.get("routes")
+            if routes is not None and not (isinstance(routes, list) and routes and all(
+                    isinstance(r, str) and r.count("@") == 1 and all(r.split("@")) for r in routes)):
+                problems.append(f"{label}.routes must be a non-empty list of exact <invocation model>@<effort> routes")
+                continue
+            # A route-scoped profile (H4, #1178) renders only for its own routes.
+            targets = ([tuple(r.split("@")) for r in routes] if routes is not None
+                       else [("probe/model", e) for e in efforts])
+            for model, effort in targets:
                 try:
-                    rendered, _ = adapters.build_argv(adapter, kind, model="probe/model", effort=effort, cwd=cwd,
+                    rendered, _ = adapters.build_argv(adapter, kind, model=model, effort=effort, cwd=cwd,
                                                       output=output, images=images, include_dirs=[cwd],
                                                       session_id="probe-session")
                     forms = [("argv", rendered)]
-                    inter = adapters.interactive_argv(adapter, kind, model="probe/model", effort=effort, cwd=cwd,
+                    inter = adapters.interactive_argv(adapter, kind, model=model, effort=effort, cwd=cwd,
                                                       include_dirs=[cwd], output=output)
                     if inter:
                         forms.append(("interactive.argv", inter[0]))
-                    resumed = adapters.resume_argv(adapter, kind, session_id="probe-session", model="probe/model",
+                    resumed = adapters.resume_argv(adapter, kind, session_id="probe-session", model=model,
                                                    effort=effort, cwd=cwd, include_dirs=[cwd], output=output)
                     if resumed:
                         forms.append(("interactive.resume_argv", resumed[0]))
@@ -587,7 +630,11 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
     slug = (rows[0].get("invocation_model_id") or rows[0].get("model_id")) if rows else model
     effort = effort or (rows[0].get("effort") if rows else None) or "medium"
     profiles = adapter.get("office_profiles") or {}
-    kinds = [k for k in adapters.PROFILE_KINDS if isinstance(profiles.get(k), dict)]
+    # A route-scoped profile (H4, #1178) is a launch form only for its own routes.
+    kinds = [k for k in adapters.PROFILE_KINDS if isinstance(profiles.get(k), dict)
+             and adapters.profile_for(adapter, k, slug, effort)]
+    if not kinds:
+        raise OfficeError("no-profile", f"{aid} has no launch form for {slug}@{effort}", exit_code=1)
     # Prefer a form that carries no permission/trust flag; one that does runs only when asked.
     kind = next((k for k in kinds if not _unsafe_flags(adapter, profiles[k])), None)
     if kind is None:
@@ -635,8 +682,8 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
         except OSError as e:
             code, out, err, timed_out = None, "", str(e), False
         reply = output.read_text(encoding="utf-8", errors="replace") if output and output.is_file() else ""
-    answered = bool((reply or out).strip())
-    result = "launched" if code == 0 and answered else ("timed_out" if timed_out else "failed")
+    answered = _answered(reply or out)
+    result = ("launched" if answered else "no_answer") if code == 0 else ("timed_out" if timed_out else "failed")
     rec.update(result=result, exit_code=code, timed_out=timed_out, duration_s=round(time.time() - started, 2),
                output_bytes=len((reply or out).encode()), stderr_tail=err.strip()[-300:])
     _record_smoke(rec)
@@ -648,6 +695,8 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
         if not rows:
             nxt = f"office model add {aid}/{slug} --effort {effort}"
         return Result(lines=lines, next=nxt, data=rec)
+    if result == "no_answer":
+        lines.append(f"exit 0 but no line of the reply is {SMOKE_MARKER}: the harness never answered the prompt")
     if err.strip():
         lines.append(f"stderr: {err.strip().splitlines()[-1][:200]}")
     return Result(lines=lines, next="check the argv, sign-in and model, then rerun the smoke", exit_code=1, data=rec)
@@ -760,7 +809,28 @@ def _efforts(raw: list[str] | None) -> list[str]:
     return out
 
 
-def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | None = None) -> Result:
+ROLE_ALIASES = {"executor": ["executor"], "reviewer": ["code_reviewer", "plan_reviewer"]}
+
+
+def _add_roles(roles: list[str] | None, harness: str, adapter: dict) -> list[str]:
+    """Policy roles for `office model add --role` (executor, reviewer), validated before anything is written."""
+    names = [r.strip() for item in roles or [] for r in str(item).split(",") if r.strip()]
+    unknown = [r for r in names if r not in ROLE_ALIASES]
+    if unknown:
+        raise _usage(f"--role takes {', '.join(ROLE_ALIASES)}, not {', '.join(unknown)}", next_step="office model add --help")
+    out = [pr for r in dict.fromkeys(names) for pr in ROLE_ALIASES[r]]
+    for r in names:
+        kind = "worker" if r == "executor" else "reviewer"
+        if not adapters.profile(adapter, kind):
+            hint = ("add `reviewer_readonly_args` (the harness flags that leave only read tools) or an office_profiles.reviewer "
+                    "to the adapter" if kind == "reviewer" else "declare office_profiles.worker")
+            raise _usage(f"{harness} has no {kind} launch profile, so it cannot serve {r}: {hint}",
+                         next_step=f"office harness validate {harness}")
+    return out
+
+
+def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | None = None,
+              roles: list[str] | None = None) -> Result:
     harness, slug = _parse_model_ident(ident)
     adapter = adapters.load_all().get(harness)
     if not adapter or not adapter.get("office_profiles"):
@@ -768,6 +838,7 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
     want = _efforts(efforts)
     if not want:
         raise _usage("name at least one --effort", next_step=f"office model add {ident} --effort medium")
+    policy_roles = _add_roles(roles, harness, adapter)
     mid = model_id or slug.rsplit("/", 1)[-1]
     if not MODEL_ID_RE.match(mid):
         raise _usage(f"model id {mid!r} must be letters, digits, '.', '_' or '-'", next_step="pass --model-id <name>")
@@ -782,11 +853,12 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
         raise OfficeError("row-exists", f"{harness}/{mid}@{','.join(dupes)} is already a catalog row", exit_code=1,
                           next_step=f"office model list {harness}")
     overlay = _overlay_for_write()
+    original = copy.deepcopy(overlay)
     added = []
     for e in want:
         row = {"model_id": mid, "invocation_model_id": slug, "invocation_harness": harness,
                "invocation_source": f"unverified: added with office model add on {now_iso()[:10]}; unproven until "
-                                    "office harness smoke and conformance",
+                                    "office model verify cites an accepted, reviewed task it produced",
                "dispatchable": True, "source_identifier": None, "source_name": "user-overlay", "effort": e,
                "source_effort": None, "effort_confidence": "unknown", "benchmark_indexes": {}, "price_fields": None,
                "speed_fields": None, "release_date": None,
@@ -796,10 +868,35 @@ def model_add(ident: str | None, efforts: list[str] | None, *, model_id: str | N
         added.append(f"{harness}/{mid}@{e}")
     target = user_catalog.save(overlay)
     note = cli_runtimes.refresh_if_saved()
+    allowed = []
+    if policy_roles:
+        from office import routecmd
+        try:
+            for pr in policy_roles:
+                routecmd.change("allow", role=pr, route=",".join(added))
+                allowed.append(pr)
+        except Exception:
+            # One registration, all or nothing: undo the allows already written and the catalog rows.
+            for pr in allowed:
+                with contextlib.suppress(Exception):
+                    routecmd.change("clear", role=pr, route=",".join(added))
+            with contextlib.suppress(Exception):
+                user_catalog.save(original)
+                cli_runtimes.refresh_if_saved()
+            raise
+    if not allowed:
+        policy_line = "policy: neutral for every role (eligible, not denied); change it with office route allow|deny"
+    else:
+        policy_line = f"policy: allowed for {', '.join(allowed)}; every other role stays neutral."
+        if any(r.endswith("reviewer") for r in allowed):
+            policy_line += (" A reviewer on a harness without verified isolation runs with read-only tools only and "
+                            "fails as degraded if it changes the worktree.")
     return Result(lines=[f"added {', '.join(added)} (slug {slug}) to {target}",
                          "benchmark scores: none yet; an opted-in run fills them through office benchmarks brief|submit",
-                         "policy: neutral for every role (eligible, not denied); change it with office route allow|deny", *([note] if note else [])],
-                  next=f"office harness smoke {harness} --model {mid}", data={"added": added, "path": str(target)})
+                         policy_line, *([note] if note else [])],
+                  next=(f"office harness smoke {harness} --model {mid}; once it has an accepted, reviewed task, "
+                        f"office model verify {harness}/{mid} --evidence <run>/<task> clears role floors"),
+                  data={"added": added, "path": str(target), "allowed_roles": allowed})
 
 
 def model_list(harness: str | None = None) -> Result:
@@ -886,6 +983,91 @@ def model_enable(ident: str | None) -> Result:
     return Result(lines=[f"removed {removed} user-overlay disable(s) for {ident} from {target}",
                          "technical catalog gates and explicit denied_models still apply", *([note] if note else [])],
                   next="office model list", data={"changed": True, "removed": removed, "path": str(target)})
+
+
+VERIFIED_PREFIX = "local-evidence:"
+
+
+def _evidence_proof(con, ref: str, harness: str, row_by_effort: dict) -> dict:
+    """One `<run>/<task>` citation (#656): an accepted executor task of an independently reviewed run whose
+    accepted revision was produced on this harness and model. Returns {run, task, effort, revision}."""
+    run_part, sep, task_part = (ref or "").strip().partition("/")
+    if not sep or not run_part or not task_part:
+        raise _usage(f"--evidence {ref!r}: expected <run>/<task>, e.g. 7bafb981/T1", next_step="office list shows run ids")
+    from office import state
+    run = state.find_run(con, run_part)
+    if run is None:
+        raise OfficeError("evidence-rejected", f"{ref}: no run {run_part!r}", exit_code=1, next_step="office list")
+    task = state.get_task(con, run["id"], task_part.upper())
+    if task is None:
+        raise OfficeError("evidence-rejected", f"{ref}: run {run['id'][:8]} has no task {task_part}", exit_code=1)
+    if task["status"] != "accepted" or not task.get("accepted_revision_id"):
+        raise OfficeError("evidence-rejected", f"{ref}: {task['id']} is {task['status']}, not accepted", exit_code=1,
+                          next_step="cite a task whose revision was accepted")
+    if not (run.get("gates") or {}).get("code_review"):
+        raise OfficeError("evidence-rejected", f"{ref}: run {run['id'][:8]} ran without independent code review "
+                          f"(gear {run.get('gear')}), so its acceptance proves nothing about the model", exit_code=1)
+    rev = con.execute("SELECT dispatch_id FROM revisions WHERE id=?", (task["accepted_revision_id"],)).fetchone()
+    d = state.get_dispatch(con, rev["dispatch_id"]) if rev and rev["dispatch_id"] else None
+    if d is None:
+        raise OfficeError("evidence-rejected", f"{ref}: the accepted revision has no recorded dispatch", exit_code=1)
+    route = loads(d.get("route_json"), {}) or {}
+    cand = route.get("candidate") or {}
+    on_harness = harness in (d.get("harness"), d.get("adapter_id"))
+    row = row_by_effort.get(d.get("effort"))
+    on_model = row is not None and (d.get("model") == row.get("invocation_model_id")
+                                    or cand.get("model_id") == row.get("model_id"))
+    if not (on_harness and on_model):
+        wanted = ", ".join(f"{harness}/{r.get('model_id')}@{e}" for e, r in sorted(row_by_effort.items()))
+        raise OfficeError("evidence-rejected", f"{ref}: its accepted revision ran {d.get('triple')}, not {wanted}",
+                          exit_code=1, next_step="cite a task this route produced")
+    return {"run": run["id"][:8], "task": task["id"], "effort": d.get("effort"), "revision": task["accepted_revision_id"]}
+
+
+def model_verify(ident: str | None, evidence: list[str] | None) -> Result:
+    """Promote a user-added model's `invocation_source` to `local-evidence:` on cited, independently reviewed
+    acceptances (#656). Explicit only: nothing promotes a model on its own (Rico, 2026-11-02)."""
+    m = re.fullmatch(r"(?P<h>[a-z0-9-]+)/(?P<m>[A-Za-z0-9_.-]+)(?:@(?P<e>[a-z]+))?", (ident or "").strip())
+    if not m:
+        raise _usage("name the route as <harness>/<model>[@effort]", next_step="office model list")
+    harness, mid, effort = m["h"], m["m"], m["e"]
+    overlay = _overlay_for_write()
+    rows = [r for r in overlay["models"] if r.get("invocation_harness") == harness and r.get("model_id") == mid
+            and (not effort or r.get("effort") == effort)]
+    if not rows:
+        shipped = any(r.get("invocation_harness") == harness and r.get("model_id") == mid for r in _catalog_rows())
+        raise _usage(f"{ident} is not a row added with office model add" if shipped else f"{ident} names no catalog row",
+                     next_step="shipped rows keep their own invocation source; office model list" if shipped
+                     else f"office model list {harness}")
+    pending = {r.get("effort"): r for r in rows if not str(r.get("invocation_source") or "").startswith(VERIFIED_PREFIX)}
+    if not pending:
+        return Result(lines=[f"{ident} already has a {VERIFIED_PREFIX} invocation source"], data={"changed": False})
+    refs = [e.strip() for item in evidence or [] for e in str(item).split(",") if e.strip()]
+    if not refs:
+        raise _usage("--evidence names the accepted, independently reviewed tasks this route produced",
+                     next_step=f"office model verify {ident} --evidence <run>/<task>")
+    from office import db
+    con = db.connect()
+    try:
+        proofs = [_evidence_proof(con, ref, harness, pending) for ref in refs]
+    finally:
+        con.close()
+    covered = {p["effort"] for p in proofs}
+    promoted = [e for e in pending if e in covered]
+    stamp = f"office model verify on {now_iso()[:10]}"
+    for e in promoted:
+        cited = ", ".join(f"{p['run']}/{p['task']}" for p in proofs if p["effort"] == e)
+        pending[e]["invocation_source"] = f"{VERIFIED_PREFIX} {stamp}: accepted under independent review in {cited}"
+    target = user_catalog.save(overlay)
+    note = cli_runtimes.refresh_if_saved()
+    left = sorted(e for e in pending if e not in covered)
+    lines = [f"verified {', '.join(f'{harness}/{mid}@{e}' for e in promoted)} ({VERIFIED_PREFIX}) in {target}"]
+    if left:
+        lines.append(f"still unverified: {', '.join(f'{harness}/{mid}@{e}' for e in left)} (no cited task ran that effort)")
+    return Result(lines=[*lines, *([note] if note else [])],
+                  next="role floors that admit local-evidence: sources accept it from the next candidate build",
+                  data={"changed": True, "verified": promoted, "unverified": left, "evidence": proofs,
+                        "path": str(target)})
 
 
 def d_as_row(entry: dict) -> dict:

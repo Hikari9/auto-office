@@ -1,0 +1,17 @@
+diff --git a/src/office/util.py b/src/office/util.py
+index ac380e7f..8b4fb149 100644
+--- a/src/office/util.py
++++ b/src/office/util.py
+@@ -136,11 +136,8 @@ def claim_liveness(pid: int | None, claimed_by: str | None) -> tuple[str, str]:
+     alive whenever the pid is, so nothing is reaped on a guess. A start time
+     that cannot be read now is UNKNOWN, not a mismatch: `ps` can fail or be
+     denied (an agent sandbox) while the claimant runs on (#403, #404)."""
+-    state = pid_state(pid)
+-    if state == DEAD:
++    if not pid_alive(pid):
+         return DEAD, f"pid {pid} no longer exists"
+-    if state == UNKNOWN:
+-        return UNKNOWN, f"pid {pid} could not be probed"
+     start = _claim_start(claimed_by)
+     if start is None:
+         return ALIVE, f"pid {pid} is alive (the claim records no start time)"

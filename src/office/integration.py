@@ -95,13 +95,19 @@ def final_commit(con, run: dict) -> str | None:
     return s.get("commit") if s.get("status") == "accepted" else None
 
 
+def _integration_hold(con, run_id: str) -> str | None:
+    from office import queuecmd  # a paused run's integrate job waits for office queue resume (#800)
+    return queuecmd.integration_hold(con, run_id)
+
+
 def maybe_queue(con, run: dict) -> None:
     """Queue composition once per accepted set. Caller holds tx."""
     tasks = accepted_set(con, run)
     if tasks is None:
         return
     key = _set_key(con, tasks)
-    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2)
+    state.enqueue(con, run, "integrate", {"key": key}, dedup_key=f"integrate:{run['id']}:{key}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
 
 
 LOCK_WAIT_SECONDS = 7200.0  # a compose runs the run checks, which can take their whole timeout
@@ -144,7 +150,8 @@ def retrigger(con, run: dict) -> bool:
         return False
     key = _set_key(con, tasks)
     state.enqueue(con, run, "integrate", {"key": key},
-                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2)
+                  dedup_key=f"integrate:{run['id']}:{key}:recheck:{uuid.uuid4().hex[:8]}", max_attempts=2,
+                  not_before=_integration_hold(con, run["id"]))
     return True
 
 
@@ -335,7 +342,7 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 wt, {**t, "base_commit": revs[t["id"]].get("base_commit") or run["base_sha"]},
                 previous, env=genv)
         except SharedAppendUnsafe as exc:
-            detail = f"{t['id']}: shared append integrity unverified: {exc}; resolve shared edits or serialize tasks, then office resume"
+            detail = f"{t['id']}: shared append integrity unverified: {exc}; {shared_append_next(t, previous)}"
             with db.transaction(con):
                 _set_integration(con, run, key=key, status="conflict", detail=detail, branch=branch)
                 state.emit(con, run, "integration.conflict", f"INTEGRATION CONFLICT: {detail}")
@@ -375,16 +382,21 @@ def _integrate(con, run: dict, job: dict) -> dict:
             except Exception:
                 base_failures = []  # no proof -> block, never guess that it is pre-existing
             proven = {entry["code"] for entry in base_failures}
-            failures = {f"C{i}" for i, result in enumerate(outcome.get("results") or [], 1)
-                        if result["exit"] != 0}
+            check_results = outcome.get("results") or []
+            failures = {f"C{i}" for i, result in enumerate(check_results, 1) if result["exit"] != 0}
+            # Pre-existing failures never verify the composed result alone: a run-level check must pass too.
+            passed_run_check = any(result["exit"] == 0 for result in check_results[:len(run_checks)])
             if base_failures:
                 summary = (f"{len(base_failures)} integration check(s) fail identically on pinned base "
-                           f"{base[:12]}: pre-existing, NONBLOCKING (not green)")
+                           f"{base[:12]}: pre-existing" + (", NONBLOCKING (not green)" if passed_run_check else ""))
                 with db.transaction(con):
                     state.emit(con, run, "integration.preexisting", summary,
                                payload={"commit": commit, "base_commit": base, "checks": base_failures})
-                if failures and failures <= proven:
+                if failures and failures <= proven and passed_run_check:
                     outcome = {**outcome, "verdict": "PASS", "summary": summary}
+                elif failures <= proven:
+                    outcome = {**outcome, "summary": f"{outcome['summary']}; {summary}; no run-level check passed, "
+                                                     "so nothing verifies the composed result: BLOCK"}
                 else:
                     outcome = {**outcome, "summary": f"{outcome['summary']}; {summary}; introduced failures BLOCK"}
         check_outcome = outcome
@@ -419,33 +431,101 @@ def _integrate(con, run: dict, job: dict) -> dict:
                 state.emit(con, run, "integration.failed", f"INTEGRATION checks {outcome['verdict']} on the composed result"
                            + (f"; {hint}" if hint else ""))
             return results
-    if needs_review:
-        gid = _gate(con, run, integ_rev, "integration_review", commit)
-        gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
-        diff = gates.cap_diff(paths.git(repo, "diff", compose_base(run), commit))
-        checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
-        try:
-            brief = briefs.code_review_brief(run, None, integ_rev, diff, ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
-                                             [], str(checkout), integration=True)
-            outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout, include_dirs=[checkout])
-        finally:
-            gates.remove_checkout(run, checkout)
-        with db.transaction(con):
-            con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
-                        (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
-        results["integration_review"] = outcome["verdict"]
-        if outcome["verdict"] != "PASS":
-            findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
-            detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
-            with db.transaction(con):
-                _set_integration(con, run, status="blocked" if outcome["verdict"] != "UNAVAILABLE" else "unavailable",
-                                 detail=f"integration review {outcome['verdict']}: {detail[:200]}")
-                state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
-            return results
-    # An independent integration reviewer has its own outcome/gate. The proof
-    # must come from the original passing check gate, not the last reviewer.
     executed = ([r["command"] for r in check_outcome.get("results") or [] if r.get("exit") == 0]
                 if check_outcome is not None else [])
+    # What the review and the acceptance after it need, kept on the run so a `review_fallback` job can finish them.
+    ctx = {"key": key, "commit": commit, "base": base, "branch": branch, "integ_rev": integ_rev, "run_checks": run_checks,
+           "executed": executed, "checks_gate_id": checks_gate_id, "results": results}
+    if needs_review:
+        gid = _gate(con, run, integ_rev, "integration_review", commit)
+        return _review_composed(con, run, {"id": job["id"], "kind": "integration_review",
+                                           "payload": {"gate_id": gid, "key": key}}, gid, ctx)
+    return _accept_composed(con, run, ctx)
+
+
+def job_integration_review(con, run: dict, job: dict) -> dict:
+    """Re-run the integration review of the composed commit after no reviewer returned a verdict (a `review_fallback`
+    job), then finish the integration the way the integrate job would have."""
+    gid = job["payload"]["gate_id"]
+    gate = con.execute("SELECT status FROM gates WHERE id=?", (gid,)).fetchone()
+    if gate is None or gate["status"] not in ("queued", "running"):
+        return {"skipped": gate["status"] if gate else "missing"}
+    run = state.get_run(con, run["id"])
+    integ = (run.get("landing") or {}).get("integration") or {}
+    ctx = integ.get("review_ctx")
+    if not ctx or integ.get("commit") != ctx["commit"] or compose_base(run) != ctx["base"]:
+        with db.transaction(con):
+            con.execute("UPDATE gates SET status='stale', stale_reason='integration recomposed', finished_at=? WHERE id=?",
+                        (now_iso(), gid))
+        return {"skipped": "integration recomposed"}
+    return _review_composed(con, run, job, gid, ctx)
+
+
+def _review_composed(con, run: dict, job: dict, gid: str, ctx: dict) -> dict:
+    """The independent review of the composed commit, then its acceptance. No verdict from any reviewer route queues
+    the bounded `review_fallback` job (the gate stays open) before the gate finalizes UNAVAILABLE."""
+    repo = Path(run["repo_root"])
+    commit, branch = ctx["commit"], ctx["branch"]
+    results = dict(ctx["results"])
+    gate = dict(con.execute("SELECT * FROM gates WHERE id=?", (gid,)).fetchone())
+    outcome = None
+    if job["payload"].get(gates.SETTLE_KEY):
+        # The reviewer was launched by an earlier run of this review, which left its checkout for it to read.
+        checkout = paths.run_dir(run["id"]) / "checkouts" / f"integration-{gid}"
+        try:
+            outcome = gates.settle_reviewer(con, run, gate, job)
+        finally:
+            gates.remove_checkout(run, checkout)
+    else:
+        diff = gates.cap_diff(paths.git(repo, "diff", ctx["base"], commit))
+        checkout = gates.detached_checkout(run, commit, f"integration-{gid}", purpose="review")
+        with db.transaction(con):
+            _set_integration(con, run, review_ctx=ctx)
+        try:
+            brief = briefs.code_review_brief(run, None, ctx["integ_rev"], diff,
+                                             ", ".join(f"{k} {v}" for k, v in results.items()) or "none",
+                                             [], str(checkout), integration=True)
+            outcome = gates.run_reviewer(con, run, gate, "integration_reviewer", brief, cwd=checkout,
+                                         include_dirs=[checkout], job=job)
+        finally:
+            if not gates.review_launched(outcome):  # a launched reviewer reads the checkout until its job settles it
+                gates.remove_checkout(run, checkout)
+    if gates.review_launched(outcome):
+        # The gate stays open: the review_supervise job re-enters this review once the reviewer ends and finishes the
+        # integration from its verdict, so nothing here finalizes the gate.
+        with db.transaction(con):
+            _set_integration(con, run, status="verifying", detail="integration review: the reviewer is running")
+        return {"supervise": outcome["supervise_queued"], "dispatch_id": outcome["dispatch_id"]}
+    if outcome.get("fallback_queued"):
+        with db.transaction(con):
+            _set_integration(con, run, status="verifying",
+                             detail="integration review: no reviewer returned a verdict; re-running it on the next route")
+        return {"fallback": outcome["fallback_queued"]}
+    results["integration_review"] = outcome["verdict"]
+    if outcome["verdict"] != "PASS":
+        findings = (outcome.get("parsed").findings if outcome.get("parsed") else [])
+        detail = "; ".join(f"{f['code']} {f['location']} {f['summary'][:80]}" for f in findings[:3]) or outcome.get("summary", "")
+        with db.transaction(con):
+            _finish_review_gate(con, gid, outcome)
+            _set_integration(con, run, status="unavailable" if outcome["verdict"] in ("UNAVAILABLE", "REVOKED") else "blocked",
+                             detail=f"integration review {outcome['verdict']}: {detail[:200]}", review_ctx=None)
+            state.emit(con, run, "integration.failed", f"INTEGRATION review {outcome['verdict']}: {detail[:140]}")
+        return results
+    return _accept_composed(con, run, {**ctx, "results": results}, review=(gid, outcome))
+
+
+def _finish_review_gate(con, gid: str, outcome: dict) -> None:
+    con.execute("UPDATE gates SET status='done', verdict=?, summary=?, finished_at=? WHERE id=?",
+                (outcome["verdict"], outcome.get("summary"), now_iso(), gid))
+
+
+def _accept_composed(con, run: dict, ctx: dict, review: tuple[str, dict] | None = None) -> dict:
+    """Accept the composed integration once its checks and any review passed. The proof must come from the original
+    passing check gate, not the last reviewer. The review's gate (`review` = its id and outcome) finishes in the same
+    transaction as the acceptance: a process that dies between them would leave a done gate that no reclaimed job
+    revisits and an integration that stays verifying despite its recorded pass."""
+    repo = Path(run["repo_root"])
+    commit, base, branch, run_checks, executed = ctx["commit"], ctx["base"], ctx["branch"], ctx["run_checks"], ctx["executed"]
     coverage = verification_coverage.audit(repo, commit, run_checks, verified_commands=executed)
     incomplete = coverage and coverage[0] == verification_coverage.PARTIAL
     detail = (f"composed result verified by declared checks; FULL SUITE NOT VERIFIED: {coverage[1]}"
@@ -454,20 +534,22 @@ def _integrate(con, run: dict, job: dict) -> dict:
               if coverage and coverage[0] == verification_coverage.SCOPED
               else "composed result verified")
     with db.transaction(con):
+        if review:
+            _finish_review_gate(con, *review)
         if compose_base(state.get_run(con, run["id"])) != base:
             return {"skipped": "rebased while composing"}
         direct = next((c for c in executed
                        if verification_coverage._complete_pytest_command(c)
                        or verification_coverage._scoped_validate(repo, commit, c)), None)
-        proof = ({"commit": commit, "gate": checks_gate_id, "command": direct,
+        proof = ({"commit": commit, "gate": ctx["checks_gate_id"], "command": direct,
                   "scope": coverage[0] if coverage else None} if direct else None)
-        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof)
+        _set_integration(con, run, status="accepted", detail=detail, full_suite=proof, review_ctx=None)
         if incomplete:
             state.emit(con, run, "integration.coverage_partial",
                        f"integration {commit[:12]}: FULL SUITE NOT VERIFIED: {coverage[1]}")
         state.emit(con, run, "integration.accepted", f"READY: integration verified on {commit[:10]} ({branch})"
                    if contract.is_convergence(run) else f"READY: integration PASS on {commit[:10]} ({branch})")
-    return results
+    return ctx["results"]
 
 
 MISSING_DEPS_HINT = ("the composed worktree is a fresh checkout with no installed dependencies (anything not in git, "
@@ -540,6 +622,26 @@ def review_boundary(con, run: dict, tasks: list[dict], revs: dict) -> tuple[bool
 
 class SharedAppendUnsafe(Exception):
     """An append-only shared file cannot be proved safe to compose."""
+
+
+def shared_append_next(task: dict, previous: list[dict]) -> str:
+    """The `next:` advice for an unverified shared append. Telling an orchestrator to serialize tasks
+    that already depend on each other has no action behind it (#773)."""
+    shared = {x for x in task.get("scope") or [] if planfile.is_shared(x)}
+    by_id = {t["id"]: t for t in previous}
+    reach, todo = set(), list(task.get("depends") or [])
+    while todo:
+        dep = todo.pop()
+        if dep not in reach:
+            reach.add(dep)
+            todo.extend((by_id.get(dep) or {}).get("depends") or [])
+    rivals = {t["id"] for t in previous if shared & {x for x in t.get("scope") or [] if planfile.is_shared(x)}}
+    if rivals <= reach:
+        return ("the tasks that declare it are already serialized by depends, so this is an edit made after "
+                f"{task['id']}'s base that its stack does not contain: restack {task['id']} onto its dependencies "
+                "(or repair the shared file's history), then office resume")
+    return ("serialize the tasks that declare it with depends or repair the append-only history, "
+            "then office resume")
 
 
 def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dict], *, env: dict) -> bool:
@@ -624,6 +726,11 @@ def preserve_shared_append_multiplicity(wt: Path, task: dict, previous: list[dic
         base_mode, base = base_blob
         if len({base_mode, left_mode, right_mode, merged_mode}) != 1:
             raise SharedAppendUnsafe(f"{path}: shared file mode changed")
+        if left == base and merged == right:
+            # The composition has not touched this file since the task's recorded base (#773): the earlier
+            # stacked tasks left it alone or are already part of that base, so nothing can have been appended
+            # concurrently. The task's own edit, in place or not, is the file's only change.
+            continue
         if not left.startswith(base) or not right.startswith(base):
             raise SharedAppendUnsafe(f"{path}: non-append edit or truncated shared file")
         if base and not base.endswith(b"\n") and (left != base or right != base):
@@ -764,6 +871,58 @@ def _merge_in_scratch(repo: str, a: str, b: str) -> tuple[str, list[str]]:
             subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", scratch], capture_output=True)
 
 
+def shared_paths(task: dict | None) -> set[str]:
+    """The literal files a task declares `shared:` (append-only registries); globs never qualify."""
+    return {x[1:] for x in (task or {}).get("scope") or [] if planfile.is_shared(x) and not any(c in x for c in "*?[]")}
+
+
+def _tree_blob(repo: str, commit: str, path: str) -> tuple[str, bytes] | None:
+    """(mode, bytes) of a regular UTF-8 text file at `commit`, or None for anything else."""
+    entry = subprocess.run(["git", "-C", repo, "ls-tree", commit, "--", path], capture_output=True)
+    if entry.returncode or not entry.stdout or b" blob " not in entry.stdout:
+        return None
+    mode = entry.stdout.split(b" ", 1)[0].decode("ascii", "replace")
+    raw = subprocess.run(["git", "-C", repo, "show", f"{commit}:{path}"], capture_output=True)
+    if mode not in ("100644", "100755") or raw.returncode or b"\0" in raw.stdout:
+        return None
+    try:
+        raw.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return mode, raw.stdout
+
+
+def _union_shared_appends(repo: str, a: str, b: str, tree: str, conflicts: list[str]) -> str | None:
+    """`tree` with each conflicting shared file replaced by its base plus both sides' appended records, kept
+    byte-exact and with their multiplicity (#537); None unless every conflict is a provable append on both
+    sides from one merge base. The same proof as finish_shared_append_merge, without a checkout."""
+    bases = paths.git(repo, "merge-base", "--all", a, b, check=False).split()
+    if len(bases) != 1:
+        return None
+    merged: dict[str, tuple[str, bytes]] = {}
+    for path in sorted(set(conflicts)):
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            return None
+        blobs = [_tree_blob(repo, c, path) for c in (bases[0], a, b)]
+        if any(x is None for x in blobs) or len({m for m, _ in blobs}) != 1:
+            return None
+        (mode, base), (_, left), (_, right) = blobs
+        if not left.startswith(base) or not right.startswith(base) or (base and not base.endswith(b"\n")):
+            return None
+        ours, theirs = left[len(base):], right[len(base):]
+        if any(v and not v.endswith(b"\n") for v in (ours, theirs)):
+            return None
+        merged[path] = (mode, base + ours + theirs)
+    with tempfile.TemporaryDirectory(prefix="office-union-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        paths.git(repo, "read-tree", tree, env=env)
+        for path, (mode, content) in merged.items():
+            blob = subprocess.run(["git", "-C", repo, "hash-object", "-w", "--stdin"], input=content,
+                                  capture_output=True, check=True).stdout.decode().strip()
+            paths.git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+        return paths.git(repo, "write-tree", env=env)
+
+
 def dependency_tips(run: dict, parents: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Keep distinct maximal heads before merging any ancestors (#714).
 
@@ -780,11 +939,16 @@ def dependency_tips(run: dict, parents: list[tuple[str, str]]) -> list[tuple[str
             if not any(commit != other and gates._is_ancestor(run, commit, other) for _, other in unique)]
 
 
-def combine(run: dict, parents: list[tuple[str, str]]) -> str:
+def combine(run: dict, parents: list[tuple[str, str]], *, shared: dict[str, set[str]] | None = None) -> str:
     """One commit containing every `(label, commit)` head. A head that is an ancestor of another adds
     nothing; the rest are merged without touching any worktree. Raises CombineConflict naming the
     conflicting pair and paths, or GitError when git cannot merge (merge-tree needs git 2.38). Each commit it
-    creates is anchored by a `refs/office/<run>/combine/<sha>` ref."""
+    creates is anchored by a `refs/office/<run>/combine/<sha>` ref.
+
+    `shared` maps a label to the files its task declares `shared:`. A conflict confined to files the incoming
+    head and an earlier head both declare is resolved as the union of their appends when that is provable
+    (#537): sibling tasks appending to one registry then compose instead of refusing the dependent task."""
+    shared = shared or {}
     repo = run["repo_root"]
     acc = None
     seen: list[tuple[str, str]] = []
@@ -797,13 +961,24 @@ def combine(run: dict, parents: list[tuple[str, str]]) -> str:
             acc = commit
         else:
             tree, conflicts = _merge_tree(repo, acc, commit)
+            mine = shared.get(label) or set()
+            earlier = set().union(*(shared.get(l) or set() for l, _ in seen)) if seen else set()
+            if conflicts and tree and set(conflicts) <= (mine & earlier):
+                unioned = _union_shared_appends(repo, acc, commit, tree, conflicts)
+                if unioned is not None:
+                    tree, conflicts = unioned, []
             if conflicts:
                 # Name the earlier head that collides, not the whole accumulated result.
                 culprit = next((l for l, c in seen if _merge_tree(repo, c, commit)[1]), None)
                 raise CombineConflict(culprit or " + ".join(l for l, _ in seen), label, conflicts)
+            # Pin both dates to the newer parent's committer date so the same inputs always yield the same
+            # SHA: preflight and submit each resolve the base and must agree on it (#1113).
+            stamp = max(int(paths.git(repo, "log", "-1", "--format=%ct", p)) for p in (acc, commit))
+            when = {"GIT_AUTHOR_DATE": f"{stamp} +0000", "GIT_COMMITTER_DATE": f"{stamp} +0000"}
             acc = paths.git(repo, "commit-tree", tree, "-p", acc, "-p", commit, "-m",
                             f"office: combine {', '.join(l for l, _ in [*seen, (label, commit)])}\n\n"
-                            f"{paths.office_trailer(run['id'])}", env={**os.environ, **paths.commit_identity_env(repo)})
+                            f"{paths.office_trailer(run['id'])}",
+                            env={**os.environ, **paths.commit_identity_env(repo), **when})
             # No branch holds this commit: a ref under the run's namespace keeps gc from pruning the base a
             # dispatch records, and `prune` deletes it with the run's other refs/office/<run>/ refs.
             paths.git(repo, "update-ref", f"refs/office/{run['id'][:8]}/combine/{acc}", acc)

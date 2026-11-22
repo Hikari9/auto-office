@@ -24,7 +24,10 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
    preflight/quota/version/model command resolves on this host.
 4. `office model add <id>/<provider/slug> --effort medium[,high]` appends rows to the user
    catalog overlay (`catalog.yaml` beside the user config), never the packaged seed. Scores
-   come later through `office benchmarks brief|submit`; there is no second path.
+   come later through `office benchmarks brief|submit`; there is no second path. The rows start
+   `unverified:`; once a task this route produced is accepted under independent review,
+   `office model verify <id>/<model> --evidence <run>/<task>` promotes them to `local-evidence:`
+   so `allowed_sources` role floors admit them (#656). It is explicit only.
 5. `office harness smoke <id> --model <m>`: one launch in a throwaway git repo, no run
    identity, no pty. Recorded in `harness-smoke.jsonl` as launch evidence only. It refuses
    a form with a permission/trust flag unless `--allow-unsafe-flags` is passed.
@@ -34,7 +37,7 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
 
 ## Trust posture
 
-- Every new route starts `neutral` for every role (eligible, not denied). Validate, model add and smoke never set policy or record conformance; set `allow` or `deny` with `office route allow|deny <route> --role <role>`.
+- Every new route starts `neutral` for every role (eligible, not denied). Validate, model add and smoke never set policy or record conformance unless you pass `--role` to `model add` (it only writes an allow); otherwise set `allow` or `deny` with `office route allow|deny <route> --role <role>`.
   Never write `verified_state: proven`.
 - Never auto-approve a login, trust or permission prompt. A smoke that stops on one fails.
 - For each permission flag, answer before using it: what it lets the agent do unprompted
@@ -49,4 +52,4 @@ Adapters are data, never separate lifecycles. A new harness needs no Python edit
 Setting `herdr_kind` promises a pane-hosted form: add `interactive.argv` with the same trust flags and pinned model/effort,
 or Herdr launches silently degrade (#479). A harness with no timeout of its own adds `interactive.wall_cap: true` (the pane gets `max_minutes`).
 
-3.0 runs keep `office raw scaffold-adapter`/`validate-adapter`; never use them for 3.1+.
+Adapters are validated with `office harness validate <id>` (or `--file <path>`); the 3.0 `office raw scaffold-adapter`/`validate-adapter` helpers were removed.

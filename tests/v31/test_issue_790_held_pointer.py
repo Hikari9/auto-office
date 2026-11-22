@@ -49,11 +49,12 @@ def test_held_pointer_at_launch_is_submitted_with_enter(env, monkeypatch, late_u
 
 @pytest.mark.approved
 def test_enter_that_cannot_submit_says_so_and_marks_one_same_route_retry(env, monkeypatch, late_ui):
+    # Codex reviewer recovery is bounded to 1 Enter (#790) even when OFFICE_HERDR_ENTER_TRIES > 1
     state_file, run, d, ddir, res = _launch(env, monkeypatch, reads=lambda brief: [_held(brief)],
                                             settings={"OFFICE_HERDR_ENTER_TRIES": "2"})
     assert res["launcher"] == "herdr" and res["prompt_landed"] is False
     prompts, enters, typed = _sends(_calls(state_file))
-    assert prompts == [] and typed == [] and len(enters) == 2
+    assert prompts == [] and typed == [] and len(enters) == 1
     events = _launch_events(env, run)
     assert len(events) == 1 and "typed but unsubmitted" in events[0] and "after Office pressed Enter" in events[0]
     assert "retries it once on the same route" in events[0]

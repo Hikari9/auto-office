@@ -5,6 +5,7 @@ silent through an amendment deadlock and a stalled gate that printed none of the
 """
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -45,7 +46,7 @@ def virtual_wait_clock(monkeypatch):
 
 
 def _go(env):
-    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
+    approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}], code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     env.office("status", check=0)  # consume the dispatch events
 
@@ -378,7 +379,7 @@ def test_signals_an_older_run_already_read_are_not_news(env):
         state.advance_cursor(con, run["id"], "orchestrator", seq)
     assert con.execute("SELECT 1 FROM cursors WHERE consumer=?", (state.SIGNAL_CONSUMER,)).fetchone() is None
     code, out = env.office("wait", "--timeout", "1", "--poll", "0.2", env=EXTERNAL)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 @pytest.mark.approved
@@ -439,10 +440,16 @@ def _herdr(env, **files) -> dict:
     return {**EXTERNAL, "FAKE_HERDR_DIR": str(state), "OFFICE_EXECUTOR_IDLE_STALL_S": "0"}
 
 
-def _as_herdr(env) -> dict:
-    """Make T1's dispatch a running pane-hosted one, as if herdr had launched it."""
+def _as_herdr(env, harness: str | None = None) -> dict:
+    """Make T1's dispatch a running pane-hosted one, as if herdr had launched it.
+
+    `harness` pins the dispatch's harness. A test that relies on herdr's `working` status passes a non-codex
+    harness: Office ignores `working` on codex panes (herdr keeps reporting it after the turn ends), and the
+    automatic route can land on codex (#1313 moved it there, and the harness pick varies by run)."""
     con = env.con()
     con.execute("UPDATE dispatches SET launcher='herdr', pane_id='w1:p1', status='running' WHERE task_id='T1' AND role='executor'")
+    if harness:
+        con.execute("UPDATE dispatches SET harness=?, adapter_id=? WHERE task_id='T1' AND role='executor'", (harness, harness))
     con.commit()
     return dict(con.execute("SELECT * FROM dispatches WHERE task_id='T1' AND role='executor'").fetchone())
 
@@ -454,9 +461,9 @@ def _wait(env, e, timeout="1"):
 def test_a_working_agent_is_not_a_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="thinking")
-    _as_herdr(env)
+    _as_herdr(env, harness="claude")
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_an_agent_idle_past_the_threshold_without_submitting_is_a_stall(env):
@@ -500,7 +507,7 @@ def test_an_agent_idle_after_an_accepted_submit_is_not_a_stall(env):
     code, out = env.office("submit", cwd=d["worktree"], env={**e, "OFFICE_DISPATCH_ID": d["id"], "OFFICE_ROLE": "executor"})
     assert code == 0, out
     code, out = _wait(env, e)
-    assert "stall" not in out, out
+    assert not re.search(r"\bstall", out), out
 
 
 def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env, virtual_wait_clock):
@@ -508,7 +515,7 @@ def test_agy_reporting_idle_while_its_pane_changes_is_not_a_stall(env, virtual_w
     e = _herdr(env, status="idle", pane="esc to cancel", changing="1")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_herdr_unreachable_is_never_a_stall(env, virtual_wait_clock):
@@ -516,7 +523,7 @@ def test_herdr_unreachable_is_never_a_stall(env, virtual_wait_clock):
     e = _herdr(env, mode="unreachable")
     _as_herdr(env)
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 def test_a_dead_headless_process_is_a_stall(env):
@@ -635,9 +642,9 @@ def test_a_session_limit_is_a_usage_limit_stall_despite_busy_markers(env):
 def test_a_weekly_warning_pane_is_not_a_usage_limit_stall(env, virtual_wait_clock):
     _go(env)
     e = _herdr(env, status="working", pane="You've used 95% of your weekly limit")
-    _as_herdr(env)
+    _as_herdr(env, harness="claude")
     code, out = _wait(env, e)
-    assert code == 124 and "stall" not in out, out
+    assert code == 124 and not re.search(r"\bstall", out), out
 
 
 REAL_LIMIT = """\
@@ -953,3 +960,70 @@ def test_wall_budget_stall_signature_ignores_the_growing_elapsed_age(env):
         state.emit(con, run, guide.WAIT_STALL_KIND, "stall", audience="runtime", payload={"signature": sig})
     assert guide._fresh_stall(con, run, [line.format(3760)]) == (False, sig)
     assert guide._fresh_stall(con, run, [line.format(3760).replace("D1", "D2")])[0]
+
+
+@pytest.mark.approved
+def test_status_keeps_an_open_executors_stop_signal_as_a_blocker_until_it_resolves(env):
+    """#671: a live executor that signalled a stop shows as a blocker on every status, with its next step, and
+    next: no longer tells the root to wait on it. It clears once that dispatch submits."""
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="contract-conflict: line 4 would break ACCEPT 7",
+                                  next_step="office amend T1 --contract -- \"<change>\"")
+    for _ in range(2):  # the first status reads the event; the blocker stays
+        code, out = env.office("status", env=EXTERNAL)
+        line = next((l for l in out.splitlines() if l.startswith("blocker: T1")), None)
+        assert line and d["id"] in line and "contract-conflict" in line, out
+        assert "next: office amend T1 --contract" in out, out
+    con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, requirements_version, "
+                "plan_version, applied_version, env_fingerprint, operation_id, status, created_at) "
+                "VALUES('Rlater', ?, 'T1', 99, ?, 'c', 't', 1, 1, 1, 'f', 'op-later', 'current', '9999-01-01T00:00:00+00:00')",
+                (d["run_id"], d["id"]))
+    con.commit()
+    code, out = env.office("status", env=EXTERNAL)
+    assert "contract-conflict" not in out, out
+
+
+@pytest.mark.approved
+def test_status_drops_a_signal_from_a_dispatch_that_ended(env):
+    from office import state
+    _go(env)
+    wenv, wt, d = _executor(env)
+    con = env.con()
+    run = state.get_run(con, d["run_id"])
+    with con:
+        state.signal_orchestrator(con, run, source="preflight stop", task_id="T1", dispatch_id=d["id"],
+                                  reason="self-review round cap", next_step="office status")
+    con.execute("UPDATE dispatches SET ended_at='2026-01-01T00:00:00+00:00', status='exited' WHERE id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("status", env=EXTERNAL)
+    assert not any(l.startswith("blocker: T1") and "round cap" in l for l in out.splitlines()), out
+
+
+def test_idle_outcome_qa_guidance_keeps_progress_first_and_qa_optional():
+    """#904: idle-only outcome QA is guidance; the order (P0 progress, P1 lifecycle, then QA) and its limits are
+    pinned so later edits cannot turn it into a gate or let it delay dispatch."""
+    root = Path(__file__).resolve().parents[2]
+    skill = (root / "SKILL.md").read_text()
+    ref = (root / "docs" / "orchestrator-reference.md").read_text()
+    bullet = next(line for line in skill.splitlines() if line.startswith("- Idle-only outcome QA"))
+    assert "`next:` names no action" in bullet and "always come first" in bullet and "never a gate" in bullet
+    section = ref.split("## Idle-only outcome QA (#904)", 1)[1].split("\n## ", 1)[0]
+    assert section.index("**P0") < section.index("**P1") < section.index("**P2")
+    for phrase in ("a landing gate", "a second code review", "QA is skipped",
+                   "preempts QA"):
+        assert phrase in section, phrase
+
+
+def test_ui_lane_walkthrough_guidance_is_parallel_not_a_gate():
+    """#1077, Rico 2026-11-04: the orchestrator walks a UI lane while its reviews run and routes both sets of findings."""
+    root = Path(__file__).resolve().parents[2]
+    bullet = next(l for l in (root / "SKILL.md").read_text().splitlines() if l.startswith("- UI lanes:"))
+    assert "at the same time, not before" in bullet and "office inspect evidence <gate>" in bullet
+    assert "route your findings and the reviewers' together" in bullet and "start its executor at once" in bullet
+    assert "never as a gate before them" in (root / "docs" / "review-convergence.md").read_text()

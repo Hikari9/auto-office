@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from office import paths, read_scope
+from office import hermes_access, paths, read_scope
 from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
@@ -107,15 +107,135 @@ def load_sources() -> dict[str, tuple[dict, str, Path]]:
     return copy.deepcopy(cached)
 
 
+# Read-only reviewer flag sets Office has vetted, by harness executable. `reviewer_readonly_args` is
+# security-relevant: it decides which flags a reviewer launches with and automatically grants the review
+# capability, so an adapter's own text is never trusted. Only a form accepted here derives a profile; a
+# harness is added only after its read-only flags are verified. pi: --tools is an allowlist of tool
+# names, so only the read-only built-ins are accepted (bash cannot be limited to read-only commands).
+PI_READONLY_TOOLS = frozenset({"read", "grep", "find", "ls"})
+
+
+def _vetted_pi(args: list[str]) -> bool:
+    if len(args) != 2 or args[0] != "--tools":
+        return False
+    tools = args[1].split(",")
+    return bool(tools) and all(t in PI_READONLY_TOOLS for t in tools)
+
+
+# Every other token of the worker argv a derived reviewer inherits. A worker argv carrying anything outside
+# this set (--tools, -t, --tools=edit, --exclude-tools, --approve, ...) could override or widen the
+# read-only allowlist, so the whole derived argv is checked and nothing is derived from it.
+PI_WORKER_TOKENS = frozenset({"--print", "--no-approve", "--no-extensions", "--no-mcp", "--model", "--thinking",
+                              "--no-session", "{model}", "{effort}"})
+
+PI_FLAGS = frozenset({"--print", "--no-approve", "--no-extensions", "--no-mcp", "--no-session"})
+
+
+def _pi_rendered_ok(argv: list[str]) -> bool:
+    """The complete rendered pi reviewer argv: the vetted --tools pair first, then only the closed flag set and
+    the values of --model and --thinking. Anything else (a second --tools, -t, --tools=x, assigned-session or
+    resume args, a value that looks like a flag) is rejected."""
+    if len(argv) < 2 or not _vetted_pi(argv[:2]):
+        return False
+    rest, i = argv[2:], 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in PI_FLAGS:
+            i += 1
+        elif tok in ("--model", "--thinking") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            i += 2
+        else:
+            return False
+    return True
+
+
+VETTED_READONLY_ARGS = {"pi": (_vetted_pi, PI_WORKER_TOKENS, _pi_rendered_ok)}
+
+
+def check_rendered_reviewer_argv(adapter: dict, prof: dict | None, argv: list[str]) -> None:
+    """Final gate on a read-only headless reviewer launch: the whole rendered argv (profile argv plus any
+    assigned-session or resume args the runtime appended) must pass the harness's vetted checker. It covers a
+    derived profile and an explicit one on a vetted harness that relies on the worktree guard instead of a
+    sandbox (pi's explicit reviewer, #1027). The pane form is built separately and may also write its reply."""
+    exe = os.path.basename(executable(adapter) or "")
+    if not ((prof or {}).get("derived_readonly")
+            or ((prof or {}).get("verify_worktree_unchanged") and exe in VETTED_READONLY_ARGS)):
+        return
+    vetted = VETTED_READONLY_ARGS.get(exe)
+    # build_argv's list starts with the executable; the flags are everything after it.
+    if vetted is None or not vetted[2](argv[1:] if argv and os.path.basename(argv[0]) == exe else argv):
+        raise AdapterError(f"adapter {adapter.get('id')} derived read-only reviewer argv {argv} is not a vetted "
+                           "read-only form; refusing to launch it")
+
+
+def readonly_args_problem(adapter: dict) -> str | None:
+    """Why `reviewer_readonly_args` cannot be trusted, or None when absent or vetted."""
+    args = adapter.get("reviewer_readonly_args")
+    if args is None:
+        return None
+    exe = os.path.basename(executable(adapter) or "")
+    vet, worker_tokens, _ = VETTED_READONLY_ARGS.get(exe, (None, frozenset(), None))
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or not args:
+        return "reviewer_readonly_args must be a non-empty list of strings"
+    if vet is None:
+        return (f"reviewer_readonly_args is only accepted for harnesses whose read-only flags Office has vetted "
+                f"({', '.join(sorted(VETTED_READONLY_ARGS))}); {exe or 'this harness'} is not one. Write an explicit "
+                "office_profiles.reviewer only for a harness with a verified read-only sandbox")
+    if not vet(args):
+        return f"reviewer_readonly_args {args} is not a vetted read-only form for {exe} (pi accepts --tools with only read,grep,find,ls)"
+    if session_spec(adapter).get("id") == "assigned" or session_spec(adapter).get("assign_arg"):
+        return ("the adapter assigns session ids (session.assign_arg), which the runtime would append after the vetted "
+                "read-only flags; a derived reviewer is never session-bearing. Write an explicit office_profiles.reviewer")
+    worker = ((adapter.get("office_profiles") or {}).get("worker") or {}).get("argv")
+    extra = [str(t) for t in worker or [] if str(t) not in worker_tokens]
+    if extra:
+        return (f"the worker argv carries {extra}, which a derived {exe} reviewer would inherit after the vetted "
+                f"read-only flags and could override them; the derived reviewer argv allows only {sorted(worker_tokens)}. "
+                "Write an explicit office_profiles.reviewer instead")
+    return None
+
+
+def derive_reviewer_profile(adapter: dict) -> dict | None:
+    """The generic read-only reviewer launch form for a harness with no verified isolation.
+
+    An adapter that declares a worker profile and vetted `reviewer_readonly_args` (see
+    `readonly_args_problem`) and no reviewer profile of its own gets one derived from the worker form:
+    the same trust flags, model and effort pins, prompt and reply transport, headless only (no pane
+    form), the read-only args first, and `verify_worktree_unchanged` so Office fails a review that
+    changed the worktree as degraded."""
+    profiles = adapter.get("office_profiles") or {}
+    args = adapter.get("reviewer_readonly_args")
+    worker = profiles.get("worker")
+    if "reviewer" in profiles or not isinstance(worker, dict) or not isinstance(worker.get("argv"), list) \
+            or not args or readonly_args_problem(adapter):
+        return None
+    # Closed construction: nothing is copied from the worker profile except the prompt transport and the wall
+    # cap. include_arg, headless_resume_argv, interactive, agent_file and any other field never carry over.
+    derived = {"argv": [*[str(a) for a in args], *[str(t) for t in worker["argv"]]], "prompt": worker.get("prompt"),
+               "output": "stdout", "verify_worktree_unchanged": True, "derived_readonly": True}
+    if isinstance(worker.get("max_minutes"), (int, float)) and not isinstance(worker.get("max_minutes"), bool):
+        derived["max_minutes"] = worker["max_minutes"]
+    return derived
+
+
+def _with_derived_reviewer(data: dict) -> dict:
+    if (derived := derive_reviewer_profile(data)) is not None:
+        data.setdefault("office_profiles", {})["reviewer"] = derived
+        caps = list(data.get("capabilities") or [])
+        data["capabilities"] = caps if "review" in caps else [*caps, "review"]
+    return data
+
+
 def _load_sources_uncached() -> dict[str, tuple[dict, str, Path]]:
     out: dict[str, tuple[dict, str, Path]] = {}
     for p in sorted(adapter_dir().glob("*.yaml")):
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        data = _with_derived_reviewer(yaml.safe_load(p.read_text(encoding="utf-8")) or {})
         out[data.get("id", p.stem)] = (data, "seed", p)
     for p in user_adapter_files():
         data = _read(p)
         if data is None or _has_todo(data):
             continue
+        data = _with_derived_reviewer(data)
         aid = str(data.get("id") or p.stem)
         if aid in out and out[aid][1] == "seed":
             if data.get("override_seed") is not True:
@@ -171,6 +291,36 @@ def adapter_hash(adapter: dict) -> str:
 
 def profile(adapter: dict, kind: str) -> dict | None:
     return (adapter.get("office_profiles") or {}).get(kind)
+
+
+def profile_for(adapter: dict | None, kind: str, model: str | None, effort: str | None) -> dict | None:
+    """The `kind` launch profile for one exact route, or None.
+
+    `model` is the invocation model id (the string Office passes as `{model}`). A profile that declares
+    `routes` launches only those exact `<invocation model>@<effort>` routes, so a harness can open one
+    route for a role without opening every model it serves (H4, #1178: agy reviews only as Hydrogen@high)."""
+    prof = profile(adapter or {}, kind)
+    if not prof or not isinstance(prof, dict):
+        return prof or None
+    routes = prof.get("routes")
+    if routes is None:
+        return prof
+    return prof if isinstance(routes, list) and f"{model}@{effort}" in routes else None
+
+
+def pane_capable(adapter: dict | None, kind: str) -> bool:
+    """Whether this profile has a Herdr pane form (`herdr_kind` plus `interactive`); without one it runs headless.
+    Executors and reviewers launch the same way (Rico, 2026-11-02; #1027): a reviewer profile is pane-capable
+    exactly when the harness's worker profile is."""
+    prof = profile(adapter or {}, kind) or {}
+    return bool(prof.get("herdr_kind") and isinstance(prof.get("interactive"), dict))
+
+
+def pane_hosts_supervisor(adapter: dict | None, kind: str) -> bool:
+    """Whether the profile's pane form is the headless supervisor run in a visible pane (`interactive.supervisor:
+    true`) rather than an interactive agent session. The harness still runs its headless form, so its stdout is
+    the reply and nothing depends on an interactive write allowance (agy reviewer, H4 #1178)."""
+    return bool(((profile(adapter or {}, kind) or {}).get("interactive") or {}).get("supervisor"))
 
 
 def terminal_statuses_without_reply(adapter: dict | None, kind: str) -> set[str]:
@@ -354,6 +504,52 @@ def run_preflight(adapter: dict, model: str) -> tuple[bool, str]:
     return True, ""
 
 
+HERMES = "hermes"
+
+
+def _is_hermes(adapter: dict | None) -> bool:
+    return os.path.basename(executable(adapter or {}) or "") == HERMES
+
+
+def launch_env(adapter: dict | None, env: dict[str, str]) -> dict[str, str]:
+    """`env` as this harness's launch should see it: Hermes loses every HERMES_* variable but HERMES_HOME (they
+    steer the model, provider, config and session, so a dispatch could run another route than the one pinned)."""
+    return hermes_access.launch_env(env) if _is_hermes(adapter) else env
+
+
+def shell_env_prelude(adapter: dict | None) -> str | None:
+    """A shell line for a pane that clears what `launch_env` clears; None when the harness needs none."""
+    return hermes_access.scrub_shell_line() if _is_hermes(adapter) else None
+
+
+def pane_launch_env(adapter: dict | None, directory: Path) -> dict[str, str]:
+    """Extra env a pane-hosted agent needs so Herdr can detect it. A git-installed Hermes is a shell wrapper
+    around `python3 -I -c`, which Herdr cannot see; a shim in `directory` runs the launcher script instead."""
+    return hermes_access.write_launcher_shim(directory / "bin") if _is_hermes(adapter) else {}
+
+
+def classify_failure(adapter: dict | None, text: str) -> dict | None:
+    """The adapter failure signature (id, attribution, pattern) matched by the tail of a failed run's output.
+    Matching ignores the exit code: Hermes exits 2 for any failed turn, so the text decides whether the quota or
+    the account is at fault and not the model."""
+    tail = (text or "")[-4000:].lower()
+    for sig in (adapter or {}).get("failure_signatures") or []:
+        if isinstance(sig, dict) and sig.get("pattern") and str(sig["pattern"]).lower() in tail:
+            return sig
+    return None
+
+
+def readback_problem(adapter: dict | None, prof: dict | None, slug: str, usage_path: Path | None, *, code: int | None) -> str | None:
+    """Why a finished run's own report names a different route than `slug`, or None. Only a profile that declares
+    `readback: hermes-usage` is checked. A clean exit must carry a report with completed=true; a failed run is judged only when it left one."""
+    if (prof or {}).get("readback") != "hermes-usage" or usage_path is None:
+        return None
+    usage = hermes_access.read_usage(usage_path)
+    if usage is None and code != 0:
+        return None
+    return hermes_access.readback_problem(slug, usage, require_completed=code == 0)
+
+
 def toml_path(path: Path) -> str:
     """`path`, resolved, as a TOML basic string. Codex keys `projects` trust on
     the canonical path (macOS `/tmp` is `/private/tmp`), and a JSON string is a
@@ -368,18 +564,25 @@ def toml_path(path: Path) -> str:
 def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
                output: Path | None = None, images: list[Path] | None = None,
                include_dirs: list[Path] | None = None, session_id: str | None = None,
-               resume_args: list[str] | None = None) -> tuple[list[str], dict]:
+               resume_args: list[str] | None = None, usage_file: Path | None = None) -> tuple[list[str], dict]:
     """Return (argv, profile). Placeholders are substituted element-wise; the
     prompt never passes through a shell. `session_id` is appended through the
-    adapter's `session.assign_arg` when the harness accepts an assigned id."""
+    adapter's `session.assign_arg` when the harness accepts an assigned id.
+    `{provider}` and `{model_name}` split a `provider:model` slug (no provider: the flag before it is dropped);
+    `{usage_file}` is where the harness writes its run report (`usage_file`, else beside the reply or cwd)."""
     prof = profile(adapter, kind)
     if not prof:
         raise AdapterError(f"adapter {adapter.get('id')} has no {kind} profile")
+    if not profile_for(adapter, kind, model, effort):
+        raise AdapterError(f"adapter {adapter.get('id')} {kind} profile launches only {prof.get('routes')}, "
+                           f"not {model}@{effort}")
     exe = executable(adapter)
     mapped_effort = effort_value(adapter, effort)
-    include_dirs = read_scope.with_read_dirs(kind, include_dirs)
+    include_dirs = read_scope.with_read_dirs(kind, include_dirs, output)
     # The one directory a sandboxed reviewer may write: its dispatch dir, else cwd.
     sandbox_dir = Path(output).parent if output else Path(cwd)
+    pinned_provider, model_name = hermes_access.expected_route(model)
+    usage_path = usage_file or (Path(output).with_name("usage.json") if output else Path(cwd) / "usage.json")
     argv = [exe]
     for raw in prof.get("argv") or []:
         arg = str(raw)
@@ -399,6 +602,10 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
             if argv and argv[-1].startswith("-"):
                 argv.pop()
             continue
+        if arg == "{provider}" and not pinned_provider:
+            if argv and argv[-1].startswith("-"):
+                argv.pop()
+            continue
         if "{output_dir}" in arg and not output:
             # No reply file (a worker): drop the flag that grants its directory.
             if argv and argv[-1].startswith("-"):
@@ -410,7 +617,44 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
         if "{write_deny}" in arg:
             deny = read_scope.write_denials(cwd, output) if kind in read_scope.READER_KINDS else []
             arg = arg.replace("{write_deny}", "".join("," + r for r in deny))
+        granted = bool(output) and kind in read_scope.READER_KINDS
+        # #1186: a reviewer whose host runs Claude Code's OS sandbox gets a safe shell inside it; elsewhere it
+        # keeps the #1030 posture (the one submit command, the built-in read-only commands denied).
+        shell = granted and read_scope.claude_sandbox_available()
+        if "{sandbox_settings}" in arg:
+            if not shell:
+                if argv and argv[-1].startswith("-"):
+                    argv.pop()
+                continue
+            # Appended as is: the JSON holds paths, which must not go through the placeholder substitution below.
+            argv.append(arg.replace("{sandbox_settings}", read_scope.claude_sandbox_settings(cwd, output, include_dirs)))
+            continue
+        if "{submit_extension}" in arg:  # pi: the per-dispatch extension holding the one submit tool (#1231)
+            if not granted:
+                if argv and argv[-1].startswith("-"):
+                    argv.pop()
+                continue
+            from office import review_submit
+            argv.append(str(review_submit.pi_extension_path(output)))
+            continue
+        if "{submit_tool}" in arg:
+            from office import review_submit
+            arg = arg.replace("{submit_tool}", f",{review_submit.PI_SUBMIT_TOOL}" if granted else "")
+        if "{submit_allow}" in arg:  # exactly one command, no wildcard (#1030 narrow grant)
+            from office import review_submit
+            arg = arg.replace("{submit_allow}", f",Bash({review_submit.submit_command(output)})" if granted else "")
+        if "{bash_allow}" in arg:
+            from office import review_submit
+            allow = [r for c in review_submit.REVIEWER_TEST_BASH for r in (f"Bash({c})", f"Bash({c} *)")] if shell else []
+            arg = arg.replace("{bash_allow}", "".join("," + r for r in allow))
+        if "{bash_deny}" in arg:
+            from office import review_submit
+            cmds = review_submit.REVIEWER_BASH_DENY if shell else review_submit.CLAUDE_READONLY_BASH
+            deny = [r for c in cmds for r in (f"Bash({c})", f"Bash({c} *)")] if granted else ["Bash"]
+            arg = arg.replace("{bash_deny}", "".join("," + r for r in deny))
         arg = (arg.replace("{model}", model).replace("{effort}", mapped_effort or "")
+               .replace("{provider}", pinned_provider or "").replace("{model_name}", model_name)
+               .replace("{usage_file}", str(usage_path))
                .replace("{last_message}", str(Path(output).with_name("last-message.txt") if output else Path(cwd) / "last-message.txt"))
                .replace("{cwd_toml}", toml_path(cwd))
                .replace("{sandbox_dir_toml}", toml_path(sandbox_dir))
@@ -421,6 +665,7 @@ def build_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: Path,
     if session_id and assigns_session(adapter):
         argv.extend(str(a).replace("{session_id}", session_id) for a in session_spec(adapter)["assign_arg"])
     argv.extend(str(a) for a in resume_args or [])
+    check_rendered_reviewer_argv(adapter, prof, argv)
     return argv, prof
 
 
@@ -432,7 +677,12 @@ def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
     dispatch dir and `env` (OPENCODE_CONFIG_DIR) points the harness at it. The same
     env serves the pane and headless forms. Raises AdapterError when the file cannot
     be written, so the launch stops with a reason instead of running unfenced."""
-    spec = (profile(adapter, kind) or {}).get("agent_file") or {}
+    prof = profile(adapter, kind) or {}
+    if prof.get("submit_grant") == "codex-rules" and output and kind in read_scope.READER_KINDS:
+        _write_codex_submit_rules(adapter, kind, Path(output))
+    if prof.get("submit_grant") == "pi-extension" and output and kind in read_scope.READER_KINDS:
+        _write_pi_submit_extension(adapter, kind, Path(output))
+    spec = prof.get("agent_file") or {}
     if not spec or not output or kind not in read_scope.READER_KINDS:
         return {}
     if spec.get("format") != "opencode":
@@ -443,6 +693,30 @@ def reviewer_env(adapter: dict, kind: str, *, cwd: Path, output: Path | None,
         raise AdapterError(f"the {adapter.get('id')} {kind} agent file could not be written under "
                            f"{Path(output).parent}: {exc}") from exc
     return {spec.get("env") or "OPENCODE_CONFIG_DIR": str(config_dir)}
+
+
+def _write_codex_submit_rules(adapter: dict, kind: str, output: Path) -> None:
+    """The reviewer's own trusted project (its dispatch dir) carries one execpolicy rule: the exact submit command."""
+    from office import review_submit
+    rules = output.parent / ".codex" / "rules" / "office-review-submit.rules"
+    try:
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.write_text(review_submit.codex_rules(output), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"the {adapter.get('id')} {kind} submit rule could not be written under {output.parent}: "
+                           f"{exc}") from exc
+
+
+def _write_pi_submit_extension(adapter: dict, kind: str, output: Path) -> None:
+    """The pi reviewer's dispatch dir carries one extension: the tool that runs the exact submit command (#1231)."""
+    from office import review_submit
+    path = review_submit.pi_extension_path(output)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(review_submit.pi_extension(output), encoding="utf-8")
+    except OSError as exc:
+        raise AdapterError(f"the {adapter.get('id')} {kind} submit extension could not be written under "
+                           f"{output.parent}: {exc}") from exc
 
 
 def headless_resume_args(adapter: dict, kind: str, session_id: str) -> list[str] | None:
@@ -481,6 +755,8 @@ def interactive_argv(adapter: dict, kind: str, *, model: str, effort: str, cwd: 
     if not prof.get("herdr_kind") or not inter.get("argv"):
         return None
     form = {"argv": inter["argv"], "include_arg": prof.get("include_arg")}
+    if "routes" in prof:
+        form["routes"] = prof["routes"]  # the pane form keeps the profile's route scope (H4, #1178)
     argv, _ = build_argv({**adapter, "office_profiles": {kind: form}}, kind,
                          model=model, effort=effort, cwd=cwd, include_dirs=include_dirs, output=output,
                          session_id=session_id)

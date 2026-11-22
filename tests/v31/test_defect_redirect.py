@@ -28,7 +28,7 @@ REDIRECT = ["--redirect", "P2", "--root-cause", "done criterion: mul reuses calc
 def _start(env, **script):
     env.trust()
     env.script(**script)
-    code, out = env.office("start", "fixture", "--gear", "express", "--planner", "inline")
+    code, out = env.office("start", "fixture", "--gear", "L", "--planner", "inline", "--plan-review-rounds", "2")
     assert code == 0, out
     env.write_plan(PLAN_TWO)
     code, out = env.office("submit")
@@ -84,7 +84,7 @@ def test_redirect_records_the_requirement_resets_the_budget_and_rereviews(env):
 
 
 def test_redirect_refills_a_spent_budget_and_escalation(env):
-    # express: 2 rounds, then one escalation. Spend all three on the same defect.
+    # two review rounds (--plan-review-rounds 2), then one escalation. Spend all three on the same defect.
     _start(env, plan_reviewer=[{"reply": DEFECT}, {"reply": DEFECT}, {"reply": DEFECT}, {"reply": CLEARED}])
     env.write_plan(PLAN_TWO.replace("### T2: Implement mul", "### T2: Implement mul v2"))
     env.office("amend", "T2", "--contract", "--", "try again", check=0)

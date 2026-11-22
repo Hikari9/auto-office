@@ -23,13 +23,22 @@ PLAN = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) 
 PASS = "EVIDENCE_STATUS: COMPARABLE\nVERDICT: PASS\n"
 
 
+def _fund_no_code_review(env):
+    """Every XS-XL run funds one independent code review (#1297); pin the gate off to reach the no-review path."""
+    con = env.con()
+    gates = json.loads(con.execute("SELECT gates_json FROM runs").fetchone()[0])
+    con.execute("UPDATE runs SET gates_json=?", (json.dumps({**gates, "code_review": False}),))
+    con.commit()
+
+
 def _blocked_on_visual(env):
     env.trust()
-    code, out = env.office("start", "fixture goal", "--gear", "direct", "--planner", "inline")
+    code, out = env.office("start", "fixture goal", "--gear", "XS", "--planner", "inline")
     assert code == 0, out
     env.write_plan(PLAN)
     env.office("submit", check=0)
     env.office("approve", "plan", "--quote", "go", check=0)
+    _fund_no_code_review(env)
     env.office("dispatch", "T1", env=EXTERNAL, check=0)
     con = env.con()
     d = dict(con.execute("SELECT id, run_id, worktree, route_json FROM dispatches WHERE role='executor'").fetchone())

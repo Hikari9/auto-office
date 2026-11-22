@@ -173,7 +173,7 @@ def test_prompt_reports_the_cwd_and_agent_herdr_reports_not_only_the_recorded_wo
 @pytest.mark.parametrize("pane,why", [
     (dict(name="office-dsomebodyelse"), "does not report agent"),
     (dict(name=None), "does not report agent"),
-    (dict(kind="codex"), "runs codex"),
+    (dict(kind="other-harness"), "runs other-harness"),
     (dict(session="someone-elses-session"), "session does not match"),
 ], ids=["other-agent", "unnamed-agent", "other-kind", "other-session"])
 def test_prompt_refuses_a_pane_whose_real_herdr_identity_is_not_this_dispatchs(env, monkeypatch, pane, why):
@@ -181,6 +181,9 @@ def test_prompt_refuses_a_pane_whose_real_herdr_identity_is_not_this_dispatchs(e
     from office import dispatch, prompting
     con.execute("UPDATE dispatches SET worktree=?, session_id='session-A' WHERE id=?", (str(env.repo), d["id"]))
     con.commit()
+    if "kind" in pane:  # a kind other than the one this dispatch ran on (the ranker's pick is not always claude)
+        other = "claude" if d["harness"] == "codex" else "codex"
+        pane, why = dict(kind=other), f"runs {other}"
     reported = dict(name=dispatch.herdr_agent_name(d["id"]), kind=d["harness"], session="session-A",
                     foreground_cwd=str(env.repo))
     monkeypatch.setattr(dispatch, "_herdr_json", real_herdr_json("w1:p7", **{**reported, **pane}))

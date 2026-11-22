@@ -169,8 +169,7 @@ def _install_shell_gate_fixture(pr_repo):
     script = Path(__file__).resolve().parents[1] / "scripts" / "validate.sh"
     (pr_repo / "scripts").mkdir(exist_ok=True)
     (pr_repo / "scripts" / "validate.sh").write_text(script.read_text())
-    for path in ("scripts/check_ecosystem.py", "scripts/select_pr_tests.py",
-                 "scripts/office_runtime.py"):
+    for path in ("scripts/check_ecosystem.py", "scripts/select_pr_tests.py"):
         (pr_repo / path).write_text("pass\n")
     (pr_repo / "tests" / "conftest.py").write_text(
         'def pytest_addoption(parser):\n    parser.addoption("--all", action="store_true")\n')
@@ -200,7 +199,6 @@ case "$1" in
   scripts/select_pr_tests.py)
     if [ -n "$SELECTED_TESTS" ]; then printf '%s\\n' "$SELECTED_TESTS" > "$3"; else : > "$3"; fi
     exit 0 ;;
-  scripts/office_runtime.py) exit 0 ;;
   -m)
     if [ -n "$PYTEST_ARGS_LOG" ]; then printf '%s\\n' "$@" > "$PYTEST_ARGS_LOG"; fi
     exec {real_python} "$@" ;;
@@ -452,16 +450,51 @@ def test_pr_shell_gate_rejects_uncommitted_inputs_before_install(pr_repo, kind):
     assert not (pr_repo / ".venv").exists()
 
 
-def test_legacy_integration_mapping_runs_only_relevant_node(pr_repo):
-    target = pr_repo / "src/office/integration.py"
-    target.write_text("def compose(): return True\n")
-    node = pr_repo / "tests/test_integration.py"
-    node.write_text("def test_issue_577_failed_integration_check_evidence_includes_log(): pass\n")
-    git(pr_repo, "add", "tests/test_integration.py")
-    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
-                    "user.email=t@t", "commit", "-qm", "baseline test"], check=True)
+def test_curated_distribution_builder_is_explicitly_covered():
+    from scripts.select_pr_tests import SPECIAL
+    assert "tests/contracts/test_plugin_distribution.py" in SPECIAL["scripts/build_plugin_distribution.py"]
+
+
+def test_builder_change_selects_its_contract_module(pr_repo):
+    contract = "tests/contracts/test_plugin_distribution.py"
+    # The selector reads test modules from HEAD, so the contract module must be on the base branch.
+    git(pr_repo, "checkout", "-q", "main")
+    (pr_repo / "tests/contracts").mkdir(parents=True, exist_ok=True)
+    (pr_repo / contract).write_text("def test_contract(): pass\n")
+    git(pr_repo, "add", contract)
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "contract on base"], check=True)
     git(pr_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    git(pr_repo, "add", "src/office/integration.py")
-    _, _, chosen = selection(pr_repo)
-    assert "tests/test_integration.py" not in chosen
-    assert "tests/test_integration.py::test_issue_577_failed_integration_check_evidence_includes_log" in chosen
+    git(pr_repo, "checkout", "-q", "feature")
+    git(pr_repo, "merge", "-q", "--ff-only", "main")
+    (pr_repo / "scripts").mkdir(exist_ok=True)
+    (pr_repo / "scripts/build_plugin_distribution.py").write_text("def check(): return []\n")
+    git(pr_repo, "add", "scripts/build_plugin_distribution.py")
+    _, changed, chosen = selection(pr_repo)
+    assert changed == ["scripts/build_plugin_distribution.py"]
+    assert "tests/contracts/test_plugin_distribution.py" in chosen
+    assert all((pr_repo / p).is_file() for p in chosen)
+
+
+def _commit_all(pr_repo, message: str) -> None:
+    git(pr_repo, "add", ".")
+    subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
+                    "user.email=t@t", "commit", "-qm", message], check=True)
+
+
+def test_hyphenated_script_selects_its_underscore_test(pr_repo):
+    (pr_repo / "scripts").mkdir()
+    (pr_repo / "scripts/agy-usage.py").write_text("print('agy')\n")
+    (pr_repo / "tests/test_agy_usage.py").write_text("def test_agy(): pass\n")
+    _commit_all(pr_repo, "hyphenated script and test")
+    _, changed, chosen = selection(pr_repo)
+    assert "scripts/agy-usage.py" in changed
+    assert "tests/test_agy_usage.py" in chosen
+
+
+def test_unmatched_hyphenated_script_still_fails_closed(pr_repo):
+    (pr_repo / "scripts").mkdir()
+    (pr_repo / "scripts/orphan-usage.py").write_text("print('x')\n")
+    _commit_all(pr_repo, "unmatched hyphenated script")
+    with pytest.raises(SelectionError, match="No tests mapped to changed runtime module scripts/orphan-usage.py"):
+        selection(pr_repo)

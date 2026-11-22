@@ -86,6 +86,23 @@ def _row_serves(row: dict, required: set[str]) -> bool:
     return required <= set((adapter or {}).get("capabilities") or [])
 
 
+def _user_allowed_seed(entry: dict, role: str | None, config: dict | None) -> bool:
+    """Whether the user's own exact allow covers this exact seed route for this role.
+
+    An allow lifts a catalog `dispatchable: false` at routing time (#845), so a seed may order such a
+    route too (H3, #1168: the user-allowed agy/gemini-4-hydrogen@high code reviewer). Routing still
+    applies every gate, including the Hydrogen exact-probe veto; the seed only sets order."""
+    if not role or not config or not (entry.get("harness") and entry.get("effort")):
+        return False
+    from office import route_policy, route_probe
+    try:
+        cand = route_probe.candidate_from_spec(format_route(entry))
+    except Exception:  # noqa: BLE001 - an unresolvable spec is simply not allowed
+        return False
+    rule = route_policy.user_allows(cand, role, [route_policy.user_policy(config)])
+    return bool(rule and route_policy._is_exact_spec(rule.get("rule")))
+
+
 def validate_seed(entries: list[dict], *, role: str | None = None, config: dict | None = None) -> list[str]:
     """Problems with seed entries against the shipped catalog (empty when valid).
     With a role, an entry must also be a route that role can actually use: a
@@ -113,7 +130,7 @@ def validate_seed(entries: list[dict], *, role: str | None = None, config: dict 
         if any(r.get("alias_family") for r in same_model):
             pool = [r for r in rows if r.get("invocation_harness") in {x.get("invocation_harness") for x in same_model}]
         pool = [r for r in pool if e.get("harness") in (None, r.get("invocation_harness"))]
-        if not any(r.get("dispatchable") is not False for r in pool):
+        if not any(r.get("dispatchable") is not False for r in pool) and not _user_allowed_seed(e, role, config):
             problems.append(f"{label}: {e['model_id']} is not dispatchable (its catalog row is disabled or superseded)")
             continue
         if required and not any(_row_serves(r, required) for r in pool):
@@ -256,6 +273,11 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
     edited tier produced. Raises OfficeError when the result is invalid."""
     root = _repo_root(cwd)
     files = cfg.read_files(root)
+    try:
+        old = yaml.safe_load(files.get(tier) or "") or {}
+    except yaml.YAMLError:
+        old = {}
+    old_roles = (old.get("roles") or {}) if isinstance(old, dict) and isinstance(old.get("roles"), dict) else {}
     files[tier] = yaml.safe_dump(new, sort_keys=False)
     try:
         effective, warnings = cfg.resolve(root, files=files)
@@ -268,14 +290,24 @@ def _validate(new: dict, tier: str, cwd: Path | None) -> list[str]:
     policy = effective.get("cost_policy") or {}
     if policy.get("default") not in (policy.get("available") or []):
         raise _usage(f"cost_policy.default must be one of {', '.join(policy.get('available') or [])}")
-    # Only what this file sets: a shipped default is not the edit's to reject.
+    # Only what this edit changes: a shipped default, or a seed this edit leaves
+    # as it was, is not the edit's to reject (#874). Otherwise one stale entry
+    # blocks every write, including the write that removes it.
+    stale = []
     for role, conf in (new.get("roles") or {}).items():
-        problems = (validate_seed((conf or {}).get("preferred_seed") or [], role=role, config=effective)
-                    if isinstance(conf, dict) else [])
-        if problems:
-            raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
-                         next_step="office setup lists the known routes (type ? at a prompt)")
-    return [f"{w['key']}: {w['reason']}" for w in warnings if w.get("tier") == tier]
+        seed = (conf or {}).get("preferred_seed") or [] if isinstance(conf, dict) else []
+        problems = validate_seed(seed, role=role, config=effective) if seed else []
+        if not problems:
+            continue
+        before = old_roles.get(role)
+        if isinstance(before, dict) and (before.get("preferred_seed") or []) == seed:
+            stale.append(f"roles.{role}.preferred_seed: " + "; ".join(problems)
+                         + f" (already set; office config --{tier} roles.{role}.preferred_seed <routes> replaces it)")
+            continue
+        raise _usage(f"roles.{role}.preferred_seed: " + "; ".join(problems),
+                     next_step=f"office config --{tier} roles.{role}.preferred_seed <routes> with only known routes; "
+                               "office setup lists them (type ? at a prompt)")
+    return stale + [f"{w['key']}: {w['reason']}" for w in warnings if w.get("tier") == tier]
 
 
 def _coerce(key: str, raw: str) -> Any:
@@ -356,7 +388,33 @@ def _effective_with_origin(key: str, tier: str | None, cwd: Path) -> tuple[bool,
     return ok, v, where
 
 
+RESERVE_KEY = "quota.reserve_percent"
+
+
+def _pct(value) -> str:
+    return f"{value:g}" if isinstance(value, (int, float)) else str(value)
+
+
+def _reserve_lines(by_role: dict, origins: dict[str, str]) -> list[str]:
+    """One line per reserve family: the protected percent and the layer it came from."""
+    roles = {fam: sorted(r for r, f in cfg.RESERVE_KEY_BY_ROLE.items() if f == fam) for fam in cfg.RESERVE_FAMILIES}
+    return [f"{fam}: {_pct(by_role.get(fam))}%  ({origins[fam]}; roles {', '.join(roles[fam])})" for fam in cfg.RESERVE_FAMILIES]
+
+
+def _get_reserves(cwd: Path) -> Result:
+    root = _repo_root(cwd)
+    files = cfg.read_files(root)
+    effective, _ = cfg.resolve(root, files=files)
+    by_role = (effective.get("quota") or {}).get("reserve_percent_by_role") or {}
+    origins = cfg.reserve_origins(files)
+    other = (effective.get("quota") or {}).get("reserve_percent")
+    lines = _reserve_lines(by_role, origins) + [f"other roles: {_pct(other)}%  (quota.reserve_percent)"]
+    return Result(lines=lines, data={"key": RESERVE_KEY, "value": other, "by_role": by_role, "origins": origins})
+
+
 def _get(key: str, tier: str | None, origin: bool, cwd: Path) -> Result:
+    if key == RESERVE_KEY and tier is None:
+        return _get_reserves(cwd)
     ok, value, where = _effective_with_origin(key, tier, cwd)
     if not ok:
         raise OfficeError("not-set", f"{key} is not set" + (f" in the {tier} file" if tier else ""), exit_code=1,
@@ -432,35 +490,45 @@ def _applies_next() -> str:
 
 # ------------------------------------------------------------------ a run's routing (#308)
 
-def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
-    """Re-pin a run's `roles` and `routing` from the current config files: the one
-    opt-in that moves a running run off the values it pinned at start. Later
-    dispatches route from the re-pinned policy; the drift notice then has nothing
-    left to report for those blocks. `quote` is the user's words authorizing it."""
+def _repin_target(con, run_arg: str | None, quote: str | None, flag: str) -> tuple[dict, Path, dict, dict]:
+    """The running run a re-pin moves, with its repo, config files and live resolved config. Only the
+    orchestrator re-pins, only on the user's words, and only a live run."""
     if os.environ.get("OFFICE_DISPATCH_ID") or os.environ.get("OFFICE_ROLE"):
-        raise Refused("worker-cannot-apply-routing", "a worker cannot re-pin a run's routing; the orchestrator does, on the user's words")
+        what = "routing" if flag == "--apply-routing" else "verification limits"
+        raise Refused(f"worker-cannot-{flag[2:]}", f"a worker cannot re-pin a run's {what}; the orchestrator does, on the user's words")
     if not run_arg:
-        raise _usage("--apply-routing needs --run <id>", next_step="office list shows run ids")
+        raise _usage(f"{flag} needs --run <id>", next_step="office list shows run ids")
     run = state.find_run(con, run_arg)
     if run is None:
         raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
     if not (quote or "").strip():
-        raise _usage('--apply-routing records the user\'s words (--quote "<words>")',
-                     next_step=f"office config --run {run['id'][:8]} --apply-routing --quote \"<words>\"")
+        raise _usage(f'{flag} records the user\'s words (--quote "<words>")',
+                     next_step=f"office config --run {run['id'][:8]} {flag} --quote \"<words>\"")
     if state.is_terminal(run):
-        raise Refused("run-terminal", f"run is {run['phase']}; its routing is no longer used")
+        raise Refused("run-terminal", f"run is {run['phase']}; its pinned config is no longer used")
     root = Path(run["repo_root"]) if run.get("repo_root") else None
     if root is None or not root.is_dir():
         raise OfficeError("repo-missing", f"run {run['id'][:8]}'s repository ({root or 'unrecorded'}) is gone; its repo config cannot be read",
                           next_step="restore the repository, then retry")
-    repo = root
-    files = cfg.read_files(repo)
+    files = cfg.read_files(root)
     try:
-        live, _ = cfg.resolve(repo, files=files)
+        live, _ = cfg.resolve(root, files=files)
     except ValueError as exc:
         raise OfficeError("bad-config", f"config is invalid: {exc}", next_step="fix the config files, then retry")
+    return run, root, files, live
+
+
+def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
+    """Re-pin a run's `roles`, `routing` and `quota` from the current config files:
+    the one opt-in that moves a running run off the values it pinned at start.
+    Later dispatches route from the re-pinned policy; the drift notice then has
+    nothing left to report for those blocks. `quota` is here because route choice
+    reads the run's pinned `quota` reserves (`reserve_percent` and `reserve_percent_by_role`):
+    without it a lowered reserve could never reach a live run. `quote` is the user's words authorizing it."""
+    run, repo, files, live = _repin_target(con, run_arg, quote, "--apply-routing")
+    cfg.require_supported_gear(run.get("gear"))
     policy = dict(run.get("policy") or {})
-    blocks = ("roles", "routing")
+    blocks = ("roles", "routing", "quota")
     changed = [b for b in blocks if policy.get(b) != live.get(b)]
     if policy.get(route_policy.PROVENANCE_KEY) != live[route_policy.PROVENANCE_KEY] and "routing" not in changed:
         changed.append("routing")
@@ -497,6 +565,98 @@ def apply_run_routing(con, run_arg: str | None, quote: str | None) -> Result:
     return Result(lines=[line],
                   next="later dispatches of this run route from the re-pinned policy" if changed else None,
                   data={"run": run["id"], "changed": changed})
+
+
+# The verification limits a running run may re-pin (#755): how long a check may run and how many run at once.
+# Retry, recapture and round caps stay pinned: they decide verdicts, not whether a check can finish.
+VERIFICATION_REPIN = ("check_timeout_seconds", "full_suite_timeout_seconds", "check_concurrency")
+
+
+def apply_run_verification(con, run_arg: str | None, quote: str | None) -> Result:
+    """Re-pin a run's check timeouts and check concurrency from the current config files, on the user's words.
+    A suite that outgrew the timeout pinned at start (#755) otherwise exits 124 on every retry, and raising
+    the value in a config file never reaches the run. Later checks of the run use the re-pinned values."""
+    run, _repo, _files, live = _repin_target(con, run_arg, quote, "--apply-verification")
+    cfg.require_supported_gear(run.get("gear"))
+    policy = dict(run.get("policy") or {})
+    pinned = dict(policy.get("verification") or {})
+    want = live.get("verification") or {}
+    # Only a limit the live config states moves: a key it leaves out never overwrites the pinned value with None.
+    changed = {k: {"from": pinned.get(k), "to": want[k]} for k in VERIFICATION_REPIN
+               if k in want and pinned.get(k) != want[k]}
+    short = run["id"][:8]
+    if not changed:
+        return Result(lines=[f"run {short} already uses the current verification limits; nothing changed"])
+    pinned.update({k: v["to"] for k, v in changed.items()})
+    policy["verification"] = pinned
+    moved = ", ".join(f"verification.{k} {v['from']} -> {v['to']}" for k, v in changed.items())
+    with db.transaction(con):
+        state.update_run(con, run["id"], policy=policy)
+        state.emit(con, run, "run.verification_applied", f"run {short} re-pinned {moved} from the config files",
+                   payload={"quote": quote.strip(), "changed": changed})
+    return Result(lines=[f"run {short} re-pinned {moved} (\"{quote.strip()}\")"],
+                  next="later checks of this run use the re-pinned limits; office status names how to re-run a timed-out gate",
+                  data={"run": run["id"], "changed": changed})
+
+
+def _run_reserves(run: dict, short: str, cwd: Path) -> Result:
+    """The reserves a run pinned per family, and where the live config now differs."""
+    pinned = state.pinned_config(run)
+    quota = pinned.get("quota") or {}
+    by_role = quota.get("reserve_percent_by_role") or {}
+    origins = {fam: f"run {short} pinned" for fam in cfg.RESERVE_FAMILIES}
+    lines = _reserve_lines(by_role, origins) + [f"other roles: {_pct(quota.get('reserve_percent'))}%  (run {short} pinned)"]
+    res = Result(lines=lines, data={"key": RESERVE_KEY, "value": quota.get("reserve_percent"), "by_role": by_role,
+                                    "origins": origins, "run": run["id"]})
+    try:
+        root = Path(run.get("repo_root") or cwd)
+        files = cfg.read_files(root)
+        live, _ = cfg.resolve(root, files=files)
+    except (OSError, ValueError, yaml.YAMLError):
+        return res
+    live_by_role = (live.get("quota") or {}).get("reserve_percent_by_role") or {}
+    live_origins = cfg.reserve_origins(files)
+    moved = [f"{fam} {_pct(by_role.get(fam))}% -> {_pct(live_by_role.get(fam))}% ({live_origins[fam]})"
+             for fam in cfg.RESERVE_FAMILIES if live_by_role.get(fam) != by_role.get(fam)]
+    if moved:
+        res.notices.append(f"note: the config files now say {'; '.join(moved)}; the run keeps its pinned value until "
+                           f"office config --run {short} --apply-routing --quote \"<user's words>\"")
+        res.data["live"] = {"by_role": live_by_role, "origins": live_origins}
+    return res
+
+
+def run_get(con, run_arg: str, key: str, origin: bool, cwd: Path) -> Result:
+    """`office config --run <id> <key>`: the value the run pinned at start, which is what its gates use (#755).
+    When the config files now say something else, a notice names the live value and how it would reach the run."""
+    run = state.find_run(con, run_arg)
+    if run is None:
+        raise _usage(f"no run {run_arg!r}", next_step="office list shows run ids")
+    cfg.require_supported_gear(run.get("gear"))
+    short = run["id"][:8]
+    if key == RESERVE_KEY:
+        return _run_reserves(run, short, cwd)
+    ok, value = _get_path(state.pinned_config(run), key.split("."))
+    if not ok:
+        raise OfficeError("not-set", f"{key} is not pinned in run {short}", exit_code=1,
+                          next_step=f"office config {key} shows the live config value")
+    text = _show(key, value)
+    where = f"run {short} (pinned)"
+    res = Result(lines=[f"{where}\t{text}" if origin else text],
+                 data={"key": key, "value": value, "origin": where, "run": run["id"]})
+    try:
+        live_ok, live_value, live_where = _effective_with_origin(key, None, Path(run.get("repo_root") or cwd))
+    except (OfficeError, OSError, ValueError, yaml.YAMLError):
+        return res
+    if live_ok and live_value != value:
+        top, _, leaf = key.partition(".")
+        how = (f"office config --run {short} --apply-verification --quote \"<user's words>\""
+               if top == "verification" and leaf in VERIFICATION_REPIN
+               else f"office config --run {short} --apply-routing --quote \"<user's words>\""
+               if top in ("roles", "routing", "quota") else None)
+        res.notices.append(f"note: the config files now say {_show(key, live_value)} ({live_where}); the run keeps its "
+                           "pinned value" + (f" until {how}" if how else ""))
+        res.data["live"] = {"value": live_value, "origin": live_where}
+    return res
 
 
 # ------------------------------------------------------------------ office setup

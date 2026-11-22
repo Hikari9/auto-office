@@ -16,6 +16,7 @@ Re-onboarding keys on SCHEMA_VERSION alone, never on the package version.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from office import adapters, candidates, route_policy, configcmd, db, discovery, install, paths, routing
+from office import adapters, candidates, route_policy, configcmd, db, discovery, harness_preference, hermes_access, install, paths, routing
 from office import config as cfg
 from office.result import Result
 from office.state import OfficeError
@@ -32,6 +33,13 @@ from office.state import OfficeError
 SCHEMA_VERSION = 2
 SCHEMA_KEY = "onboarding.schema_version"
 FREE_MODELS_KEY = "onboarding.free_models_enabled"
+# Harness preference round: due once per overlapping harness, not a schema bump (the three questions stay as they are).
+OVERLAP_SEEN_KEY = "onboarding.harness_overlap_seen"
+BUDGETS_KEY = "onboarding.harness_budgets"
+# A monthly budget above this is refused as a typo: larger values overflow the share arithmetic to NaN.
+MAX_MONTHLY_USD = 1_000_000_000.0
+PREFERENCE_KEY = f"routing.{harness_preference.KEY}"
+RECOMMENDED = "recommended"
 DISCLAIMER = ("Office favors this route according to its routing policy, but may choose another model or effort "
               "when availability, quota, task fit, capability, evidence, or policy calls for it.")
 # (answer flag, question, config roles it writes, what the preference does)
@@ -45,6 +53,7 @@ QUESTIONS = (
      "Plan and code review. Visual review keeps its own capability-checked routes."),
 )
 OFFICE, KEEP = "office", "keep"
+HARNESS_ANSWERS = (OFFICE, KEEP, RECOMMENDED)
 HOOK_ACTIONS = ("install-recommended", "review-individually", "skip")
 EFFORT_ORDER = ("none", "low", "medium", "high", "xhigh", "max")
 
@@ -89,8 +98,6 @@ def current_harness(explicit: str | None = None) -> tuple[str | None, str]:
         return os.environ["OFFICE_HARNESS"], "OFFICE_HARNESS"
     if os.environ.get("CLAUDECODE") == "1":
         return "claude", "CLAUDECODE"
-    if os.environ.get("GEMINI_CLI") == "1":
-        return "gemini", "GEMINI_CLI"
     key = discovery.process_key()
     if key:
         return key.split(":", 1)[0], "process tree"
@@ -266,9 +273,6 @@ def credentials(harness: str) -> tuple[str, str]:
     elif harness == "agy":
         ok, where = _files_or_env([gemini_home / "antigravity-cli" / "antigravity-oauth-token",
                                    gemini_home / "jetski-standalone-oauth-token"], (), "sign in to agy")
-    elif harness == "gemini":
-        ok, where = _files_or_env([gemini_home / "oauth_creds.json"], ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-                                  "sign in to gemini")
     elif harness == "opencode":
         ok, where = _opencode_signed_in()
     elif harness == "kilo":
@@ -278,8 +282,9 @@ def credentials(harness: str) -> tuple[str, str]:
     return ("found" if ok else "missing"), where
 
 
-def harnesses() -> list[dict]:
-    """Every adapter that can launch an Office role: installed, version, sign-in."""
+def harnesses(auth: dict | None = None) -> list[dict]:
+    """Every adapter that can launch an Office role: installed, version, sign-in. Hermes also lists its
+    providers with a usable or exhausted credential (names and status only, from hermes_access)."""
     out = []
     for aid, a in sorted(adapters.load_all().items()):
         if not a.get("office_profiles"):
@@ -291,8 +296,16 @@ def harnesses() -> list[dict]:
             if aid == "opencode":
                 model, detail = _opencode_free_model()
                 row["free_model_availability"] = {"listed_model": model, "detail": detail}
+            if aid == "hermes":
+                row["providers"] = _hermes_providers(auth)
         out.append(row)
     return out
+
+
+def _hermes_providers(auth: dict | None = None) -> list[dict]:
+    auth = hermes_access.auth_status() if auth is None else auth
+    return [{"provider": name, "status": "usable" if info["usable"] > 0 else "exhausted"}
+            for name, info in sorted(auth.items())]
 
 
 # ------------------------------------------------------------------ routes
@@ -464,12 +477,188 @@ def validate_answer(question: dict, answer: str) -> dict | None:
     return {"model_id": entry["model_id"], "harness": entry["harness"], "effort": entry["effort"]}
 
 
+# ------------------------------------------------------------------ harness preference
+
+def _user_onboarding() -> dict:
+    data = configcmd._load(paths.user_config_path())
+    onboarding = data.get("onboarding")
+    return onboarding if isinstance(onboarding, dict) else {}
+
+
+def _recorded() -> list[str]:
+    """Harnesses whose overlap the user has answered. Anything but a list of names is treated as none."""
+    value = _user_onboarding().get("harness_overlap_seen")
+    return [h for h in value if isinstance(h, str)] if isinstance(value, list) else []
+
+
+def _stored_budgets() -> dict:
+    value = _user_onboarding().get("harness_budgets")
+    return value if isinstance(value, dict) else {}
+
+
+def _usd(value) -> float | None:
+    """A budget as a non-negative finite number, else None (a hand-edited value never reaches the arithmetic)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or not 0 <= value <= MAX_MONTHLY_USD:
+        return None
+    return float(value)
+
+
+def _apply_harness(answer: str | None, budgets_specs: list[str] | None) -> tuple[list[str], list[tuple[str, object]]]:
+    """(summary lines, config changes) for the harness preference round. Validation happens before any change is
+    returned, so an invalid answer changes nothing. No answer (a skipped round) writes nothing."""
+    if answer is None:
+        return [], []
+    overlap = harness_overlap(hermes_access.auth_status())
+    if not overlap:
+        raise _usage("no installed harness shares a model with another here, so there is no harness preference to answer",
+                     next_step="office onboard --harness <h> --json")
+    onboarding_budgets = _stored_budgets()
+    lines: list[str] = []
+    changes: list[tuple[str, object]] = []
+    current = harness_preference.settings(configcmd._load(paths.user_config_path()))
+    if answer == RECOMMENDED:
+        budgets = _parse_budgets(budgets_specs, overlap)
+        missing = _missing_budgets(overlap, budgets)
+        if missing:
+            raise _usage("recommended weights need a monthly USD budget for each overlapping harness: " + ", ".join(missing),
+                         next_step="office onboard --harness-preference recommended --harness-budget PROVIDER:HARNESS=USD ...")
+        weights, reasoning = derive_weights(overlap, budgets)
+        new_prefs = {k: v for k, v in current.items() if k not in overlap} | weights
+        stored = {**onboarding_budgets, **budgets}
+        if stored != onboarding_budgets:
+            changes.append((BUDGETS_KEY, stored))
+        lines.append("Harness preference: recommended, derived from your monthly budgets")
+        lines += [f"  {r}" for r in reasoning]
+    elif answer == OFFICE:
+        new_prefs = {k: v for k, v in current.items() if k not in overlap}
+        lines.append("Harness preference: Let Office decide (weights for the overlapping providers cleared)")
+    else:
+        new_prefs = current
+        lines.append("Harness preference: kept")
+    if (new_prefs or None) != (current or None):
+        changes.append((PREFERENCE_KEY, new_prefs or None))
+    return lines, changes + _seen_changes(overlap)
+
+
+def _seen_changes(overlap: dict) -> list[tuple[str, object]]:
+    """Record the overlap set as seen (only when it differs from what is recorded), so the round is not asked again.
+    Bare harness names from before entries carried the model are replaced by the entries they cover."""
+    seen = set(_recorded())
+    now = overlap_keys(overlap) | {s for s in seen if "|" in s}
+    return [(OVERLAP_SEEN_KEY, sorted(now))] if now != seen else []
+
+
+def _covered(key: str, seen: set[str]) -> bool:
+    """A recorded entry covers its key; a bare harness name (recorded before entries carried the model) covers its harness."""
+    return key in seen or key.rsplit("|", 1)[-1] in seen
+
+
+def harness_overlap(auth: dict) -> dict[str, dict]:
+    """Providers whose models two or more installed harnesses can launch: {provider: {models, harnesses}}.
+    A model is overlapping when at least two harnesses run it; Hermes counts only for a provider it reaches
+    with a usable credential (`auth`, from hermes_access.auth_status). Grouped by the model's vendor, which is
+    the scope `routing.harness_preference` keys on."""
+    installed = {aid for aid, a in adapters.load_all().items() if a.get("office_profiles") and adapters.installed(a)}
+    serving: dict[tuple[str, str], set[str]] = {}
+    for row in candidates.catalog_rows():
+        harness, model = row.get("invocation_harness"), row.get("model_id")
+        provider = (row.get("lineage_key") or "").split("/", 1)[0]
+        if harness not in installed or not model or not provider:
+            continue
+        if harness == "hermes":
+            reached, _ = hermes_access.expected_route(row.get("invocation_model_id") or "")
+            if not reached or (auth.get(reached) or {}).get("usable", 0) < 1:
+                continue
+        serving.setdefault((provider, model), set()).add(harness)
+    out: dict[str, dict] = {}
+    for (provider, model), harnesses_ in sorted(serving.items()):
+        if len(harnesses_) < 2:
+            continue
+        entry = out.setdefault(provider, {"models": [], "harnesses": set(), "pairs": []})
+        entry["models"].append(model)
+        entry["harnesses"] |= harnesses_
+        entry["pairs"] += [f"{model}|{h}" for h in sorted(harnesses_)]
+    return {p: {"models": e["models"], "harnesses": sorted(e["harnesses"]), "pairs": e["pairs"]}
+            for p, e in sorted(out.items())}
+
+
+def overlap_keys(overlap: dict) -> set[str]:
+    """The overlap set the round is answered against: one `provider|model|harness` per harness running a shared model,
+    so a newly shared model reopens the round even when its harnesses were already recorded."""
+    return {f"{p}|{pair}" for p, info in overlap.items() for pair in info["pairs"]}
+
+
+def _missing_budgets(overlap: dict, budgets: dict) -> list[str]:
+    return [f"{p}:{h}" for p, info in overlap.items() for h in info["harnesses"]
+            if (budgets.get(p) or {}).get(h) is None]
+
+
+def derive_weights(overlap: dict, budgets: dict) -> tuple[dict, list[str]]:
+    """Weights from the monthly USD budgets: each harness's share of its provider's total, in percent.
+    A provider with no budget at all gets no weights (routing keeps its default). Returns (weights, reasoning)."""
+    weights: dict[str, dict[str, float]] = {}
+    lines: list[str] = []
+    for provider, info in overlap.items():
+        spend = budgets[provider]
+        total = sum(spend[h] for h in info["harnesses"])
+        if total <= 0:
+            lines.append(f"{provider}: no monthly budget, so no weights here (routing keeps its default)")
+            continue
+        shares = {h: round(100 * spend[h] / total, 1) for h in info["harnesses"]}
+        weights[provider] = shares
+        split = ", ".join(f"{h} ${spend[h]:g}/mo of ${total:g} = {shares[h]:g}%" for h in info["harnesses"])
+        lines.append(f"{provider}: {split}; weights " + ", ".join(f"{h} {shares[h]:g}" for h in info["harnesses"]))
+    return weights, lines
+
+
+def _parse_budgets(specs: list[str] | None, overlap: dict) -> dict[str, dict[str, float]]:
+    """`--harness-budget PROVIDER:HARNESS=USD`: each must name an overlapping pair; nothing is written on error."""
+    budgets: dict[str, dict[str, float]] = {}
+    for spec in specs or []:
+        pair, sep, value = spec.rpartition("=")
+        provider, colon, harness = pair.partition(":")
+        if not sep or not colon or not provider or not harness:
+            raise _usage(f"--harness-budget {spec!r}: name it as PROVIDER:HARNESS=USD",
+                         next_step="office onboard --harness <h> --json lists the pairs to answer")
+        try:
+            usd = float(value)
+        except ValueError:
+            usd = math.nan
+        if not math.isfinite(usd) or not 0 <= usd <= MAX_MONTHLY_USD:
+            raise _usage(f"--harness-budget {spec!r}: USD must be a number from zero to {MAX_MONTHLY_USD:g}")
+        if harness not in (overlap.get(provider) or {}).get("harnesses", []):
+            raise _usage(f"--harness-budget {spec!r}: {harness} does not run an overlapping {provider} model here",
+                         next_step="office onboard --harness <h> --json lists the pairs to answer")
+        budgets.setdefault(provider, {})[harness] = usd
+    return budgets
+
+
+def harness_preference_state(overlap: dict, seen: list[str], budgets: dict) -> dict:
+    """The round's state for status: what is due, what is asked, and the recommendation once every budget is known."""
+    recorded = set(seen)
+    pending = sorted({k.rsplit("|", 1)[-1] for k in overlap_keys(overlap) if not _covered(k, recorded)})
+    inputs = [f"{p}:{h}" for p, info in overlap.items() for h in info["harnesses"]]
+    budgets = {p: row for p, row in budgets.items() if isinstance(row, dict)}
+    stored = {p: {h: usd for h in info["harnesses"] if (usd := _usd((budgets.get(p) or {}).get(h))) is not None}
+              for p, info in overlap.items()}
+    weights, reasoning = derive_weights(overlap, stored) if overlap and not _missing_budgets(overlap, stored) else ({}, [])
+    return {"due": bool(pending), "pending": pending, "recorded": sorted(seen),
+            "overlap": [{"provider": p, **info} for p, info in overlap.items()],
+            "budget_inputs": inputs, "budgets": stored, "recommended": weights or None, "reasoning": reasoning,
+            "options": [OFFICE, KEEP, RECOMMENDED]}
+
+
 # ------------------------------------------------------------------ commands
 
 def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     """What /auto-office needs to decide whether to onboard and how: never prompts."""
     completed = completed_schema()
-    reason = due_reason(completed)
+    auth = hermes_access.auth_status()
+    overlap = harness_overlap(auth)
+    hp = harness_preference_state(overlap, _recorded(), _stored_budgets())
+    reasons = [r for r in (due_reason(completed), _harness_reason(hp)) if r]
+    reason = "; ".join(reasons) or None
     name, source = current_harness(harness)
     integration = install.integration_status(name) if name else {
         "state": "unknown", "reason": "the current harness was not identified (pass --harness)", "items": []}
@@ -482,7 +671,9 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     commands = {"apply": "office onboard --planner <answer> --executor <answer> --reviewer <answer>",
                 "skip": "office onboard --skip",
                 "enable_free_models": "office onboard --enable-free-models",
-                "disable_free_models": "office onboard --disable-free-models"}
+                "disable_free_models": "office onboard --disable-free-models",
+                "harness_preference": "office onboard --harness-preference office|keep|recommended "
+                                      "[--harness-budget PROVIDER:HARNESS=USD ...]"}
     if offer and name:
         commands["install_recommended"] = f"office install --only {name}"
         commands["install_items"] = f"office install --only {name} --item <id> [--item <id> ...]"
@@ -490,8 +681,8 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     data = {"schema_version": SCHEMA_VERSION, "completed_schema": completed, "due": reason is not None,
             "reason": reason or "current", "user_config": str(paths.user_config_path()),
             "harness": {"current": name, "source": source, "integration": integration, "offer": offer},
-            "harnesses": harnesses(), "questions": qs, "free_models": free_models,
-            "disclaimer": DISCLAIMER, "commands": commands,
+            "harnesses": harnesses(auth), "questions": qs, "free_models": free_models,
+            "harness_preference": hp, "disclaimer": DISCLAIMER, "commands": commands,
             "answers": "office (Let Office decide), keep, or harness/model@effort"}
     lines = [f"onboarding: {'due' if reason else 'current'} (schema {SCHEMA_VERSION}, completed {completed})"
              + (f": {reason}" if reason else "")]
@@ -503,6 +694,10 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
     lines.append("harnesses: " + ", ".join(
         f"{h['harness']} " + (f"{h['version']} sign-in {h['auth']}" if h["installed"] else "not installed")
         for h in data["harnesses"]))
+    for row in data["harnesses"]:
+        if row["harness"] == "hermes" and row["installed"]:
+            lines.append("hermes providers: " + (", ".join(f"{p['provider']} {p['status']}" for p in row["providers"])
+                                                  or "none listed"))
     lines.append(f"free models: {'enabled' if free_models['enabled'] else 'disabled'} "
                  "(default off; use --enable-free-models to opt in)")
     for q in qs:
@@ -512,29 +707,56 @@ def status(*, harness: str | None = None, cwd: Path | None = None) -> Result:
         lines.append(f"{q['title']} (--{q['id']}): now {now}"
                      + (f"; repo override {cur['repo_override']}" if cur["repo_override"] else ""))
         lines.append(f"  eligible: {', '.join(q['eligible_grouped']) or 'none here'}")
+    for o in hp["overlap"]:
+        lines.append(f"harness overlap ({o['provider']}): {', '.join(o['models'])} run on {' and '.join(o['harnesses'])}")
+    for r in hp["reasoning"]:
+        lines.append(f"  {r}")
     lines.append(f"note: {DISCLAIMER}")
-    if reason:
-        nxt = ("ask the three questions (and the integration choice, if offered), then "
-               f"{commands['apply']}, or {commands['skip']}")
-    else:
-        nxt = "onboarding is current; continue the /auto-office request (office onboard --planner ... reconfigures)"
+    steps = []
+    if completed < SCHEMA_VERSION:
+        steps.append("ask the three questions (and the integration choice, if offered), then "
+                     f"{commands['apply']}, or {commands['skip']}")
+    if hp["due"]:
+        steps.append("ask the harness-preference question (monthly USD per overlapping provider and harness), then "
+                     f"{commands['harness_preference']}")
+    nxt = ("; ".join(steps) if steps
+           else "onboarding is current; continue the /auto-office request (office onboard --planner ... reconfigures)")
     return Result(lines=lines, next=nxt, data=data)
 
 
+def _harness_reason(hp: dict) -> str | None:
+    if not hp["due"]:
+        return None
+    pairs = "; ".join(f"{o['provider']} ({' and '.join(o['harnesses'])})" for o in hp["overlap"])
+    return f"harness overlap not yet answered: {', '.join(hp['pending'])} share models on {pairs}"
+
+
 def apply(answers: dict[str, str | None], *, skip: bool = False, enable_free_models: bool | None = None,
+          harness_answer: str | None = None, harness_budgets: list[str] | None = None,
           cwd: Path | None = None) -> Result:
     """Write the accepted answers and the completed schema in one atomic user-file
-    write. Skip writes only the marker. Any invalid answer writes nothing."""
+    write. Skip writes only the markers. Any invalid answer writes nothing.
+
+    The harness preference round is not a schema question: `harness_answer` (office, keep or recommended)
+    settles the harnesses that overlap, and writes nothing for the schema. It records the overlapping
+    harnesses as seen, so they are not asked again. `recommended` needs a monthly USD budget per
+    overlapping provider and harness."""
     given = {k: v for k, v in answers.items() if v is not None}
-    if skip and (given or enable_free_models is not None):
+    if harness_answer is not None and harness_answer not in HARNESS_ANSWERS:
+        raise _usage(f"--harness-preference {harness_answer!r}: use office, keep or recommended",
+                     next_step="office onboard --harness <h> --json")
+    if harness_budgets and harness_answer != RECOMMENDED:
+        raise _usage("--harness-budget is used by --harness-preference recommended only",
+                     next_step="office onboard --harness-preference recommended --harness-budget PROVIDER:HARNESS=USD")
+    if skip and (given or enable_free_models is not None or harness_answer is not None):
         raise _usage("--skip keeps every preference; it takes no answers", next_step="office onboard --skip")
-    if not skip and not given and enable_free_models is None:
+    if not skip and not given and enable_free_models is None and harness_answer is None:
         raise _usage("name at least one answer, or --skip",
                      next_step="office onboard --planner <answer> --executor <answer> --reviewer <answer>")
     changes: list[tuple[str, object]] = []
     lines: list[str] = []
     repo_notes: list[str] = []
-    if not skip:
+    if given:
         con = db.connect()
         try:
             qs = {q["id"]: q for q in questions(con, cwd)}
@@ -553,22 +775,32 @@ def apply(answers: dict[str, str | None], *, skip: bool = False, enable_free_mod
                 if answer != KEEP and prefs[role]["repo"] is not None:
                     repo_notes.append(f"{role} ({_show_seed(prefs[role]['repo'])})")
             lines.append(f"{title}: " + {OFFICE: "Let Office decide", KEEP: "kept"}.get(answer, answer))
-        if enable_free_models is not None:
-            if free_models_enabled() is not enable_free_models:
-                changes.append((FREE_MODELS_KEY, enable_free_models))
-            lines.append(f"Free models: {'enabled' if enable_free_models else 'disabled'}")
-    if completed_schema() != SCHEMA_VERSION:
+    if enable_free_models is not None:
+        if free_models_enabled() is not enable_free_models:
+            changes.append((FREE_MODELS_KEY, enable_free_models))
+        lines.append(f"Free models: {'enabled' if enable_free_models else 'disabled'}")
+    harness_lines, harness_changes = _apply_harness(harness_answer, harness_budgets)
+    lines += harness_lines
+    changes += harness_changes
+    if skip:
+        changes += _seen_changes(harness_overlap(hermes_access.auth_status()))
+    schema_answered = skip or bool(given) or enable_free_models is not None
+    if schema_answered and completed_schema() != SCHEMA_VERSION:
         changes.append((SCHEMA_KEY, SCHEMA_VERSION))
     if changes:
         written = configcmd.apply_changes("user", changes, cwd)
     else:
         written = Result(data={"changed": []})
-    res = Result(lines=[("onboarding skipped: preferences unchanged" if skip else "onboarding complete")
-                        + f" (schema {SCHEMA_VERSION})", *lines],
+    heading = ("onboarding skipped: preferences unchanged" if skip
+               else "onboarding complete" if schema_answered else "harness preference saved")
+    res = Result(lines=[heading + (f" (schema {SCHEMA_VERSION})" if schema_answered else ""), *lines],
                  data={"schema_version": SCHEMA_VERSION, "skipped": skip,
                        "free_models_enabled": free_models_enabled(),
+                       "harness_preference": harness_answer,
                        "changed": written.data.get("changed", []), "path": str(paths.user_config_path())})
     res.notices += written.notices
+    if harness_answer == RECOMMENDED:
+        res.notices.append(f"note: {DISCLAIMER}")
     if repo_notes:
         res.notices.append("note: this repository's .auto-office/config.yaml still overrides "
                            + ", ".join(repo_notes) + " here (office config --repo --unset <key> removes it)")

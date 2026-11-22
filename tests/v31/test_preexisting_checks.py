@@ -9,7 +9,7 @@ import json
 import pytest
 
 from conftest import BAD_ADD, GOOD_ADD, PLAN_ONE, approved_run, start_inline, task_row
-from office import gates
+from office import db, gates, state
 
 OLD = "python3 -c \"print('FAILED legacy::test_old'); raise SystemExit(1)\""
 OLD_PLAN = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {OLD}")
@@ -20,7 +20,11 @@ V31 = pytest.mark.review_contract("v3.1")
 
 
 @pytest.fixture(autouse=True)
-def _quiet_host(monkeypatch):
+def _quiet_host(request, monkeypatch):
+    # The `env` fixture drops every OFFICE_* variable, so build it first or this setting is lost
+    # and a busy host turns the check's failure into UNAVAILABLE (#1273).
+    if "env" in request.fixturenames:
+        request.getfixturevalue("env")
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "100000")
 
 
@@ -159,14 +163,17 @@ def test_v31_a_test_runner_timeout_is_never_preexisting(env):
     plan = OLD_PLAN.replace("FAILED legacy::test_old", "Test timed out in 5000ms")
     _start(env, plan, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
-    assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
+    gate = _checks_gate(env)
+    assert gate["verdict"] == "CHANGES_REQUIRED", gate["summary"]
     assert not _preexisting_events(env) and not _base_evidence(env)
 
 
 @V31
 def test_v31_a_revision_that_changes_no_file_is_never_preexisting(env):
-    # The failing check is the work this task owes; an empty revision did none of it.
-    approved_run(env, gear="direct+review", executor=[{"write": {}, "submit": True}],
+    # The failing check is the work this task owes; an empty revision did none of it. An empty tree with
+    # accept criteria is submitted only as an acknowledged no-change (#1138).
+    approved_run(env, gear="S",
+                 executor=[{"write": {}, "office": [["submit", "--no-change", "--", "calc.add already holds"]]}],
                  code_reviewer=[{"reply": "VERDICT: PASS"}])
     env.office("dispatch", "T1", check=0)
     assert _checks_gate(env)["verdict"] == "CHANGES_REQUIRED"
@@ -228,3 +235,53 @@ def test_v31_a_new_error_higher_up_with_the_same_tail_is_not_preexisting(env):
     assert not _preexisting_events(env)
     assert json.loads(_base_evidence(env)[0]["meta_json"])["preexisting"] is False
     assert "code_reviewer" not in _roles(env) and task_row(env)["status"] == "changes_required"
+
+
+# ------------------------------------------------------------------ office status (#629 note beside acceptance)
+
+@V31
+def test_status_names_the_preexisting_check_beside_the_accepted_task(env):
+    _start(env, OLD_PLAN, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert f"T1 accepted with 1 pre-existing check failure (also fails on base): {OLD}" in out
+
+
+@V31
+def test_status_prints_no_preexisting_line_for_a_task_accepted_with_clean_checks(env):
+    _start(env, PLAN_ONE, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert "(also fails on base)" not in out
+
+
+@V31
+def test_status_ignores_a_preexisting_note_for_a_revision_that_is_not_the_accepted_one(env):
+    _start(env, PLAN_ONE, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    run = _q(env, "SELECT * FROM runs")[-1]
+    con = env.con()
+    try:
+        with db.transaction(con):
+            state.emit(con, run, "gate.preexisting", "superseded revision note", task_id="T1",
+                       payload={"gate": "g-old", "revision": "superseded-rev",
+                                "preexisting": [{"code": "C1", "command": OLD, "exit": 1, "base_commit": "x"}]})
+    finally:
+        con.close()
+    _, out = env.office("status", check=0)
+    assert "(also fails on base)" not in out
+
+
+@V31
+def test_status_lists_every_preexisting_command_of_an_accepted_task(env):
+    OLD2 = "python3 -c \"print('FAILED legacy::test_other'); raise SystemExit(1)\""
+    plan = PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"',
+                            f"checks:\n- {OLD}\n- {OLD2}")
+    _start(env, plan, executor=WORK, code_reviewer=[{"reply": "VERDICT: PASS"}])
+    env.office("dispatch", "T1", check=0)
+    assert task_row(env)["status"] == "accepted"
+    _, out = env.office("status", check=0)
+    assert f"T1 accepted with 2 pre-existing check failures (also fails on base): {OLD}; {OLD2}" in out
