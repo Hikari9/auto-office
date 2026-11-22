@@ -9,6 +9,7 @@ import pytest
 
 from office import land, verification_coverage as vc
 from office.state import Refused
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.fixture
@@ -298,8 +299,7 @@ def test_issue_563_full_suite_proof_survives_independent_integration_review(env)
     env.git("commit", "-qm", "fixture: tiered test collection")
     # An isolated no-op pytest executable proves which command Office actually
     # invoked without recursively running this repo's real pytest suite.
-    (env.bin / "pytest").write_text("#!/bin/sh\necho direct test command executed\nexit 0\n")
-    (env.bin / "pytest").chmod(0o755)
+    write_launcher((env.bin / "pytest"), "#!/bin/sh\necho direct test command executed\nexit 0\n")
     plan = PLAN_TWO.replace("blast_radius: repo\n", "blast_radius: repo\nchecks: pytest tests/ --all -q\n")
     plan = plan.replace('scope: mul.py\ndepends: none', 'scope: mul.py\ndepends: T1')
     approved_run(env, plan=plan,
@@ -359,7 +359,7 @@ p.add_argument("--output")
 a=p.parse_args()
 open(a.output,"w").write("tests/test_smoke.py\\n")
 ''')
-    (scripts / "validate.sh").write_text('''#!/usr/bin/env bash
+    write_launcher((scripts / "validate.sh"), '''#!/usr/bin/env bash
 set -e
 selection_file="$(mktemp)"
 python3 scripts/select_pr_tests.py --output "$selection_file"
@@ -367,7 +367,6 @@ selected_tests=()
 while IFS= read -r selected_test; do selected_tests+=("$selected_test"); done < "$selection_file"
 python3 -m pytest "${selected_tests[@]}" -q -n 2 --all
 ''')
-    (scripts / "validate.sh").chmod(0o755)
     # Exercise the lifecycle with a deliberately small test-only trusted gate.
     import hashlib
     write_scoped_gate_artifacts(env.repo)

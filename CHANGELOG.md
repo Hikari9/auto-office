@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.32.0
+
+- fix(windows): the `office` CLI runs natively on Windows (#915). New `office.portable` replaces `fcntl`, `killpg`, `os.kill(pid, 0)` (which kills on Windows), `start_new_session`, `os.uname` and `os.getloadavg`; binary-safe `os.open` flags; README documents the git install (the PyPI `auto-office` is a different project), Python pinning and Windows notes; D142-7 superseded.
+
 ## 3.31.10
 
 `tests/v31/test_landing_recovery.py` (added by #1312) gets its `keep` row in the test-retirement inventory and the contract-suite legacy table, so the inventory and record tests pass on main again.

@@ -21,6 +21,7 @@ import yaml
 
 from conftest import approved_run  # noqa: F401  (puts src on sys.path via the env fixture)
 from test_herdr_agent_launch import _calls, _fake, _live_dispatch, launch_in_herdr
+from host_tools import write_launcher  # noqa: E402
 
 MODEL = "opencode/muse-spark-1.3-contributor-free"
 
@@ -85,8 +86,7 @@ print("READY")
 def opencode(env, monkeypatch):
     """A fake `opencode` first on PATH; its log lands in FAKE_OPENCODE_LOG."""
     exe = env.bin / "opencode"
-    exe.write_text(FAKE_OPENCODE)
-    exe.chmod(0o755)
+    write_launcher(exe, FAKE_OPENCODE)
     monkeypatch.setenv("FAKE_OPENCODE_LOG", str(env.tmp / "opencode-log.json"))
     monkeypatch.setenv("OFFICE_PREFLIGHT", "off")
     from office import adapters

@@ -130,7 +130,7 @@ def test_supervisor_gets_the_subprocess_environment_and_hands_it_back(env, monke
     from office import dispatch, frontdoor
     calls = []
     real = dispatch.supervise
-    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, *([signal.SIGHUP] if hasattr(signal, 'SIGHUP') else []), signal.SIGINT)}
 
     def spy(dispatch_id):
         seen = {"hops": os.environ.get(frontdoor.HOP_ENV, "absent"), "cwd": Path(os.getcwd()).resolve(),
@@ -233,7 +233,8 @@ def test_the_seam_only_replaces_the_unmodified_fake_harness(env):
 
 
 @pytest.mark.approved
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill(getpid, sig) terminates the process on Windows; POSIX signal delivery")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM)])
 def test_a_signal_during_an_in_process_agent_stops_it_like_a_killed_child(env, monkeypatch, signum):
     after = []
 
@@ -243,7 +244,7 @@ def test_a_signal_during_an_in_process_agent_stops_it_like_a_killed_child(env, m
         return 0, b""
 
     monkeypatch.setattr(fake_agent, "run", agent)
-    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, *([signal.SIGHUP] if hasattr(signal, 'SIGHUP') else []), signal.SIGINT)}
     approved_run(env, executor=[{}])
     env.office("dispatch", "T1", check=0)
     con = env.con()

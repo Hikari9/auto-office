@@ -14,6 +14,7 @@ from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 
 from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
 from office.util import dumps, now_iso
+from host_tools import remove_launcher, write_launcher  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
@@ -1004,17 +1005,16 @@ def _discovery_env(env, monkeypatch, **probe):
     the probe suites' fake harness, and anything else like the Env's scripted agent: one binary serves the probe,
     the trial worker and the fallback worker."""
     for other in ("claude", "agy"):  # one harness: the draw can only land on a route the fake can probe
-        (env.bin / other).unlink()
+        remove_launcher(env.bin / other)
         env.fakes.pop(env.bin / other, None)
     codex = env.bin / "codex"
-    codex.write_text("\n".join([
+    write_launcher(codex, "\n".join([
         f"#!{sys.executable}",
         "import os, runpy, sys",
         "if os.environ.get('OFFICE_PROBE_NONCE') or sys.argv[1:] == ['--version']:",
         f"    runpy.run_path({str(TESTS / 'fixtures' / 'route_probe' / 'fake_harness.py')!r}, run_name='__main__')",
         "os.environ['FAKE_HARNESS'] = 'codex'",
         f"runpy.run_path({str(TESTS / 'v31' / 'fake_agent.py')!r}, run_name='__main__')", ""]))
-    codex.chmod(0o755)
     monkeypatch.setenv("FAKE_PROBE", json.dumps(probe))
     # No exploration draw (it would, at random, hold the discovery draw back), and a window that admits one trial.
     (env.tmp / "user-config.yaml").write_text("\n".join([
@@ -1121,8 +1121,7 @@ def test_the_snapshot_reads_the_failed_agents_worktree_without_its_fsmonitor_hoo
     d, wt, ddir = in_flight(cold)
     marker = tmp_path / "hook-ran"
     hook = tmp_path / "hook.sh"
-    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
-    hook.chmod(0o755)
+    write_launcher(hook, f"#!/bin/sh\ntouch {marker}\n")
     subprocess.run(["git", "-C", str(wt), "config", "core.fsmonitor", str(hook)], check=True)
     assert dispatch._worktree_snapshot(wt) is not None
     assert not marker.exists()

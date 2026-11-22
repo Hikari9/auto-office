@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from host_tools import host_tool_dirs, write_launcher
 
 from office import adapters, adaptive, candidates, config as cfg, db, paths, route_policy, route_probe, routing, scoring, state
 
@@ -61,11 +62,10 @@ class World:
                            ("CODEX_HOME", tmp / "codex-home"), ("CLAUDE_CONFIG_DIR", tmp / "claude-home")):
             monkeypatch.setenv(key, str(value))
         monkeypatch.chdir(tmp / "repo")  # manual-route denial reads the repo tier from the repository it runs in
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", *host_tool_dirs()]
         monkeypatch.setenv("PATH", os.pathsep.join([str(tmp / "bin")] + system))
         self.codex = tmp / "bin" / "codex"
-        self.codex.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-        self.codex.chmod(0o755)
+        write_launcher(self.codex, f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
         # Discovery fixtures model one fake codex. Do not enlist real host CLIs.
         monkeypatch.setattr(adapters, "installed", lambda adapter: adapters.executable(adapter) == "codex")
         # The scenarios follow one discovery-eligible codex model, 6.1 Sol; 6.1 Terra (#811) and 6.2 Sol stay out of this world.

@@ -15,6 +15,7 @@ from office import batch_landing as batch
 from office import cli
 from office.result import Result
 from office.state import Refused, Usage
+from host_tools import write_launcher  # noqa: E402
 
 
 def git(repo, *args):
@@ -763,12 +764,12 @@ def test_version_must_increase_from_the_starting_version(tmp_path, monkeypatch):
 
 
 def test_second_concurrent_batch_is_refused_by_the_repository_lock(tmp_path, monkeypatch):
-    import fcntl
+    from office import portable
     repo, prs, events, m = setup_two(tmp_path, monkeypatch)
     lock_path = batch._state_path(repo, "release-a").parent.parent / "landing.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(held, blocking=False)
         with pytest.raises(Refused, match="another batch landing is active"):
             batch.land_batch(str(m), cwd=repo)
     assert events == []
@@ -996,8 +997,7 @@ def test_compose_ignores_operator_merge_hooks(tmp_path, monkeypatch):
     repo, prs, events, m = setup_two(tmp_path, monkeypatch)
     hook = repo / ".git" / "hooks" / "pre-merge-commit"
     # Fails only inside the throwaway compose checkout, so the fake GitHub merge in the repo still works.
-    hook.write_text('#!/bin/sh\ncase "$PWD" in *office-batch-compose*) exit 1;; esac\nexit 0\n')
-    hook.chmod(0o755)
+    write_launcher(hook, '#!/bin/sh\ncase "$PWD" in *office-batch-compose*) exit 1;; esac\nexit 0\n')
     git(repo, "config", "core.hooksPath", str(repo / ".git" / "hooks"))
     result = batch.land_batch(str(m), cwd=repo)
     assert result.data["batch"]["status"] == "green"

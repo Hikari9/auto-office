@@ -25,6 +25,7 @@ from conftest import GOOD_ADD, approved_run, retired_mimo_rows, task_row
 
 from office import adapters, candidates, configcmd, executor_slates, routing, user_catalog
 from office.state import Refused
+from host_tools import read_launcher, write_launcher  # noqa: E402
 
 PI = "pi"
 MIMO_FLASH = "xiaomi-token-plan-sgp/mimo-v2.6-flash"
@@ -151,7 +152,7 @@ def test_mimo_is_excluded_from_every_routing_pool(monkeypatch):
 def _fake_pi_script(directory: Path) -> Path:
     """A pi stand-in serving --version, --list-models, auth check and --print."""
     script = directory / "pi"
-    script.write_text(textwrap.dedent(f"""\
+    write_launcher(script, textwrap.dedent(f"""\
         #!{sys.executable}
         import os, sys
         args = sys.argv[1:]
@@ -170,7 +171,6 @@ def _fake_pi_script(directory: Path) -> Path:
         sys.argv[0] = {str(script)!r}
         runpy.run_path({str(Path(fake_agent.__file__))!r}, run_name="__main__")
         """))
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script
 
 
@@ -194,7 +194,7 @@ def enable_decommissioned_mimo(harness: str, model_id: str, effort: str = "low")
 def _install_pi(env):
     """Give an Env the fake pi harness, as conftest gives it codex/claude/gemini/agy."""
     script = _fake_pi_script(env.bin)
-    env.fakes[script] = script.read_text()
+    env.fakes[script] = read_launcher(script)
     return script
 
 

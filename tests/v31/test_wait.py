@@ -12,6 +12,7 @@ import pytest
 from pathlib import Path
 
 from conftest import GOOD_ADD, approved_run, self_reviewed
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -431,8 +432,7 @@ def _herdr(env, **files) -> dict:
     """A fake herdr driven by files in a directory; `files` sets the agent's state."""
     import sys
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     state = env.tmp / "herdr-fake"
     state.mkdir(exist_ok=True)
     for name, text in files.items():
@@ -583,6 +583,7 @@ def test_usage_limit_parses_time_forms():
     assert got["resets_at"] == _utc(2026, 10, 3, 0, 0)
 
 
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="the TZ environment variable needs time.tzset, which Windows lacks")
 def test_usage_limit_without_a_zone_uses_the_local_zone(monkeypatch):
     import time
     from office import dispatch
@@ -800,6 +801,8 @@ def test_a_resolved_limit_clears_the_stored_episode(env, virtual_wait_clock):
 @pytest.fixture
 def new_york(monkeypatch):
     import time
+    if not hasattr(time, "tzset"):
+        pytest.skip("the TZ environment variable needs time.tzset, which Windows lacks")
     monkeypatch.setenv("TZ", "America/New_York")
     time.tzset()
     yield

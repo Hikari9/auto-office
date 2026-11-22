@@ -7,13 +7,14 @@ import sys
 import pytest
 
 from office import adapters, dispatch, doctor, gates, review_parse
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.mark.parametrize("kind", ["reviewer", "vision"])
 def test_codex_final_message_cannot_clobber_review(tmp_path, kind):
     # Reproduce Codex's exit write after the agent has written its own reply.
     fake = tmp_path / "codex"
-    fake.write_text(f"#!{sys.executable}\n" + '''import sys
+    fake = write_launcher(fake, f"#!{sys.executable}\n" + '''import sys
 from pathlib import Path
 args = sys.argv[1:]
 cwd = Path(args[args.index("--cd") + 1])
@@ -21,7 +22,6 @@ reply = cwd / "reply.txt"
 reply.write_text("VERDICT: PASS\\n")
 Path(args[args.index("-o") + 1]).write_text("[reply.txt](" + str(reply) + ")")
 ''')
-    fake.chmod(0o755)
     adapter = adapters.load_all()["codex"]
     adapter["invocation"]["executable"] = str(fake)
     reply = tmp_path / "reply.txt"

@@ -18,6 +18,7 @@ import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, PLAN_TWO, ROOT, start_inline
 from test_herdr_agent_launch import BUSY, _fake, _live_dispatch, launch_in_herdr
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -256,10 +257,9 @@ def test_herdr_ledger_sweep_sees_office_rows(env, monkeypatch, tmp_path):
         pytest.skip("node is not installed")
     run, d, res, rows = _herdr_worker(env, monkeypatch)
     fake = env.bin / "herdr"
-    fake.write_text(f"#!{sys.executable}\nimport json, sys\na = sys.argv[1:]\n"
+    write_launcher(fake, f"#!{sys.executable}\nimport json, sys\na = sys.argv[1:]\n"
                     "print(json.dumps({'result': {'agents': []} if a[:2] == ['agent', 'list'] else "
                     "{'panes': []} if a[:2] == ['pane', 'list'] else {}}))\n")
-    fake.chmod(0o755)
     from office import paths
     e = dict(os.environ, HERDR_LEDGER=str(paths.run_dir(run["id"]) / "panes.jsonl"), HERDR_PANE_ID="w1:pQ",
              HERDR_NODE_BIN=node)

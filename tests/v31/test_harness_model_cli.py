@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from office import adapters, candidates, config, configcmd, discovery, harnesscmd, paths, scoring, user_catalog
+from host_tools import write_launcher  # noqa: E402
 
 FAKE_FAKECLI = f"""#!{sys.executable}
 import json, os, sys
@@ -68,8 +69,7 @@ def unit(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     exe = bin_dir / "fakecli"
-    exe.write_text(FAKE_FAKECLI)
-    exe.chmod(0o755)
+    write_launcher(exe, FAKE_FAKECLI)
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp_path / "user-config.yaml"))
     monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
@@ -78,8 +78,7 @@ def unit(tmp_path, monkeypatch):
 
 def _fakecli(env) -> Path:
     exe = env.bin / "fakecli"
-    exe.write_text(FAKE_FAKECLI)
-    exe.chmod(0o755)
+    write_launcher(exe, FAKE_FAKECLI)
     return exe
 
 

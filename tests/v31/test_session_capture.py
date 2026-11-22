@@ -8,6 +8,7 @@ in for the harnesses: nothing here starts a live agent.
 """
 from __future__ import annotations
 
+import os
 import io
 import json
 import re
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from host_tools import write_launcher  # noqa: E402
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -190,10 +192,9 @@ def test_headless_supervisor_starts_claude_with_the_recorded_id(ledger, monkeypa
     bindir = ledger.tmp / "bin"
     bindir.mkdir()
     fake = bindir / "claude"
-    fake.write_text(f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
+    write_launcher(fake, f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
                     f"open({str(ledger.tmp / 'argv.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
     did = ledger.dispatch(role="code_reviewer", kind="code_reviewer", worktree=str(ledger.tmp))
     ddir = dispatch_mod.paths.run_dir("R1") / "dispatches" / did
     ddir.mkdir(parents=True)
@@ -215,10 +216,9 @@ def _fake_codex(ledger, monkeypatch, stderr: str, stdout: str = "done\n") -> Non
     bindir = ledger.tmp / "bin"
     bindir.mkdir(exist_ok=True)
     fake = bindir / "codex"
-    fake.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n"
+    write_launcher(fake, f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n"
                     f"sys.stderr.write({stderr!r}); sys.stderr.flush()\nsys.stdout.write({stdout!r})\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
 
 
 def _supervise_codex(ledger, monkeypatch, role, kind, **cols) -> str:
@@ -494,9 +494,8 @@ def test_reviewer_resume_argv_comes_from_the_recorded_id_after_the_pane_closed(l
     from office import dispatch as dispatch_mod, gates
     herdr = ledger.tmp / "bin" / "herdr"
     herdr.parent.mkdir(exist_ok=True)
-    herdr.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('{{\"error\": {{\"code\": \"agent_not_found\"}}}}')\nsys.exit(1)\n")
-    herdr.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{herdr.parent}:/usr/bin:/bin")
+    write_launcher(herdr, f"#!{sys.executable}\nimport sys\nsys.stderr.write('{{\"error\": {{\"code\": \"agent_not_found\"}}}}')\nsys.exit(1)\n")
+    monkeypatch.setenv("PATH", f"{herdr.parent}{os.pathsep}/usr/bin{os.pathsep}/bin")
     monkeypatch.setattr(dispatch_mod, "herdr_usable", lambda: True)
     parent = ledger.dispatch(role="code_reviewer", kind="code_reviewer", status="exited", launcher="herdr", pane_id="w1:p5",
                              pane_closed_at="then", session_id="rev-sess-1", triple="claude:m:high")

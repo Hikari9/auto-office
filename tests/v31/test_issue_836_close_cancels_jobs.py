@@ -20,18 +20,20 @@ import time
 from pathlib import Path
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
+from host_tools import write_launcher  # noqa: E402
 
 # The probe test_job_ownership uses, plus the pid it runs as: a stopped check
 # is proven by its pid answering nothing — "now" stays 1 in its state file
 # when it was stopped instead of finishing.
 PROBE = r'''
-import fcntl, json, os, sys, time
+import json, os, sys, time
+from office import portable
 d, secs = sys.argv[1], float(sys.argv[2])
 os.makedirs(d, exist_ok=True)
 lock = open(os.path.join(d, "probe.lock"), "a")
 
 def bump(delta, pid=0):
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    portable.lock_exclusive(lock)
     path = os.path.join(d, "state.json")
     st = json.load(open(path)) if os.path.exists(path) else {"now": 0, "max": 0, "runs": 0, "pid": None}
     st["now"] += delta
@@ -40,7 +42,7 @@ def bump(delta, pid=0):
     if pid:
         st["pid"] = pid
     json.dump(st, open(path, "w"))
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    portable.unlock(lock)
 
 bump(1, os.getpid())
 time.sleep(secs)
@@ -106,10 +108,9 @@ def _job_process(env, job_id: str) -> subprocess.Popen:
 
 def _gh(env, oid: str, pr: str = "https://github.com/o/r/pull/7"):
     """A fake gh that reports PR 7 merged, its merge commit already made."""
-    (env.bin / "gh").write_text("#!/bin/sh\necho '%s'\n" % json.dumps(
+    write_launcher((env.bin / "gh"), "#!/bin/sh\necho '%s'\n" % json.dumps(
         {"state": "MERGED", "url": pr, "number": 7, "mergeCommit": {"oid": oid},
          "baseRefName": "main", "headRefOid": oid, "headRefName": "external"}))
-    (env.bin / "gh").chmod(0o755)
 
 
 def _close_terminal_run(con, run_id: str) -> None:

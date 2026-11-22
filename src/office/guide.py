@@ -6,14 +6,13 @@ agent never needs an `office next` command or the Office source to proceed.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import re
 
 import os
 from pathlib import Path
 
-from office import amend, contract, paths, planpath, plans, route_learning, state
+from office import amend, contract, paths, planpath, plans, portable, route_learning, state
 from office import oversize as oversize_signal
 from office.result import Result
 from office.util import atomic_write_text, short, sha256_obj
@@ -1070,7 +1069,7 @@ def waiting(run_id: str):
     marker.parent.mkdir(parents=True, exist_ok=True)
     with marker.open("a") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            portable.lock_exclusive(fh, blocking=False)
         except BlockingIOError:
             # Another root wait holds it: never block here, so this wait keeps its own --timeout.
             yield
@@ -1078,7 +1077,7 @@ def waiting(run_id: str):
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def wait_in_flight(run_id: str) -> bool:
@@ -1087,10 +1086,10 @@ def wait_in_flight(run_id: str) -> bool:
         return False
     with marker.open("a") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            portable.lock_exclusive(fh, blocking=False)
         except BlockingIOError:
             return True
-        fcntl.flock(fh, fcntl.LOCK_UN)
+        portable.unlock(fh)
     return False
 
 

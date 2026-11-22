@@ -15,7 +15,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from office import paths
+from office import paths, portable
 from office.state import Refused
 from office.util import atomic_write_json, now_iso
 
@@ -68,13 +68,15 @@ def _entry(path: Path) -> dict:
         return {**base, "kind": "symlink", "target": os.readlink(path)}
     if not stat.S_ISREG(info.st_mode):
         raise OSError(f"cannot safely archive non-file output {path}")
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as fh:
+    with os.fdopen(os.open(path, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_BINARY), "rb") as fh:
         digest = hashlib.file_digest(fh, "sha256").hexdigest()
     return {**base, "kind": "file", "size": info.st_size, "sha256": "sha256:" + digest}
 
 
 def _sync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
+    if portable.IS_WINDOWS:
+        return  # a directory cannot be opened for fsync on Windows; NTFS journals the rename
+    fd = os.open(path, os.O_RDONLY | portable.O_BINARY)
     try:
         os.fsync(fd)
     finally:
@@ -112,7 +114,7 @@ def preserve(run: dict, checkout: Path) -> dict | None:
                 dest.symlink_to(before["target"])
             else:
                 # Never follow a file changed into a link while copying.
-                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                fd = os.open(source, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_BINARY)
                 with os.fdopen(fd, "rb") as inp, dest.open("xb") as out:
                     shutil.copyfileobj(inp, out)
                     out.flush()

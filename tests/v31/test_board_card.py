@@ -11,6 +11,7 @@ import threading
 import pytest
 
 from conftest import start_inline
+from host_tools import write_launcher  # noqa: E402
 
 FAKE_BOARD = r'''#!{python}
 import json, os, sys
@@ -54,8 +55,7 @@ def board(env, monkeypatch):
     """A fake board CLI at HERDR_PROJECTS_BIN; HOME is the test's own, so ~/.herdr-projects is empty."""
     monkeypatch.setenv("HOME", str(env.home))
     cli = env.bin / "herdr-projects"
-    cli.write_text(FAKE_BOARD.format(python=sys.executable))
-    cli.chmod(0o755)
+    write_launcher(cli, FAKE_BOARD.format(python=sys.executable))
     state_file = env.tmp / "board.json"
     monkeypatch.setenv("FAKE_BOARD_STATE", str(state_file))
     monkeypatch.setenv("HERDR_PROJECTS_BIN", str(cli))
@@ -403,8 +403,7 @@ def test_fallback_triples_drop_the_adapter_version():
 
 def _exe(path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\n")
-    path.chmod(0o755)
+    write_launcher(path, "#!/bin/sh\n")
     return str(path)
 
 

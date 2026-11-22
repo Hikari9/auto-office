@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from office import adapters
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -25,8 +26,7 @@ def clean_memo():
 
 def _make_executable(path: Path, script_content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(script_content, encoding="utf-8")
-    path.chmod(0o755)
+    write_launcher(path, script_content, encoding="utf-8")
     return path
 
 
@@ -36,7 +36,7 @@ def test_harness_version_memo_n_calls_one_probe_and_mtime_change_reprobes(tmp_pa
     bin_dir = tmp_path / "bin"
     exe_path = bin_dir / "fakeharness"
     _make_executable(exe_path, "#!/bin/sh\necho 'fakeharness 1.2.3'\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter = {"id": "fakeharness", "invocation": {"executable": "fakeharness"}}
 
@@ -146,11 +146,11 @@ def test_harness_version_swapped_fake_binary_different_path(tmp_path, monkeypatc
     adapter = {"id": "fake", "invocation": {"executable": "fake"}}
 
     # Case 1: PATH points to bin_a
-    monkeypatch.setenv("PATH", f"{bin_dir_a}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir_a}{os.pathsep}{os.environ.get('PATH', '')}")
     assert adapters.harness_version(adapter) == "1.0.0"
 
     # Case 2: PATH points to bin_b (swapped binary location)
-    monkeypatch.setenv("PATH", f"{bin_dir_b}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir_b}{os.pathsep}{os.environ.get('PATH', '')}")
     assert adapters.harness_version(adapter) == "2.0.0"
 
 
@@ -159,7 +159,7 @@ def test_harness_version_cross_process_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
     bin_dir = tmp_path / "bin"
     exe = _make_executable(bin_dir / "tool", "#!/bin/sh\necho 'tool 3.1.4'\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter = {"id": "tool", "invocation": {"executable": "tool"}}
 
@@ -190,7 +190,7 @@ def test_harness_version_probe_failure_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
     bin_dir = tmp_path / "bin"
     _make_executable(bin_dir / "crash", "#!/bin/sh\nexit 1\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter = {"id": "crash", "invocation": {"executable": "crash"}}
 
@@ -213,7 +213,7 @@ def test_harness_version_ttl_expiration(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
     bin_dir = tmp_path / "bin"
     exe = _make_executable(bin_dir / "timed", "#!/bin/sh\necho 'timed 1.0'\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter = {"id": "timed", "invocation": {"executable": "timed"}}
 
@@ -273,7 +273,7 @@ def test_harness_version_disk_cache_corrupt_or_non_dict(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters.paths, "data_home", lambda: tmp_path)
     bin_dir = tmp_path / "bin"
     exe = _make_executable(bin_dir / "safe", "#!/bin/sh\necho 'safe 1.0'\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter = {"id": "safe", "invocation": {"executable": "safe"}}
     cache_path = tmp_path / "harness-versions.json"
@@ -304,7 +304,7 @@ def test_harness_version_different_command_same_exe(tmp_path, monkeypatch):
         "if [ \"$1\" = \"--v1\" ]; then echo '1.0.0'; else echo '2.0.0'; fi\n"
     )
     _make_executable(bin_dir / "multicmd", script)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     adapter_a = {
         "id": "multicmd_a",
@@ -347,7 +347,7 @@ def test_harness_version_nonzero_exit_with_version_output(tmp_path, monkeypatch)
     _make_executable(bin_dir / "errprobe_stderr", "#!/bin/sh\necho 'error 503.1: offline' >&2\nexit 1\n")
     # Case 2: command exits 2 with version on stdout
     _make_executable(bin_dir / "errprobe_stdout", "#!/bin/sh\necho 'tool v2.4.9 (experimental)'\nexit 2\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
     orig_run = subprocess.run
     run_counts: dict[str, int] = {}

@@ -4,6 +4,7 @@ A fake `hermes` on PATH stands in for the CLI; nothing here calls a model.
 """
 from __future__ import annotations
 
+import os
 import csv
 import stat
 import textwrap
@@ -27,7 +28,7 @@ def _fake_hermes(tmp_path, monkeypatch, auth: str):
     exe.parent.mkdir(exist_ok=True)
     exe.write_text(f"#!/bin/sh\nif [ \"$1\" = auth ]; then cat <<'EOF'\n{auth}EOF\nelse echo 'Hermes Agent v0.23.3'; fi\n")
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{exe.parent}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", f"{exe.parent}{os.pathsep}/usr/bin{os.pathsep}/bin")
     monkeypatch.setenv("OFFICE_USER_ADAPTERS", str(tmp_path / "no-user-adapters"))
     route_policy.reset_provider_cache()
     yield

@@ -4,6 +4,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.mark.parametrize("case, expected", [
@@ -19,8 +23,7 @@ def test_pre_push_ref_guard(tmp_path, case, expected):
     (tmp_path / "scripts").mkdir()
     marker = tmp_path / "validated"
     script = tmp_path / "scripts/validate.sh"
-    script.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
-    script.chmod(0o755)
+    write_launcher(script, f"#!/bin/sh\ntouch '{marker}'\n")
     updates = {
         "head": f"refs/heads/topic {sha} refs/heads/topic {zero}\n",
         "different": f"refs/heads/topic {'1' * 40} refs/heads/topic {zero}\n",

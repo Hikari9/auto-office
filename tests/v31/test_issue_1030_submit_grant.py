@@ -3,6 +3,7 @@ exactly `office review submit --file <its dispatch dir>/review-submit.txt` and n
 posture is otherwise unchanged. pi gets no grant: it cannot restrict bash to one command."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ def _tools(argv, flag):
     return argv[argv.index(flag) + 1].split(",")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the Claude allowedTools path grammar is POSIX; the Windows form is unverified (listed as a Windows limit)")
 @pytest.mark.parametrize("kind", ["reviewer", "vision"])
 @pytest.mark.parametrize("pane", [False, True])
 def test_claude_reviewers_may_run_exactly_the_submit_command(kind, pane, monkeypatch):

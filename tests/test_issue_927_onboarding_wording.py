@@ -4,6 +4,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,14 +26,12 @@ def _probe(tmp_path, direct_url, *, mismatched=False):
     tool_bin = tmp_path / "tools" / "auto-office" / "bin"
     tool_bin.mkdir(parents=True, exist_ok=True)
     (tool_bin / "python").symlink_to(sys.executable)
-    (tool_bin / "office").write_text("#!/bin/sh\n")
-    (tool_bin / "office").chmod(0o755)
+    write_launcher((tool_bin / "office"), "#!/bin/sh\n")
     executable_bin = tmp_path / "bin"
     executable_bin.mkdir(parents=True, exist_ok=True)
     (executable_bin / "office").symlink_to(tool_bin / "office" if not mismatched else sys.executable)
-    (executable_bin / "uv").write_text(f'#!/bin/sh\nprintf "%s\\n" "{tmp_path / "tools"}"\n')
-    (executable_bin / "uv").chmod(0o755)
-    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}:{os.environ['PATH']}"}
+    write_launcher((executable_bin / "uv"), f'#!/bin/sh\nprintf "%s\\n" "{tmp_path / "tools"}"\n')
+    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}{os.pathsep}{os.environ['PATH']}"}
     return subprocess.run(command, shell=True, env=env, capture_output=True, text=True)
 
 

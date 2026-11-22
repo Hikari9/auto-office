@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from conftest import GOOD_ADD, GOOD_MUL, PLAN_TWO, start_inline
+from host_tools import write_launcher  # noqa: E402
 
 FAKE_GH = Path(__file__).resolve().parent / "fake_gh.py"
 PLAN_STACKED = PLAN_TWO.replace("### T2: Implement mul\nscope: mul.py\ndepends: none",
@@ -25,8 +26,7 @@ def github(env, monkeypatch, **state) -> Path:
     if state:
         from fake_gh import load
         gh_state.write_text(json.dumps({**load(), **state}))
-    (env.bin / "gh").write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE_GH)!r}, run_name='__main__')\n")
-    (env.bin / "gh").chmod(0o755)
+    write_launcher((env.bin / "gh"), f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE_GH)!r}, run_name='__main__')\n")
     return bare
 
 

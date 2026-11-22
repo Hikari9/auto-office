@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from host_tools import write_launcher  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 HOOK = ROOT / "scripts" / "hooks" / "close_finished_panes.mjs"
@@ -66,8 +67,7 @@ def setup(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake = bindir / "herdr"
-    fake.write_text(FAKE.format(python=sys.executable))
-    fake.chmod(0o755)
+    write_launcher(fake, FAKE.format(python=sys.executable))
     herdr_state = tmp_path / "herdr.json"
 
     def run(rows, panes, *, down=False, self_pane="w1:pQ"):

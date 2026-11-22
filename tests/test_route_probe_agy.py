@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from office import adapters, route_probe  # noqa: E402
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 MODEL = "gemini-4-hydrogen-medium"
 
@@ -45,8 +49,7 @@ def agy(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     script = bin_dir / "agy"
-    script.write_text(FAKE_AGY.format(python=sys.executable))
-    script.chmod(0o755)
+    write_launcher(script, FAKE_AGY.format(python=sys.executable))
     monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]))
     monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("OFFICE_DATA_HOME", str(tmp_path / "data"))

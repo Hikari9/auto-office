@@ -10,6 +10,7 @@ import pytest
 
 from conftest import PLAN_TWO, GOOD_ADD, approved_run, self_reviewed, task_row
 from office import db, discovery, dispatch, root_wake, state
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 PANE = "fake-workspace:p-root"
@@ -228,7 +229,7 @@ def test_723_background_supervisor_wakes_idle_root_and_root_dispatches_within_fi
                          '''Path(os.environ["FAKE_RESPONDED"]).write_text(json.dumps({"context": a.returncode, "dispatch": b.returncode,\n'''
                          '''                                                  "stdout": b.stdout + b.stderr}))\n''')
     herdr = env.bin / "herdr"
-    herdr.write_text('''#!/usr/bin/env python3
+    write_launcher(herdr, '''#!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
@@ -253,7 +254,6 @@ else:
     result = {}
 print(json.dumps({"result": result}))
 ''')
-    herdr.chmod(0o755)
     for key, value in {
         "HERDR_PANE_ID": PANE, "FAKE_WAKE_PANE": PANE, "FAKE_WAKE_MARKER": str(marker),
         "FAKE_WAKE_RUN_ID": run["id"], "FAKE_WAKE_REPO": str(env.repo),

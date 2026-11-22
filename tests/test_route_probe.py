@@ -6,6 +6,7 @@ No real model is called.
 import copy
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -20,9 +21,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests" / "v31"))
 
 from office import adapters, config as cfg, db, route_policy, route_probe  # noqa: E402
 from office.route_probe import Refused  # noqa: E402
+from host_tools import write_launcher  # noqa: E402
 
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
 ROUTE = "codex/gpt-6.1-sol@high"
@@ -51,13 +54,12 @@ class World:
         monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp / "state"))
         monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp / "user-config.yaml"))
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", *([os.path.join(os.environ["SystemRoot"], "System32"), os.path.dirname(shutil.which("git") or "")] if sys.platform == "win32" else [])]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         for name in ("codex", "claude"):
             script = self.bin / name
-            script.write_text(f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = {name!r}\n"
-                              f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-            script.chmod(0o755)
+            write_launcher(script, f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = {name!r}\n"
+                                   f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
         self.monkeypatch = monkeypatch
         if route_probe.write_boundary_reason() is not None:
             # No OS boundary here: the launch path is still exercised, the boundary tests skip.
@@ -1084,26 +1086,28 @@ def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monke
     assert route_probe._running({os.getpid()}) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a /bin/sh leader started with start_new_session")
 def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, monkeypatch):
     """A recovered pid whose start time no longer matches is not ours (#1296 review)."""
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = route_probe.portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-recovered", None), seed=True,
                                 start="Sat Jan  1 00:00:00 2000", term_wait=0.2, kill_wait=0.2)
     assert sent == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a /bin/sh leader started with start_new_session")
 def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
     """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = route_probe.portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
                                 term_wait=0.2, kill_wait=0.2)

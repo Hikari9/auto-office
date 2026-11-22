@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 import fake_agent
+from host_tools import host_tool_dirs, read_launcher, write_launcher
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -123,7 +124,7 @@ class InProcessAgent:
         self._running = False
         # From the spawn on, a signal is chained to the supervisor's own handler (which records it for the
         # classification) and either stops the running agent or, before it starts, keeps it from starting.
-        self._previous = {s: signal.signal(s, self._on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+        self._previous = {s: signal.signal(s, self._on_signal) for s in (signal.SIGTERM, *([signal.SIGHUP] if hasattr(signal, 'SIGHUP') else []), signal.SIGINT)}
 
     def _on_signal(self, signum, frame):
         handler = self._previous.get(signum)
@@ -186,8 +187,7 @@ class Env:
         for name in ("codex", "claude", "agy"):
             self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
                                            f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-            (self.bin / name).write_text(self.fakes[self.bin / name])
-            (self.bin / name).chmod(0o755)
+            write_launcher(self.bin / name, self.fakes[self.bin / name])
         env_drop = [k for k in os.environ if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_"))]
         for k in env_drop:
             monkeypatch.delenv(k, raising=False)
@@ -207,7 +207,7 @@ class Env:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.home / ".claude"))
         monkeypatch.setenv("CODEX_HOME", str(self.home / ".codex"))
         # Only fake harnesses and system tools: a real harness on PATH must never run in tests.
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", *host_tool_dirs()]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         pythonpath = [str(SRC)]
         import site
@@ -255,15 +255,30 @@ class Env:
         monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin: self._spawn_agent(
             spawn_process, argv, cwd, env, stdin))
 
+    @staticmethod
+    def _fake_key(exe):
+        """The `self.fakes` key for a resolved executable. On Windows `which` finds the `<name>.cmd`
+        launcher that `write_launcher` wrote, while the fake is registered under `<name>`."""
+        if not exe:
+            return None
+        p = Path(exe)
+        return p.with_suffix("") if sys.platform == "win32" and p.suffix.lower() == ".cmd" else p
+
+    @staticmethod
+    def _fake_text(key):
+        """What the fake's script says: the `<name>.py` body beside the launcher on Windows."""
+        return read_launcher(key)
+
     def _spawn_agent(self, spawn_process, argv, cwd, env, stdin):
         """The agent seam: an unmodified fake harness runs in this process; anything
         that needs a real process (a real binary, a sleep, a wall cap, a signal
         the scenario cannot emulate) is started as one."""
         exe = shutil.which(argv[0], path=env.get("PATH"))
-        fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
-        if not fake or self._has_wall_cap(Path(exe).name, env) or not fake_agent.scenario_runs_in_process(env):
+        key = self._fake_key(exe)
+        fake = key and key in self.fakes and self._fake_text(key) == self.fakes[key]
+        if not fake or self._has_wall_cap(key.name if key else Path(exe).name, env) or not fake_agent.scenario_runs_in_process(env):
             return spawn_process(argv, cwd, env, stdin)
-        env = {**env, "FAKE_HARNESS": Path(exe).name}
+        env = {**env, "FAKE_HARNESS": key.name}
         return InProcessAgent(argv, cwd, env, stdin)
 
     @staticmethod
@@ -348,8 +363,9 @@ class Env:
         found = {}  # what each adapter finds on PATH: an untouched fake of ours (by name), or whatever else it is
         for name, adapter in all_adapters.items():
             exe = shutil.which(adapters.executable(adapter) or "")
-            fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
-            found[name] = Path(exe).name if fake else exe
+            key = self._fake_key(exe)
+            fake = key and key in self.fakes and self._fake_text(key) == self.fakes[key]
+            found[name] = key.name if fake else exe
         # Route identity includes the resolved harness major, which can change
         # while the executable path and adapter configuration stay the same.
         route_harnesses = {row.get("invocation_harness") for row in catalog

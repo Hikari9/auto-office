@@ -19,7 +19,6 @@ Without a card the run never calls the board: no events, no jobs, no subprocess.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -29,7 +28,7 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import db, paths, state
+from office import db, paths, portable, state
 from office.result import Result
 from office.state import Usage
 from office.util import now_iso, short
@@ -149,11 +148,11 @@ def _card_lock(run_id: str):
     d = paths.run_dir(run_id)
     d.mkdir(parents=True, exist_ok=True)
     with (d / "card.lock").open("a+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        portable.lock_exclusive(fh)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            portable.unlock(fh)
 
 
 def link(con, run_id: str, card_id: str, *, created_by: str, cli: str | None = None) -> dict:

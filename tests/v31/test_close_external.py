@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 
 from conftest import GOOD_ADD, approved_run, task_row
+from host_tools import write_launcher  # noqa: E402
 
 
 def _gh(env, state: str, oid: str):
-    (env.bin / "gh").write_text(f"#!/bin/sh\necho '{json.dumps({'state': state, 'url': 'https://github.com/o/r/pull/7', 'number': 7, 'mergeCommit': {'oid': oid}})}'\n")
-    (env.bin / "gh").chmod(0o755)
+    write_launcher((env.bin / "gh"), f"#!/bin/sh\necho '{json.dumps({'state': state, 'url': 'https://github.com/o/r/pull/7', 'number': 7, 'mergeCommit': {'oid': oid}})}'\n")
 
 
 def _blocked_run(env):

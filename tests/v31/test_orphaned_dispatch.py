@@ -15,6 +15,7 @@ from office import gates, integration, state
 from office.util import claim_alive, claim_identity, claim_signalable, now_iso
 from test_land import _plan, _run
 from test_task_prs import gh
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -41,8 +42,7 @@ def _orphan(env, monkeypatch, *, pid=DEAD_PID, age="2026-01-01T00:00:00+00:00", 
     """A running pane-hosted reviewer on a still-running gate, as a host reboot leaves it."""
     approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}])
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     con = env.con()
     run = _run_row(con)
     con.execute("INSERT INTO gates(id, run_id, subject, kind, input_key, status, created_at) VALUES(?,?,?,?,?,?,?)",

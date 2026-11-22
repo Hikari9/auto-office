@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from conftest import start_inline
+from host_tools import write_launcher  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
@@ -29,8 +30,7 @@ def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
 def probe_env(env, monkeypatch):
     """`env` with its `codex` replaced by the probe fake and a launch log."""
     codex = env.bin / "codex"
-    codex.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-    codex.chmod(0o755)
+    write_launcher(codex, f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
     log = env.tmp / "launches.log"
     from office import route_probe
     if route_probe.write_boundary_reason() is not None:  # no OS boundary here: the launch path still runs

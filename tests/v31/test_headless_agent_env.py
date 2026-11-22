@@ -13,6 +13,7 @@ import pytest
 from conftest import Env, _activate, approved_run
 
 from test_herdr_agent_launch import launch_in_herdr
+from host_tools import read_launcher, write_launcher  # noqa: E402
 
 # Runs first in every fake harness binary, before the harness does anything: reads agent.env as the agent
 # process finds it at its start and records what it saw. The fake then runs as it always does.
@@ -39,9 +40,9 @@ def _recording_harnesses(env, monkeypatch):
     record = env.tmp / "agent-env-seen.json"
     monkeypatch.setenv("FAKE_ENV_RECORD", str(record))
     for path in list(env.fakes):
-        body = path.read_text().replace("import os, runpy\n", "import os, runpy\n" + PRELUDE, 1)
+        body = read_launcher(path).replace("import os, runpy\n", "import os, runpy\n" + PRELUDE, 1)
         assert PRELUDE in body, "the fake harness wrapper changed shape"
-        path.write_text(body)
+        write_launcher(path, body)
         env.fakes[path] = body
     return record
 

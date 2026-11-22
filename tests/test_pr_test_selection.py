@@ -1,6 +1,7 @@
 """Regression coverage for Auto-Office's targeted PR selector (#854)."""
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -10,6 +11,10 @@ from pathlib import Path
 import pytest
 
 from scripts.select_pr_tests import SAFETY_SMOKE, SelectionError, selection
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 
 def git(root: Path, *args: str) -> str:
@@ -205,8 +210,7 @@ case "$1" in
 esac
 exit 99
 '''
-    (env_dir / "python3").write_text(fake_python)
-    (env_dir / "python3").chmod(0o755)
+    write_launcher((env_dir / "python3"), fake_python)
     stamp = hashlib.sha256((pr_repo / "pyproject.toml").read_bytes()).hexdigest()
     (pr_repo / ".venv" / ".validate-stamp").write_text(stamp + "\n")
     git(pr_repo, "add", ".")
@@ -261,7 +265,7 @@ def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo, too_old):
     fake_bin = pr_repo / "fake-bin"
     fake_bin.mkdir()
     uv = fake_bin / "uv"
-    uv.write_text('''#!/bin/bash
+    write_launcher(uv, '''#!/bin/bash
 printf '%s\\n' "$*" >> "$UV_LOG"
 if [ "$1" = "venv" ]; then
   mkdir -p .venv/bin
@@ -272,11 +276,10 @@ fi
 if [ "$1" = "pip" ]; then exit 0; fi
 exit 99
 ''')
-    uv.chmod(0o755)
     env_log = pr_repo / "uv.log"
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
                                "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
                                "SELECTED_TESTS": selected_tests,
                                "PY_TOO_OLD": "1" if too_old else "",
@@ -310,16 +313,15 @@ def test_build_resource_check_survives_early_grep_match(tmp_path):
         "for i in range(200000):\n"
         "    print('filler', i, 'x' * 40)\n")
     fake_python = fake_bin / "python3"
-    fake_python.write_text(
+    write_launcher(fake_python, 
         "#!/bin/bash\n"
         'if [ "$1" = "-m" ] && [ "$2" = "build" ]; then mkdir -p dist && : > dist/x.whl; exit 0; fi\n'
         'if [ "$1" = "-m" ] && [ "$2" = "zipfile" ]; then exec '
         f"{shlex.quote(sys.executable)} {shlex.quote(str(listing))}; fi\n"
         "exit 99\n")
-    fake_python.chmod(0o755)
     proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{body}"], cwd=tmp_path,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"})
     assert proc.returncode == 0, proc.stderr
 
 

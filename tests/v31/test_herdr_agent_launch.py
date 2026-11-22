@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from conftest import approved_run
+from host_tools import write_launcher  # noqa: E402
 
 FAKE_HERDR = r'''#!{python}
 import json, os, shlex, sys
@@ -168,8 +169,7 @@ def _idle_before_busy(reads) -> list:
 
 def _fake(env, monkeypatch, gets=(), reads=(), *, launch=True) -> Path:
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     state = env.tmp / "herdr-state.json"
     reads = _idle_before_busy(reads) if launch else list(reads)
     state.write_text(json.dumps({"calls": [], "n": 0, "get": list(gets), "reads": reads}))

@@ -26,7 +26,8 @@ import pytest
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
 
 PROBE = r'''
-import fcntl, json, os, signal, sys, time
+import json, os, signal, sys, time
+from office import portable
 d, secs = sys.argv[1], float(sys.argv[2])
 os.makedirs(d, exist_ok=True)
 if len(sys.argv) > 3 and sys.argv[3] == "stubborn" and not os.path.exists(os.path.join(d, "stubborn.done")):
@@ -36,14 +37,14 @@ if len(sys.argv) > 3 and sys.argv[3] == "stubborn" and not os.path.exists(os.pat
 lock = open(os.path.join(d, "probe.lock"), "a")
 
 def bump(delta):
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    portable.lock_exclusive(lock)
     path = os.path.join(d, "state.json")
     st = json.load(open(path)) if os.path.exists(path) else {"now": 0, "max": 0, "runs": 0}
     st["now"] += delta
     st["max"] = max(st["max"], st["now"])
     st["runs"] += 1 if delta > 0 else 0
     json.dump(st, open(path, "w"))
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    portable.unlock(lock)
 
 bump(1)
 time.sleep(secs)
@@ -320,8 +321,8 @@ def test_a_held_execution_lock_is_alive_and_a_free_one_is_dead(env, monkeypatch)
     con.execute("UPDATE outbox SET status='claimed', attempts=1, claim_token='A1', claimed_pid=1 WHERE id=?", (job["id"],))
     row = _row(con, job["id"])
     assert jobs.claim_state(row) == (util.UNKNOWN, "its execution lock file is missing")
-    holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'a'); "
-                               "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
+    holder = subprocess.Popen([sys.executable, "-c", "import sys, time; from office import portable; f = open(sys.argv[1], 'a'); "
+                               "portable.lock_exclusive(f); print('held', flush=True); time.sleep(60)",
                                str(jobs.lock_path(run["id"], job["id"]))], stdout=subprocess.PIPE, text=True)
     try:
         assert holder.stdout.readline().strip() == "held"
