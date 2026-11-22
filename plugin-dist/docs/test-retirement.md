@@ -440,6 +440,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_land.py` | keep |  |
 | `tests/v31/test_land_recovery.py` | keep |  |
 | `tests/v31/test_landing_gaps.py` | keep |  |
+| `tests/v31/test_landing_recovery.py` | keep |  |
 | `tests/v31/test_lane_gate_revoke.py` | keep |  |
 | `tests/v31/test_launch_argv_evidence.py` | keep |  |
 | `tests/v31/test_lineage_supersession_811.py` | consolidate | the Terra score and effort-roster node is replaced by a data-driven catalog property |
@@ -594,7 +595,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 
-Totals: {'keep': 368, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
+Totals: {'keep': 370, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
 
 ## Left alone on purpose
 
