@@ -21,7 +21,7 @@ from unittest import mock
 import pytest
 
 import fake_agent
-from host_tools import host_tool_dirs
+from host_tools import host_tool_dirs, write_launcher
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -187,8 +187,7 @@ class Env:
         for name in ("codex", "claude", "agy"):
             self.fakes[self.bin / name] = (f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = '{name}'\n"
                                            f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-            (self.bin / name).write_text(self.fakes[self.bin / name])
-            (self.bin / name).chmod(0o755)
+            write_launcher(self.bin / name, self.fakes[self.bin / name])
         env_drop = [k for k in os.environ if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_"))]
         for k in env_drop:
             monkeypatch.delenv(k, raising=False)

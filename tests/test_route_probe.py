@@ -21,9 +21,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests" / "v31"))
 
 from office import adapters, config as cfg, db, route_policy, route_probe  # noqa: E402
 from office.route_probe import Refused  # noqa: E402
+from host_tools import write_launcher  # noqa: E402
 
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
 ROUTE = "codex/gpt-6.1-sol@high"
@@ -56,9 +58,8 @@ class World:
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         for name in ("codex", "claude"):
             script = self.bin / name
-            script.write_text(f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = {name!r}\n"
-                              f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
-            script.chmod(0o755)
+            write_launcher(script, f"#!{sys.executable}\nimport os, runpy\nos.environ['FAKE_HARNESS'] = {name!r}\n"
+                                   f"runpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
         self.monkeypatch = monkeypatch
         if route_probe.write_boundary_reason() is not None:
             # No OS boundary here: the launch path is still exercised, the boundary tests skip.
