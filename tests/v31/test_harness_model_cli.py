@@ -279,6 +279,14 @@ def test_smoke_fails_a_clean_exit_that_never_answers_the_prompt(env):
     assert code == 1 and "no_answer" in out
     code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": "Sure.\n**Ready.**"})
     assert code == 0 and "launched" in out
+    # A JSON-event harness (kilo run --format json) answers inside a string value, never as a plain last line.
+    events = "\n".join(json.dumps(e) for e in (
+        {"type": "user", "text": echoed}, {"type": "text", "part": {"text": "READY"}}, {"type": "step_finish", "tokens": 9}))
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": events})
+    assert code == 0 and "launched" in out, out
+    prompt_only = "\n".join(json.dumps(e) for e in ({"type": "user", "text": echoed}, {"type": "step_finish"}))
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": prompt_only})
+    assert code == 1 and "no_answer" in out
 
 
 def test_smoke_refuses_an_invalid_adapter_and_reports_a_failed_launch(env):

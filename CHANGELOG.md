@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.31.9
 
-Hermes panes start again when `hermes` on PATH is an installer wrapper that forwards to the git checkout's own wrapper (#1321). The launcher resolver stopped at the outer `exec <path> "$@"` script, so Office wrote no launcher shim, Herdr never detected the pane's Hermes, and every `herdr agent start --kind hermes` timed out into the headless fallback. The resolver now follows forwarding wrappers (bounded, loop-safe). `office harness smoke` no longer passes a clean exit that never answered: the reply's last line must be the READY marker, else the result is `no_answer`.
+Hermes panes start again when `hermes` on PATH is an installer wrapper that forwards to the git checkout's own wrapper (#1321). The launcher resolver stopped at the outer `exec <path> "$@"` script, so Office wrote no launcher shim, Herdr never detected the pane's Hermes, and every `herdr agent start --kind hermes` timed out into the headless fallback. The resolver now follows forwarding wrappers (bounded, loop-safe). `office harness smoke` no longer passes a clean exit that never answered: a line of the reply, or of the text inside a JSON reply, must be the READY marker alone, else the result is `no_answer`.
 
 ## 3.31.8
 
