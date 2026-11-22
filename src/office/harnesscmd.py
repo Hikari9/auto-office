@@ -54,9 +54,19 @@ UNSAFE_TRUST_FLAGS: dict[str, re.Pattern[str]] = {
     "trust_level=trusted": re.compile(r"trust_level\s*=\s*\\?\"?trusted"),
 }
 _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+SMOKE_MARKER = "READY"
 SMOKE_PROMPT = ("This is an Auto Office launch smoke test in a throwaway repository. "
-                "Reply with the single word READY. Do not edit, create or delete any files.")
+                f"Reply with the single word {SMOKE_MARKER}. Do not edit, create or delete any files.")
 SMOKE_TIMEOUT_S = 300
+
+
+def _answered(text: str) -> bool:
+    """True when the reply's last non-empty line is the smoke marker (case, markup and end punctuation aside).
+
+    Exit 0 with output is not an answer: a harness that never read its prompt still prints a banner and a goodbye
+    and exits cleanly (#1321). The prompt itself is never on that line, so echoing it does not pass either."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return bool(lines) and lines[-1].strip("*_`'\".!:> ").upper() == SMOKE_MARKER
 
 
 def _usage(message: str, next_step: str | None = None) -> OfficeError:
@@ -651,8 +661,8 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
         except OSError as e:
             code, out, err, timed_out = None, "", str(e), False
         reply = output.read_text(encoding="utf-8", errors="replace") if output and output.is_file() else ""
-    answered = bool((reply or out).strip())
-    result = "launched" if code == 0 and answered else ("timed_out" if timed_out else "failed")
+    answered = _answered(reply or out)
+    result = ("launched" if answered else "no_answer") if code == 0 else ("timed_out" if timed_out else "failed")
     rec.update(result=result, exit_code=code, timed_out=timed_out, duration_s=round(time.time() - started, 2),
                output_bytes=len((reply or out).encode()), stderr_tail=err.strip()[-300:])
     _record_smoke(rec)
@@ -664,6 +674,8 @@ def smoke(ident: str | None, model: str | None, *, effort: str | None = None, ti
         if not rows:
             nxt = f"office model add {aid}/{slug} --effort {effort}"
         return Result(lines=lines, next=nxt, data=rec)
+    if result == "no_answer":
+        lines.append(f"exit 0 but the reply's last line is not {SMOKE_MARKER}: the harness never answered the prompt")
     if err.strip():
         lines.append(f"stderr: {err.strip().splitlines()[-1][:200]}")
     return Result(lines=lines, next="check the argv, sign-in and model, then rerun the smoke", exit_code=1, data=rec)

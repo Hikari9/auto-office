@@ -33,7 +33,7 @@ if log:
     with open(log, "a") as f:
         f.write(json.dumps({{"argv": args, "cwd": os.getcwd(), "prompt": prompt,
                             "run": os.environ.get("OFFICE_RUN_ID")}}) + "\\n")
-print("READY")
+print(os.environ.get("FAKECLI_REPLY", "READY"))
 """
 
 GOOD = {
@@ -264,6 +264,21 @@ def test_smoke_records_launch_evidence_in_a_throwaway_repo_and_never_trust(env, 
     finally:
         con.close()
     assert "smoke launched" in env.office("harness", "list")[1]
+
+
+def test_smoke_fails_a_clean_exit_that_never_answers_the_prompt(env):
+    # #1321: a harness that ignored its prompt printed a banner and a goodbye, exited 0, and the smoke said launched.
+    _fakecli(env)
+    _write_adapter(GOOD)
+    banner = "Hermes Agent v0.23.3\nWelcome!\nShutting down... Goodbye!"
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": banner})
+    assert code == 1 and "no_answer" in out and "never answered" in out
+    assert json.loads(harnesscmd.smoke_log().read_text().splitlines()[-1])["result"] == "no_answer"
+    echoed = "Reply with the single word READY. Do not edit, create or delete any files."
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": echoed})
+    assert code == 1 and "no_answer" in out
+    code, out = env.office("harness", "smoke", "fakecli", "--model", "acme/fast-1", env={"FAKECLI_REPLY": "Sure.\n**Ready.**"})
+    assert code == 0 and "launched" in out
 
 
 def test_smoke_refuses_an_invalid_adapter_and_reports_a_failed_launch(env):

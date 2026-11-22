@@ -75,6 +75,10 @@ def scrub_shell_line() -> str:
 
 
 _EXEC = re.compile(r"^exec\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))\s", re.M)
+# A forwarding wrapper: its exec line hands every argument straight to another file (`exec <path> "$@"`), as an
+# installer's ~/.local/bin/hermes does in front of the git checkout's own wrapper (#1321).
+_FORWARD = re.compile(r"^exec\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))\s+\"\$@\"\s*$", re.M)
+_MAX_WRAPPER_HOPS = 4
 _ROOT = re.compile(r"sys\.path\.insert\(0,\s*(?:'\"'\"')?([^'\"\s,)]+)")
 
 
@@ -84,25 +88,34 @@ def resolve_launcher(hermes: str | None = None) -> list[str] | None:
     A git-installed Hermes puts a shell wrapper on PATH that execs `python3 -I -c '<inline script>'`: the running
     process then carries no `hermes` in its argv and Herdr cannot detect it. The checkout holds the real launcher
     script (`<install>/hermes`), which runs under the same interpreter, so the resolved form is
-    `[interpreter, <install>/hermes]`. Any other `hermes` (a console script, a binary) is returned as itself;
-    None when Hermes is not installed.
+    `[interpreter, <install>/hermes]`. A wrapper that only forwards (`exec <path> "$@"`, as an installer's
+    ~/.local/bin/hermes does) is followed, up to a few hops, to the wrapper it forwards to (#1321). Any other
+    `hermes` (a console script, a binary) is returned as itself; None when Hermes is not installed.
     """
     exe = hermes or shutil.which("hermes")
     if not exe:
         return None
-    try:
-        head = Path(exe).read_bytes()[:65536]
-    except OSError:
-        return [exe]
-    if not head.startswith(b"#!/bin/sh"):
-        return [exe]
-    text = head.decode("utf-8", "replace")
-    found = _EXEC.search(text)
-    interpreter = next((g for g in found.groups() if g), None) if found else None
-    root = _ROOT.search(text)
-    script = Path(root[1]) / "hermes" if root else None
-    if interpreter and script and Path(interpreter).is_file() and script.is_file():
-        return [interpreter, str(script)]
+    current, seen = exe, set()
+    for _ in range(_MAX_WRAPPER_HOPS):
+        seen.add(current)
+        try:
+            head = Path(current).read_bytes()[:65536]
+        except OSError:
+            return [exe]
+        if not head.startswith(b"#!/bin/sh"):
+            return [exe]
+        text = head.decode("utf-8", "replace")
+        found = _EXEC.search(text)
+        interpreter = next((g for g in found.groups() if g), None) if found else None
+        root = _ROOT.search(text)
+        script = Path(root[1]) / "hermes" if root else None
+        if interpreter and script and Path(interpreter).is_file() and script.is_file():
+            return [interpreter, str(script)]
+        forward = _FORWARD.search(text) if root is None else None
+        target = next((g for g in forward.groups() if g), None) if forward else None
+        if not target or target in seen or not Path(target).is_file():
+            return [exe]
+        current = target
     return [exe]
 
 
