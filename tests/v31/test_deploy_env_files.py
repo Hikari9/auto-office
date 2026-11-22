@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import sys
+
 import pytest
 
 from conftest import start_inline
@@ -115,6 +117,7 @@ def test_plan_submit_warns_about_a_gitignored_deploy_path(env):
 
 # ---------------------------------------------------------------- copying
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits do not exist on Windows")
 def test_env_files_are_copied_with_their_mode(repo, tmp_path):
     (repo / ".env").chmod(0o640)
     checkout = tmp_path / "c"

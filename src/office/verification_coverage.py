@@ -129,7 +129,7 @@ def is_full_suite(command: str) -> bool:
 _SCOPED_GATE_SHA256 = {
     "scripts/validate.sh": "d4a2a80240af41596cd4a66abf36731753e5feef9a90c5c0d13096beb98617d6",
     "scripts/select_pr_tests.py": "96e3fe6686dba9887976007c27b54ef9d5458c7ac6edfd26248f0a15c1101bf9",
-    "tests/test_pr_test_selection.py": "455659f4ed119003a9ea04c38e4f74b2f84e581f2da57519f5c74df8bad69309",
+    "tests/test_pr_test_selection.py": "0e0b499cec96942fa5c44f09de8a5d32e54f6ef7b61c6a16d1171237fcf5da01",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
     "tests/v31/test_verification_coverage.py": "5710c22de3c20f3a72c12298442cb491a0c9bac64ba1b46f950db39343c346e1",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",

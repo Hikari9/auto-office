@@ -1,6 +1,7 @@
 """Regression coverage for Auto-Office's targeted PR selector (#854)."""
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -278,7 +279,7 @@ exit 99
     env_log = pr_repo / "uv.log"
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
                                "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
                                "SELECTED_TESTS": selected_tests,
                                "PY_TOO_OLD": "1" if too_old else "",
@@ -320,7 +321,7 @@ def test_build_resource_check_survives_early_grep_match(tmp_path):
         "exit 99\n")
     proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{body}"], cwd=tmp_path,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"})
     assert proc.returncode == 0, proc.stderr
 
 

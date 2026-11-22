@@ -31,7 +31,7 @@ def _probe(tmp_path, direct_url, *, mismatched=False):
     executable_bin.mkdir(parents=True, exist_ok=True)
     (executable_bin / "office").symlink_to(tool_bin / "office" if not mismatched else sys.executable)
     write_launcher((executable_bin / "uv"), f'#!/bin/sh\nprintf "%s\\n" "{tmp_path / "tools"}"\n')
-    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}:{os.environ['PATH']}"}
+    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}{os.pathsep}{os.environ['PATH']}"}
     return subprocess.run(command, shell=True, env=env, capture_output=True, text=True)
 
 

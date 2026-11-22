@@ -13,6 +13,7 @@ authors = [{ name = "Auto Office maintainers" }]
 dependencies = [
   "PyYAML>=6",
   "jsonschema>=4.18",
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

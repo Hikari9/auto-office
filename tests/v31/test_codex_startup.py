@@ -14,7 +14,7 @@ from host_tools import write_launcher  # noqa: E402
 def test_codex_final_message_cannot_clobber_review(tmp_path, kind):
     # Reproduce Codex's exit write after the agent has written its own reply.
     fake = tmp_path / "codex"
-    write_launcher(fake, f"#!{sys.executable}\n" + '''import sys
+    fake = write_launcher(fake, f"#!{sys.executable}\n" + '''import sys
 from pathlib import Path
 args = sys.argv[1:]
 cwd = Path(args[args.index("--cd") + 1])
