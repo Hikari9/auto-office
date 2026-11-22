@@ -1431,6 +1431,8 @@ def route_repairs(con, run: dict, scope: dict, blocking: list[dict]) -> list[str
         state.emit(con, run, "gate.recheck", f"RECHECK {scope['id']} for {tid}: {text}", audience=f"task:{tid}",
                    task_id=tid)
         if gates.worker_live(con, task.get("current_dispatch_id")):
+            from office import dispatch as dispatch_mod
+            dispatch_mod.relet_released_lease(con, run, task)  # #1318: its repair submit must not be lease-lost
             state.enqueue(con, run, "notify_worker", {"dispatch_id": task["current_dispatch_id"], "task_id": tid,
                           "text": f"{scope['id']} convergence findings for you: run office status, fix, then office submit."},
                           dedup_key=f"notify:{scope['id']}:{tid}:{uuid.uuid4().hex[:6]}", max_attempts=1)

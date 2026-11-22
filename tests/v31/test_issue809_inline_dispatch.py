@@ -387,3 +387,81 @@ def test_a_relaunch_of_an_inline_task_stays_inline_with_its_reason(env):
     assert code == 0 and "orchestrator-inline lease/worktree prepared" in out, out
     after = _mode(env)
     assert after["mode"] == "inline" and after["why"] == before["why"] and after["owner"] == "orchestrator"
+
+
+# ------------------------------------------------------------------ #1318: a RECHECK after acceptance
+
+RECHECK = "VERDICT: RECHECK\nFINDING P1 | high | blocking | T1 | add has no contract | add one\nNEXT fix it"
+
+
+def _inline_submit(env, d, text):
+    wt = d["worktree"]
+    (Path(wt) / "calc.py").write_text(text)
+    subprocess.run(["git", "-C", wt, "add", "calc.py"], check=True)
+    subprocess.run(["git", "-C", wt, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "work"], check=True)
+    write_clean_ledger(wt)
+    return env.office("submit", cwd=wt, env={"OFFICE_RUN_ID": d["run_id"], "OFFICE_TASK_ID": "T1",
+                                             "OFFICE_DISPATCH_ID": d["id"]})
+
+
+def _inline_rechecked(env):
+    """An inline T1 accepted on its own checks, then reopened by a convergence RECHECK, its session still live."""
+    env.script(convergence_reviewer=[{"reply": RECHECK}, {"reply": APPROVED}], code_reviewer=[{"reply": APPROVED}])
+    _approved(env, _m_plan(), "M")
+    env.office("dispatch", "T1", check=0)
+    d = _q(env, "SELECT * FROM dispatches WHERE role='executor'")[0]
+    code, out = _inline_submit(env, d, GOOD_ADD)
+    assert code == 0, out
+    (conv,) = _gates(env, "convergence_review")
+    assert conv["verdict"] == "RECHECK", conv
+    assert _row(env)["status"] == "changes_required"
+    return d
+
+
+def test_a_recheck_after_acceptance_re_lets_the_live_inline_session_so_its_fix_submits(env):
+    d = _inline_rechecked(env)
+    live = _q(env, "SELECT l.* FROM leases l JOIN dispatches d ON d.lease_id=l.id WHERE d.id=?", (d["id"],))[0]
+    assert live["released_at"] is None and live["revoked_at"] is None, "the repair holder has a live lease"
+    code, out = _inline_submit(env, d, GOOD_ADD + "\n# contract: add(a, b) returns a + b\n")
+    assert code == 0 and "lease-lost" not in out, out
+    assert _row(env)["status"] == "accepted"
+    assert [g["verdict"] for g in _gates(env, "convergence_review")] == ["RECHECK", "APPROVED"]
+
+
+def test_revoke_ends_an_inline_session_whose_lease_acceptance_released_and_relaunch_works(env):
+    """The 3.31.4 loop: rerun refused worker-live, revoke said revoked, dispatch refused worker-live again."""
+    d = _inline_rechecked(env)
+    con = env.con()
+    # The state before the relet: acceptance released the live inline session's lease and nothing re-let it.
+    con.execute("UPDATE leases SET released_at='2026-11-22T00:00:00+00:00' WHERE dispatch_id=? AND revoked_at IS NULL",
+                (d["id"],))
+    con.commit()
+    code, out = env.office("rerun", "T1", "--fresh")
+    assert code != 0 and "worker-live" in out and "office revoke T1" in out, out
+    code, out = env.office("revoke", "T1")
+    assert code == 0 and f"ended {d['id']}" in out, out
+    ended = _q(env, "SELECT * FROM dispatches WHERE id=?", (d["id"],))[0]
+    assert ended["ended_at"] and ended["terminal_classification"] == "revoked"
+    assert _q(env, "SELECT revoked_at FROM leases WHERE id=?", (ended["lease_id"],))[0]["revoked_at"]
+    code, out = env.office("rerun", "T1", "--fresh")
+    assert code == 0 and "worker-live" not in out, out
+    new = _q(env, "SELECT * FROM dispatches WHERE role='executor' AND id!=?", (d["id"],))
+    assert len(new) == 1 and json.loads(new[0]["override_json"])["inline"] is True
+    code, out = _inline_submit(env, new[0], GOOD_ADD + "\n# contract: add(a, b) returns a + b\n")
+    assert code == 0 and "lease-lost" not in out, out
+
+
+def test_revoke_leaves_a_non_inline_external_session_running_but_fenced(env):
+    _approved(env, _xs_plan(), "XS")
+    code, out = env.office("dispatch", "T1", "--external")
+    assert code == 0, out
+    d = _q(env, "SELECT * FROM dispatches WHERE role='executor'")[0]
+    con = env.con()
+    con.execute("UPDATE leases SET released_at='2026-11-22T00:00:00+00:00' WHERE dispatch_id=?", (d["id"],))
+    con.commit()
+    code, out = env.office("revoke", "T1")
+    assert code == 0 and "ended" not in out, out
+    assert _q(env, "SELECT ended_at FROM dispatches WHERE id=?", (d["id"],))[0]["ended_at"] is None
+    assert _q(env, "SELECT revoked_at FROM leases WHERE dispatch_id=?", (d["id"],))[0]["revoked_at"]
+    code, out = env.office("dispatch", "T1", "--external")
+    assert code == 0 and "worker-live" not in out, out

@@ -1711,6 +1711,13 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         else:
             con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? "
                         "AND released_at IS NULL AND revoked_at IS NULL", (now, reason, run["id"], task_id))
+            # #1318: acceptance released the lease of a session that is still live (an external or orchestrator-inline
+            # worker is not ended by acceptance). Revoking only unreleased leases left it uncounted as revoked, so
+            # it stayed live and rerun/dispatch refused worker-live in a loop. Fence the live sessions' leases too.
+            con.execute("UPDATE leases SET revoked_at=?, revoke_reason=? WHERE run_id=? AND task_id=? AND revoked_at IS NULL "
+                        "AND id IN (SELECT lease_id FROM dispatches WHERE run_id=? AND task_id=? AND ended_at IS NULL "
+                        "AND status IN ('launching','running') AND (? IS NULL OR id=?))",
+                        (now, reason, run["id"], task_id, run["id"], task_id, only, only))
         if status:
             state.update_task(con, run["id"], task_id, status=status,
                               pause_reason=pause_reason or (f"lease revoked: {reason}" if status == "paused" else None))
@@ -1725,6 +1732,9 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     # Re-read: a launch may have recorded its launcher and pid since the snapshot.
     fresh = [state.get_dispatch(con, d["id"]) for d in targets if d["id"] not in cancelled]
     stopped = [d["id"] for d in fresh if stop_dispatch(run, d, notes=notes)]
+    # #1318: an orchestrator-inline worker is the orchestrator itself, which is asking for the revoke: there is no
+    # process to stop, so its end is recorded here and office rerun --fresh has an ended session to rerun.
+    inline_ended = [d["id"] for d in fresh if d["id"] not in stopped and _end_inline(con, run, d, reason)]
     starting = [d["id"] for d in fresh if d["id"] not in stopped and d["status"] == "launching" and not d.get("launcher")]
     if kept:
         lines = [f"{task_id} stays accepted on {task['accepted_revision_id']} | lease released; later submits from its "
@@ -1737,6 +1747,8 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
         lines.append(f"stopped {', '.join(stopped)} (SIGTERM)")
     if cancelled:
         lines.append(f"cancelled {', '.join(cancelled)} before its agent started")
+    if inline_ended:
+        lines.append(f"ended {', '.join(inline_ended)} (orchestrator-inline: no process to stop)")
     if starting:
         lines.append(f"{', '.join(starting)} is starting its agent now; it is tracked once up: office revoke "
                      f"{task_id} again to stop it")
@@ -1754,6 +1766,41 @@ def _revoke_task(con, run: dict, task_id: str, reason: str, only: str | None = N
     else:
         nxt = f"office dispatch {task_id} to relaunch"
     return Result(lines=lines, next=nxt)
+
+
+def is_inline(d: dict) -> bool:
+    """An orchestrator-inline dispatch (#809 R11): an external dispatch whose worker is the orchestrator."""
+    return d.get("launcher") == "external" and loads(d.get("override_json"), {}).get("inline") is True
+
+
+def _end_inline(con, run: dict, d: dict, reason: str) -> bool:
+    """Record the end of a revoked orchestrator-inline dispatch (#1318). Other external sessions keep running:
+    Office cannot stop them and their revoked lease already fences their submits."""
+    if not is_inline(d) or d.get("ended_at") or d["status"] not in ("launching", "running"):
+        return False
+    with db.transaction(con):
+        state.emit(con, run, REVOKED_KIND, f"{d['id']} {d['role']} revoked: {reason}", audience="runtime",
+                   task_id=d.get("task_id"), dispatch_id=d["id"])
+    _finish(d["id"], None, None, "revoked", 0.0, only_if_open=True)
+    return bool(state.get_dispatch(con, d["id"]).get("ended_at"))
+
+
+def relet_released_lease(con, run: dict, task: dict) -> str | None:
+    """#1318: a task reopened after acceptance (a convergence RECHECK) whose current session is still live gets
+    a fresh lease, so the fix it is told to submit is not refused as lease-lost. Acceptance released its lease;
+    a revoked or superseded lease is never restored, and an overlapping live scope keeps it unleased (revoke and
+    rerun then relaunch it). Returns the new lease id, or None. Caller holds the transaction."""
+    d = state.get_dispatch(con, task.get("current_dispatch_id")) if task.get("current_dispatch_id") else None
+    if not d or d.get("kind") != "executor" or not d.get("lease_id") or d.get("ended_at"):
+        return None
+    lease = con.execute("SELECT * FROM leases WHERE id=? AND run_id=?", (d["lease_id"], run["id"])).fetchone()
+    if lease is None or lease["revoked_at"] or not lease["released_at"] or scope_holder(con, run, task):
+        return None
+    new = acquire_lease(con, run, task, d["id"], lease["role"])
+    con.execute("UPDATE dispatches SET lease_id=? WHERE id=?", (new["id"], d["id"]))
+    state.emit(con, run, "lease.relet", f"{task['id']} lease {new['id']} re-let to live {d['id']} for its repair",
+               task_id=task["id"], dispatch_id=d["id"])
+    return new["id"]
 
 
 def _cancel_pending_launch(con, run: dict, d: dict, reason: str) -> bool:
