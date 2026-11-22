@@ -234,6 +234,19 @@ O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
 O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
 
 # The `office` launcher Office writes for a checkout not installed with uv: a `.cmd` on Windows.
+def resolve_argv(argv, path: str | None = None) -> list[str]:
+    """`argv` with its program resolved on `path` (default: PATH). POSIX execs the bare name through the
+    PATH search. On Windows CreateProcess searches PATH only for `.exe`, so an npm-style `codex.cmd` shim is
+    found only through `shutil.which`, which honours PATHEXT."""
+    argv = list(argv)
+    if IS_WINDOWS and argv:
+        import shutil
+        found = shutil.which(str(argv[0]), path=path)
+        if found:
+            argv[0] = found
+    return argv
+
+
 SHIM_NAME = "office.cmd" if IS_WINDOWS else "office"
 
 

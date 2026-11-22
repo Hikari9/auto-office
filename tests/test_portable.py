@@ -144,3 +144,17 @@ def test_host_helpers():
     assert portable.node_name()
     averages = portable.loadavg()
     assert averages is None or len(averages) == 3
+
+
+def test_resolve_argv_leaves_argv_alone_on_posix_and_finds_cmd_shims_on_windows(tmp_path):
+    shim = tmp_path / ("tool.cmd" if sys.platform == "win32" else "tool")
+    shim.write_text("@echo off\r\n" if sys.platform == "win32" else "#!/bin/sh\n")
+    shim.chmod(0o755)
+    argv = ["tool", "--version"]
+    out = portable.resolve_argv(argv, str(tmp_path))
+    assert argv == ["tool", "--version"], "the input list is never mutated"
+    if sys.platform == "win32":
+        assert out == [str(shim), "--version"]
+    else:
+        assert out == argv
+    assert portable.resolve_argv(["no-such-tool-xyz"], str(tmp_path)) == ["no-such-tool-xyz"]

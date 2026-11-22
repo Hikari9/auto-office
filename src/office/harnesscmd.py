@@ -593,7 +593,8 @@ def _run_capped(argv: list[str], *, cwd: Path, stdin_text: str | None, cap: int)
     """Run in its own session so a timeout kills the whole process group: a
     grandchild holding the pipes open cannot hang the smoke."""
     import signal
-    proc = subprocess.Popen(argv, cwd=cwd, env=_smoke_env(), text=True, **portable.session_kwargs(),
+    env = _smoke_env()
+    proc = subprocess.Popen(portable.resolve_argv(argv, env.get("PATH")), cwd=cwd, env=env, text=True, **portable.session_kwargs(),
                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:

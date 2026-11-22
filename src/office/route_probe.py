@@ -1308,8 +1308,8 @@ def _boundary_argv(ws: _Workspace) -> list[str]:
 
 def _spawn(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
     """The one place a probe child is created: its own session, output piped back."""
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-                            **portable.session_kwargs())
+    return subprocess.Popen(portable.resolve_argv(argv, env.get("PATH")), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env, **portable.session_kwargs())
 
 
 def _probe_env(attempt_id: str, probe_key: str, ws: _Workspace, harness: str, nonce: str) -> dict:

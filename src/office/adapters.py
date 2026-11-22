@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from office import hermes_access, paths, read_scope
+from office import hermes_access, paths, portable, read_scope
 from office.util import atomic_write_json, sha256_obj
 
 PROFILE_KINDS = ("worker", "reviewer", "vision")
@@ -424,7 +424,7 @@ def harness_version(adapter: dict) -> str | None:
         return version
 
     try:
-        proc = subprocess.run(cmd_list, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        proc = subprocess.run(portable.resolve_argv(cmd_list), capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
         text = (out or err).splitlines()
@@ -489,7 +489,7 @@ def run_preflight(adapter: dict, model: str) -> tuple[bool, str]:
     registration time proves nothing about another host."""
     for name, argv in preflight_checks(adapter, model):
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_S)
+            proc = subprocess.run(portable.resolve_argv(argv), capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             return False, f"preflight {name} timed out after {PREFLIGHT_TIMEOUT_S}s ({' '.join(argv)})"
         except (OSError, subprocess.SubprocessError):

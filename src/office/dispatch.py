@@ -2670,8 +2670,8 @@ def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess
     The one place a harness child is created, so tests can replace it."""
     # Popen's cwd leaves $PWD at the supervisor's directory; opencode takes its working
     # directory from $PWD, so the checkout would count as external and be denied.
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env={**env, "PWD": str(cwd)}, **portable.session_kwargs())
+    return subprocess.Popen(portable.resolve_argv(argv, env.get("PATH")), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env={**env, "PWD": str(cwd)}, **portable.session_kwargs())
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
