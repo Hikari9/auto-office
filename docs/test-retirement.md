@@ -175,7 +175,6 @@ Node counts are collected pytest nodes at base for that function.
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_5_5_high_clears_the_executor_floor` | 1 | deleted | `PDC::test_a_size_floor_is_enforced_exactly_at_its_value`; `PDC::test_every_dispatchable_slate_route_clears_its_size_floor_or_holds_an_exception`; `tests/v31/test_intelligence_floor.py::test_executor_and_reviewer_floors_use_intelligence` |
 | `tests/v31/test_sonnet_5_5.py::test_sonnet_alias_high_now_invokes_sonnet_5_5` | 1 | deleted | `tests/test_alias_resolution.py::test_alias_is_offered_at_every_effort_of_the_newest_member` (generic alias resolution). Obsolete part: the shipped Sonnet alias's invocation target and score are catalog data and are no longer asserted. |
 | `tests/v31/test_issue811_terra_supersession.py::test_six_terra_rows_are_present_and_only_probed_efforts_dispatch` | 1 | deleted | Obsolete: pins six catalog rows and their scores. Eligible-but-undispatchable rule: `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate` |
-| `tests/test_portable.py` | keep |  |
 | `tests/test_route_policy.py::test_shipped_discovery_catalog_exactly_matches_locked_choices` | 1 | deleted | Obsolete: the literal set of discovery-eligible routes. Its two generic loops moved to `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`, which also requires every gated row outside discovery to disclose why (an `unverified:` invocation source or a superseded model) |
 | `tests/v31/test_lineage_supersession_811.py::test_terra_61_rows_match_the_documented_scores_and_stay_gated` | 1 | rewritten | `tests/v31/test_lineage_supersession_811.py::test_every_catalog_row_keeps_its_source_effort_and_a_gated_row_is_never_available` (every catalog row: source effort matches its effort, a `dispatchable: false` row is never `available`); `PDC::test_every_shipped_route_is_either_dispatchable_or_a_documented_discovery_candidate`. Obsolete part: the six-effort score table and the per-effort dispatchable roster are catalog data. |
 
@@ -225,6 +224,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_packet_delivery_channel.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_pane_busy.py` | keep |  |
 | `tests/test_plugin_skill_entry.py` | keep |  |
+| `tests/test_portable.py` | keep |  |
 | `tests/test_pr_report.py` | keep |  |
 | `tests/test_pr_test_selection.py` | keep |  |
 | `tests/test_pre_push_hook.py` | keep |  |
