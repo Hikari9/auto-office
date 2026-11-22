@@ -428,6 +428,18 @@ def test_a_recheck_after_acceptance_re_lets_the_live_inline_session_so_its_fix_s
     assert [g["verdict"] for g in _gates(env, "convergence_review")] == ["RECHECK", "APPROVED"]
 
 
+def test_a_recheck_that_cannot_re_let_the_lease_queues_findings_instead_of_prompting_a_fenced_session(env, monkeypatch):
+    from office import dispatch
+    # An overlapping live scope appears once T1 is accepted, before the RECHECK reopens it.
+    monkeypatch.setattr(dispatch, "scope_holder", lambda con, run, task: "T9" if task.get("accepted_revision_id") else None)
+    d = _inline_rechecked(env)
+    assert _q(env, "SELECT released_at FROM leases WHERE id=(SELECT lease_id FROM dispatches WHERE id=?)",
+              (d["id"],))[0]["released_at"], "no lease was re-let"
+    assert not _q(env, "SELECT 1 FROM outbox WHERE kind='notify_worker' AND payload_json LIKE '%convergence findings%'")
+    queued = _q(env, "SELECT summary FROM events WHERE kind='task.findings_queued'")
+    assert any("holds no lease" in r["summary"] and "office revoke T1" in r["summary"] for r in queued), queued
+
+
 def test_revoke_ends_an_inline_session_whose_lease_acceptance_released_and_relaunch_works(env):
     """The 3.31.4 loop: rerun refused worker-live, revoke said revoked, dispatch refused worker-live again."""
     d = _inline_rechecked(env)
