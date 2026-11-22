@@ -107,7 +107,7 @@ Verify after install: `claude plugin details auto-office@auto-office` lists 16 s
 
 ### 1. Install the CLI
 
-Install from this repository. The `auto-office` name on PyPI is a different project that provides no `office` executable, so `uv tool install auto-office` does not install this CLI.
+Install from this repository. The `auto-office` name on PyPI is a different project that provides no `office` executable, so installing that name does not install this CLI.
 
 ```bash
 uv tool install git+https://github.com/Hikari9/auto-office
