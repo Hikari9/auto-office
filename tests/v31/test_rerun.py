@@ -13,6 +13,7 @@ import pytest
 
 from conftest import GOOD_ADD, approved_run
 from test_adaptive_dispatch import FB1, PLANNED, _approve, _quota
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -38,8 +39,7 @@ def _setup(env, monkeypatch, *, session="sess-123", launcher="herdr", route="cla
     approved_run(env, unmarked=True, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": False}] * 3)
     env.office("dispatch", "T1", *(["--as", route] if route else []), env=EXTERNAL, check=0)
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     for k, v in EXTERNAL.items():
         monkeypatch.setenv(k, v)
     con = env.con()

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from host_tools import host_tool_dirs
+from host_tools import host_tool_dirs, write_launcher
 import yaml
 
 from office import adapters, candidates, harnesscmd, install, onboarding, route_policy, routing
@@ -110,8 +110,7 @@ def fake(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     exe = bin_dir / "opencode"
-    exe.write_text(FAKE_OPENCODE)
-    exe.chmod(0o755)
+    write_launcher(exe, FAKE_OPENCODE)
     monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setenv("FAKE_OPENCODE_AUTH", "ok")
     for key in ("OFFICE_AUTH_FIXTURE", "OFFICE_USER_ADAPTERS"):

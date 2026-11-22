@@ -13,6 +13,7 @@ import pytest
 
 from conftest import GOOD_ADD, approved_run
 from test_herdr_agent_launch import _fake, _live_dispatch
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.mark.approved
@@ -21,8 +22,7 @@ def test_crashed_opencode_reviewer_pane_without_reply_is_terminal(env, monkeypat
 
     # The scripted harness exits like a crashed `opencode mini`; it never writes reply.txt.
     opencode = env.bin / "opencode"
-    opencode.write_text(f"#!{sys.executable}\nraise SystemExit(17)\n")
-    opencode.chmod(0o755)
+    write_launcher(opencode, f"#!{sys.executable}\nraise SystemExit(17)\n")
     crash = subprocess.run([str(opencode)], capture_output=True, text=True)
     assert crash.returncode == 17
 
@@ -165,8 +165,7 @@ def test_crashed_opencode_review_records_unavailable_and_attempts_fallback_witho
 
     state_file = _fake(env, monkeypatch)
     opencode = env.bin / "opencode"
-    opencode.write_text(f"#!{sys.executable}\nraise SystemExit(17)\n")
-    opencode.chmod(0o755)
+    write_launcher(opencode, f"#!{sys.executable}\nraise SystemExit(17)\n")
     crash = subprocess.run([str(opencode)], capture_output=True, text=True)
     assert crash.returncode == 17
 
@@ -231,8 +230,7 @@ def test_opencode_wall_cap_timeout_records_unavailable_and_attempts_fallback_wit
 
     state_file = _fake(env, monkeypatch, gets=["working"], reads=["Working (1s • esc to interrupt)"])
     opencode = env.bin / "opencode"
-    opencode.write_text(f"#!{sys.executable}\nraise SystemExit(17)\n")
-    opencode.chmod(0o755)
+    write_launcher(opencode, f"#!{sys.executable}\nraise SystemExit(17)\n")
     assert subprocess.run([str(opencode)], capture_output=True, text=True).returncode == 17
     monkeypatch.setenv("OFFICE_WORKER_MAX_MINUTES", "0.001")
     monkeypatch.setattr(candidates, "route_role", route_role)

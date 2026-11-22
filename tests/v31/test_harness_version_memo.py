@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from office import adapters
+from host_tools import write_launcher  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -25,8 +26,7 @@ def clean_memo():
 
 def _make_executable(path: Path, script_content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(script_content, encoding="utf-8")
-    path.chmod(0o755)
+    write_launcher(path, script_content, encoding="utf-8")
     return path
 
 

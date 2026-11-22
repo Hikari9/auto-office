@@ -15,6 +15,7 @@ from office import batch_landing as batch
 from office import cli
 from office.result import Result
 from office.state import Refused, Usage
+from host_tools import write_launcher  # noqa: E402
 
 
 def git(repo, *args):
@@ -996,8 +997,7 @@ def test_compose_ignores_operator_merge_hooks(tmp_path, monkeypatch):
     repo, prs, events, m = setup_two(tmp_path, monkeypatch)
     hook = repo / ".git" / "hooks" / "pre-merge-commit"
     # Fails only inside the throwaway compose checkout, so the fake GitHub merge in the repo still works.
-    hook.write_text('#!/bin/sh\ncase "$PWD" in *office-batch-compose*) exit 1;; esac\nexit 0\n')
-    hook.chmod(0o755)
+    write_launcher(hook, '#!/bin/sh\ncase "$PWD" in *office-batch-compose*) exit 1;; esac\nexit 0\n')
     git(repo, "config", "core.hooksPath", str(repo / ".git" / "hooks"))
     result = batch.land_batch(str(m), cwd=repo)
     assert result.data["batch"]["status"] == "green"

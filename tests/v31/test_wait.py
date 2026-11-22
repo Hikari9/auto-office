@@ -12,6 +12,7 @@ import pytest
 from pathlib import Path
 
 from conftest import GOOD_ADD, approved_run, self_reviewed
+from host_tools import write_launcher  # noqa: E402
 
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 
@@ -431,8 +432,7 @@ def _herdr(env, **files) -> dict:
     """A fake herdr driven by files in a directory; `files` sets the agent's state."""
     import sys
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     state = env.tmp / "herdr-fake"
     state.mkdir(exist_ok=True)
     for name, text in files.items():

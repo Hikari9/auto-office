@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from host_tools import host_tool_dirs
+from host_tools import host_tool_dirs, write_launcher
 import yaml
 
 from office import cli, configcmd, discovery, onboarding, version
@@ -67,8 +67,7 @@ def h(tmp_path, monkeypatch):
     bin_.mkdir()
     for name, ver in VERSIONS.items():
         exe = bin_ / name
-        exe.write_text(f"#!/bin/sh\necho {ver}\n")
-        exe.chmod(0o755)
+        write_launcher(exe, f"#!/bin/sh\necho {ver}\n")
     for k in list(os.environ):
         if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_")) or k in (
                 "CLAUDECODE", "GEMINI_CLI", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):

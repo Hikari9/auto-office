@@ -17,6 +17,10 @@ import pytest
 
 from office import adapters, dispatch, install, review_submit, transcripts
 from office import hermes_access
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 CWD = Path("/w")
 REPLY = Path("/d/reply.txt")
@@ -347,11 +351,10 @@ def _git_install(tmp_path) -> tuple[Path, Path, Path]:
     launcher = root / "hermes"
     launcher.write_text("#!/usr/bin/env python3\nif __name__ == '__main__':\n    print('hermes')\n")
     interpreter = tools / "python3"
-    interpreter.write_text("#!/bin/sh\nexit 0\n")
-    interpreter.chmod(0o755)
+    write_launcher(interpreter, "#!/bin/sh\nexit 0\n")
     wrapper = tmp_path / "bin" / "hermes"
     wrapper.parent.mkdir()
-    wrapper.write_text(textwrap.dedent(f"""\
+    write_launcher(wrapper, textwrap.dedent(f"""\
         #!/bin/sh
         exec {interpreter} -I -c 'import os, re, sys
         os.environ.pop('"'"'PYTHONHOME'"'"', None)
@@ -360,7 +363,6 @@ def _git_install(tmp_path) -> tuple[Path, Path, Path]:
         sys.exit(main())
         ' "$@"
         """))
-    wrapper.chmod(0o755)
     return wrapper, interpreter, launcher
 
 
@@ -375,8 +377,7 @@ def test_a_forwarding_wrapper_in_front_of_the_git_wrapper_is_followed(tmp_path):
     wrapper, interpreter, launcher = _git_install(tmp_path)
     outer = tmp_path / "local-bin" / "hermes"
     outer.parent.mkdir()
-    outer.write_text(f'#!/bin/sh\nexec {wrapper} "$@"\n')
-    outer.chmod(0o755)
+    write_launcher(outer, f'#!/bin/sh\nexec {wrapper} "$@"\n')
     assert hermes_access.resolve_launcher(str(outer)) == [str(interpreter), str(launcher)]
     quoted = tmp_path / "local-bin" / "hermes-quoted"
     quoted.write_text(f"#!/bin/sh\nexec '{outer}' \"$@\"\n")
@@ -406,7 +407,7 @@ def test_the_real_hermes_wrapper_shape_resolves_when_installed():
 
 def test_a_binary_or_console_script_hermes_is_used_as_is(tmp_path):
     script = tmp_path / "hermes"
-    script.write_text("#!/usr/bin/env python3\nprint('x')\n")
+    write_launcher(script, "#!/usr/bin/env python3\nprint('x')\n")
     assert hermes_access.resolve_launcher(str(script)) == [str(script)]
     assert hermes_access.resolve_launcher(str(tmp_path / "nowhere")) == [str(tmp_path / "nowhere")]
 
@@ -425,7 +426,6 @@ def test_no_shim_when_the_path_hermes_is_already_detectable(tmp_path, monkeypatc
     script = tmp_path / "bin" / "hermes"
     script.parent.mkdir()
     script.write_text("#!/usr/bin/env python3\nprint('x')\n")
-    script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{script.parent}{os.pathsep}/usr/bin")
     assert adapters.pane_launch_env(hermes, tmp_path / "dispatch") == {}
     assert adapters.pane_launch_env(adapters.load_all()["codex"], tmp_path / "dispatch") == {}

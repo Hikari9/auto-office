@@ -7,6 +7,7 @@ from conftest import GOOD_ADD, approved_run
 from office import closeout
 from test_land import _plan, _run
 from test_task_prs import remote_head
+from host_tools import write_launcher  # noqa: E402
 
 DONE = "office close done — "
 
@@ -211,8 +212,7 @@ def test_landed_externally_close_keeps_convergence_and_integration_in_stored_lan
     env.git("merge", "--no-ff", "-qm", "external PR", accepted)
     merged = env.git("rev-parse", "HEAD").strip()
     pr = {"state": "MERGED", "url": "https://github.com/o/r/pull/7", "number": 7, "mergeCommit": {"oid": merged}}
-    (env.bin / "gh").write_text(f"#!/bin/sh\necho '{json.dumps(pr)}'\n")
-    (env.bin / "gh").chmod(0o755)
+    write_launcher((env.bin / "gh"), f"#!/bin/sh\necho '{json.dumps(pr)}'\n")
     code, out = env.office("close", "--landed-externally", "https://github.com/o/r/pull/7")
     assert code == 0 and "landed externally" in out, out
     after = stored()

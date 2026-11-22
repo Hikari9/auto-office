@@ -9,6 +9,10 @@ import sys
 
 import pytest
 import yaml
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parents[2] / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 
 FAKE = f'''#!{sys.executable}
@@ -71,11 +75,9 @@ def cli_env(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake = bindir / "fakecli"
-    fake.write_text(FAKE)
-    fake.chmod(0o755)
+    write_launcher(fake, FAKE)
     ambient_office = bindir / "office"
-    ambient_office.write_text(f"#!{sys.executable}\nraise SystemExit('ambient office must not be used')\n")
-    ambient_office.chmod(0o755)
+    write_launcher(ambient_office, f"#!{sys.executable}\nraise SystemExit('ambient office must not be used')\n")
     adapters = tmp_path / "adapters"
     adapters.mkdir()
     (adapters / "fakecli.yaml").write_text(yaml.safe_dump(ADAPTER, sort_keys=False))

@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
+from host_tools import write_launcher  # noqa: E402
 
 # The probe test_job_ownership uses, plus the pid it runs as: a stopped check
 # is proven by its pid answering nothing — "now" stays 1 in its state file
@@ -106,10 +107,9 @@ def _job_process(env, job_id: str) -> subprocess.Popen:
 
 def _gh(env, oid: str, pr: str = "https://github.com/o/r/pull/7"):
     """A fake gh that reports PR 7 merged, its merge commit already made."""
-    (env.bin / "gh").write_text("#!/bin/sh\necho '%s'\n" % json.dumps(
+    write_launcher((env.bin / "gh"), "#!/bin/sh\necho '%s'\n" % json.dumps(
         {"state": "MERGED", "url": pr, "number": 7, "mergeCommit": {"oid": oid},
          "baseRefName": "main", "headRefOid": oid, "headRefName": "external"}))
-    (env.bin / "gh").chmod(0o755)
 
 
 def _close_terminal_run(con, run_id: str) -> None:

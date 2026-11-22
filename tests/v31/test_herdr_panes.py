@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from host_tools import write_launcher  # noqa: E402
 
 FAKE_HERDR = r'''#!{python}
 import json, os, sys
@@ -46,8 +47,7 @@ print(json.dumps({{"result": result}}))
 
 def _fake(env, monkeypatch) -> Path:
     herdr = env.bin / "herdr"
-    herdr.write_text(FAKE_HERDR.format(python=sys.executable))
-    herdr.chmod(0o755)
+    write_launcher(herdr, FAKE_HERDR.format(python=sys.executable))
     state = env.tmp / "herdr-state.json"
     monkeypatch.setenv("FAKE_HERDR_STATE", str(state))
     return state

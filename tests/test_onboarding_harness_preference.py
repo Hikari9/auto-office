@@ -16,6 +16,10 @@ import yaml
 
 from office import candidates, cli, discovery, onboarding
 from office import hermes_access
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent / 'v31'))
+from host_tools import write_launcher  # noqa: E402
 
 OFFICE_AUTH = {"claude": "found", "codex": "found", "agy": "found", "hermes": "found"}
 VERSIONS = {"claude": "2.1.300", "codex": "0.160.0", "agy": "1.3.2", "hermes": "0.9.0"}
@@ -65,8 +69,7 @@ def h(tmp_path, monkeypatch):
     t.bin.mkdir()
     for name, ver in VERSIONS.items():
         exe = t.bin / name
-        exe.write_text(f"#!/bin/sh\necho {ver}\n")
-        exe.chmod(0o755)
+        write_launcher(exe, f"#!/bin/sh\necho {ver}\n")
     for k in list(os.environ):
         if k.startswith(("OFFICE_", "HERDR_", "AUTO_OFFICE_", "HERMES_")) or k in (
                 "CLAUDECODE", "GEMINI_CLI", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
@@ -152,8 +155,7 @@ def test_a_new_overlapping_harness_reopens_the_round(h):
     code, out = h.office("onboard", "--skip")  # records agy and claude only
     assert code == 0, out
     assert h.status()["due"] is False
-    (h.bin / "hermes").write_text("#!/bin/sh\necho 0.9.0\n")  # hermes is installed now and joins the overlap
-    (h.bin / "hermes").chmod(0o755)
+    write_launcher(h.bin / "hermes", "#!/bin/sh\necho 0.9.0\n")  # hermes is installed now and joins the overlap
     hp = pref(h)
     # hermes joins the sonnet and opus overlap, and it also shares haiku with claude, which is new too
     assert hp["due"] is True and hp["pending"] == ["claude", "hermes"]
