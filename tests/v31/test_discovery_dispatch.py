@@ -14,7 +14,7 @@ from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 
 from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
 from office.util import dumps, now_iso
-from host_tools import write_launcher  # noqa: E402
+from host_tools import remove_launcher, write_launcher  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
@@ -1005,7 +1005,7 @@ def _discovery_env(env, monkeypatch, **probe):
     the probe suites' fake harness, and anything else like the Env's scripted agent: one binary serves the probe,
     the trial worker and the fallback worker."""
     for other in ("claude", "agy"):  # one harness: the draw can only land on a route the fake can probe
-        (env.bin / other).unlink()
+        remove_launcher(env.bin / other)
         env.fakes.pop(env.bin / other, None)
     codex = env.bin / "codex"
     write_launcher(codex, "\n".join([

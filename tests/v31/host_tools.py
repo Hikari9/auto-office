@@ -34,6 +34,27 @@ def write_launcher(path, text: str, encoding: str | None = None) -> None:
         if not found:
             pytest.skip("needs a POSIX sh, which this Windows host does not have")
         exe = found
-    body = path.with_name(path.name + ".py")
+    body = path.with_name(path.name + (".sh" if Path(exe).name.startswith(("sh", "bash")) else ".py"))
     body.write_text(text, encoding="utf-8")
     path.with_name(path.name + ".cmd").write_text(f'@"{exe}" "{body}" %*\r\n', encoding="utf-8")
+
+
+def read_launcher(path) -> str:
+    """The script text `write_launcher` wrote for `path`: the file itself, or its `.py`/`.sh` body on Windows."""
+    from pathlib import Path
+    path = Path(path)
+    if sys.platform != "win32":
+        return path.read_text()
+    for suffix in (".py", ".sh"):
+        body = path.with_name(path.name + suffix)
+        if body.exists():
+            return body.read_text(encoding="utf-8")
+    return path.read_text()
+
+
+def remove_launcher(path) -> None:
+    """Delete a fake harness `write_launcher` wrote, with whatever Windows files go with it."""
+    from pathlib import Path
+    path = Path(path)
+    for p in (path, *(path.with_name(path.name + x) for x in (".cmd", ".py", ".sh"))):
+        p.unlink(missing_ok=True)

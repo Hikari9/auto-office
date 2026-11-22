@@ -26,13 +26,14 @@ from host_tools import write_launcher  # noqa: E402
 # is proven by its pid answering nothing — "now" stays 1 in its state file
 # when it was stopped instead of finishing.
 PROBE = r'''
-import fcntl, json, os, sys, time
+import json, os, sys, time
+from office import portable
 d, secs = sys.argv[1], float(sys.argv[2])
 os.makedirs(d, exist_ok=True)
 lock = open(os.path.join(d, "probe.lock"), "a")
 
 def bump(delta, pid=0):
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    portable.lock_exclusive(lock)
     path = os.path.join(d, "state.json")
     st = json.load(open(path)) if os.path.exists(path) else {"now": 0, "max": 0, "runs": 0, "pid": None}
     st["now"] += delta
@@ -41,7 +42,7 @@ def bump(delta, pid=0):
     if pid:
         st["pid"] = pid
     json.dump(st, open(path, "w"))
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    portable.unlock(lock)
 
 bump(1, os.getpid())
 time.sleep(secs)

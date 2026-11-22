@@ -764,12 +764,12 @@ def test_version_must_increase_from_the_starting_version(tmp_path, monkeypatch):
 
 
 def test_second_concurrent_batch_is_refused_by_the_repository_lock(tmp_path, monkeypatch):
-    import fcntl
+    from office import portable
     repo, prs, events, m = setup_two(tmp_path, monkeypatch)
     lock_path = batch._state_path(repo, "release-a").parent.parent / "landing.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portable.lock_exclusive(held, blocking=False)
         with pytest.raises(Refused, match="another batch landing is active"):
             batch.land_batch(str(m), cwd=repo)
     assert events == []

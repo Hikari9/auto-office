@@ -1086,26 +1086,28 @@ def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monke
     assert route_probe._running({os.getpid()}) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a /bin/sh leader started with start_new_session")
 def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, monkeypatch):
     """A recovered pid whose start time no longer matches is not ours (#1296 review)."""
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = route_probe.portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-recovered", None), seed=True,
                                 start="Sat Jan  1 00:00:00 2000", term_wait=0.2, kill_wait=0.2)
     assert sent == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a /bin/sh leader started with start_new_session")
 def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
     """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = route_probe.portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
                                 term_wait=0.2, kill_wait=0.2)
