@@ -303,6 +303,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_land.py` | keep |
 | `tests/v31/test_land_recovery.py` | keep |
 | `tests/v31/test_landing_gaps.py` | keep |
+| `tests/v31/test_landing_recovery.py` | keep |
 | `tests/v31/test_lane_gate_revoke.py` | keep |
 | `tests/v31/test_launch_argv_evidence.py` | keep |
 | `tests/v31/test_lineage_supersession_811.py` | consolidate |
