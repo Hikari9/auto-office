@@ -369,6 +369,33 @@ def test_the_launcher_script_and_its_interpreter_are_resolved_from_the_shell_wra
     assert hermes_access.resolve_launcher(str(wrapper)) == [str(interpreter), str(launcher)]
 
 
+def test_a_forwarding_wrapper_in_front_of_the_git_wrapper_is_followed(tmp_path):
+    # #1321: the installer's ~/.local/bin/hermes is `exec <checkout>/.hermes/bin/hermes "$@"`; stopping at it left
+    # no shim, so Herdr never detected the pane's Hermes and every pane start timed out.
+    wrapper, interpreter, launcher = _git_install(tmp_path)
+    outer = tmp_path / "local-bin" / "hermes"
+    outer.parent.mkdir()
+    outer.write_text(f'#!/bin/sh\nexec {wrapper} "$@"\n')
+    outer.chmod(0o755)
+    assert hermes_access.resolve_launcher(str(outer)) == [str(interpreter), str(launcher)]
+    quoted = tmp_path / "local-bin" / "hermes-quoted"
+    quoted.write_text(f"#!/bin/sh\nexec '{outer}' \"$@\"\n")
+    assert hermes_access.resolve_launcher(str(quoted)) == [str(interpreter), str(launcher)]
+
+
+def test_a_forwarding_loop_or_dead_end_returns_the_path_hermes(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.write_text(f'#!/bin/sh\nexec {b} "$@"\n')
+    b.write_text(f'#!/bin/sh\nexec {a} "$@"\n')
+    assert hermes_access.resolve_launcher(str(a)) == [str(a)]
+    dead = tmp_path / "dead"
+    dead.write_text(f'#!/bin/sh\nexec {tmp_path / "missing"} "$@"\n')
+    assert hermes_access.resolve_launcher(str(dead)) == [str(dead)]
+    extra = tmp_path / "extra"  # an exec that adds its own arguments is not a pure forward
+    extra.write_text(f'#!/bin/sh\nexec {a} --profile x "$@"\n')
+    assert hermes_access.resolve_launcher(str(extra)) == [str(extra)]
+
+
 def test_the_real_hermes_wrapper_shape_resolves_when_installed():
     exe = hermes_access.shutil.which("hermes")
     if not exe or not (Path(exe).read_bytes().startswith(b"#!/bin/sh") and b" -I -c " in Path(exe).read_bytes()):

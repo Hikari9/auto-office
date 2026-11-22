@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.9
+
+Hermes panes start again when `hermes` on PATH is an installer wrapper that forwards to the git checkout's own wrapper (#1321). The launcher resolver stopped at the outer `exec <path> "$@"` script, so Office wrote no launcher shim, Herdr never detected the pane's Hermes, and every `herdr agent start --kind hermes` timed out into the headless fallback. The resolver now follows forwarding wrappers (bounded, loop-safe). `office harness smoke` no longer passes a clean exit that never answered: a line of the reply, or of the text inside a JSON reply, must be the READY marker alone, else the result is `no_answer`.
+
 ## 3.31.8
 
 A convergence RECHECK on an orchestrator-inline (fastlane) or other live task session no longer loops on `worker-live` (#1318). Acceptance released the live session's lease, so its repair submit was refused as `lease-lost` and `office revoke` changed nothing. Now the RECHECK re-lets a fresh lease to the live session when no overlapping scope is held, and `office revoke` also fences a live session's released lease and records the end of an orchestrator-inline dispatch, so `office rerun --fresh` and `office dispatch` relaunch it.
