@@ -58,7 +58,7 @@ cross-session prompt, duplicate wake loop, synthetic keepalive or fallback headl
 Native Claude Code is a supported **mechanism**, not an unconditional delivery guarantee: the
 host may refuse new/changed hooks, terminate background hooks, or close/suspend the session.
 `office status` shows whether the native path was armed and whether a listener is active. When
-it is unavailable (or the listener has expired), use `office wait`/manual `office resume`;
+it is unavailable (or the listener has expired), run `office wait` in the background (one waiter per run: root wake wins while armed) or manual `office resume`;
 no transport invents an acceptance or human approval. Codex, agy and other non-Herdr roots remain
 manual until their own verified idle-wake adapter is implemented.
 

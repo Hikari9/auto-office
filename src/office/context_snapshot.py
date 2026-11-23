@@ -285,7 +285,9 @@ def render(snap: dict) -> list[str]:
 
 
 # Root turn rule (#922): a turn that ends with nothing armed is never woken for an event.
-TURN_RULE = ("turn: arm `office wait` instead of ending the turn on an event-dependent step "
+TURN_RULE = ("turn: with no wake armed, run `office wait` in the background and end the turn on an event-dependent step, "
+             "then act on its exit code (foreground only in a harness with no background command that wakes the turn); "
+             "with wake armed, root wake wins: end the turn with no wait "
              "(root wake is on by default in a bound Claude Herdr pane; --wake-off disables it)")
 
 
