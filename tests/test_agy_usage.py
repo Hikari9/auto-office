@@ -325,6 +325,7 @@ def test_gemini_4_never_reads_above_the_gemini_summary(agy, monkeypatch, capsys)
 
 def test_fallback_host_readings_are_unknown_not_idle_full(agy, monkeypatch, capsys):
     raw = {"buckets": [{"modelId": "gemini-3-flash", "remainingFraction": 1, "resetTime": "g"},
+                       {"modelId": "gemini-4-hydrogen-sonar", "remainingFraction": 1, "resetTime": "g4"},
                        {"modelId": "claude-opus-5-5-high", "remainingFraction": 1, "resetTime": "c"}],
            "api_host": agy.PROD_HOST}
     monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None, None))
@@ -334,7 +335,8 @@ def test_fallback_host_readings_are_unknown_not_idle_full(agy, monkeypatch, caps
     for name in ("gemini", "claude"):
         assert out["families"][name]["status"] == "unknown"
         assert out["families"][name]["cause"] == agy.FALLBACK_HOST_CAUSE
-    assert out["families"]["gemini-4"]["tightest_remaining_percent"] == 0
+    assert out["families"]["gemini-4"]["tightest_remaining_percent"] == 0  # even with a gemini-4 bucket at 100%
+    assert out["families"]["gemini-4"]["cause"] == agy.FALLBACK_HOST_CAUSE
     assert out["tightest_remaining_percent"] is None
 
 

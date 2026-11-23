@@ -623,7 +623,11 @@ def main(argv):
     families = processed["families"]
     if processed["api_host"] not in (None, DAILY_HOST):
         for name, family in families.items():
-            if name != GEMINI_4_FAMILY and family.get("status") == "ok":
+            if name == GEMINI_4_FAMILY:
+                # Never launch Hydrogen on a fallback reading, even one that names a gemini-4 bucket.
+                family.update({"tightest_remaining_percent": 0, "status": "ok", "cause": FALLBACK_HOST_CAUSE,
+                               "exhausted_by": "unreported"})
+            elif family.get("status") == "ok":
                 family.update({"tightest_remaining_percent": None, "status": "unknown", "cause": FALLBACK_HOST_CAUSE})
     # Hydrogen draws on the Gemini allowance (one shared weekly bucket on the daily
     # host, 2026-11-23), so gemini-4 never reads above the Gemini family.
