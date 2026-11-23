@@ -149,6 +149,13 @@ def test_process_quota_reports_independent_model_families(agy):
             "reset_time": "2026-10-21T16:00:00Z",
             "status": "ok",
         },
+        "gemini-4": {
+            "tightest_remaining_percent": 0,
+            "reset_time": None,
+            "status": "ok",
+            "cause": agy.GEMINI_4_UNREPORTED_CAUSE,
+            "exhausted_by": "unreported",
+        },
     }
     assert result["tightest_remaining_percent"] == 73
 
@@ -248,9 +255,76 @@ def test_summary_failure_does_not_fail_the_probe(agy, monkeypatch):
 
     monkeypatch.setattr(agy, "_post_quota", post)
     data, summary, credits, err = agy.fetch_agy_quota()
-    assert (data, summary, err) == ({"buckets": []}, None, None)
+    assert (data, summary, err) == ({"buckets": [], "api_host": agy.DAILY_HOST}, None, None)
     assert credits["status"] == "unknown"
     assert calls == [agy.QUOTA_URL, agy.SUMMARY_URL, agy.LOAD_CODE_ASSIST_URL]
+
+
+def _hosts(agy, monkeypatch, answers):
+    """answers: host -> retrieveUserQuota response, or an error string."""
+    monkeypatch.setattr(agy, "get_refreshed_access_token", lambda: ("tok", None))
+    calls = []
+
+    def post(url, token, body=None):
+        calls.append(url)
+        host = url.split("/v1internal:")[0]
+        if url.endswith(":retrieveUserQuota"):
+            answer = answers[host]
+            return (None, answer) if isinstance(answer, str) else (answer, None)
+        return None, "skip"
+
+    monkeypatch.setattr(agy, "_post_quota", post)
+    return calls
+
+
+def test_probe_reads_the_daily_host_agy_uses_first(agy, monkeypatch):
+    """#1339: agy 1.5 talks to daily-cloudcode-pa; the prod host reported idle windows and no gemini-4 bucket."""
+    calls = _hosts(agy, monkeypatch, {agy.DAILY_HOST: {"buckets": []}, agy.PROD_HOST: "unused"})
+    data, _, _, err = agy.fetch_agy_quota()
+    assert err is None and data["api_host"] == agy.DAILY_HOST
+    assert all(url.startswith(agy.DAILY_HOST) for url in calls)
+    assert agy.API_HOSTS[0] == agy.DAILY_HOST == "https://daily-cloudcode-pa.googleapis.com"
+
+
+def test_probe_falls_back_to_the_prod_host_and_reuses_it(agy, monkeypatch):
+    calls = _hosts(agy, monkeypatch, {agy.DAILY_HOST: "API returned status 404", agy.PROD_HOST: {"buckets": []}})
+    data, _, _, err = agy.fetch_agy_quota()
+    assert err is None and data["api_host"] == agy.PROD_HOST
+    assert calls[0].startswith(agy.DAILY_HOST) and all(url.startswith(agy.PROD_HOST) for url in calls[1:])
+
+
+def test_probe_reports_every_host_when_all_fail(agy, monkeypatch):
+    _hosts(agy, monkeypatch, {agy.DAILY_HOST: "boom-daily", agy.PROD_HOST: "boom-prod"})
+    data, summary, credits, err = agy.fetch_agy_quota()
+    assert data is None and "boom-daily" in err and "boom-prod" in err
+
+
+def test_gemini_4_family_comes_from_its_own_buckets(agy):
+    result = agy.process_quota({"buckets": [
+        {"modelId": "gemini-3-flash", "remainingFraction": 1, "resetTime": "g3"},
+        {"modelId": "gemini-4-hydrogen-sonar", "remainingFraction": 0.0004208381, "resetTime": "g4"},
+    ]})
+    assert result["families"]["gemini-4"] == {"tightest_remaining_percent": 0, "reset_time": "g4", "status": "ok"}
+    assert result["families"]["gemini"]["tightest_remaining_percent"] == 0
+    assert result["models"]["gemini-4-hydrogen-sonar"]["remaining_percent"] == 0.0
+
+
+def test_unreported_gemini_4_reads_exhausted_not_the_gemini_number(agy, monkeypatch, capsys):
+    raw = {"buckets": [{"modelId": "gemini-3-flash", "remainingFraction": 1, "resetTime": "g"}], "api_host": "h"}
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (raw, None, None, None))
+    assert agy.main(["--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["api_host"] == "h"
+    assert out["families"]["gemini"]["tightest_remaining_percent"] == 100
+    assert out["families"]["gemini-4"]["tightest_remaining_percent"] == 0
+    assert out["families"]["gemini-4"]["cause"] == agy.GEMINI_4_UNREPORTED_CAUSE
+
+
+def test_error_output_names_the_gemini_4_family_unknown(agy, monkeypatch, capsys):
+    monkeypatch.setattr(agy, "fetch_agy_quota", lambda: (None, None, None, "down"))
+    assert agy.main(["--json"]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["families"]["gemini-4"]["status"] == "unknown"
 
 
 # --- macOS keychain token ---------------------------------------------------

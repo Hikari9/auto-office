@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.12
+
+The agy quota probe now reads the `daily-cloudcode-pa` host agy 1.5 itself uses, falling back to `cloudcode-pa` only on failure (#1339). The production host reported idle 100% windows and no Gemini 4 bucket, so Hydrogen passed the reserve gate with about 0% left. The probe also reports a `gemini-4` family, which reads as exhausted when no bucket is reported, and agy `gemini-4*` routes gate on it.
+
 ## 3.31.11
 
 `office close` on a run closed with `--handoff` and later merged by `office land --merge` now closes as landed (#1333). The terminal replay reused the stored handoff, so it tried to mark the merged PR ready, printed "handed off" and kept the worktrees. When the recorded merge covers the accepted integration, the replay clears the handoff, records the landed state and runs base sync and worktree removal. A handoff chosen after the run had already landed stays a handoff, and a merge record for another integration tree keeps the handoff path.

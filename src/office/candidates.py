@@ -873,7 +873,12 @@ def quota_for_candidate(candidate: dict, quota: dict | None = None) -> dict:
     families = result.get("families") if isinstance(result, dict) else None
     family = model_family(candidate.get("model_id"))
     family = _AGY_QUOTA_FAMILY.get(family, family)
-    family_result = families.get(family) if isinstance(families, dict) else None
+    # A Gemini generation the probe reports on its own (gemini-4: Hydrogen, #1339)
+    # gates on that number; older probe output without it keeps the family reading.
+    generation = re.match(r"gemini-\d+", (candidate.get("model_id") or "").lower())
+    keys = ([generation.group(0)] if generation else []) + [family]
+    family_result = next((families[k] for k in keys if isinstance(families.get(k), dict)), None) \
+        if isinstance(families, dict) else None
     if isinstance(family_result, dict):
         # Provider-account metadata from the parent is only inherited when the
         # family does not publish its own identity. Do not merge unverified IDs.

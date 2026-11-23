@@ -103,15 +103,33 @@ def token_paths():
 # moment the CLI is upgraded.
 # ---------------------------------------------------------------------------
 TOKEN_URL = "https://oauth2.googleapis.com/token"
-QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+# agy 1.5 talks to the daily host (11k requests in its own log on 2026-11-23). For the
+# same account the prod host answers with idle windows (reset = now + window, 100%)
+# and no gemini-4 bucket, which let Hydrogen pass the reserve gate at ~0% left
+# (#1339). The prod host is a fallback for when the daily host fails.
+DAILY_HOST = "https://daily-cloudcode-pa.googleapis.com"
+PROD_HOST = "https://cloudcode-pa.googleapis.com"
+API_HOSTS = (DAILY_HOST, PROD_HOST)
+
+
+def _api_url(host, method):
+    return f"{host}/v1internal:{method}"
+
+
+QUOTA_URL = _api_url(DAILY_HOST, "retrieveUserQuota")
 # The account view agy itself shows ("5h ... weekly ..."): per model GROUP, with a
 # five-hour and a weekly window. Found in agy 1.4.3's own log
 # (~/.gemini/antigravity-cli/log, quota_manager.go) and callable with the same
 # OAuth token and an empty JSON body.
-SUMMARY_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+SUMMARY_URL = _api_url(DAILY_HOST, "retrieveUserQuotaSummary")
+LOAD_CODE_ASSIST_URL = _api_url(DAILY_HOST, "loadCodeAssist")
 LOAD_CODE_ASSIST_BODY = {"metadata": {"ideType": "ANTIGRAVITY", "pluginType": "GEMINI"}}
 CREDITS_EXHAUSTED_CAUSE = "AI credits balance too low"
+# Gemini 4 (Hydrogen) is reported as its own family. With no gemini-4 bucket the
+# allowance is unknown, and it reads as exhausted rather than inheriting the
+# Gemini number, so routing never launches Hydrogen blind (#1339).
+GEMINI_4_FAMILY = "gemini-4"
+GEMINI_4_UNREPORTED_CAUSE = "gemini-4 allowance not reported; treated as exhausted"
 UA = "antigravity-cli"
 
 CLIENT_ID_RE = re.compile(rb"[0-9]{10,}-[a-z0-9]{28,}\.apps\.googleusercontent\.com")
@@ -424,15 +442,24 @@ def credits_from(response):
 def fetch_agy_quota():
     """(per-model quota, account-view summary, credits, error). Summary and credits
     are best effort: the summary is None when its endpoint fails (families fall back
-    to the buckets) and credits are `unknown` when loadCodeAssist fails."""
+    to the buckets) and credits are `unknown` when loadCodeAssist fails.
+
+    The per-model quota is read from the first host in API_HOSTS that answers; the
+    summary and credits come from that same host, and `api_host` names it."""
     access_token, err = get_refreshed_access_token()
     if err:
         return None, None, None, err
-    data, err = _post_quota(QUOTA_URL, access_token)
-    if err:
-        return None, None, None, err
-    summary, _ = _post_quota(SUMMARY_URL, access_token)
-    loaded, load_err = _post_quota(LOAD_CODE_ASSIST_URL, access_token, LOAD_CODE_ASSIST_BODY)
+    errors = []
+    for host in API_HOSTS:
+        data, err = _post_quota(_api_url(host, "retrieveUserQuota"), access_token)
+        if not err:
+            break
+        errors.append(f"{host}: {err}")
+    else:
+        return None, None, None, "; ".join(errors)
+    data = {**data, "api_host": host} if isinstance(data, dict) else {"buckets": [], "api_host": host}
+    summary, _ = _post_quota(_api_url(host, "retrieveUserQuotaSummary"), access_token)
+    loaded, load_err = _post_quota(_api_url(host, "loadCodeAssist"), access_token, LOAD_CODE_ASSIST_BODY)
     credits = {
         "status": "unknown", "balance": None, "minimum": None, "credit_type": None,
         "source": None, "cause": f"loadCodeAssist failed: {load_err}",
@@ -507,18 +534,29 @@ def process_quota(data, all_models=False, include_claude=False):
         if min_pct is None or pct < min_pct:
             min_pct = pct
 
-    family_buckets = {"gemini": [], "claude": []}
+    family_buckets = {"gemini": [], "claude": [], GEMINI_4_FAMILY: []}
     for bucket in buckets:
         if not isinstance(bucket.get("remainingFraction"), (int, float)):
             continue
         model_id = str(bucket.get("modelId") or "").lower()
         if model_id.startswith("gemini"):
             family_buckets["gemini"].append(bucket)
+            if model_id.startswith(GEMINI_4_FAMILY):
+                family_buckets[GEMINI_4_FAMILY].append(bucket)
         elif "claude" in model_id:
             family_buckets["claude"].append(bucket)
 
     families = {}
     for family, members in family_buckets.items():
+        if not members and family == GEMINI_4_FAMILY:
+            families[family] = {
+                "tightest_remaining_percent": 0,
+                "reset_time": None,
+                "status": "ok",
+                "cause": GEMINI_4_UNREPORTED_CAUSE,
+                "exhausted_by": "unreported",
+            }
+            continue
         if not members:
             families[family] = {
                 "tightest_remaining_percent": None,
@@ -560,7 +598,7 @@ def main(argv):
                 "error": err,
                 "remaining_percent": None,
                 "tightest_remaining_percent": None,
-                "families": {"gemini": dict(unknown_family), "claude": dict(unknown_family)},
+                "families": {family: dict(unknown_family) for family in ("gemini", "claude", GEMINI_4_FAMILY)},
             }, indent=2))
         else:
             print(f"AGY quota probe UNKNOWN: {err}", file=sys.stderr)
@@ -573,6 +611,7 @@ def main(argv):
     )
     account = summary_families(summary)
     processed["family_source"] = "retrieveUserQuotaSummary" if account else "retrieveUserQuota"
+    processed["api_host"] = raw_data.get("api_host")
     processed["families"].update(account)
     processed["scope"] = "gemini+claude" if include_claude else (
         "gemini+other" if all_models else "gemini"
