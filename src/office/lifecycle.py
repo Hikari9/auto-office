@@ -468,10 +468,12 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         # passed on: _closeout's merged-detection reads it, not the status.
         external = landing.get("status") == "landed-externally"
         handoff = None if external else landing.get("handoff")
-        if handoff and (landing.get("merged") or {}).get("commit"):
-            # #1333: office land --merge after a handoff close merged the PR, so
-            # the handoff is over. Close as landed: no mark-ready, base sync and
-            # worktree removal run. A stale merge record keeps the handoff path.
+        if handoff and landing.get("status") != "landed" and (landing.get("merged") or {}).get("commit"):
+            # #1333: the handoff closed unlanded work and office land --merge
+            # merged it later, so the handoff is over. Close as landed: no
+            # mark-ready; base sync and worktree removal run. A handoff chosen
+            # after the run had already landed stays a handoff (#783), and a
+            # merge record for another integration tree keeps the handoff path.
             merged = gates.landing_state(con, run, None)
             if merged["status"] == "landed":
                 with db.transaction(con):

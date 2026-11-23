@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.31.11
 
-`office close` on a run closed with `--handoff` and later merged by `office land --merge` now closes as landed (#1333). The terminal replay reused the stored handoff, so it tried to mark the merged PR ready, printed "handed off" and kept the worktrees. When the recorded merge covers the accepted integration, the replay clears the handoff, records the landed state and runs base sync and worktree removal. A merge record for another integration tree keeps the handoff path.
+`office close` on a run closed with `--handoff` and later merged by `office land --merge` now closes as landed (#1333). The terminal replay reused the stored handoff, so it tried to mark the merged PR ready, printed "handed off" and kept the worktrees. When the recorded merge covers the accepted integration, the replay clears the handoff, records the landed state and runs base sync and worktree removal. A handoff chosen after the run had already landed stays a handoff, and a merge record for another integration tree keeps the handoff path.
 
 ## 3.31.10
 
