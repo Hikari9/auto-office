@@ -321,6 +321,20 @@ def test_gemini_4_route_with_headroom_is_not_quota_rejected():
     assert result["status"] == "selected" and result["selected"].startswith("agy@")
 
 
+@pytest.mark.parametrize("reserve", [0.0, 5.0])
+def test_unreported_gemini_4_is_rejected_before_launch(reserve):
+    unreported = {"tightest_remaining_percent": 0, "reset_time": None, "status": "ok",
+                  "cause": "gemini-4 allowance not reported; treated as exhausted", "exhausted_by": "unreported"}
+    families = {**_FAMILIES, "gemini": {"status": "ok", "tightest_remaining_percent": 100, "reset_time": "g"},
+                "gemini-4": unreported}
+    quota = {"status": "ok", "tightest_remaining_percent": 100.0, "families": candidates._normalize_probe_result(
+        {"tightest_remaining_percent": 100, "families": families}, None)["families"]}
+    from office import routing
+    hydrogen = _agy("gemini-4-hydrogen", quota)
+    gated = {**hydrogen, "quota": candidates.quota_for_candidate(hydrogen, quota)}
+    assert routing._quota_gate(gated, reserve) == (6, "projected quota crosses the protected reserve", "quota")
+
+
 def test_gemini_4_without_its_own_family_keeps_the_gemini_reading():
     quota = _agy_family_quota()  # older probe output: no gemini-4 family
     assert candidates.quota_for_candidate(_agy("gemini-4-hydrogen", quota), quota)["tightest_remaining_percent"] == 0

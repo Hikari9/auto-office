@@ -130,6 +130,12 @@ CREDITS_EXHAUSTED_CAUSE = "AI credits balance too low"
 # Gemini number, so routing never launches Hydrogen blind (#1339).
 GEMINI_4_FAMILY = "gemini-4"
 GEMINI_4_UNREPORTED_CAUSE = "gemini-4 allowance not reported; treated as exhausted"
+GEMINI_4_MODEL = re.compile(r"gemini-4(?![0-9])")
+# The fallback host's windows read idle (100%) for an account agy shows nearly
+# spent, so its numbers are never trusted as headroom: only its credits are.
+FALLBACK_HOST_CAUSE = "only the fallback quota host answered; its windows read idle, so headroom is unknown"
+# The daily attempt is short so the fallback still fits Office's 20 s probe timeout.
+DAILY_TIMEOUT_S = 5
 UA = "antigravity-cli"
 
 CLIENT_ID_RE = re.compile(rb"[0-9]{10,}-[a-z0-9]{28,}\.apps\.googleusercontent\.com")
@@ -377,7 +383,7 @@ def get_refreshed_access_token():
     return None, last_error or "No OAuth client candidates available"
 
 
-def _post_quota(url, access_token, body=None):
+def _post_quota(url, access_token, body=None, timeout=10):
     headers = {
         "Authorization": f"Bearer {access_token}",
         "User-Agent": UA,
@@ -388,7 +394,7 @@ def _post_quota(url, access_token, body=None):
     req = urllib.request.Request(url, data=data, headers=headers)
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as res:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
             return json.load(res), None
     except urllib.error.HTTPError as e:
         body = e.read()[:200].decode("utf-8", "replace")
@@ -451,7 +457,8 @@ def fetch_agy_quota():
         return None, None, None, err
     errors = []
     for host in API_HOSTS:
-        data, err = _post_quota(_api_url(host, "retrieveUserQuota"), access_token)
+        kwargs = {"timeout": DAILY_TIMEOUT_S} if host == DAILY_HOST else {}
+        data, err = _post_quota(_api_url(host, "retrieveUserQuota"), access_token, **kwargs)
         if not err:
             break
         errors.append(f"{host}: {err}")
@@ -541,7 +548,7 @@ def process_quota(data, all_models=False, include_claude=False):
         model_id = str(bucket.get("modelId") or "").lower()
         if model_id.startswith("gemini"):
             family_buckets["gemini"].append(bucket)
-            if model_id.startswith(GEMINI_4_FAMILY):
+            if GEMINI_4_MODEL.match(model_id):
                 family_buckets[GEMINI_4_FAMILY].append(bucket)
         elif "claude" in model_id:
             family_buckets["claude"].append(bucket)
@@ -613,6 +620,16 @@ def main(argv):
     processed["family_source"] = "retrieveUserQuotaSummary" if account else "retrieveUserQuota"
     processed["api_host"] = raw_data.get("api_host")
     processed["families"].update(account)
+    families = processed["families"]
+    if processed["api_host"] not in (None, DAILY_HOST):
+        for name, family in families.items():
+            if name != GEMINI_4_FAMILY and family.get("status") == "ok":
+                family.update({"tightest_remaining_percent": None, "status": "unknown", "cause": FALLBACK_HOST_CAUSE})
+    # Hydrogen draws on the Gemini allowance (one shared weekly bucket on the daily
+    # host, 2026-11-23), so gemini-4 never reads above the Gemini family.
+    gemini, gemini_4 = families["gemini"], families[GEMINI_4_FAMILY]
+    if gemini.get("status") == "ok" and gemini["tightest_remaining_percent"] < gemini_4["tightest_remaining_percent"]:
+        families[GEMINI_4_FAMILY] = dict(gemini)
     processed["scope"] = "gemini+claude" if include_claude else (
         "gemini+other" if all_models else "gemini"
     )
