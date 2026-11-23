@@ -467,8 +467,23 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
         # replay sweeps instead of re-offering the handoff. The PR must be
         # passed on: _closeout's merged-detection reads it, not the status.
         external = landing.get("status") == "landed-externally"
-        _closeout(con, run, landing, res,
-                  handoff=None if external else landing.get("handoff"),
+        handoff = None if external else landing.get("handoff")
+        if handoff and landing.get("status") != "landed" and (landing.get("merged") or {}).get("commit"):
+            # #1333: the handoff closed unlanded work and office land --merge
+            # merged it later, so the handoff is over. Close as landed: no
+            # mark-ready; base sync and worktree removal run. A handoff chosen
+            # after the run had already landed stays a handoff (#783), and a
+            # merge record for another integration tree keeps the handoff path.
+            merged = gates.landing_state(con, run, None)
+            if merged["status"] == "landed":
+                with db.transaction(con):
+                    current = state.get_run(con, run["id"])
+                    landing = {**(current.get("landing") or {}), **merged, "handoff": None}
+                    state.update_run(con, run["id"], landing=landing)
+                run = state.get_run(con, run["id"])
+                handoff = None
+                res.add(f"landed after the handoff: {merged['detail']}")
+        _closeout(con, run, landing, res, handoff=handoff,
                   pr=landing.get("pr") if external else None)
         res.lines.extend(cleanup.offer(con, run))
         return res

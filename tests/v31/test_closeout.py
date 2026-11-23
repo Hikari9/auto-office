@@ -218,3 +218,80 @@ def test_landed_externally_close_keeps_convergence_and_integration_in_stored_lan
     after = stored()
     assert after["convergence"] == before["convergence"]
     assert after["integration"] == before["integration"]
+
+
+# #1333: office close after office land --merge on a handed-off run closes as landed, not as a handoff.
+HANDOFF_PR = "https://example.test/pr/1"
+
+
+def _handed_off(env):
+    approved_run(env, executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
+                 convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
+    env.office("dispatch", "T1", check=0)
+    code, out = env.office("close", "--handoff", HANDOFF_PR)
+    assert code == 0 and "handed off" in out, out
+    con = env.con()
+    return con, con.execute("SELECT id FROM runs").fetchone()[0]
+
+
+def _record_merge(con, rid, commit):
+    """What office land --merge records (land._record) once the task PRs merged."""
+    import json
+    landing = json.loads(con.execute("SELECT landing_json FROM runs WHERE id=?", (rid,)).fetchone()[0] or "{}")
+    landing["merged"] = {"commit": commit, "integration_commit": commit}
+    con.execute("UPDATE runs SET landing_json=? WHERE id=?", (json.dumps(landing), rid))
+    con.commit()
+
+
+def _no_mark_ready(monkeypatch):
+    ready = []
+    monkeypatch.setattr(closeout, "mark_ready", lambda *a, **k: ready.append(a))
+    return ready
+
+
+def test_close_after_land_merge_on_a_handed_off_run_takes_the_merged_path(env, monkeypatch):
+    from office import integration, lifecycle, state
+    con, rid = _handed_off(env)
+    assert _office_worktrees(env)
+    commit = integration.final_commit(con, state.get_run(con, rid))
+    _record_merge(con, rid, commit)
+    ready = _no_mark_ready(monkeypatch)
+    res = lifecycle.close(con, state.get_run(con, rid))
+    out = "\n".join(res.lines)
+    assert ready == [], out
+    assert "handed off" not in out and "landed after the handoff: task PRs merged" in out, out
+    assert res.final.startswith(DONE + "merged, ") and "worktree(s) removed" in res.final, res.final
+    # The real finish ran: this fixture has no origin, so it keeps unproven worktrees with a reason.
+    assert "base sync skipped: no origin remote" in out and "not proven recoverable" in out, out
+    stored = state.get_run(con, rid)["landing"]
+    assert stored["handoff"] is None and stored["status"] == "landed", stored
+    assert stored["detail"].startswith("task PRs merged") and stored["merged"]["commit"] == commit
+    res = lifecycle.close(con, state.get_run(con, rid))  # a second replay stays on the landed path
+    assert ready == [] and res.final.startswith(DONE + "merged, "), res.final
+
+
+def test_unmerged_handoff_replay_still_hands_off(env, monkeypatch):
+    from office import lifecycle, state
+    con, rid = _handed_off(env)
+    kept = _office_worktrees(env)
+    ready = _no_mark_ready(monkeypatch)
+    res = lifecycle.close(con, state.get_run(con, rid))
+    assert len(ready) == 1 and ready[0][1] == HANDOFF_PR, res.lines
+    assert res.final == DONE + f"handed off {HANDOFF_PR}, worktrees kept", res.final
+    assert _office_worktrees(env) == kept
+
+
+def test_merge_record_for_another_integration_keeps_the_handoff(env, monkeypatch):
+    """A merge recorded for another integration tree does not prove this run landed."""
+    from office import lifecycle, state
+    con, rid = _handed_off(env)
+    kept = _office_worktrees(env)
+    _record_merge(con, rid, state.get_run(con, rid)["base_sha"])
+    ready = _no_mark_ready(monkeypatch)
+    res = lifecycle.close(con, state.get_run(con, rid))
+    out = "\n".join(res.lines)
+    assert len(ready) == 1 and "landed after the handoff" not in out, out
+    assert res.final == DONE + f"handed off {HANDOFF_PR}, worktrees kept", res.final
+    stored = state.get_run(con, rid)["landing"]
+    assert stored["handoff"] == HANDOFF_PR and stored.get("status") != "landed", stored
+    assert _office_worktrees(env) == kept
