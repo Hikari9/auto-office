@@ -57,6 +57,20 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 
 `dispatch --as` and `rerun --as` record orchestrator choices with ordinary routing safety gates. Add `--quote "<user's words>"` only for actual user authority. `amend route` can record an accepted task's future route without rewriting its submitted producer; its next legal reopen uses that route. Revoking new acceptance work does not mark the new criteria satisfied.
 
+- Run `office wait` as a background command, never in the foreground, and end the turn there. A foreground wait keeps the
+  root mid-turn for minutes, so a prompt queued for it (`/compactable`, a user message) lands whenever the wait returns, mixed
+  with acting on its result. In the background the turn ends at the waiting point, queued prompts land there, and the wait's
+  completion notification starts the next turn. Claude Code: Bash with `run_in_background: true`, then end the turn; act on the
+  notification's exit code; never poll the output file or sleep. A root harness with no background command that wakes the turn
+  when it finishes (Codex, agy, pi, Hermes, OpenCode) keeps the foreground wait.
+  - Compaction: `/compact` summarizes the conversation and leaves the session's background commands running, so a wait
+    started before it still delivers its completion notification afterwards and is acted on by exit code. The summary may
+    drop that a wait is running: check the session's background tasks before starting another. If two waits do finish on
+    the same event, the second notification is a duplicate: act on fresh `office status`, as for a duplicate wake.
+  - Root wake: run at most one waiter per run. With `wake: armed` (Herdr or native Stop/`asyncRewake`), root wake wins:
+    end the turn with no `office wait`, because a background wait would wake the same idle root a second time for the same
+    event. Start a background wait only when status shows `wake: off` or `wake: unavailable`; that is when it prints
+    `next: office wait`.
 - `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
 - An `office` command exits 75 (EX_TEMPFAIL) and prints `office: install is being rebuilt, retry in 5 s (<ExceptionType>: <module>)` on stderr, with no traceback, when the install is replaced as the command starts (for example during `uv tool install --force`). Retry the same command after a few seconds, because nothing ran. A failure whose origin is outside the office package (a dependency that fails to import) is not a rebuild: the command exits 1 and prints its cause with a reinstall hint, naming `uv tool install --force --editable <checkout>` for a checkout or `uv tool install --force git+https://github.com/Hikari9/auto-office` for a release. If a reinstall is already running, the hint says to retry after it finishes. A replacement that breaks a command after it has started still raises a traceback; check the run before retrying it. The root wake supervisor records one `office.reinstalled` event once the install is healthy again, and that event wakes the root to resume the run. The event waits for a fresh-process probe that imports the CLI and resolves the version. While the supervisor's ticks keep failing it retries with backoff, up to 30 s between ticks.
 - Exit 5 prints a `question:` line (dispatch, pane, question, options, answer command). Decide planning, scope, ordering and
@@ -69,7 +83,7 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
 - Root wake (#922) is on by default. `office resume` from a bound, verified Claude Herdr root pane arms it; `--wake-off` turns it
   off for the run and it stays off across later plain resumes; `office resume --auto-wake` re-arms it. `--auto-wake` is still accepted. Outside Herdr, or when Herdr cannot verify the pane, resume prints a notice
   and arms nothing. `office status` prints `wake: armed`, `wake: off` or `wake: unavailable (<reason>)` on every non-terminal run.
-  A turn that ends with work running and no wake armed is never woken, so arm `office wait` instead of ending the turn on an
+  A turn that ends with work running and no wake armed is never woken, so run `office wait` in the background and end the turn on an
   event-dependent step. Status ends with `next: office wait` in that state. `office context` repeats this rule.
 - **Outside Herdr, a Claude Code root can now be woken natively (#940):** `office install --only claude --item turn.stop`
   installs the managed `Stop` command hook with `asyncRewake: true` (Claude Code must load/approve this hook), alongside

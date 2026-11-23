@@ -148,7 +148,8 @@ def test_office_context_carries_the_turn_rule(env):
 def test_docs_describe_default_on_wake_and_the_turn_rule(doc):
     text = (REPO / doc).read_text()
     assert "is on by default" in text and "`--wake-off`" in text, doc
-    assert "arm `office wait` instead of ending the turn" in text, doc
+    assert "run `office wait` in the background and end the turn" in text, doc
+    assert "arm `office wait` instead of ending the turn" not in text, doc
 
 
 # --- #919: review gates classified and emitted once per episode -----------------------------------------------------

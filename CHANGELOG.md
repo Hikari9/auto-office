@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.12
+
+Orchestrators run `office wait` as a background command (#1340). SKILL.md, the orchestrator reference and the `office context` turn rule now say to start it in the background (Claude Code: `run_in_background`), end the turn at that waiting point and act on the completion notification by exit code, so a queued prompt such as `/compactable` lands at the waiting point instead of whenever a foreground wait returns. Harnesses with no background command that wakes the turn keep the foreground wait. The reference documents compaction during a background wait and makes armed root wake the single waiter, so a background wait never wakes the root a second time.
+
 ## 3.31.11
 
 `office close` on a run closed with `--handoff` and later merged by `office land --merge` now closes as landed (#1333). The terminal replay reused the stored handoff, so it tried to mark the merged PR ready, printed "handed off" and kept the worktrees. When the recorded merge covers the accepted integration, the replay clears the handoff, records the landed state and runs base sync and worktree removal. A handoff chosen after the run had already landed stays a handoff, and a merge record for another integration tree keeps the handoff path.
