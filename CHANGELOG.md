@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.13
+
+The agy quota probe now reads the `daily-cloudcode-pa` host agy 1.5 itself uses, falling back to `cloudcode-pa` only on failure (#1339). The production host reported idle 100% windows and no Gemini 4 bucket, so Hydrogen passed the reserve gate with about 0% left. The probe also reports a `gemini-4` family, which reads as exhausted when no bucket is reported, and agy `gemini-4*` routes gate on it.
+
 ## 3.31.12
 
 Orchestrators run `office wait` as a background command (#1340). SKILL.md, the orchestrator reference and the `office context` turn rule now say to start it in the background (Claude Code: `run_in_background`), end the turn at that waiting point and act on the completion notification by exit code, so a queued prompt such as `/compactable` lands at the waiting point instead of whenever a foreground wait returns. Harnesses with no background command that wakes the turn keep the foreground wait. The reference documents compaction during a background wait and makes armed root wake the single waiter, so a background wait never wakes the root a second time.

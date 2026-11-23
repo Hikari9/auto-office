@@ -291,6 +291,55 @@ def test_zero_gemini_family_is_rejected_even_when_other_candidates_are_unknown()
     assert any(r["stage"] == 6 and "gemini-3.8-flash" in r["candidate"] for r in result["rejected"])
 
 
+def _gemini_4_quota(gemini_4_percent):
+    families = {**_FAMILIES, "gemini": {"status": "ok", "tightest_remaining_percent": 100, "reset_time": "g"},
+                "gemini-4": {"status": "ok", "tightest_remaining_percent": gemini_4_percent, "reset_time": "g4"}}
+    return {"status": "ok", "tightest_remaining_percent": 100.0, "families": candidates._normalize_probe_result(
+        {"tightest_remaining_percent": 100, "families": families}, None)["families"]}
+
+
+def test_gemini_4_route_at_2_percent_is_rejected_before_launch_with_reserve_5():
+    """#1339: Hydrogen gates on its own gemini-4 number, not the Gemini family's 100%."""
+    quota = _gemini_4_quota(2)
+    hydrogen = _agy("gemini-4-hydrogen", quota)
+    assert candidates.quota_for_candidate(hydrogen, quota)["tightest_remaining_percent"] == 2
+    assert candidates.quota_for_candidate(_agy("gemini-3.8-flash", quota), quota)["tightest_remaining_percent"] == 100
+    from office import routing
+    gated = {**hydrogen, "quota": candidates.quota_for_candidate(hydrogen, quota)}
+    assert routing._quota_gate(gated, 5.0) == (6, "projected quota crosses the protected reserve", "quota")
+    roomy = {**hydrogen, "quota": candidates.quota_for_candidate(hydrogen, _gemini_4_quota(50))}
+    assert routing._quota_gate(roomy, 5.0) is None
+    # Through the whole router (Hydrogen's own role/size gates aside): any gemini-4 route is set aside at stage 6.
+    unknown = {"status": "unknown", "tightest_remaining_percent": None}
+    result = _route([_routable("agy", "gemini-4-neon", quota), _routable("claude", "opus", unknown)])
+    assert result["selected"].startswith("claude@")
+    assert any(r["stage"] == 6 and "gemini-4-neon" in r["candidate"] for r in result["rejected"])
+
+
+def test_gemini_4_route_with_headroom_is_not_quota_rejected():
+    result = _route([_routable("agy", "gemini-4-neon", _gemini_4_quota(50))])
+    assert result["status"] == "selected" and result["selected"].startswith("agy@")
+
+
+@pytest.mark.parametrize("reserve", [0.0, 5.0])
+def test_unreported_gemini_4_is_rejected_before_launch(reserve):
+    unreported = {"tightest_remaining_percent": 0, "reset_time": None, "status": "ok",
+                  "cause": "gemini-4 allowance not reported; treated as exhausted", "exhausted_by": "unreported"}
+    families = {**_FAMILIES, "gemini": {"status": "ok", "tightest_remaining_percent": 100, "reset_time": "g"},
+                "gemini-4": unreported}
+    quota = {"status": "ok", "tightest_remaining_percent": 100.0, "families": candidates._normalize_probe_result(
+        {"tightest_remaining_percent": 100, "families": families}, None)["families"]}
+    from office import routing
+    hydrogen = _agy("gemini-4-hydrogen", quota)
+    gated = {**hydrogen, "quota": candidates.quota_for_candidate(hydrogen, quota)}
+    assert routing._quota_gate(gated, reserve) == (6, "projected quota crosses the protected reserve", "quota")
+
+
+def test_gemini_4_without_its_own_family_keeps_the_gemini_reading():
+    quota = _agy_family_quota()  # older probe output: no gemini-4 family
+    assert candidates.quota_for_candidate(_agy("gemini-4-hydrogen", quota), quota)["tightest_remaining_percent"] == 0
+
+
 def test_zero_gemini_family_still_leaves_agy_claude_eligible():
     quota = _agy_family_quota()
     result = _route([_routable("agy", "gemini-3.8-flash", quota), _routable("agy", "claude-sonnet-5-5", quota)])
