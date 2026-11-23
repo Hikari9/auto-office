@@ -142,6 +142,9 @@ def test_office_context_carries_the_turn_rule(env):
     _go(env)
     code, out = env.office("context", check=0)
     assert context_snapshot.TURN_RULE in out, out
+    rule = context_snapshot.TURN_RULE
+    assert "run `office wait` in the background and end the turn" in rule, rule
+    assert "root wake wins" in rule and "arm `office wait` instead of ending the turn" not in rule, rule
 
 
 @pytest.mark.parametrize("doc", ["SKILL.md", "docs/orchestrator-reference.md"])
@@ -150,6 +153,13 @@ def test_docs_describe_default_on_wake_and_the_turn_rule(doc):
     assert "is on by default" in text and "`--wake-off`" in text, doc
     assert "run `office wait` in the background and end the turn" in text, doc
     assert "arm `office wait` instead of ending the turn" not in text, doc
+    assert "run_in_background: true" in text and "root wake wins" in text, doc
+    assert "office wait --timeout 540" in text, doc
+
+
+def test_root_wake_doc_names_the_background_wait_and_its_single_waiter():
+    text = (REPO / "docs/root-wake.md").read_text()
+    assert "run `office wait` in the background (one waiter per run: root wake wins while armed)" in text
 
 
 # --- #919: review gates classified and emitted once per episode -----------------------------------------------------

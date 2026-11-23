@@ -61,15 +61,20 @@ For a trial launch failure before meaningful work, confirm the entire failed wor
   root mid-turn for minutes, so a prompt queued for it (`/compactable`, a user message) lands whenever the wait returns, mixed
   with acting on its result. In the background the turn ends at the waiting point, queued prompts land there, and the wait's
   completion notification starts the next turn. Claude Code: Bash with `run_in_background: true`, then end the turn; act on the
-  notification's exit code; never poll the output file or sleep. A root harness with no background command that wakes the turn
+  notification's exit code; never poll the output file or sleep. Keep the wait's own timeout under the command timeout
+  (`office wait --timeout 540` with Bash `timeout: 600000`) so it ends with 124, not a kill; any exit outside 0/3/5/124
+  (a killed command) means read `office status` and follow its `next:`. A root harness with no background command that wakes the turn
   when it finishes (Codex, agy, pi, Hermes, OpenCode) keeps the foreground wait.
   - Compaction: `/compact` summarizes the conversation and leaves the session's background commands running, so a wait
     started before it still delivers its completion notification afterwards and is acted on by exit code. The summary may
     drop that a wait is running: check the session's background tasks before starting another. If two waits do finish on
-    the same event, the second notification is a duplicate: act on fresh `office status`, as for a duplicate wake.
+    the same event, the second notification is a duplicate: act on fresh `office status`, as for a duplicate wake. A restart,
+    `--resume` or crash ends the background command with no notification: run `office status`, and start a new background
+    wait when it prints `next: office wait`.
   - Root wake: run at most one waiter per run. With `wake: armed` (Herdr or native Stop/`asyncRewake`), root wake wins:
     end the turn with no `office wait`, because a background wait would wake the same idle root a second time for the same
-    event. Start a background wait only when status shows `wake: off` or `wake: unavailable`; that is when it prints
+    event. Root wake loses nothing a wait would catch: its watchdog runs the same agent-question scan as `office wait`, and
+    the notifier re-checks the fresh action signature before sending, so it never repeats an action already taken. Start a background wait only when status shows `wake: off` or `wake: unavailable`; that is when it prints
     `next: office wait`.
 - `office wait` exits 0 (act), 3 (stall or an already-reported action with no work in flight), 5 (an agent asked a question), 124 (nothing new). On 3, follow `next:` before waiting again. An amendment awaiting an ended executor's acknowledgement is a blocker and names a fresh recovery; resume is offered only when the adapter and stored session support it. Key on the exit code.
 - An `office` command exits 75 (EX_TEMPFAIL) and prints `office: install is being rebuilt, retry in 5 s (<ExceptionType>: <module>)` on stderr, with no traceback, when the install is replaced as the command starts (for example during `uv tool install --force`). Retry the same command after a few seconds, because nothing ran. A failure whose origin is outside the office package (a dependency that fails to import) is not a rebuild: the command exits 1 and prints its cause with a reinstall hint, naming `uv tool install --force --editable <checkout>` for a checkout or `uv tool install --force git+https://github.com/Hikari9/auto-office` for a release. If a reinstall is already running, the hint says to retry after it finishes. A replacement that breaks a command after it has started still raises a traceback; check the run before retrying it. The root wake supervisor records one `office.reinstalled` event once the install is healthy again, and that event wakes the root to resume the run. The event waits for a fresh-process probe that imports the CLI and resolves the version. While the supervisor's ticks keep failing it retries with backoff, up to 30 s between ticks.
