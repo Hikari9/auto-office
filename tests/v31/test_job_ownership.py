@@ -430,3 +430,59 @@ def test_a_live_job_is_never_reported_as_no_job_running(env, monkeypatch):
         holder.wait()
     (stall,) = guide.stalls(con, run)
     assert "worker is gone" in stall
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows independent worker guard")
+def test_supervisor_death_does_not_release_live_workers_guard(env, monkeypatch):
+    from office import jobs, portable, util
+    import re
+
+    plan, out = _probe_plan(env, 12)
+    con, run, job = _submitted(env, monkeypatch, plan)
+    first = _job_process(env, job["id"])
+    try:
+        assert _until(lambda: _probe_state(out)["now"] == 1)
+        supervisors = re.findall(r"supervisor pid (\d+) starts a worker", jobs_log(run, job["id"]))
+        assert supervisors
+        supervisor = int(supervisors[-1])
+        worker = _row(con, job["id"])["claimed_pid"]
+        assert worker and supervisor != worker
+        portable.kill(supervisor, signal.SIGTERM)
+        assert _until(lambda: portable.pid_exists(supervisor) is False)
+        assert jobs.claim_state(_row(con, job["id"]))[0] == util.ALIVE
+        con.execute("UPDATE outbox SET status='queued', claim_token=NULL, claimed_pid=NULL WHERE id=?", (job["id"],))
+        retry = _job_process(env, job["id"])
+        assert retry.wait(timeout=30) == 0
+        assert _probe_state(out)["max"] == 1
+        assert _until(lambda: _probe_state(out)["now"] == 0)
+        assert _until(lambda: portable.pid_exists(worker) is False)
+        again = _job_process(env, job["id"])
+        assert again.wait(timeout=60) == 0
+        assert _probe_state(out)["max"] == 1 and _probe_state(out)["runs"] == 2
+    finally:
+        if first.poll() is None:
+            first.kill()
+        first.wait(timeout=30)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows unconfirmed check guard")
+def test_a_crashed_check_guard_blocks_claim_recovery_and_new_attempts(env, monkeypatch):
+    from office import jobs, util
+
+    con, run, job = _submitted(env, monkeypatch)
+    fd = jobs.try_lock(run["id"], job["id"])
+    assert fd is not None
+    try:
+        with jobs._attempt(run["id"], job["id"], "old-attempt", fd):
+            marker = jobs.begin_check()
+        assert marker and marker.exists()
+    finally:
+        os.close(fd)
+    con.execute("UPDATE outbox SET status='claimed', claim_token='old-attempt', claimed_pid=1 WHERE id=?", (job["id"],))
+    assert jobs.claim_state(_row(con, job["id"]))[0] == util.UNKNOWN
+    assert jobs.reclaim(con, run["id"]) == 0
+    assert jobs.try_lock(run["id"], job["id"]) is None
+    jobs.end_check(marker)  # operator confirmed previous check ended
+    fd = jobs.try_lock(run["id"], job["id"])
+    assert fd is not None
+    os.close(fd)

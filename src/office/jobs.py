@@ -53,8 +53,8 @@ from office.util import ALIVE, DEAD, UNKNOWN, claim_identity, claim_liveness, du
 
 KICK_THROTTLE_SECONDS = 10
 LOCK_FD_ENV = "OFFICE_JOB_LOCK_FD"
-# Windows cannot hand a lock descriptor to a child (no `pass_fds`): the supervisor keeps the lock
-# for as long as the worker runs and tells it so with this value instead of a descriptor.
+# Windows workers take a separate exclusive guard before claiming. The supervisor
+# still serializes launches with the original lock; either surviving owner excludes a retry.
 LOCK_HELD = "held-by-supervisor"
 # A spawn waits this long for the lock: a liveness probe holds it for an instant.
 LOCK_WAIT_SECONDS = 2.0
@@ -115,23 +115,59 @@ def _children_path(run_id: str, job_id: str) -> Path:
     return job_dir(run_id) / f"{job_id}.children"
 
 
-def try_lock(run_id: str, job_id: str, *, wait: float = 0.0) -> int | None:
-    """An fd holding the job's execution lock, or None when another process holds it."""
-    path = lock_path(run_id, job_id)
+def _worker_lock_path(run_id: str, job_id: str) -> Path:
+    return job_dir(run_id) / f"{job_id}.worker.lock"
+
+
+def _check_guard_path(run_id: str, job_id: str) -> Path:
+    return job_dir(run_id) / f"{job_id}.check-pending"
+
+
+def _check_pending(run_id: str, job_id: str) -> bool:
+    try:
+        _check_guard_path(run_id, job_id).stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _try_lock_path(path: Path, *, wait: float = 0.0) -> int | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    deadline = time.time() + wait
+    deadline = time.monotonic() + wait
     while True:
         try:
             portable.lock_exclusive(fd, blocking=False)
             return fd
         except OSError as exc:
-            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES) or time.time() >= deadline:
+            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES) or time.monotonic() >= deadline:
                 os.close(fd)
                 if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
                     return None
                 raise
         time.sleep(0.1)
+
+
+def try_lock(run_id: str, job_id: str, *, wait: float = 0.0) -> int | None:
+    """Serialize supervisors; on Windows also exclude independently live workers and unconfirmed checks."""
+    fd = _try_lock_path(lock_path(run_id, job_id), wait=wait)
+    if fd is None or not portable.IS_WINDOWS:
+        return fd
+    try:
+        guard = _try_lock_path(_worker_lock_path(run_id, job_id))
+        if guard is not None:
+            try:
+                if not _check_pending(run_id, job_id):
+                    return fd
+            finally:
+                os.close(guard)
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    return None
 
 
 def _lock_state(run_id: str, job_id: str) -> tuple[str, str]:
@@ -149,6 +185,16 @@ def _lock_state(run_id: str, job_id: str) -> tuple[str, str]:
         return UNKNOWN, f"its execution lock cannot be probed ({exc.strerror})"
     else:
         portable.unlock(fd)
+        if portable.IS_WINDOWS:
+            try:
+                guard = _try_lock_path(_worker_lock_path(run_id, job_id))
+            except OSError as exc:
+                return UNKNOWN, f"its worker lock cannot be probed ({exc.strerror})"
+            if guard is None:
+                return ALIVE, "a live worker holds its execution guard"
+            os.close(guard)
+            if _check_pending(run_id, job_id):
+                return UNKNOWN, f"check exit is unconfirmed ({_check_guard_path(run_id, job_id)}); verify its processes before recovery"
         return DEAD, "no process holds its execution lock (worker, supervisor and checks are gone)"
     finally:
         os.close(fd)
@@ -181,6 +227,24 @@ def attempt_lock_fds() -> tuple[int, ...]:
     if portable.IS_WINDOWS:
         return ()
     return tuple(fd for *_, fd in _ATTEMPTS[-1:] if fd is not None)
+
+
+def begin_check() -> Path | None:
+    """Persist uncertainty before a Windows check runs, even if its worker is killed."""
+    if not portable.IS_WINDOWS or not _ATTEMPTS:
+        return None
+    run_id, job_id, token, _ = _ATTEMPTS[-1]
+    marker = _check_guard_path(run_id, job_id)
+    with marker.open("x", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    return marker
+
+
+def end_check(marker: Path | None) -> None:
+    if marker is not None:
+        marker.unlink()
 
 
 def register_child(pid: int) -> None:
@@ -484,12 +548,15 @@ def spawn(job_id: str, run_id: str) -> None:
     env.pop(frontdoor.HOP_ENV, None)
     env.pop(LOCK_FD_ENV, None)
     env.pop("OFFICE_WORKER_TAG", None)  # a job is not the worker that kicked it: the tag would name the job's processes
+    session = portable.session_kwargs()
+    if env.pop(portable.AGENT_JOB_ENV, None) and portable.IS_WINDOWS:
+        session["creationflags"] |= subprocess.CREATE_BREAKAWAY_FROM_JOB
     path = log_path(run_id, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     log = open(path, "ab")
     try:
         subprocess.Popen(argv + ["_job", job_id], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         env=env, **portable.session_kwargs(), close_fds=True, cwd=_child_cwd(run_id))
+                         env=env, **session, close_fds=True, cwd=_child_cwd(run_id))
     finally:
         log.close()
 
@@ -534,7 +601,12 @@ def execute(con, job_id: str, *, token: str | None = None, lock_fd: int | None =
             _note(row["run_id"], job_id, "not started: an earlier attempt's processes still hold the execution lock")
             return 0
     token = token or new_token()
+    guard = None
     try:
+        if portable.IS_WINDOWS:
+            guard = _try_lock_path(_worker_lock_path(row["run_id"], job_id), wait=LOCK_WAIT_SECONDS)
+            if guard is None or _check_pending(row["run_id"], job_id):
+                return 0
         claimant = claim_identity(os.getpid())  # the start time tells this process from a later one with its pid
         with db.transaction(con):
             cur = con.execute("UPDATE outbox SET status='claimed', claimed_pid=?, claimed_by=?, claimed_at=?, claim_token=?, "
@@ -545,6 +617,8 @@ def execute(con, job_id: str, *, token: str | None = None, lock_fd: int | None =
         with _attempt(row["run_id"], job_id, token, lock_fd):
             return _run_attempt(con, job_id, token)
     finally:
+        if guard is not None:
+            os.close(guard)
         if own:
             os.close(lock_fd)
 
@@ -736,6 +810,9 @@ def _supervise_locked(con, run_id: str, job_id: str, lock_fd: int) -> int:
     if row is None or row["status"] != "claimed" or row["claim_token"] != token:
         return code
     stopped = _stop_children(run_id, job_id, token)
+    if portable.IS_WINDOWS and _check_pending(run_id, job_id):
+        _note(run_id, job_id, "check exit is unconfirmed; keeping the claim and recovery guard")
+        return code or 1
     with db.transaction(con):
         row = con.execute("SELECT * FROM outbox WHERE id=?", (job_id,)).fetchone()
         if row is not None and row["status"] == "claimed" and row["claim_token"] == token:

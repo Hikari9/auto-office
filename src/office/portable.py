@@ -17,10 +17,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import IO
 
 IS_WINDOWS = sys.platform == "win32"
+# Explicit Office outbox launches may detach from an agent job.
+AGENT_JOB_ENV = "OFFICE_WINDOWS_AGENT_JOB"
 
 # Windows has no SIGKILL: a forced kill is `taskkill /F` (see `killpg`).
 SIGKILL: int = getattr(signal, "SIGKILL", 9)
@@ -151,6 +154,8 @@ if IS_WINDOWS:
 
     _k32.CreateJobObjectW.restype = wt.HANDLE
     _k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+    _k32.OpenJobObjectW.restype = wt.HANDLE
+    _k32.OpenJobObjectW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
     _k32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
     _k32.TerminateJobObject.argtypes = [wt.HANDLE, wt.UINT]
     _k32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
@@ -161,50 +166,117 @@ if IS_WINDOWS:
     _JOB_BASIC_ACCOUNTING = 1
     _JOB_EXTENDED_LIMIT = 9
     _JOB_KILL_ON_CLOSE = 0x2000
+    _JOB_BREAKAWAY_OK = 0x800
+    _JOB_QUERY_TERMINATE = 0x4 | 0x8
+    _ERROR_ALREADY_EXISTS = 183
 
 # Windows: the job object holding each group this process started with `popen_group`, by leader pid.
 _JOBS: dict[int, int] = {}
 
 
-def popen_group(*args, **kwargs) -> subprocess.Popen:
-    """`subprocess.Popen` that makes the child the leader of a new process group, as `session_kwargs` does,
-    and on Windows also contains the child and every descendant in a job object. A Windows process tree is
-    linked only by parent pid, so an orphan whose parent exited escapes `taskkill /T`; a job keeps it, and
-    `killpg` then reaches it until the job is empty. The child starts suspended and runs only once it is in the
-    job, so nothing it spawns is missed. Closing Office's handle (Office exiting) kills what is left."""
+class GroupCleanupError(OSError):
+    """The suspended launch could not be proven stopped. Never retry past it."""
+
+
+def new_group_name() -> str:
+    """A unique, session-local Windows job name (never a numeric PID)."""
+    import uuid
+    return "Local\\AutoOffice-" + uuid.uuid4().hex
+
+
+def popen_group(*args, job_name: str | None = None, on_ready=None,
+                allow_breakaway: bool = False, **kwargs) -> subprocess.Popen:
+    """Start a process group; on Windows prove containment before executing code.
+
+    The child stays suspended until its kill-on-close job is configured and
+    assigned. on_ready records the assigned job before the child can run.
+    """
     if not IS_WINDOWS:
         return subprocess.Popen(*args, **{**kwargs, **session_kwargs()})
     flags = kwargs.pop("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
     proc = subprocess.Popen(*args, creationflags=flags, **kwargs)
-    job = _k32.CreateJobObjectW(None, None)
+    job = None
     try:
-        if not job:
-            raise ctypes.WinError(ctypes.get_last_error())
+        ctypes.set_last_error(0)
+        job = _k32.CreateJobObjectW(None, job_name)
+        err = ctypes.get_last_error()
+        if not job or (job_name and err == _ERROR_ALREADY_EXISTS):
+            raise ctypes.WinError(err)
         limit = _JobExtendedLimit()
-        limit.BasicLimitInformation.LimitFlags = _JOB_KILL_ON_CLOSE
-        _k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT, ctypes.byref(limit), ctypes.sizeof(limit))
+        limit.BasicLimitInformation.LimitFlags = _JOB_KILL_ON_CLOSE | (_JOB_BREAKAWAY_OK if allow_breakaway else 0)
+        if not _k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT, ctypes.byref(limit), ctypes.sizeof(limit)):
+            raise ctypes.WinError(ctypes.get_last_error())
         if not _k32.AssignProcessToJobObject(job, int(proc._handle)):
             raise ctypes.WinError(ctypes.get_last_error())
-    except OSError:
-        if job:
-            _k32.CloseHandle(job)
-        job = None  # contain nothing rather than fail the launch: the tree is still a group by parent pid
-    if job:
-        _JOBS[proc.pid] = job
-    if _ntdll.NtResumeProcess(int(proc._handle)) != 0:
-        proc.kill()
-        raise OSError(errno.EPERM, "the new process could not be resumed")
+        if proc.pid in _JOBS:
+            raise OSError(errno.EBUSY, "a previous job still owns this process id")
+        if on_ready is not None:
+            on_ready()
+        if _ntdll.NtResumeProcess(int(proc._handle)) != 0:
+            raise OSError(errno.EPERM, "the new process could not be resumed")
+    except BaseException:
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GroupCleanupError(errno.EIO, "could not confirm suspended child stopped") from exc
+        finally:
+            if job:
+                _k32.CloseHandle(job)
+        raise
+    _JOBS[proc.pid] = job
     return proc
+
+
+def _active_job(job: int) -> int:
+    info = _JobBasicAccounting()
+    if not _k32.QueryInformationJobObject(job, _JOB_BASIC_ACCOUNTING, ctypes.byref(info), ctypes.sizeof(info), None):
+        raise PermissionError(errno.EPERM, "the process group's job could not be queried")
+    return info.ActiveProcesses
 
 
 def _job_active(pgid: int) -> int | None:
     job = _JOBS.get(pgid)
+    return _active_job(job) if job else None
+
+
+def _drain_job(job: int, timeout: float = 10.0) -> bool:
+    """Terminate the exact job by handle and confirm it has no active members."""
+    try:
+        if not _active_job(job):
+            return True
+        if not _k32.TerminateJobObject(job, 1):
+            return False
+        deadline = time.monotonic() + timeout
+        while _active_job(job):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+    except OSError:
+        return False
+
+
+def finish_group(pgid: int) -> bool:
+    """Drain and release an owned Windows job; unknown is not empty."""
+    job = _JOBS.get(pgid)
+    if not IS_WINDOWS or not job or not _drain_job(job):
+        return False
+    release_group(pgid)
+    return True
+
+
+def finish_named_group(name: str) -> bool:
+    """Reopen the exact recorded job; a missing job name is not proof of exit."""
+    if not IS_WINDOWS:
+        return False
+    job = _k32.OpenJobObjectW(_JOB_QUERY_TERMINATE, False, name)
     if not job:
-        return None
-    info = _JobBasicAccounting()
-    if not _k32.QueryInformationJobObject(job, _JOB_BASIC_ACCOUNTING, ctypes.byref(info), ctypes.sizeof(info), None):
-        return None
-    return info.ActiveProcesses
+        return False
+    try:
+        return _drain_job(job)
+    finally:
+        _k32.CloseHandle(job)
 
 
 def release_group(pgid: int) -> None:
@@ -250,8 +322,11 @@ def kill(pid: int, sig: int) -> None:
         os.kill(pid, sig)
         return
     if sig == 0:
-        if not pid_exists(pid):
+        exists = pid_exists(pid)
+        if exists is False:
             raise ProcessLookupError(errno.ESRCH, "no such process")
+        if exists is None:
+            raise PermissionError(errno.EPERM, "process liveness is unknown")
         return
     try:
         os.kill(pid, signal.SIGTERM)  # TerminateProcess on Windows
@@ -265,9 +340,8 @@ def killpg(pgid: int, sig: int) -> None:
     """Signal a process group (`os.killpg`). On Windows the group is the process
     tree below `pgid`: SIGTERM is a polite `taskkill /T`; SIGKILL is `taskkill /T /F`.
     `sig == 0` checks that the group exists. Raises `ProcessLookupError` when it is gone.
-    A group this process started with `popen_group` is its job object instead: it exists while any member
-    lives, even after the leader exited; SIGTERM asks its leader to stop with CTRL_BREAK, and SIGKILL (or SIGTERM
-    once the leader is gone) ends every member."""
+    A group this process started with `popen_group` is its job object instead. Both stop signals address
+    that exact job by handle, never a console group id that may have been reused."""
     if not IS_WINDOWS:
         os.killpg(pgid, sig)
         return
@@ -277,10 +351,6 @@ def killpg(pgid: int, sig: int) -> None:
             raise ProcessLookupError(errno.ESRCH, "no such process group")
         if sig == 0:
             return
-        if sig == signal.SIGTERM and pid_exists(pgid):
-            with contextlib.suppress(OSError):
-                os.kill(pgid, signal.CTRL_BREAK_EVENT)
-                return
         if not _k32.TerminateJobObject(_JOBS[pgid], 1):
             raise PermissionError(errno.EPERM, "the process group's job could not be terminated")
         return

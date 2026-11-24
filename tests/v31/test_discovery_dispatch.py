@@ -606,8 +606,9 @@ class Tree:
 
     def __init__(self, did, log, secs=30):
         env = {**os.environ, dispatch._WORKER_TAG: did}
-        self.leader = subprocess.Popen([sys.executable, "-c", LEADER, did, str(log), str(secs)], stdout=subprocess.PIPE,
-                                       text=True, env=env, start_new_session=True)
+        self.job_name = dispatch.portable.new_group_name() if sys.platform == "win32" else None
+        self.leader = dispatch.portable.popen_group([sys.executable, "-c", LEADER, did, str(log), str(secs)],
+                                                    stdout=subprocess.PIPE, text=True, env=env, job_name=self.job_name)
         self.child = int(self.leader.stdout.readline())
         threading.Thread(target=self.leader.wait, daemon=True).start()  # reaps the leader the moment it dies
 
@@ -617,6 +618,8 @@ class Tree:
         atomic_write_json(ddir / "agent.identity", {"pid": self.leader.pid, "start": process_start(self.leader.pid),
                                                     "c_start": dispatch._c_start(self.leader.pid)})
         (ddir / "agent.pgid").write_text(str(self.leader.pid))
+        if self.job_name:
+            atomic_write_json(ddir / "agent.job.json", {"name": self.job_name, "state": "active"})
 
     def alive(self):
         """Whether either process can still run: a zombie, killed and waiting for its parent, cannot write."""
@@ -624,6 +627,10 @@ class Tree:
         return any(pid in states and not states[pid].startswith("Z") for pid in (self.child, self.leader.pid))
 
     def close(self):
+        if self.job_name:
+            dispatch.portable.finish_group(self.leader.pid)
+            dispatch.portable.release_group(self.leader.pid)
+            return
         for pid in (self.child, self.leader.pid):
             try:
                 os.kill(pid, 9)
@@ -773,6 +780,8 @@ def test_a_worker_that_survives_the_termination_blocks_the_fallback_without_movi
     trees.append(tree)
     tree.record("run-A", d["id"])
     monkeypatch.setattr(dispatch, "_terminate_worker", lambda *a, **kw: claimed_gone)  # it ignored every signal
+    if sys.platform == "win32":
+        monkeypatch.setattr(dispatch.portable, "finish_named_group", lambda *a: False)
     lease = _live_leases(cold)[0]["id"]
     recover(cold, d["id"])
     assert tree.alive()
@@ -1851,3 +1860,51 @@ def test_discovery_inputs_record_only_a_planner_declared_task_size(cold, descrip
     settings = route_policy.discovery_settings(state.pinned_config(run))
     got = candidates.discovery_inputs(cold.con, run, "executor", [], settings, {"descriptor": descriptor})
     assert got["risk"]["task"] == {"task_size": size, "bounds": "bounded", "domain": None}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows named job")
+def test_windows_dead_agent_leader_does_not_leave_a_second_writer(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    portable = dispatch.portable
+    ready = cold.tmp / "orphan-ready"
+    child_code = "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); time.sleep(30)"
+    code = ("import os, subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
+            "cwd=sys.argv[3], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+            "env={k: v for k, v in os.environ.items() if k != 'OFFICE_WORKER_TAG'})")
+    name = portable.new_group_name()
+    proc = portable.popen_group([sys.executable, "-c", code, child_code, str(ready), str(cold.tmp)],
+                                cwd=wt, job_name=name,
+                                on_ready=lambda: atomic_write_json(ddir / "agent.job.json", {"name": name, "state": "active"}))
+    try:
+        (ddir / "agent.pgid").write_text(str(proc.pid))
+        proc.wait(timeout=10)
+        _until(lambda: ready.exists() and ready.read_text().isdigit())
+        orphan = int(ready.read_text())
+        assert portable.pid_exists(orphan)
+        real = dispatch.request_launch
+
+        def verify_before_launch(*a, **kw):
+            assert portable.pid_exists(orphan) is False
+            return real(*a, **kw)
+
+        monkeypatch.setattr(dispatch, "request_launch", verify_before_launch)
+        recover(cold, d["id"])
+        assert portable.pid_exists(orphan) is False
+        assert cold.trials()[0]["status"] == "fell-back"
+    finally:
+        portable.finish_group(proc.pid)
+        portable.release_group(proc.pid)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows named job")
+def test_windows_missing_job_handle_without_drained_receipt_blocks_fallback(cold):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    atomic_write_json(ddir / "agent.job.json", {"name": dispatch.portable.new_group_name(), "state": "active"})
+    lease = _live_leases(cold)[0]["id"]
+    recover(cold, d["id"])
+    assert len(cold.dispatches()) == 1 and _live_leases(cold)[0]["id"] == lease
+    assert task_row(cold)["status"] == "blocked"
+    assert "could not be confirmed empty" in task_row(cold)["pause_reason"]

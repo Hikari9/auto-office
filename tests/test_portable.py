@@ -311,3 +311,47 @@ def test_owns_group_is_a_held_windows_job_only():
     finally:
         portable.release_group(proc.pid)
     assert portable.owns_group(proc.pid) is False
+
+
+@pytest.mark.skipif(not portable.IS_WINDOWS, reason="Windows suspended job launch")
+@pytest.mark.parametrize("stage", ["create", "configure", "assign", "resume"])
+def test_job_setup_failure_never_runs_suspended_child(tmp_path, monkeypatch, stage):
+    marker = tmp_path / "ran"
+    spawned = []
+    real = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        proc = real(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(portable.subprocess, "Popen", capture)
+    if stage == "create":
+        monkeypatch.setattr(portable._k32, "CreateJobObjectW", lambda *a: 0)
+    elif stage == "configure":
+        monkeypatch.setattr(portable._k32, "SetInformationJobObject", lambda *a: 0)
+    elif stage == "assign":
+        monkeypatch.setattr(portable._k32, "AssignProcessToJobObject", lambda *a: 0)
+    else:
+        monkeypatch.setattr(portable._ntdll, "NtResumeProcess", lambda *a: 1)
+    before = dict(portable._JOBS)
+    with pytest.raises(OSError):
+        portable.popen_group([sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).touch()", str(marker)])
+    assert len(spawned) == 1 and spawned[0].poll() is not None
+    assert not marker.exists() and portable._JOBS == before
+
+
+@pytest.mark.skipif(not portable.IS_WINDOWS, reason="Windows job query")
+def test_owned_job_query_failure_never_falls_back_to_a_pid(monkeypatch):
+    proc = portable.popen_group(SLEEPER)
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(portable._k32, "QueryInformationJobObject", lambda *a: 0)
+            m.setattr(portable, "_taskkill", lambda *a, **kw: pytest.fail("numeric PID fallback"))
+            with pytest.raises(PermissionError):
+                portable.killpg(proc.pid, portable.SIGKILL)
+            assert not portable.finish_group(proc.pid)
+        assert portable.finish_group(proc.pid)
+        proc.wait(timeout=10)
+    finally:
+        portable.release_group(proc.pid)

@@ -259,16 +259,16 @@ class Env:
         # teardown (#501).
         monkeypatch.setenv("OFFICE_STATE_HOME_OWNER", claim_identity(os.getpid()))
         spawn_process = dispatch._spawn_agent
-        monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin: self._spawn_agent(
-            spawn_process, argv, cwd, env, stdin))
+        monkeypatch.setattr(dispatch, "_spawn_agent", lambda argv, cwd, env, stdin, **kwargs: self._spawn_agent(
+            spawn_process, argv, cwd, env, stdin, **kwargs))
 
-    def _spawn_agent(self, spawn_process, argv, cwd, env, stdin):
+    def _spawn_agent(self, spawn_process, argv, cwd, env, stdin, **kwargs):
         """The agent seam: an unmodified fake harness runs in this process; anything
         that needs a real process (a real binary, a sleep, a wall cap, a signal
         the scenario cannot emulate) is started as one."""
         fake = self._untouched_fake(shutil.which(argv[0], path=env.get("PATH")))
         if not fake or self._has_wall_cap(fake.name, env) or not fake_agent.scenario_runs_in_process(env):
-            return spawn_process(argv, cwd, env, stdin)
+            return spawn_process(argv, cwd, env, stdin, **kwargs)
         env = {**env, "FAKE_HARNESS": fake.name}
         return InProcessAgent(argv, cwd, env, stdin)
 

@@ -845,36 +845,42 @@ _CMD_NOT_FOUND = re.compile(r"^'[^'\r\n]+' is not recognized as an internal or e
 
 
 def _run_check(command: str, cwd: Path, timeout: int, env: dict) -> tuple[int, str]:
-    """(exit code, output) of one check command. It runs in its own process
-    group, which inherits the job's execution lock (#403): no replacement
-    attempt of this job can start its checks while any process of this one
-    lives, and a timeout stops the whole group, not just the shell."""
-    # popen_group: on Windows a job object holds every process the check starts, so a timeout reaches a grandchild
-    # whose parent already exited (Git Bash's processes do not keep a Windows parent chain for `taskkill /T`).
-    proc = portable.popen_group(**portable.shell_run_args(command, env), cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                pass_fds=jobs.attempt_lock_fds())
-    jobs.register_child(proc.pid)
+    """Run a check in an owned process group.
+
+    POSIX checks inherit the attempt's lock. On Windows the worker holds its
+    own guard and a durable check record survives an unconfirmed group exit.
+    """
+    marker = jobs.begin_check()
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        code = proc.returncode
+        proc = portable.popen_group(**portable.shell_run_args(command, env), cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    pass_fds=jobs.attempt_lock_fds())
+    except portable.GroupCleanupError:
+        raise  # the guard must survive an unconfirmed launch
+    except OSError:
+        jobs.end_check(marker)  # no child started, or the suspended launch was reaped
+        raise
+    try:
+        jobs.register_child(proc.pid)
         try:
-            portable.killpg(proc.pid, 0)  # something the check started still runs: Office's exit ends it
-        except ProcessLookupError:
-            portable.release_group(proc.pid)  # empty: close the Windows job handle (a no-op elsewhere)
-        except OSError:
-            pass
-        if portable.IS_WINDOWS and code == 1 and _CMD_NOT_FOUND.search(stderr or ""):
-            code = 127  # cmd.exe exits 1 for a missing command; a POSIX shell's 127 is what every caller classifies
-        return code, (stdout or "") + (stderr or "")
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            portable.killpg(proc.pid, portable.SIGKILL)
-        try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:  # a process left the group and holds the pipe
-            stdout, stderr = "", ""
-        return 124, _TimedOut(f"timed out after {timeout}s\n{(stdout or '') + (stderr or '')}")
+            stdout, stderr = proc.communicate(timeout=timeout)
+            code = proc.returncode
+            if portable.IS_WINDOWS and code == 1 and _CMD_NOT_FOUND.search(stderr or ""):
+                code = 127
+            return code, (stdout or "") + (stderr or "")
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                portable.killpg(proc.pid, portable.SIGKILL)
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            return 124, _TimedOut(f"timed out after {timeout}s\n{(stdout or '') + (stderr or '')}")
+    finally:
+        if portable.IS_WINDOWS:
+            if not portable.finish_group(proc.pid):
+                raise OSError("check process exit is unconfirmed; recovery guard retained")
+            jobs.end_check(marker)
 
 
 def host_overloaded() -> str | None:

@@ -2111,6 +2111,49 @@ def _agent_pgid_file(run: dict, dispatch_id: str) -> Path:
     return paths.run_dir(run["id"]) / "dispatches" / dispatch_id / "agent.pgid"
 
 
+def _agent_job_file(run: dict, dispatch_id: str) -> Path:
+    return _agent_pgid_file(run, dispatch_id).with_name("agent.job.json")
+
+
+def _agent_job_receipt(run: dict, dispatch_id: str) -> dict | None:
+    try:
+        rec = json.loads(_agent_job_file(run, dispatch_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rec, dict):
+        return {}
+    name = rec.get("name")
+    if not isinstance(name, str) or not re.fullmatch(r"Local\\AutoOffice-[0-9a-f]{32}", name):
+        return {}
+    return rec
+
+
+def _stop_windows_agent_job(run: dict, d: dict) -> bool:
+    """A vanished name is not proof of exit. Require a drained receipt or
+    terminate the exact recorded job while a handle can still be opened."""
+    rec = _agent_job_receipt(run, d["id"])
+    if rec is None:
+        identity = _recorded_identity(run, d["id"], "agent")
+        if identity:
+            return identity.get("pid") == os.getpid() and _verified(run, d["id"], "agent", os.getpid())
+        return not _agent_pgid_file(run, d["id"]).exists() and d.get("launcher") not in ("herdr", "external")
+    if rec.get("state") == "complete":
+        return True
+    if rec.get("state") != "active":
+        return False
+    if portable.finish_named_group(rec["name"]):
+        current = _agent_job_receipt(run, d["id"])
+        if not current or current.get("name") != rec["name"]:
+            return False
+        atomic_write_json(_agent_job_file(run, d["id"]), {"name": rec["name"], "state": "complete"})
+        return True
+    # The supervisor may have finished and closed the job while we opened it.
+    current = _agent_job_receipt(run, d["id"])
+    return bool(current and current.get("name") == rec["name"] and current.get("state") == "complete")
+
+
 def _pane_group_wait() -> float:
     """How long a pane launch polls for the agent's foreground group (#507)."""
     try:
@@ -2203,6 +2246,8 @@ def _killpg(pid, sig=signal.SIGTERM) -> bool:
     try:
         portable.killpg(pid, sig)
     except OSError:
+        if portable.owns_group(pid):
+            return False  # an unreadable owned job must never fall back to a numeric PID
         try:
             portable.kill(pid, sig)
         except OSError:
@@ -2665,14 +2710,21 @@ def _supervise_in_process(dispatch_id: str, cwd: Path, extra: dict) -> None:
         supervise(dispatch_id)
 
 
-def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int) -> subprocess.Popen:
+def _spawn_agent(argv: list[str], cwd: str, env: dict, stdin: int, *,
+                 job_name: str | None = None, on_ready=None) -> subprocess.Popen:
     """Start the harness process in its own session, its output piped back.
     The one place a harness child is created, so tests can replace it."""
     # Popen's cwd leaves $PWD at the supervisor's directory; opencode takes its working
     # directory from $PWD, so the checkout would count as external and be denied.
-    return subprocess.Popen(portable.resolve_argv(argv, env), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            env={**env, "PWD": str(cwd)}, **portable.session_kwargs())
+    env = {**env, "PWD": str(cwd)}
+    if portable.IS_WINDOWS:
+        if job_name:
+            env[portable.AGENT_JOB_ENV] = job_name
+        return portable.popen_group(portable.resolve_argv(argv, env), cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, env=env, job_name=job_name, on_ready=on_ready,
+                                    allow_breakaway=bool(job_name))
+    return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env, **portable.session_kwargs())
 
 
 def _launch_external(run: dict, dispatch: dict, kind: str, spec: dict, ddir: Path, sup: list[str], env: dict,
@@ -5055,6 +5107,7 @@ def supervise(dispatch_id: str) -> int:
     code, sig, classification = None, None, None
     empty_reply = False
     child = None
+    job_name = None
     state_box = {"signal": None, "watching": False}
     with contextlib.suppress(Exception):
         version.current()  # cached now: ending the dispatch must not depend on the install still being on disk (#830)
@@ -5164,7 +5217,19 @@ def supervise(dispatch_id: str) -> int:
                 argv, evidence_argv = argv + [flag + prompt], evidence_argv + [flag + "[PROMPT REDACTED]"]
             _record_launch_form(run, d, spec, "headless", evidence_argv,
                                 transport=prof.get("prompt") or "file", output=spec.get("output"))
-            child = _spawn_agent(argv, spec["cwd"], env, stdin)
+            if portable.IS_WINDOWS:
+                job_name = portable.new_group_name()
+                marker = _agent_job_file(run, dispatch_id)
+
+                def job_ready():
+                    previous_job = _agent_job_receipt(run, dispatch_id)
+                    if previous_job is not None and previous_job.get("state") != "complete":
+                        raise OSError("previous Windows agent job exit is unconfirmed")
+                    atomic_write_json(marker, {"name": job_name, "state": "active"})
+
+                child = _spawn_agent(argv, spec["cwd"], env, stdin, job_name=job_name, on_ready=job_ready)
+            else:
+                child = _spawn_agent(argv, spec["cwd"], env, stdin)
             _mark(dispatch_id, pid_child=child.pid)
             _agent_pgid_file(run, dispatch_id).write_text(str(child.pid))
             _record_identity(run["id"], dispatch_id, "agent", child.pid)
@@ -5175,9 +5240,11 @@ def supervise(dispatch_id: str) -> int:
                 def expire(pid=child.pid):
                     state_box["timed_out"] = True
                     _note(log_path, f"office: wall-clock cap of {cap / 60:g} min reached; stopping the agent")
-                    _killpg(pid, signal.SIGTERM)
+                    if not portable.IS_WINDOWS or portable.owns_group(pid):
+                        _killpg(pid, signal.SIGTERM)
                     time.sleep(10)
-                    _killpg(pid, portable.SIGKILL)
+                    if not portable.IS_WINDOWS or portable.owns_group(pid):
+                        _killpg(pid, portable.SIGKILL)
                 timer = threading.Timer(cap, expire)
                 timer.daemon = True
                 timer.start()
@@ -5225,6 +5292,15 @@ def supervise(dispatch_id: str) -> int:
         _note(log_path, f"supervisor error: {exc!r}")
     finally:
         try:
+            if timer:
+                timer.cancel()
+            if job_name and child is not None and portable.owns_group(child.pid):
+                # Do not publish completion or start a successor until the exact job drains.
+                if portable.finish_group(child.pid):
+                    atomic_write_json(_agent_job_file(run, dispatch_id), {"name": job_name, "state": "complete"})
+                else:
+                    classification, code = "supervisor_error", 1
+                    _note(log_path, "agent job exit could not be confirmed; recovery must keep the lease")
             if classification != "duplicate_ignored":
                 _finish(dispatch_id, code, sig, classification or "unknown", time.time() - started,
                         empty_reply=empty_reply)
@@ -5807,12 +5883,20 @@ def stop_worker_tree(run: dict, d: dict) -> tuple[bool, str]:
     pid = d.get("pid")
     if pid and pid != os.getpid() and not _recorded_identity(run, d["id"], "supervisor") and pid_alive(pid):
         return False, f"supervisor pid {pid} is alive and has no recorded identity to prove which process it is"
+    if portable.IS_WINDOWS:
+        if not _stop_windows_agent_job(run, d):
+            return False, "the recorded Windows agent job could not be confirmed empty"
+        # The agent is drained by handle, not a potentially reused numeric group id.
+        agent_pgid = 0
     tree = _WorkerTree(d["id"], roots, agent_pgid)
     gone = _terminate_worker(agent_pgid, tree)
     left = tree.scan()
     if not gone or left is None or left:
         return False, ("worker processes remain: " + (", ".join(map(str, sorted(left))) if left else
                                                       "the process table cannot be read, so exit is unconfirmed"))
+    # A supervisor racing recovery could have assigned a job before it stopped.
+    if portable.IS_WINDOWS and not _stop_windows_agent_job(run, d):
+        return False, "the recorded Windows agent job could not be confirmed empty"
     # A helper that cleared its environment and left the group carries nothing that names the dispatch. If
     # one still has the worktree as its working directory it may be writing there: not confirmed.
     if d.get("worktree") and Path(d["worktree"]).is_dir():
