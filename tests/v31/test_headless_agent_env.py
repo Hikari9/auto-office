@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from unittest import mock
 
@@ -122,3 +123,29 @@ def test_the_herdr_path_writes_the_same_file(env, monkeypatch):
     out.mkdir()
     assert (ddir / "agent.env").read_text() == dispatch.write_agent_env(run, d, out, worker=True).read_text()
     _check_env_text((ddir / "agent.env").read_text())
+
+
+def test_agent_env_sets_a_path_git_bash_can_use_on_windows(monkeypatch):
+    from office import dispatch, portable
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)
+    line = dispatch._export_line("PATH", r"C:\Tools;C:\Program Files\Git\cmd")
+    assert line.startswith("export PATH=") and line.endswith("\n")  # still one `export` line, sorted with the rest
+    assert "cygpath -u -p 'C:\\Tools;C:\\Program Files\\Git\\cmd'" in line
+    assert dispatch._export_line("OFFICE_ROLE", "executor") == "export OFFICE_ROLE=executor\n"
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    assert dispatch._export_line("PATH", "/usr/bin:/bin") == "export PATH=/usr/bin:/bin\n"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs Git for Windows' bash")
+def test_the_windows_agent_env_path_line_works_when_git_bash_sources_it(tmp_path):
+    """Sourcing agent.env with Windows' own PATH form left Git Bash unable to find any program, `office` included."""
+    import subprocess
+    from office import dispatch, portable
+    root = portable._git_root()
+    if root is None:
+        pytest.skip("Git for Windows is not installed")
+    env_file = tmp_path / "agent.env"
+    env_file.write_text(dispatch._export_line("PATH", os.environ["PATH"]), encoding="utf-8", newline="\n")
+    proc = subprocess.run([str(root / "usr" / "bin" / "bash.exe"), "-c", '. "$1" && command -v touch && command -v git',
+                           "sh", env_file.as_posix()], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr  # before: `touch: command not found`

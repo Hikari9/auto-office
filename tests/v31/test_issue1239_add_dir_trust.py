@@ -6,6 +6,10 @@ session only) when the directory it names is Office-owned for the run, never for
 """
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from office import dispatch
 
 DISPATCH = "/Users/u/.local/state/auto-office/runs/5fbb00d3-69b9f560e050a5fd30a1f90e/dispatches/D8da8e71b"
@@ -100,3 +104,12 @@ def test_office_owned_covers_the_run_and_its_dispatch_dirs_not_the_state_home(en
     assert dispatch._office_owned(run, rd) and dispatch._office_owned(run, rd / "dispatches" / "D1")
     assert not dispatch._office_owned(run, paths.state_home()) and not dispatch._office_owned(run, paths.data_home())
     assert not dispatch._office_owned(run, paths.run_dir("other-run"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a drive path is absolute only on Windows")
+def test_the_prompt_names_a_windows_directory():
+    """Only a path starting with `/` counted, so on Windows no "Adding a new directory" prompt was ever answered."""
+    screen = ("Adding a new directory:\n\n C:\\Users\\me\\state\\runs\\abc\n -def\\dispatches\\D1\n"
+              " This session hasn't worked here before. Is this a directory you created or one you trust?\n")
+    assert dispatch._add_dir_target(screen) == "C:\\Users\\me\\state\\runs\\abc-def\\dispatches\\D1"
+    assert dispatch._add_dir_target(screen.replace("C:\\Users", "Users")) is None  # a relative path is still refused

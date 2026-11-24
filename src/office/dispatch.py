@@ -2804,6 +2804,18 @@ def _harness_env(run: dict, dispatch: dict, spec: dict, *, strict: bool = False)
         return {}
 
 
+def _export_line(key: str, value: str) -> str:
+    """One `export` line of agent.env. On Windows the shell that sources it is Git Bash (a pane, Claude Code's Bash
+    tool), whose PATH reads `/c/a:/c/b`: exporting Windows' own `C:/a;C:/b` form there leaves it unable to find any
+    program, `office` included. So PATH is converted where `cygpath` exists, behind Git's own tools as a Git Bash
+    prompt has them (portable.shell_run_args does the same for checks)."""
+    quoted = shlex.quote(value)
+    if key == "PATH" and portable.IS_WINDOWS:
+        return ('export PATH="$(if command -v cygpath >/dev/null 2>&1; then '
+                f'printf %s "/mingw64/bin:/usr/bin:$(cygpath -u -p {quoted})"; else printf %s {quoted}; fi)"\n')
+    return f"export {key}={quoted}\n"
+
+
 def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = True,
                     harness_env: dict[str, str] | None = None) -> Path:
     """agent.env: the dispatch identity a pane-hosted agent sources before it
@@ -2822,7 +2834,7 @@ def write_agent_env(run: dict, dispatch: dict, ddir: Path, *, worker: bool = Tru
     env_file = ddir / "agent.env"
     prelude = adapters.shell_env_prelude(adapters.load_all().get(dispatch.get("adapter_id") or ""))
     env_file.write_text((f"{prelude}\n" if prelude else "")
-                        + "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(carry.items())),
+                        + "".join(_export_line(k, v) for k, v in sorted(carry.items())),
                         encoding="utf-8", newline="\n")  # a shell sources this: no CRLF on Windows
     env_file.chmod(0o600)
     return env_file
@@ -3552,7 +3564,7 @@ def _add_dir_target(text: str | None) -> str | None:
             break
         parts.append(ln)
     path = "".join(parts)
-    return path if path.startswith("/") else None
+    return path if os.path.isabs(path) else None  # `/x` anywhere; `C:\x` on Windows
 
 
 def _ctx_k(text: str | None) -> float | None:
