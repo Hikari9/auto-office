@@ -416,7 +416,8 @@ def test_cli_lookup_order_outside_pytest(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "pathbin"))
     assert board_card.find_cli() is None
     on_path = _exe(tmp_path / "pathbin" / "herdr-projects")
-    assert board_card.find_cli() == on_path
+    found = board_card.find_cli()  # on Windows PATH finds the launcher next to the script (tests/_win_shebang.py)
+    assert found == on_path or (os.name == "nt" and found.lower() == on_path.lower() + ".exe")
     home = _exe(tmp_path / "home" / ".herdr-projects" / "data" / "bin" / "herdr-projects")
     assert board_card.find_cli() == home
     monkeypatch.setenv("HERDR_PROJECTS_DATA_DIR", str(tmp_path / "data"))

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ from office import hermes_access
 
 CWD = Path("/w")
 REPLY = Path("/d/reply.txt")
+USAGE = Path("/d/usage.json")
 SLUG = "anthropic:claude-sonnet-5-5"
 
 
@@ -41,15 +44,15 @@ def worker(hermes, model=SLUG, effort="high", **kw):
 # ---------------------------------------------------------------- argv (pinned)
 
 def test_worker_headless_argv_is_pinned(hermes):
-    argv, prof = worker(hermes, usage_file=Path("/d/usage.json"))
+    argv, prof = worker(hermes, usage_file=USAGE)
     assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "high", "--yolo", "--usage-file", "/d/usage.json"]
+                    "--reasoning", "high", "--yolo", "--usage-file", str(USAGE)]
     # The prompt is the value of --oneshot (hermes -z takes no stdin), added by the supervisor as one argv element.
     assert prof["prompt"] == "argv-bound" and prof["prompt_flag"] == "--oneshot="
 
 
 def test_a_bare_model_id_pins_the_model_and_drops_the_provider_flag(hermes):
-    argv, _ = worker(hermes, model="claude-sonnet-5-5", usage_file=Path("/d/usage.json"))
+    argv, _ = worker(hermes, model="claude-sonnet-5-5", usage_file=USAGE)
     assert "--provider" not in argv and argv[argv.index("--model") + 1] == "claude-sonnet-5-5"
 
 
@@ -57,7 +60,7 @@ def test_worker_interactive_argv_is_pinned(hermes):
     argv, kind = adapters.interactive_argv(hermes, "worker", model=SLUG, effort="high", cwd=CWD)
     assert kind == "hermes"
     assert argv == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "high", "--yolo", "--in", "/w"]
+                    "--reasoning", "high", "--yolo", "--in", str(CWD)]
 
 
 def test_reviewer_is_restored_with_the_accepted_risk(hermes):
@@ -73,9 +76,9 @@ def test_reviewer_is_restored_with_the_accepted_risk(hermes):
 
 def test_reviewer_headless_argv_keeps_the_usage_readback(hermes):
     argv, prof = adapters.build_argv(hermes, "reviewer", model=SLUG, effort="high", cwd=CWD,
-                                     usage_file=Path("/d/usage.json"))
+                                     usage_file=USAGE)
     assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "high", "--yolo", "--usage-file", "/d/usage.json"]
+                    "--reasoning", "high", "--yolo", "--usage-file", str(USAGE)]
     assert prof["readback"] == "hermes-usage" and prof["prompt_flag"] == "--oneshot="
 
 
@@ -101,7 +104,7 @@ def test_every_profile_has_headless_and_interactive_forms_pinning_the_provider(h
     prof = adapters.profile(hermes, kind)
     assert prof and prof["herdr_kind"] == "hermes" and prof["interactive"]["argv"]
     headless, _ = adapters.build_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY,
-                                      usage_file=Path("/d/usage.json"))
+                                      usage_file=USAGE)
     pane, kind_ = adapters.interactive_argv(hermes, kind, model=SLUG, effort="high", cwd=CWD, output=REPLY)
     assert kind_ == "hermes"
     for argv in (headless, pane):
@@ -118,15 +121,15 @@ def test_vision_profile_is_restored_with_the_vision_toolset_and_dispatch_directo
     assert prof["image_transport"] == "prompt-path" and prof["verify_worktree_unchanged"] is True
     assert prof["submit"] == "shell" and prof["prompt_flag"] == "--oneshot=" and prof["readback"] == "hermes-usage"
     argv, _ = adapters.build_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY,
-                                  usage_file=Path("/d/usage.json"))
+                                  usage_file=USAGE)
     assert argv == ["hermes", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
-                    "--reasoning", "medium", "--yolo", "--toolsets", "file,terminal,vision", "--in", "/d",
-                    "--usage-file", "/d/usage.json"]
+                    "--reasoning", "medium", "--yolo", "--toolsets", "file,terminal,vision", "--in", str(REPLY.parent),
+                    "--usage-file", str(USAGE)]
     pane, kind = adapters.interactive_argv(hermes, "vision", model=SLUG, effort="medium", cwd=CWD, output=REPLY)
     assert kind == "hermes"
     assert pane == ["--cli", "--ignore-user-config", "--provider", "anthropic", "--model", "claude-sonnet-5-5",
                     "--reasoning", "medium", "--yolo", "--accept-hooks", "--toolsets", "file,terminal,vision",
-                    "--in", "/d"]
+                    "--in", str(REPLY.parent)]
 
 
 def test_vision_profile_drops_the_provider_flag_for_a_bare_model_id(hermes):
@@ -330,7 +333,8 @@ def test_reachable_providers_is_empty_when_hermes_is_absent_or_fails(tmp_path, m
 def test_only_hermes_auth_list_is_run_and_with_a_scrubbed_env(tmp_path, monkeypatch):
     fake = tmp_path / "hermes"
     record = tmp_path / "record"
-    fake.write_text(f"#!/bin/sh\necho \"$@\" > {record}\nenv | grep -c '^HERMES_' >> {record}\nenv | grep '^HERMES_HOME=' >> {record}\n")
+    out = shlex.quote(str(record))  # quoted: sh would eat the backslashes of a Windows path
+    fake.write_text(f"#!/bin/sh\necho \"$@\" > {out}\nenv | grep -c '^HERMES_' >> {out}\nenv | grep '^HERMES_HOME=' >> {out}\n")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("HERMES_MODEL", "x")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -339,6 +343,9 @@ def test_only_hermes_auth_list_is_run_and_with_a_scrubbed_env(tmp_path, monkeypa
 
 
 # ---------------------------------------------------------------- Herdr detection of a git-installed Hermes
+
+posix_wrapper = pytest.mark.skipif(sys.platform == "win32", reason="a git-installed Hermes is a `#!/bin/sh` wrapper; Windows resolves a .exe or .cmd launcher from PATH, which is used as is")
+
 
 def _git_install(tmp_path) -> tuple[Path, Path, Path]:
     """What a git install leaves on PATH: a shell wrapper that execs the managed python with an inline script."""
@@ -411,6 +418,7 @@ def test_a_binary_or_console_script_hermes_is_used_as_is(tmp_path):
     assert hermes_access.resolve_launcher(str(tmp_path / "nowhere")) == [str(tmp_path / "nowhere")]
 
 
+@posix_wrapper
 def test_the_pane_shim_execs_the_resolved_launcher_so_herdr_sees_a_hermes_script(tmp_path, monkeypatch, hermes):
     wrapper, interpreter, launcher = _git_install(tmp_path)
     monkeypatch.setenv("PATH", f"{wrapper.parent}{os.pathsep}/usr/bin")
@@ -431,6 +439,7 @@ def test_no_shim_when_the_path_hermes_is_already_detectable(tmp_path, monkeypatc
     assert adapters.pane_launch_env(adapters.load_all()["codex"], tmp_path / "dispatch") == {}
 
 
+@posix_wrapper
 def test_a_pane_dispatch_gets_the_shim_in_its_agent_env(tmp_path, monkeypatch, hermes):
     wrapper, interpreter, launcher = _git_install(tmp_path)
     monkeypatch.setenv("PATH", f"{wrapper.parent}{os.pathsep}/usr/bin")

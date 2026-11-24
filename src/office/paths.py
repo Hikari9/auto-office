@@ -82,7 +82,7 @@ def runs_db() -> Path:
 
 def git(cwd: Path | str, *args: str, check: bool = True, env: dict | None = None,
         input_text: str | None = None) -> str:
-    proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+    proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8",
                           env=env, input=input_text)
     if check and proc.returncode != 0:
         raise GitError(args, proc.returncode, proc.stderr.strip())

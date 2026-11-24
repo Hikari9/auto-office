@@ -98,7 +98,7 @@ def test_reviewer_sessions_carry_only_their_own_submit_identity(reviewer, tmp_pa
     text = env_file.read_text()
     assert f"{review_submit.TOKEN_ENV}={ident[review_submit.TOKEN_ENV]}" in text
     assert "OFFICE_DISPATCH_ID" not in text, "reviewers still get no Office dispatch authority"
-    assert oct(os.stat(out.parent / review_submit.TOKEN_FILE).st_mode & 0o777) == "0o600"
+    assert os.name == "nt" or oct(os.stat(out.parent / review_submit.TOKEN_FILE).st_mode & 0o777) == "0o600"  # Windows has no mode bits
 
 
 def test_the_herdr_watcher_ends_at_once_on_a_submitted_review(reviewer, monkeypatch):

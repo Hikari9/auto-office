@@ -13,7 +13,7 @@ import pytest
 from test_route_discovery_consumer_contract import EFFORTS, SOL, World
 
 from office import adaptive, candidates, db, dispatch, paths, plans, prs, route_policy, route_probe, routing, state, version
-from office.util import dumps, now_iso
+from office.util import dumps, now_iso, parse_iso
 
 @pytest.fixture(autouse=True)
 def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
@@ -833,7 +833,7 @@ def test_a_submitted_revision_is_work(cold, monkeypatch):
     # precondition so a host /proc race cannot hide the revision-work guard;
     # live-worker and unreadable-process tests exercise the real scanners.
     assert state.get_dispatch(cold.con, d["id"])["pid"] is None
-    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path: set())
+    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path, **kw: set())
     monkeypatch.setattr(dispatch, "_process_table", lambda: [])
     with db.transaction(cold.con):
         cold.con.execute("INSERT INTO revisions(id, run_id, task_id, seq, dispatch_id, commit_sha, tree_sha, "
@@ -1435,13 +1435,14 @@ def test_what_this_process_started_in_the_worktree_is_not_a_holder(cold):
     mine = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"], cwd=wt)
     threading.Thread(target=mine.wait, daemon=True).start()
     try:
-        assert mine.pid in dispatch._cwd_holders(wt)
+        assert mine.pid in dispatch._cwd_holders(wt, since=parse_iso(d["started_at"]).timestamp())
         recover(cold, d["id"])
         assert cold.trials()[0]["status"] == "fell-back"
     finally:
         mine.kill()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no zombie process state")
 def test_a_killed_worker_that_is_waiting_to_be_reaped_does_not_count_as_running(cold):
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
@@ -1473,6 +1474,7 @@ def test_a_dispatch_that_never_launched_has_no_work_whatever_its_worktree_holds(
         False, "no agent was ever launched in this dispatch")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a Windows worker is a job object, covered in tests/test_portable.py")
 def test_a_tagless_member_of_the_agents_group_that_ignores_sigterm_is_still_stopped(cold, trees):
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
@@ -1519,7 +1521,7 @@ def test_a_tagless_member_of_the_agents_group_that_ignores_sigterm_is_still_stop
 def test_an_unreadable_holder_listing_is_not_an_empty_one(cold, monkeypatch, listing):
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
-    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path: listing)
+    monkeypatch.setattr(dispatch, "_cwd_holders", lambda path, **kw: listing)
     recover(cold, d["id"])
     if listing is None:
         assert len(cold.dispatches()) == 1 and "cannot be listed" in task_row(cold)["pause_reason"]
@@ -1527,6 +1529,7 @@ def test_an_unreadable_holder_listing_is_not_an_empty_one(cold, monkeypatch, lis
         assert cold.trials()[0]["status"] == "fell-back"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the lsof listing is the macOS path; Windows reads process parameters")
 def test_lsof_that_fails_or_prints_nothing_is_unreadable(monkeypatch, tmp_path):
     from types import SimpleNamespace
     real_exists = dispatch.Path.exists
@@ -1633,6 +1636,7 @@ def test_the_job_worker_is_started_in_a_neutral_directory_without_the_workers_ta
     assert seen["cwd"] == str(paths.run_dir("run-A")) and "OFFICE_WORKER_TAG" not in seen["env"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a Windows worker is a job object, covered in tests/test_portable.py")
 def test_a_dead_leaders_group_still_names_its_untagged_members(cold, trees):
     d, wt, ddir = in_flight(cold)
     launched(cold, d)
@@ -1684,6 +1688,7 @@ def test_a_tagged_leaders_untagged_child_is_still_named_through_the_leader(cold,
     assert tree.child in dispatch._WorkerTree("Dnone", {tree.leader.pid: start}).scan()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: a Windows worker is a job object, covered in tests/test_portable.py")
 def test_the_scan_follows_the_descendants_of_everything_it_already_named(cold, trees):
     # A leader named by its group (or its tag) still has children: they are the worker's too.
     d, wt, ddir = in_flight(cold)
@@ -1724,6 +1729,50 @@ def test_foreign_drops_this_processs_own_children_and_keeps_strangers():
     assert dispatch._foreign({me, 50, 60, 70, 999}, table) == {60, 70}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows working-directory listing")
+def test_the_windows_listing_names_holders_and_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(dispatch.portable, "windows_cwds", lambda: None)
+    assert dispatch._cwd_holders(tmp_path) is None
+    root = str(tmp_path.resolve())
+    monkeypatch.setattr(dispatch.portable, "windows_cwds", lambda: {
+        7: root + "\\", 8: root.upper() + "\\sub\\", 9: root + "-sibling\\", 10: "C:\\"})
+    assert dispatch._cwd_holders(tmp_path) == {7, 8}
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+    try:
+        deadline = time.monotonic() + 10
+        monkeypatch.undo()
+        while kid.pid not in (dispatch._cwd_holders(tmp_path) or set()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert kid.pid in dispatch._cwd_holders(tmp_path)
+    finally:
+        kid.kill()
+        kid.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junctions")
+def test_a_process_inside_the_worktree_through_a_junction_is_a_holder(tmp_path):
+    real = tmp_path / "real"
+    (real / "wt").mkdir(parents=True)
+    link = tmp_path / "jn"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(real)], check=True, capture_output=True)
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=link / "wt")
+    try:
+        deadline = time.monotonic() + 10
+        while kid.pid not in (dispatch._cwd_holders(real / "wt") or set()) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert kid.pid in dispatch._cwd_holders(real / "wt")  # its directory is spelled through the junction
+    finally:
+        kid.kill()
+        kid.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="Linux /proc")
+def test_the_proc_owner_is_the_real_uid_not_the_entry_owner():
+    assert dispatch._proc_owner(Path("/proc") / str(os.getpid())) == os.getuid()
+    assert dispatch._proc_owner(Path("/proc/no-such-pid")) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the /proc listing is the Linux path; Windows reads process parameters")
 def test_the_proc_listing_fails_closed_on_an_unreadable_entry(monkeypatch, tmp_path):
     from pathlib import Path as P
     real_exists, real_iterdir, real_readlink = P.exists, P.iterdir, os.readlink
@@ -1736,7 +1785,20 @@ def test_the_proc_listing_fails_closed_on_an_unreadable_entry(monkeypatch, tmp_p
         raise PermissionError(13, "denied")
 
     monkeypatch.setattr(dispatch.os, "readlink", readlink)
-    assert dispatch._cwd_holders(tmp_path) is None
+    owner = {"uid": os.getuid()}
+    monkeypatch.setattr(dispatch, "_proc_owner", lambda entry: owner["uid"])
+    assert dispatch._cwd_holders(tmp_path) is None  # one of this user's own hides its directory
+    owner["uid"] = None
+    assert dispatch._cwd_holders(tmp_path) is None  # and so does one whose owner cannot be read
+    owner["uid"] = os.getuid() + 1
+    assert dispatch._cwd_holders(tmp_path) == {11}  # another account's process cannot be this user's worker
+    owner["uid"] = os.getuid()
+    monkeypatch.setattr(dispatch, "_proc_started", lambda entry: 1000.0)
+    assert dispatch._cwd_holders(tmp_path, since=5000.0) == {11}  # this user's, but older than the dispatch
+    assert dispatch._cwd_holders(tmp_path, since=900.0) is None  # this user's, started after the dispatch began
+    assert dispatch._cwd_holders(tmp_path) is None  # no dispatch start to compare with
+    monkeypatch.setattr(dispatch, "_proc_started", lambda entry: None)
+    assert dispatch._cwd_holders(tmp_path, since=5000.0) is None  # a start that cannot be read proves nothing
     monkeypatch.setattr(dispatch.os, "readlink", lambda path: str(tmp_path.resolve() / "sub") if str(path) == "/proc/11/cwd"
                         else (_ for _ in ()).throw(FileNotFoundError(2, "gone")))
     assert dispatch._cwd_holders(tmp_path) == {11}

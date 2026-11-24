@@ -116,7 +116,7 @@ def synthetic() -> None:
 
 
 def history(db_path: str) -> None:
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     outcomes = route_learning.derive_outcomes(con)
     eps = route_learning.episodes(outcomes)

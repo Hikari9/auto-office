@@ -8,7 +8,6 @@ open findings in its brief. `office dismiss` closes the panes of ended dispatche
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import sqlite3
@@ -18,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, routing, state
+from office import adapters, candidates, contract, db, dispatch, gates, jobs, paths, portable, routing, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import pid_alive, sha256_obj
@@ -254,12 +253,12 @@ def _barrier_restack_guard():
     attempt_2 = bdir / "attempt_2"
 
     with (bdir / "restack.log").open("a") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        portable.lock_exclusive(f.fileno())
         try:
             f.write(f"enter:{os.getpid()}\n")
             f.flush()
         finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            portable.unlock(f.fileno())
 
     try:
         fd = os.open(str(in_flight), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -281,12 +280,12 @@ def _barrier_restack_guard():
         with contextlib.suppress(OSError):
             in_flight.unlink()
         with (bdir / "restack.log").open("a") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            portable.lock_exclusive(f.fileno())
             try:
                 f.write(f"exit:{os.getpid()}\n")
                 f.flush()
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                portable.unlock(f.fileno())
 
 
 def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
@@ -357,7 +356,7 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             for dep, rev_id, sha in pending:
                 proc = subprocess.run(["git", "-C", str(scratch), "merge", "--no-edit", "-m",
                                        f"office: restack {task['id']} onto {dep} {rev_id}", sha],
-                                      capture_output=True, text=True, env=env)
+                                      capture_output=True, text=True, encoding="utf-8", env=env)
                 if proc.returncode != 0:
                     subprocess.run(["git", "-C", str(scratch), "merge", "--abort"], capture_output=True)
                     if rebased and dep == "rebased default branch":
@@ -386,7 +385,7 @@ def _restack(con, run: dict, task: dict, worktree: str | None) -> dict | None:
             candidate = paths.git(scratch, "rev-parse", "HEAD")
             if candidate != head:
                 proc = subprocess.run(["git", "-C", str(wt), "merge", "--ff-only", candidate],
-                                      capture_output=True, text=True, env=env)
+                                      capture_output=True, text=True, encoding="utf-8", env=env)
                 if proc.returncode != 0:
                     raise Refused("restack-publish-failed", f"cannot advance task branch: {proc.stderr[:180]}",
                                   preserved="task HEAD unchanged", next_step="inspect worktree and retry")
@@ -430,7 +429,7 @@ def _save_wip(wt: Path, tid: str, token: str) -> str:
         paths.git(wt, "add", "--update", env=tracked)
         work_tree = paths.git(wt, "write-tree", env=tracked)
         listed = subprocess.run(["git", "-C", str(wt), "ls-files", "-z", "--others", "--exclude-standard"],
-                                capture_output=True, text=True, check=True)
+                                capture_output=True, text=True, encoding="utf-8", check=True)
         names = [n for n in listed.stdout.split("\0") if n]
         parents = [head, index_commit]
         if names:
@@ -471,13 +470,13 @@ def _stash_wip(wt: Path, tid: str):
         with contextlib.suppress(Exception):
             stored = subprocess.run(["git", "-C", str(wt), "stash", "store", "-m",
                                      f"office: preserve {tid} WIP before restack [{token}]", saved],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, encoding="utf-8")
             if stored.returncode == 0:
                 paths.git(wt, "update-ref", "-d", ref, check=False)
 
     def restore() -> Refused | None:
         applied = subprocess.run(["git", "-C", str(wt), "stash", "apply", "--index", saved],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8")
         if applied.returncode:
             retain()
             return Refused("restack-wip-restore-conflict",
@@ -808,11 +807,11 @@ def _rerun_task_guard(run: dict, tid: str):
     lock_path = lock_dir / f"rerun-{sha256_obj(tid)[:16]}.lock"
     _barrier_admission_attempt()
     with lock_path.open("a") as fd:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        portable.lock_exclusive(fd.fileno())
         try:
             yield
         finally:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            portable.unlock(fd.fileno())
 
 
 def rerun(con, run: dict, tid: str, *, resume: bool, fresh: bool, reroute: bool = False,

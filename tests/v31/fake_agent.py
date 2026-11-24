@@ -271,13 +271,14 @@ if __name__ == "__main__":
     version_probe = "--version" in sys.argv[1:] or sys.argv[1:2] == ["-v"]  # never waits on stdin
     code, out, err = _execute(sys.argv, "" if version_probe or sys.stdin.isatty() else sys.stdin.read(), dict(os.environ),
                               os.getcwd(), in_process=False)
-    sys.stderr.write(err)  # stderr is unbuffered, stdout is flushed at exit
+    # Bytes, as a real harness writes them: a text stream would turn each LF into CRLF on Windows.
+    sys.stderr.buffer.write(err.encode("utf-8"))  # stderr is unbuffered, stdout is flushed at exit
     sys.stderr.flush()
-    sys.stdout.write(out)
+    sys.stdout.buffer.write(out.encode("utf-8"))
     sys.stdout.flush()
     if code < 0:
         # A launcher may ignore SIGHUP; scripted signal death must be explicit.
-        if -code != signal.SIGKILL:
+        if -code != getattr(signal, "SIGKILL", None):  # Windows has no SIGKILL
             signal.signal(-code, signal.SIG_DFL)
         os.kill(os.getpid(), -code)
     sys.exit(code)

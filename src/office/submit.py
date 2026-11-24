@@ -9,6 +9,7 @@ lost response never duplicates work.
 from __future__ import annotations
 
 import os
+import posixpath
 import shlex
 import stat
 import tempfile
@@ -16,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from office import briefs, contract, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, state, version
+from office import briefs, contract, db, discovery, dispatch as dispatch_mod, gates, jobs, paths, planpath, plans, portable, state, version
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import dumps, now_iso, sha256_bytes, sha256_file, sha256_obj, short
@@ -151,13 +152,15 @@ def clean_request_paths(wt: Path, files: list[str]) -> list[str]:
     out = []
     for raw in files:
         f = (raw or "").strip()
-        bad = (not f or os.path.isabs(f) or f.startswith(":") or "\0" in f
-               or os.path.normpath(f) in (".", "..") or os.path.normpath(f).startswith("../")
+        # A request path is a git path: forward slashes on every OS (Windows also accepts its own separator).
+        norm = posixpath.normpath(f.replace("\\", "/") if portable.IS_WINDOWS else f) if f else f
+        bad = (not f or os.path.isabs(f) or Path(f).anchor or f.startswith(":") or "\0" in f
+               or norm in (".", "..") or norm.startswith("../")
                or not (wt / f).resolve().is_relative_to(wt))
         if bad:
             raise Usage("scope-path", f"cannot request scope for {raw!r}: give a path inside the task worktree",
                         next_step='office submit --request-scope <repo-relative path> -- "<reason>"')
-        out.append(os.path.normpath(f))
+        out.append(norm)
     if not out:
         raise Usage("scope-path", "name at least one path to add to the scope",
                     next_step='office submit --request-scope <repo-relative path> -- "<reason>"')
@@ -419,7 +422,7 @@ def matches_revision(worktree: Path, commit: str, scratch: Path) -> bool:
         paths.git(worktree, "update-index", "-q", "--refresh", env=env, check=False)
         import subprocess
         proc = subprocess.run(["git", "-C", str(worktree), "diff-files", "--name-only", "-z", "--ignore-submodules"],
-                              env=env, capture_output=True, text=True)
+                              env=env, capture_output=True, text=True, encoding="utf-8")
         if proc.returncode:
             return False
         # Harness config edits were left out of the revision at submit (it carries
@@ -476,7 +479,7 @@ def worktree_equals_commit(worktree: Path, commit: str) -> bool:
                           capture_output=True).returncode:
             return False
         others = subprocess.run(["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard", "-z"],
-                                env=env, capture_output=True, text=True).stdout.split("\0")
+                                env=env, capture_output=True, text=True, encoding="utf-8").stdout.split("\0")
     for rel in [o for o in others if o]:
         in_commit = paths.git(worktree, "ls-tree", commit, "--", rel, check=False).split()
         if len(in_commit) < 3 or in_commit[2] != paths.git(worktree, "hash-object", "--", rel, check=False):
@@ -822,7 +825,7 @@ def _stage_self_review(run: dict, d: dict, rev_id: str, wt: Path, receipt: dict 
     source = wt / briefs.LEDGER_FILE
     dest = briefs.self_review_path(run, d["id"], rev_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | portable.O_NOFOLLOW | portable.O_BINARY
     try:
         fd = os.open(dest, flags, 0o600)
     except FileExistsError as exc:
@@ -878,7 +881,7 @@ def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
     if paths.git(wt, "ls-files", "--", name).strip():
         return None
     try:
-        fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(src, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_NONBLOCK | portable.O_BINARY)
         with os.fdopen(fd, "rb") as fh:
             st = os.fstat(fh.fileno())
             # A hard link to another file (a credential) shares its inode: ordinary files have one link.
@@ -887,7 +890,8 @@ def _read_untracked_text(wt: Path, name: str, limit: int) -> str | None:
             raw = fh.read(limit * 4 + 1)
     except (OSError, ValueError):
         return None
-    return raw.decode("utf-8", errors="replace")[:limit + 1]
+    # A file written on Windows ends its lines with CRLF; the text is the same text either way.
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n")[:limit + 1]
 
 
 def _read_evidence(wt: Path) -> tuple[Path, str, str] | None:

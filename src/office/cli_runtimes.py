@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from office import adapters, paths
+from office import adapters, paths, portable
 from office.util import sha256_obj
 
 COLUMNS = ("key", "skill_path", "models_path")
@@ -139,9 +139,14 @@ def _atomic_text(path: Path, text: str) -> bool:
             os.chmod(temp, 0o600)
             f.write(text)
             f.flush()
-            os.replace(temp, path)
-        finally:
+        except BaseException:
+            f.close()
             temp.unlink(missing_ok=True)
+            raise
+    try:
+        portable.replace(temp, path)  # after the handle closes: Windows refuses to replace an open file
+    finally:
+        temp.unlink(missing_ok=True)
     return True
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 import time
 
@@ -30,7 +31,7 @@ def _until(pred, timeout=20.0):
         if got:
             return got
         time.sleep(0.1)
-    raise AssertionError("condition not reached")
+    raise AssertionError(f"condition not reached; last: {got!r}")
 
 
 def _lease_revoked(env) -> bool:
@@ -44,11 +45,16 @@ def _lease_revoked(env) -> bool:
 def _reap_when_done(pid: int) -> None:
     """The supervisor is a child of this process, so a finished one lingers as a
     zombie that still answers kill 0, and `office revoke` would wait out its
-    whole grace period for it. Reap it the moment it exits."""
+    whole grace period for it. Reap it the moment it exits. Windows has no zombies (and waitpid takes a handle)."""
+    if sys.platform == "win32":
+        return
     threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
 
 
 def _dead(pid: int) -> bool:
+    if sys.platform == "win32":  # os.kill(pid, 0) there sends CTRL_C_EVENT
+        from office import portable
+        return not portable.pid_exists(pid)
     try:
         os.kill(pid, 0)
     except OSError:
@@ -82,11 +88,14 @@ def test_revoke_stops_a_herdr_agent_dispatch(env, monkeypatch):
                                                  settings={"OFFICE_HERDR_POLL": "0.2"})
     assert res["launcher"] == "herdr", res
     _reap_when_done(res["watcher_pid"])
-    _until(lambda: (lambda d: d if d["status"] == "running" and d["pid"] == res["watcher_pid"] else None)(_dispatch(env)))
+    # On Windows the venv's python.exe redirector (and Office's UTF-8 re-run) starts the supervisor as a child, so
+    # the pid it records for itself is not the launched process's.
+    same = (lambda d: d["pid"] == res["watcher_pid"]) if sys.platform != "win32" else (lambda d: bool(d["pid"]))
+    sup = _until(lambda: (lambda d: d if d["status"] == "running" and same(d) else None)(_dispatch(env)))["pid"]
     code, out = env.office("revoke", "T1", "--reason", "test stop")
     assert code == 0, out
     d = _until(lambda: (lambda d: d if d["ended_at"] else None)(_dispatch(env)))
     assert d["terminal_classification"] == "signal" and d["signal"] == signal.SIGTERM
     assert ["pane", "close", res["pane"]] in _calls(state_file), [c for c in _calls(state_file) if c[0] == "pane"]
-    _until(lambda: _dead(res["watcher_pid"]))
+    _until(lambda: _dead(res["watcher_pid"]) and _dead(sup))
     assert _lease_revoked(env)

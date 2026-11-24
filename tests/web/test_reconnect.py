@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import http.client
+import os
 import json
 import threading
 
@@ -119,6 +120,7 @@ def test_restart_gets_a_new_epoch_and_resyncs(svc, tmp_path):
         again.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the test renames runs.db while the service holds it open, which Windows refuses")
 def test_office_freshness_stale_and_disconnected(svc, tmp_path):
     run = next(r for r in svc.snapshot()["entities"]["runs"].values() if r["liveness"] == "live")
     now = [svc.clock()]

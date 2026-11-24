@@ -64,7 +64,12 @@ def test_reviewer_seed_orders_match_the_table(fresh_install):
                     " > claude/opus@low > agy/claude-opus-5-5@low")
 
 
-def test_hydrogen_visual_rung_is_conditional_and_not_dispatching_without_the_user_allow(fresh_install):
+def test_hydrogen_visual_rung_is_conditional_and_not_dispatching_without_the_user_allow(fresh_install, monkeypatch):
+    # The rung is agy's: read agy as installed (1.x) rather than depend on the host having it.
+    real_installed, real_version = adapters.installed, adapters.harness_version
+    monkeypatch.setattr(adapters, "installed", lambda a: a.get("id") == "agy" or real_installed(a))
+    monkeypatch.setattr(adapters, "harness_version",
+                        lambda a: "1.5.12" if isinstance(a, dict) and a.get("id") == "agy" else real_version(a))
     result = routecmd.policy(role="visual_reviewer", effective=True)
     [row] = [r for r in result.data["effective"] if r["route"] == "agy/gemini-4-hydrogen@low"]
     assert row["dispatches"] is False

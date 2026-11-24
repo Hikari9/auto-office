@@ -3,6 +3,7 @@ exactly `office review submit --file <its dispatch dir>/review-submit.txt` and n
 posture is otherwise unchanged. pi gets no grant: it cannot restrict bash to one command."""
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,12 @@ import pytest
 from office import adapters, review_submit
 
 OUT = Path("/tmp/office-grant-test/D1/reply.txt")
-EXACT = f"office review submit --file {OUT.parent / review_submit.SUBMIT_FILE}"
+EXACT = shlex.join(["office", "review", "submit", "--file", str(OUT.parent / review_submit.SUBMIT_FILE)])
+
+
+def _toml(path) -> str:
+    """A path as it appears inside a TOML basic string: Windows backslashes are escaped."""
+    return str(path).replace("\\", "\\\\")
 
 
 def _tools(argv, flag):
@@ -56,7 +62,7 @@ def test_codex_reviewers_get_one_exact_execpolicy_rule_in_their_own_dispatch_dir
     argv, _ = adapters.build_argv(adapters.load_all()["codex"], "reviewer", model="m", effort="high",
                                   cwd=tmp_path, output=out)
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "workspace-write", "sandbox unchanged"
-    assert any("trust_level" in a and str(out.parent) in a for a in argv), "its own dispatch dir is the trusted project"
+    assert any("trust_level" in a and _toml(out.parent) in a for a in argv), "its own dispatch dir is the trusted project"
 
 
 @pytest.mark.parametrize("pane", [False, True])
@@ -72,7 +78,7 @@ def test_codex_visual_reviewers_get_the_same_submit_rule_and_trust(tmp_path, pan
     build = adapters.interactive_argv if pane else adapters.build_argv
     argv, _ = build(a, "vision", model="m", effort="high", cwd=tmp_path, output=out)
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert any("trust_level" in x and str(out.parent.resolve()) in x for x in argv), argv
+    assert any("trust_level" in x and _toml(out.parent.resolve()) in x for x in argv), argv
 
 
 def test_every_visual_reviewer_harness_can_hand_back_with_submit(monkeypatch):

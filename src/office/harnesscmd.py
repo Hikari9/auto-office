@@ -28,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, cli_runtimes, paths, shipped_catalog, user_catalog
+from office import adapters, cli_runtimes, paths, portable, shipped_catalog, user_catalog
 from office.result import Result
 from office.state import OfficeError
 from office.util import loads, now_iso
@@ -160,7 +160,8 @@ def _resolve_adapter(ident: str | None, file: str | None = None) -> tuple[dict, 
 
 def _probe(argv: list[str]) -> str:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+        proc = subprocess.run(portable.resolve_argv(argv), capture_output=True, text=True, timeout=15,
+                              stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (proc.stdout or "") + (proc.stderr or "")
@@ -593,16 +594,17 @@ def _run_capped(argv: list[str], *, cwd: Path, stdin_text: str | None, cap: int)
     """Run in its own session so a timeout kills the whole process group: a
     grandchild holding the pipes open cannot hang the smoke."""
     import signal
-    proc = subprocess.Popen(argv, cwd=cwd, env=_smoke_env(), text=True, start_new_session=True,
+    env = _smoke_env()
+    proc = subprocess.Popen(portable.resolve_argv(argv, env), cwd=cwd, env=env, text=True, **portable.session_kwargs(),
                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         out, err = proc.communicate(input=stdin_text, timeout=cap)
         return proc.returncode, out or "", err or "", False
     except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+        for sig in (signal.SIGTERM, portable.SIGKILL):
             try:
-                os.killpg(proc.pid, sig)
+                portable.killpg(proc.pid, sig)
             except OSError:
                 pass
             try:

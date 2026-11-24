@@ -11,12 +11,11 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from office import briefs, contract, db, gates, paths, state, submit
+from office import briefs, contract, db, gates, paths, portable, state, submit
 from office.util import now_iso, sha256_obj
 _SOURCE_SUFFIXES = frozenset((".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt",
                               ".c", ".cc", ".cpp", ".h", ".cs", ".rb", ".php", ".swift",
@@ -149,7 +148,7 @@ def _paths_with_status(checkout: Path, base: str, head: str, paths_: list[str], 
     if not paths_:
         return []
     out = subprocess.run(["git", "-C", str(checkout), "diff", "--name-only", "-z", "--no-renames",
-                          f"--diff-filter={status}", base, head, "--", *paths_], capture_output=True, text=True)
+                          f"--diff-filter={status}", base, head, "--", *paths_], capture_output=True, text=True, encoding="utf-8")
     return [p for p in out.stdout.split("\0") if p]  # -z: names are never quoted, so they match the changed list
 def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str], tests: list[str],
           run: dict) -> dict:
@@ -160,7 +159,7 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
     try:
         for checkout in (red_checkout, green_checkout):
             made = subprocess.run(["git", "-C", str(wt), "worktree", "add", "--detach", str(checkout), head],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, encoding="utf-8")
             if made.returncode:
                 return {"ok": False, "status": "blocked",
                         "reason": "cannot isolate source for the proof: " + made.stderr[-300:]}
@@ -184,7 +183,7 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
             if not _safe_test(green_checkout, test):
                 return {"ok": False, "status": "blocked",
                         "reason": f"named test {test} is not a file of the submitted commit"}
-            command = " ".join(shlex.quote(w) for w in [*_resolve_interpreter(runner, wt, green_checkout), test])
+            command = portable.shell_join([*_resolve_interpreter(runner, wt, green_checkout), test])
             red, red_out = _run(red_checkout, command, run)
             if red != _PYTEST_TEST_FAILED:
                 if red == 0 and added:
@@ -217,7 +216,7 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
         for checkout in attached:
             subprocess.run(["git", "-C", str(wt), "worktree", "remove", "--force", str(checkout)],
                            capture_output=True, timeout=30)
-        shutil.rmtree(parent, ignore_errors=True)
+        portable.rmtree(parent, ignore_errors=True)
 def gate(con, run: dict, task: dict, wt: Path, base: str, head: str, changed: list[str],
          *, execute: bool) -> dict:
     """Prove once per exact commit and test set. Submit only trusts a recorded pass or exemption."""

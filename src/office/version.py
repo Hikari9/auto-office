@@ -55,7 +55,7 @@ def _is_source_checkout() -> bool:
 def _git(*args: str) -> str | None:
     try:
         proc = subprocess.run(["git", "-C", str(SOURCE_ROOT), *args], capture_output=True,
-                              text=True, timeout=10)
+                              text=True, encoding="utf-8", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
@@ -201,7 +201,9 @@ def install_source() -> Path | None:
     url = urlparse(data.get("url") or "")
     if url.scheme != "file" or (data.get("dir_info") or {}).get("editable"):
         return None
-    src = Path(unquote(url.path))
+    from urllib.request import url2pathname
+    # url2pathname, not the bare path: on Windows file:///C:/x is C:\x, never \C:\x.
+    src = Path(url2pathname(url.path) if os.name == "nt" else unquote(url.path))
     return src if (src / "src" / "office").is_dir() else None
 
 
@@ -214,7 +216,7 @@ def _tree_digests(root: Path, rel_to: Path) -> dict[str, str]:
         files = []
     # Files a wheel never ships (OS metadata, bytecode) are not drift.
     skip = {".DS_Store", "Thumbs.db"}
-    return {str(f.relative_to(rel_to)): hashlib.sha256(f.read_bytes()).hexdigest()
+    return {f.relative_to(rel_to).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
             for f in files if "__pycache__" not in f.parts and f.suffix != ".pyc" and f.name not in skip}
 
 
@@ -242,7 +244,7 @@ def install_drift(package_root: Path = PACKAGE_ROOT, source: Path | None = None)
     differ = sorted(k for k in installed.keys() | wanted.keys() if installed.get(k) != wanted.get(k))
     try:
         proc = subprocess.run(["git", "-C", str(source), "rev-parse", "--short=12", "HEAD"],
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, encoding="utf-8", timeout=10)
         head = proc.stdout.strip() if proc.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         head = None

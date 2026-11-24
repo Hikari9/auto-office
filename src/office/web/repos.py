@@ -22,7 +22,7 @@ _REMOTE = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IG
 def run_git(path: Path, args: list[str]) -> str | None:
     """stdout of `git -C path ...`, or None on any failure."""
     try:
-        out = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, encoding="utf-8", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() if out.returncode == 0 else None

@@ -30,7 +30,6 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
-from urllib.parse import quote
 
 REVIEW_KINDS = ("plan_review", "code_review", "visual", "convergence_review", "integration_review")
 LAUNCH_CLASSES = ("launch", "wall", "pointer", "silent")
@@ -55,7 +54,7 @@ _LAUNCH_FAILED = (
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(f"file://{quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=30)
+    con = sqlite3.connect(f"{Path(os.path.abspath(path)).as_uri()}?mode=ro", uri=True, timeout=30)
     con.execute("PRAGMA query_only=ON")
     return con
 

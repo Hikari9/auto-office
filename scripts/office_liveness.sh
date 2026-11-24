@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A stock Windows install has no working `python3` in Git Bash (it is absent, or the Microsoft Store stub):
+# use the first Python 3 that runs. Elsewhere this is `python3`, as before. OFFICE_PYTHON overrides it.
+PYTHON3="${OFFICE_PYTHON:-}"
+if [[ -z "$PYTHON3" ]]; then
+  for _py in python3 python; do
+    if "$_py" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then PYTHON3="$_py"; break; fi
+  done
+fi
+PYTHON3="${PYTHON3:-python3}"
 # office-liveness.sh — check dispatch liveness
 #
 # Usage:
@@ -55,7 +64,7 @@ fi
 
 PID=$(cat "$PIDFILE")
 # Parse started_at with python for safety
-STARTED_AT=$(python3 -c "import json; print(json.load(open('$METAFILE'))['started_at'])")
+STARTED_AT=$("$PYTHON3" -c "import json, sys; print(json.load(open(sys.argv[1]))['started_at'])" "$METAFILE")
 NOW=$(date +%s)
 RUNTIME=$((NOW - STARTED_AT))
 
@@ -117,7 +126,7 @@ fi
 # to before this field existed: no "completion_event" key is added at all.
 if [[ ( "$STATUS" == "completed" ) && -n "$SESSION_ID" && -n "$FAMILY_ID" ]]; then
     MONITOR_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/office_monitor.py"
-    COMPLETION_EVENT_JSON=$(python3 "$MONITOR_SCRIPT" process-exit-event \
+    COMPLETION_EVENT_JSON=$("$PYTHON3" "$MONITOR_SCRIPT" process-exit-event \
         --state-dir "$STATE_DIR" \
         --session-id "$SESSION_ID" \
         --family-id "$FAMILY_ID" \

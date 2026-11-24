@@ -13,6 +13,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from office import portable
+
 
 FULL = "full"
 SCOPED = "scoped"  # verified change-relevant tests; NEVER a full-suite claim
@@ -23,7 +25,7 @@ def _show(repo: Path, commit: str, path: str) -> str | None:
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         return None
     proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     return proc.stdout if proc.returncode == 0 else None
 
 
@@ -125,25 +127,25 @@ def is_full_suite(command: str) -> bool:
 
 
 _SCOPED_GATE_SHA256 = {
-    "scripts/validate.sh": "d4a2a80240af41596cd4a66abf36731753e5feef9a90c5c0d13096beb98617d6",
-    "scripts/select_pr_tests.py": "96e3fe6686dba9887976007c27b54ef9d5458c7ac6edfd26248f0a15c1101bf9",
-    "tests/test_pr_test_selection.py": "cfe11f97a9ab9066a95e3044b0a7c5355bef84ef5d0d9e4ef57dab565c7b75c5",
+    "scripts/validate.sh": "0aab876cc701a45192c3b5fd66ffe097398648e2a5e5028530363c51aaddbbaf",
+    "scripts/select_pr_tests.py": "64af5b7689bf97b624878e6fcd7d83396c14fe555c339cd670f5cf4e8ec3a499",
+    "tests/test_pr_test_selection.py": "7c4f462481d14cd66c11610a68967d41bca0a255ecc550d7ffca4bdfee30fae2",
     "tests/test_version_single_source.py": "fe6547051a4444ae0bc39575afcbc36fbfe613ad693cf4a2a78e7783c8fe35e3",
-    "tests/v31/test_verification_coverage.py": "b3d477501a5eb200ed7e8ed7d7b41ecb02b2d777ff7a3867e8eeaa96018f1927",
+    "tests/v31/test_verification_coverage.py": "f5680c373e50eaa96f1dae511f9386764c6e02ef0ca5585db80a35c69efba308",
     "tests/v31/test_issue_563_artifact_integrity.py": "5829d9ae9bce96cade8dab0b8ec7c239d48d4a214d26773f3ab1eb2526525c8b",
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
-    "tests/contracts/test_plugin_distribution.py": "0d3178f088e954a59a1b8de9fb2b4e7a2117324ce74dcd0ce00a27875034d7b4",
+    "tests/contracts/test_plugin_distribution.py": "8d4c09b555fd4619d520a2224849b431831955a1bbf363d426b31ad7d73a7e90",
     "tests/contracts/test_route_parity.py": "68470936786223ba23971cb1c714220e67e9dad9c0f141b3c293ce36df0d219d",
     "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
-    "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
+    "tests/contracts/core/test_cli_smokes.py": "461a0474835632db966f67ae3254479c368cddd495d251b8cbe649a56f7b0b38",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
     "tests/contracts/core/test_helpers.py": "eadd0e39841e47bb986ed50ea6f3add47f944c1c1aacb65aea9bf82b3dfe599b",
     "tests/contracts/core/test_policy_precedence.py": "e685bc86e30fa398622f3b9f27dee53a58054e95d07d38bce1acdc962a9b97cb",
     "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
     "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
     "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
-    "tests/contracts/test_route_policy_effective.py": "1fef32764cf8c2ba782a7aab984fc5f14dc7dc8f63a85688c154e8be2dd8355d",
+    "tests/contracts/test_route_policy_effective.py": "8eb0ce5c3a31e08fdc0bac43697a6305513ebfb5212ad828803bae154b6c4271",
 }
 
 
@@ -258,7 +260,7 @@ def attested_checks(con, run: dict, commit: str) -> list[str]:
                     or resolved.parent != anchor or not resolved.is_file()):
                 continue
             # A race-safe digest over one file descriptor, not metadata alone.
-            fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(resolved, os.O_RDONLY | portable.O_NOFOLLOW | portable.O_BINARY)
             with os.fdopen(fd, "rb") as artifact:
                 before = os.fstat(artifact.fileno())
                 digest = hashlib.sha256()

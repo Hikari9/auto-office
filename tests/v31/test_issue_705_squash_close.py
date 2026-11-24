@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -161,7 +162,7 @@ def test_missing_task_pr_needs_the_complete_reviewed_tree(env, monkeypatch, ref,
 def test_failed_fresh_checks_keep_run_open_and_a_retry_rechecks(env, monkeypatch):
     flag = env.tmp / "checks-available"
     flag.write_text("yes")
-    plan = _plan("merge").replace("checks: python3 -c", f"checks: test -f {flag} && python3 -c", 1)
+    plan = _plan("merge").replace("checks: python3 -c", f"checks: test -f {flag.as_posix()} && python3 -c", 1)
     _interrupted(env, monkeypatch, plan)
     flag.unlink()
     code, out = env.office("close", "--landed-externally", "2")
@@ -261,7 +262,8 @@ def test_missing_commands_or_changed_checkout_never_complete_the_proof(env, monk
     _interrupted(env, monkeypatch)
     original = gates._run_check
     def failed(command, cwd, timeout, environment):
-        assert jobs.attempt_lock_fds(), "the check must inherit its outbox attempt's execution lock"
+        # Windows passes no lock fd: there the check runs in a kill-on-close job object instead.
+        assert jobs.attempt_lock_fds() or sys.platform == "win32", "the check must inherit its outbox attempt's execution lock"
         if failure == "UNAVAILABLE":
             return 127, "command not found"
         result = original(command, cwd, timeout, environment)
@@ -276,7 +278,7 @@ def test_missing_commands_or_changed_checkout_never_complete_the_proof(env, monk
 
 def test_e2e_reentry_after_deploy_does_not_merge_or_deploy_twice(env, monkeypatch):
     marker = env.tmp / "deploy-count"
-    _run(env, monkeypatch, _plan("e2e", prod=f"printf deployed >> {marker}", verify=f"test -f {marker}"), repo=SQUASH_ONLY)
+    _run(env, monkeypatch, _plan("e2e", prod=f"printf deployed >> {marker.as_posix()}", verify=f"test -f {marker.as_posix()}"), repo=SQUASH_ONLY)
     original = land._record
     with monkeypatch.context() as patch:
         def interrupted(con, run, **values):

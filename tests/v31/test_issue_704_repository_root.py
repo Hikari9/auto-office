@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -280,7 +281,9 @@ def test_missing_browser_capture_names_install_and_resume_without_spending_a_rev
     # #651's doctor already knows the remediation. The same launch failure
     # during the real capture path must leave an actionable evidence blocker.
     message, problem = doctor._visual_capture_status()
-    assert problem and "playwright install chromium-headless-shell" in message
+    deps = " --with-deps" if sys.platform.startswith("linux") else ""  # Linux also needs the browser's system libraries
+    install = f"playwright install{deps} chromium-headless-shell"
+    assert problem and install in message
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])
@@ -300,7 +303,7 @@ def test_missing_browser_capture_names_install_and_resume_without_spending_a_rev
     assert run["landing"].get("integration", {}).get("status") != "accepted"
     assert task_row(env)["status"] == "accepted"
     code, result = env.ojson("status")
-    assert code == 0 and "playwright install chromium-headless-shell" in result["next"], result
+    assert code == 0 and install in result["next"], result
     assert "office resume" in result["next"] and "no action" not in result["next"], result
     assert "office amend" not in result["next"], result
 

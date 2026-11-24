@@ -189,7 +189,7 @@ def submit(con, run: dict, path: str) -> Result:
     body = {"index_version": delta["index_version"], "source": delta["source"], "fetched_at": str(delta["fetched_at"]),
             "base_catalog": snapshot_base(run), "rows": rows}
     digest = sha256_obj(body)
-    snap = paths.run_dir(run["id"]) / "benchmarks" / f"snapshot-{digest[:12]}.json"
+    snap = paths.run_dir(run["id"]) / "benchmarks" / f"snapshot-{digest[:12].replace(':', '-')}.json"  # no ":" in Windows names
     atomic_write_json(snap, {**body, "hash": digest})
     with db.transaction(con):
         state.update_run(con, run["id"], benchmark_refresh={**c, "snapshot": digest, "snapshot_path": str(snap),

@@ -92,6 +92,15 @@ def dispatch_dir(output: Path | None) -> Path | None:
     return Path(output).parent if output else None
 
 
+def claude_path(path: str | Path) -> str:
+    """`path` as Claude Code's permission rules match it. On Windows it matches paths in POSIX form
+    (C:\\Users\\a is /c/Users/a), so a rule naming the drive path never matches; elsewhere the path is unchanged."""
+    text = str(path)
+    if sys.platform == "win32" and len(text) > 1 and text[1] == ":":
+        return "/" + text[0].lower() + text[2:].replace("\\", "/")
+    return text
+
+
 def write_allows(output: Path | None) -> list[str]:
     """Claude `Edit(<abs>/**)` allow rules for a reviewer: its dispatch dir and
     nothing else. (Claude Code consults only `Edit(path)` rules for file writes;
@@ -104,7 +113,7 @@ def write_allows(output: Path | None) -> list[str]:
     an allow rule the operator already has (a broad `Write` or `Edit(<state>/**)`)
     cannot widen this fence."""
     out_dir = dispatch_dir(output)
-    return [f"Edit(/{out_dir}/**)"] if out_dir else []
+    return [f"Edit(/{claude_path(out_dir)}/**)"] if out_dir else []
 
 
 def _spellings(path: Path) -> list[str]:
@@ -191,9 +200,9 @@ def write_denials(cwd: Path, output: Path | None) -> list[str]:
     the dispatch dir is skipped, since deny beats allow."""
     out_dir = dispatch_dir(output)
     targets = [str(Path(cwd)), str(paths.data_home()), str(paths.worktrees_dir())]
-    rules = [f"Edit(/{t}/**)" for t in targets
+    rules = [f"Edit(/{claude_path(t)}/**)" for t in targets
              if out_dir is None or not (out_dir == Path(t) or Path(t) in out_dir.parents)]
-    rules += [f"Edit(/{r})" for r in readonly_roots()]
+    rules += [f"Edit(/{claude_path(r)})" for r in readonly_roots()]
     return list(dict.fromkeys(rules))
 
 
@@ -260,7 +269,7 @@ def claude_sandbox_settings(cwd: Path, output: Path | None, include_dirs: list[P
 
 def allow_rules() -> list[str]:
     rules: list[str] = []
-    targets = [f"{d}/**" for d in state_dirs() + guidance_dirs()] + [str(f) for f in guidance_files()]
+    targets = [f"{claude_path(d)}/**" for d in state_dirs() + guidance_dirs()] + [claude_path(f) for f in guidance_files()]
     for target in targets:
         for rule in (f"Read({target})", f"Read(/{target})"):
             if rule not in rules:

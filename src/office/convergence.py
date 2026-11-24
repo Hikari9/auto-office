@@ -509,7 +509,7 @@ def _compose(con, run: dict, scope: dict) -> dict:
                 continue
             proc = subprocess.run(["git", "-C", str(wt), "merge", "--no-ff", "--no-edit", "-m",
                                    f"office: converge {scope['id']} {t['id']}\n\n{paths.office_trailer(run['id'])}", commit],
-                                  capture_output=True, text=True, env=genv)
+                                  capture_output=True, text=True, encoding="utf-8", env=genv)
             if proc.returncode != 0 and not integration.finish_shared_append_merge(wt, t, previous, env=genv):
                 conflicted = paths.git(wt, "diff", "--name-only", "--diff-filter=U", check=False)
                 subprocess.run(["git", "-C", str(wt), "merge", "--abort"], capture_output=True)
@@ -780,7 +780,7 @@ def _same_tree(repo: Path, commit: str, stated: str) -> bool:
     trees = []
     for rev in (commit, stated):
         proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{rev}^{{tree}}"],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0 or not proc.stdout.strip():
             return False
         trees.append(proc.stdout.strip())

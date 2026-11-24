@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shlex
 import stat
 import sys
 import textwrap
@@ -512,7 +513,7 @@ def test_reviewer_env_keeps_python_bytecode_outside_the_checkout(tmp_path, monke
     assert "PYTHONPYCACHEPREFIX" not in dispatch.worker_env(run, d, "executor")
     # A reviewer launched from agent.env (pane or by hand) gets the same prefix; a worker does not.
     reviewer_env = dispatch.write_agent_env(run, {**d, "role": "reviewer"}, tmp_path, worker=False).read_text()
-    assert f"export PYTHONPYCACHEPREFIX={prefix}\n" in reviewer_env
+    assert f"export PYTHONPYCACHEPREFIX={shlex.quote(str(prefix))}\n" in reviewer_env  # a Windows path is quoted
     (tmp_path / "w").mkdir()
     worker_env = dispatch.write_agent_env(run, {**d, "role": "executor"}, tmp_path / "w", worker=True).read_text()
     assert "PYTHONPYCACHEPREFIX" not in worker_env

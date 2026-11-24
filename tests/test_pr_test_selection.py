@@ -9,6 +9,11 @@ from pathlib import Path
 
 import pytest
 
+# scripts/validate.sh is the POSIX pre-push gate (bash, .venv/bin, `uv`); Windows runs the suite with pytest.
+posix_gate = pytest.mark.skipif(sys.platform == "win32", reason="scripts/validate.sh is a POSIX bash gate")
+# Windows file names cannot hold a line break, a carriage return or bytes that are not UTF-16.
+posix_names = pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids this file name")
+
 from scripts.select_pr_tests import SAFETY_SMOKE, SelectionError, selection
 
 
@@ -72,6 +77,7 @@ def test_version_invariant_runs_on_every_pr(pr_repo):
     _, _, chosen = selection(pr_repo)
     assert "tests/test_version_single_source.py" in chosen
 
+@posix_names
 
 def test_line_break_in_selected_test_path_fails_closed(pr_repo):
     # One name holds a newline and a pytest option; split at the newline it becomes an argument.
@@ -92,6 +98,7 @@ def _commit_index_path(pr_repo, path: str) -> None:
     subprocess.run(["git", "-C", str(pr_repo), "-c", "user.name=t", "-c",
                     "user.email=t@t", "commit", "-qm", "odd name"], check=True)
 
+@posix_names
 
 def test_carriage_return_in_selected_path_is_named_not_translated(pr_repo):
     _commit_index_path(pr_repo, "tests/test_c\rx.py")
@@ -100,6 +107,7 @@ def test_carriage_return_in_selected_path_is_named_not_translated(pr_repo):
     # Text mode would turn \r into \n, and the message would show that instead.
     assert repr("tests/test_c\rx.py") in str(excinfo.value)
 
+@posix_names
 
 def test_non_utf8_path_fails_closed_with_its_own_message(pr_repo):
     import os
@@ -143,6 +151,7 @@ def test_safety_smoke_set_is_named_and_selected(pr_repo):
     assert all("named safety smoke" in reasons[name] for name in SAFETY_SMOKE)
 
 
+@posix_gate
 @pytest.mark.parametrize("contracts", ["missing", "empty"])
 def test_pr_shell_gate_fails_closed_without_contract_tests(pr_repo, contracts):
     import os
@@ -214,6 +223,7 @@ exit 99
                     "user.email=t@t", "commit", "-qm", "gate fixture"], check=True)
     return pr_repo / "scripts" / "validate.sh"
 
+@posix_gate
 
 def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
     import os
@@ -234,6 +244,7 @@ def test_pr_shell_gate_executes_contracts_and_affected_selection(pr_repo):
     assert "tests/contracts/" in pytest_args
     assert (set(SAFETY_SMOKE) | {"tests/test_affected.py"}) <= set(pytest_args)
 
+@posix_gate
 
 def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     import os
@@ -246,6 +257,7 @@ def test_pr_shell_gate_handles_empty_selection_on_system_bash(pr_repo):
     assert "No tests selected; refusing empty scoped validation" in proc.stderr
 
 
+@posix_gate
 @pytest.mark.parametrize("too_old", [False, True])
 def test_pr_shell_gate_requests_any_supported_python_from_uv(pr_repo, too_old):
     import os
@@ -276,7 +288,7 @@ exit 99
     env_log = pr_repo / "uv.log"
     proc = subprocess.run(["/bin/bash", str(script), "--pr"], cwd=pr_repo,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
                                "PYTHON_STUB": str(python_stub), "UV_LOG": str(env_log),
                                "SELECTED_TESTS": selected_tests,
                                "PY_TOO_OLD": "1" if too_old else "",
@@ -291,6 +303,7 @@ exit 99
     else:
         assert proc.returncode == 0, proc.stderr + proc.stdout
 
+@posix_gate
 
 def test_build_resource_check_survives_early_grep_match(tmp_path):
     """grep -q exiting on the first match must not SIGPIPE the listing under pipefail."""
@@ -319,7 +332,7 @@ def test_build_resource_check_survives_early_grep_match(tmp_path):
     fake_python.chmod(0o755)
     proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{body}"], cwd=tmp_path,
                           capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+                          env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"})
     assert proc.returncode == 0, proc.stderr
 
 
@@ -423,6 +436,7 @@ def test_unmapped_runtime_file_fails_closed(pr_repo):
         selection(pr_repo)
 
 
+@posix_gate
 @pytest.mark.parametrize("kind", ["tracked", "untracked_source", "root_conftest", "ignored_test"])
 def test_pr_shell_gate_rejects_uncommitted_inputs_before_install(pr_repo, kind):
     import os

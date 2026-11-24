@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import time
 from pathlib import Path
 
-from office import db, state
+from office import db, portable, state
 from office.state import Refused
 from office.util import sha256_bytes
 
@@ -102,14 +101,14 @@ def execute(run: dict, wt: Path, log: Path, *, marker: bool = False) -> dict:
            if not (k.startswith("OFFICE_") and k not in ("OFFICE_DATA_HOME", "OFFICE_STATE_HOME"))}
     started, timed_out = time.time(), False
     with log.open("w", encoding="utf-8") as fh:
-        proc = subprocess.Popen(cfg["setup"], shell=True, cwd=str(wt), stdout=fh, stderr=subprocess.STDOUT,
-                                env=env, start_new_session=True)
+        proc = subprocess.Popen(**portable.shell_run_args(cfg["setup"], env), cwd=str(wt), stdout=fh,
+                                stderr=subprocess.STDOUT, **portable.session_kwargs())
         try:
             code = proc.wait(timeout=cfg["timeout"])
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                portable.killpg(proc.pid, portable.SIGKILL)
             except OSError:
                 proc.kill()
             proc.wait()

@@ -125,8 +125,12 @@ def test_a_pinned_hydrogen_plan_reviewer_needs_only_the_run(env, monkeypatch):
         candidates.declared_decision(HYDROGEN, flag="--as", role="plan_reviewer", config=_config(), run_id="r1")
 
 
-def test_seed_accepts_hydrogen_behind_luna_for_plan_review_with_the_allow():
-    luna = {"model_id": "luna", "harness": "codex", "effort": "high"}
+def test_seed_accepts_hydrogen_behind_luna_for_plan_review_with_the_allow(monkeypatch):
+    # the allow names agy@1: pin the installed version rather than depend on the host having agy 1.x
+    real_version = adapters.harness_version
+    monkeypatch.setattr(adapters, "harness_version",
+                        lambda adapter: "1.5.12" if adapter.get("id") == "agy" else real_version(adapter))
+    luna ={"model_id": "luna", "harness": "codex", "effort": "high"}
     assert configcmd.validate_seed([luna, SEED], role="plan_reviewer", config=_config()) == []
     assert any("not dispatchable" in p for p in configcmd.validate_seed([luna, SEED], role="plan_reviewer",
                                                                          config=_config(role="code_reviewer")))

@@ -41,8 +41,8 @@ def test_install_writes_allow_rules_once_and_preserves_other_settings(scope):
         assert allow.count(rule) == 1, rule
     # Both absolute spellings cover Office state: Claude Code's `//abs` and context-mode's literal `/abs`.
     state = str(env.state)
-    assert f"Read({state}/**)" in allow and f"Read(/{state}/**)" in allow
-    assert f"Read({env.home}/.claude/rules/**)" in allow
+    assert f"Read({cp(state)}/**)" in allow and f"Read(/{cp(state)}/**)" in allow
+    assert f"Read({cp(env.home)}/.claude/rules/**)" in allow
     assert not any(".credentials" in r or "auth.json" in r for r in allow)
 
     before = _settings(env).read_text()
@@ -100,8 +100,8 @@ def test_reinstall_removes_owned_rules_for_a_moved_root(scope, monkeypatch):
     monkeypatch.setenv("OFFICE_STATE_HOME", str(moved))
     env.office("install", "--only", "claude", env={"OFFICE_STATE_HOME": str(moved)}, check=0)
     allow = json.loads(_settings(env).read_text())["permissions"]["allow"]
-    assert f"Read({moved.resolve()}/**)" in allow
-    assert f"Read({old_state}/**)" not in allow
+    assert f"Read({cp(moved.resolve())}/**)" in allow
+    assert f"Read({cp(old_state)}/**)" not in allow
 
 
 def test_doctor_treats_absent_settings_as_empty(scope):
@@ -182,7 +182,7 @@ def test_read_roots_skip_missing_directories(scope):
     (env.home / ".claude" / "skills").rmdir()
     assert env.home / ".claude" / "skills" not in read_scope.add_dirs()
     # The allow rules do not depend on the directory existing yet.
-    assert f"Read({env.home}/.claude/skills/**)" in read_scope.allow_rules()
+    assert f"Read({cp(env.home)}/.claude/skills/**)" in read_scope.allow_rules()
 
 
 @pytest.mark.parametrize("adapter_id", ["claude", "codex", "agy", "hermes"])
@@ -229,8 +229,8 @@ def test_claude_reviewer_cannot_edit_the_checkout_or_office_data(scope):
     # depends on the sandbox posture, pinned in test_issue_1030_submit_grant and test_issue_1186_reviewer_shell.
     assert {"Edit", "NotebookEdit"} <= set(denied) and "Bash" not in denied
     # `Edit(path)` denies also block the Write tool; the reply file stays writable.
-    assert f"Edit(/{env.repo}/**)" in denied and f"Edit(/{env.data}/**)" in denied
-    assert f"Edit(/{env.state}/worktrees/**)" in denied
+    assert f"Edit(/{cp(env.repo)}/**)" in denied and f"Edit(/{cp(env.data)}/**)" in denied
+    assert f"Edit(/{cp(env.state)}/worktrees/**)" in denied
     assert not any(str(out.parent) in d for d in denied)
 
 
@@ -238,7 +238,13 @@ def test_claude_denial_skips_a_cwd_that_is_the_dispatch_dir(scope):
     env, adapters, read_scope = scope
     out = env.tmp / "dispatch" / "reply.txt"
     deny = read_scope.write_denials(out.parent, out)
-    assert f"Edit(/{out.parent}/**)" not in deny and f"Edit(/{env.data}/**)" in deny
+    assert f"Edit(/{cp(out.parent)}/**)" not in deny and f"Edit(/{cp(env.data)}/**)" in deny
+
+
+def cp(path) -> str:
+    """A path as Claude Code's permission rules spell it (POSIX form on Windows)."""
+    from office import read_scope
+    return read_scope.claude_path(path)
 
 
 def _can_write(argv: list[str], target: Path, inherited_allow: tuple[str, ...] = ()) -> bool:
@@ -261,9 +267,9 @@ def _can_write(argv: list[str], target: Path, inherited_allow: tuple[str, ...] =
                 continue
             pat = rule[len("Edit(/"):-1]
             if pat.endswith("/**"):
-                if str(target).startswith(pat[:-2]):
+                if cp(target).startswith(pat[:-2]):
                     return True
-            elif str(target) == pat:
+            elif cp(target) == pat:
                 return True
         return False
 
@@ -323,7 +329,7 @@ def test_preexisting_broad_write_allow_does_not_widen_a_claude_reviewer(scope, k
     env, adapters, _ = scope
     sibling = env.state / "runs" / "other-run" / "dispatches" / "Dxyz" / "reply.txt"
     own = env.tmp / "dispatch" / "reply.txt"
-    broad = ("Write", "Edit", f"Edit(/{env.state}/**)", f"Edit(/{env.home}/**)")
+    broad = ("Write", "Edit", f"Edit(/{cp(env.state)}/**)", f"Edit(/{cp(env.home)}/**)")
     argv = _reviewer_argv(adapters, "claude", kind, env)
     assert "--restricted" in argv
     assert not _can_write(argv, sibling, inherited_allow=broad)

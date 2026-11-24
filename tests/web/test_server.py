@@ -1,11 +1,13 @@
 """The loopback server: binding, request guards, startup lifecycle and the daemon."""
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -286,14 +288,24 @@ def test_office_web_cli_serve_and_refusal(tmp_path):
                          capture_output=True, text=True, env=env, timeout=60)
     assert bad.returncode == 2 and "non-loopback-host" in bad.stdout
     proc = subprocess.Popen([sys.executable, "-m", "office", "web", "serve", "--port", "0", "--fixture", "small"],
-                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            env={**env, "OFFICE_WEB_LAUNCH": "cli-test"},
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    windows = sys.platform == "win32"
     try:
         pid = tmp_path / "st" / "web" / "web.pid"
         deadline = time.time() + 30
         while not pid.exists() and time.time() < deadline:
             time.sleep(0.1)
-        assert json.loads(pid.read_text())["pid"] == proc.pid
+        info = json.loads(pid.read_text())
+        assert info["launch"] == "cli-test"
+        # On Windows the venv's python.exe redirector serves from a child process with its own pid.
+        assert windows or info["pid"] == proc.pid
     finally:
+        if windows:
+            from office import portable
+            with contextlib.suppress(OSError):
+                portable.kill(info["pid"], signal.SIGTERM)
         proc.terminate()
         proc.wait(timeout=20)
-    assert not pid.exists()
+    if not windows:  # TerminateProcess skips the server's own cleanup; a stale pid file reads as not running
+        assert not pid.exists()

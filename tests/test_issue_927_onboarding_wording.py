@@ -5,6 +5,8 @@ import re
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,13 +31,17 @@ def _probe(tmp_path, direct_url, *, mismatched=False):
     (executable_bin / "office").symlink_to(tool_bin / "office" if not mismatched else sys.executable)
     (executable_bin / "uv").write_text(f'#!/bin/sh\nprintf "%s\\n" "{tmp_path / "tools"}"\n')
     (executable_bin / "uv").chmod(0o755)
-    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}:{os.environ['PATH']}"}
+    env = {**os.environ, "PYTHONPATH": str(tmp_path), "PATH": f"{executable_bin}{os.pathsep}{os.environ['PATH']}"}
     return subprocess.run(command, shell=True, env=env, capture_output=True, text=True)
 
 
 def test_onboarding_says_missing_cli_asks_once_per_session():
     assert "asks once per session" in (ROOT / "docs/onboarding.md").read_text()
 
+posix_probe = pytest.mark.skipif(sys.platform == "win32", reason="the documented install probe is a POSIX shell recipe (`command -v`, `test -ef`, symlinks, `<tool dir>/bin/office`)")
+
+
+@posix_probe
 
 def test_probe_identifies_editable_checkout_without_consulting_upstream(tmp_path):
     source = {"url": "file:///checkout-ahead", "dir_info": {"editable": True}}
@@ -44,6 +50,7 @@ def test_probe_identifies_editable_checkout_without_consulting_upstream(tmp_path
     found = (ROOT / "SKILL.md").read_text().split("- **Found:**", 1)[1].split("\n- **Not found:**", 1)[0]
     assert '`uv tool install --force --editable "<checkout path>"` for an editable install' in found
 
+@posix_probe
 
 def test_probe_identifies_local_source_without_git(tmp_path):
     source = {"url": "file:///source-without-git", "dir_info": {}}
@@ -52,6 +59,7 @@ def test_probe_identifies_local_source_without_git(tmp_path):
     found = (ROOT / "SKILL.md").read_text().split("- **Found:**", 1)[1].split("\n- **Not found:**", 1)[0]
     assert '`uv tool install --force --reinstall "<checkout path>"` for a non-editable directory install' in found
 
+@posix_probe
 
 def test_probe_flags_an_index_install_as_not_auto_office(tmp_path):
     # Auto Office is not on PyPI (#979): an index install is the unrelated `auto-office` project.
@@ -60,6 +68,7 @@ def test_probe_flags_an_index_install_as_not_auto_office(tmp_path):
     found = (ROOT / "SKILL.md").read_text().split("- **Found:**", 1)[1].split("\n- **Not found:**", 1)[0]
     assert "the PyPI `auto-office` is an unrelated project, so tell the user to reinstall from GitHub" in found
 
+@posix_probe
 
 def test_probe_identifies_a_github_install(tmp_path):
     source = {"url": "https://github.com/Hikari9/auto-office", "vcs_info": {"vcs": "git", "commit_id": "0" * 40}}
@@ -73,6 +82,7 @@ def test_probe_refuses_a_different_office_executable(tmp_path):
     result = _probe(tmp_path, None, mismatched=True)
     assert result.returncode != 0 and not result.stdout
 
+@posix_probe
 
 def test_archive_is_not_called_a_checkout(tmp_path):
     source = {"url": "file:///auto-office.whl", "archive_info": {}}
@@ -82,6 +92,7 @@ def test_archive_is_not_called_a_checkout(tmp_path):
     assert "with `dir_info` identifies a source directory" in found
     assert "An archive, failed command" in found
 
+@posix_probe
 
 def test_probe_reports_vcs_info_rather_than_checkout(tmp_path):
     source = {"url": "https://github.com/example/auto-office.git", "vcs_info": {"vcs": "git", "commit_id": "abcdef123"}}
@@ -91,6 +102,7 @@ def test_probe_reports_vcs_info_rather_than_checkout(tmp_path):
     found = (ROOT / "SKILL.md").read_text().split("- **Found:**", 1)[1].split("\n- **Not found:**", 1)[0]
     assert "unclear origin is not proof" in found
 
+@posix_probe
 
 def test_probe_reports_empty_or_malformed_metadata_as_unclear(tmp_path):
     result_empty = _probe(tmp_path / "empty", "")

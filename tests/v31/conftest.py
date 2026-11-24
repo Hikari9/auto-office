@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from unittest import mock
 import pytest
 
 import fake_agent
+from host_tools import host_tool_dirs
+from office import portable
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -102,6 +105,10 @@ class _Interrupted(BaseException):
         self.signum = signum
 
 
+# The stop signals an in-process agent honours; Windows has no SIGHUP.
+_STOP_SIGNALS = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGHUP", "SIGINT") if hasattr(signal, n))
+
+
 class InProcessAgent:
     """A Popen-like fake harness child that runs `fake_agent.run` in this process.
 
@@ -123,7 +130,7 @@ class InProcessAgent:
         self._running = False
         # From the spawn on, a signal is chained to the supervisor's own handler (which records it for the
         # classification) and either stops the running agent or, before it starts, keeps it from starting.
-        self._previous = {s: signal.signal(s, self._on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+        self._previous = {s: signal.signal(s, self._on_signal) for s in _STOP_SIGNALS}
 
     def _on_signal(self, signum, frame):
         handler = self._previous.get(signum)
@@ -207,7 +214,7 @@ class Env:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.home / ".claude"))
         monkeypatch.setenv("CODEX_HOME", str(self.home / ".codex"))
         # Only fake harnesses and system tools: a real harness on PATH must never run in tests.
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", *host_tool_dirs()]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         pythonpath = [str(SRC)]
         import site
@@ -259,12 +266,21 @@ class Env:
         """The agent seam: an unmodified fake harness runs in this process; anything
         that needs a real process (a real binary, a sleep, a wall cap, a signal
         the scenario cannot emulate) is started as one."""
-        exe = shutil.which(argv[0], path=env.get("PATH"))
-        fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
-        if not fake or self._has_wall_cap(Path(exe).name, env) or not fake_agent.scenario_runs_in_process(env):
+        fake = self._untouched_fake(shutil.which(argv[0], path=env.get("PATH")))
+        if not fake or self._has_wall_cap(fake.name, env) or not fake_agent.scenario_runs_in_process(env):
             return spawn_process(argv, cwd, env, stdin)
-        env = {**env, "FAKE_HARNESS": Path(exe).name}
+        env = {**env, "FAKE_HARNESS": fake.name}
         return InProcessAgent(argv, cwd, env, stdin)
+
+    def _untouched_fake(self, exe: str | None) -> Path | None:
+        """The fake script `exe` resolves to, when it is one of ours and unmodified. On Windows `exe` is the launcher
+        written next to the script (tests/_win_shebang.py)."""
+        if not exe:
+            return None
+        path = Path(exe)
+        if os.name == "nt" and path.suffix.lower() == ".exe" and path.with_suffix("") in self.fakes:
+            path = path.with_suffix("")
+        return path if path in self.fakes and path.read_text() == self.fakes[path] else None
 
     @staticmethod
     def _has_wall_cap(harness, env):
@@ -336,7 +352,15 @@ class Env:
     def con(self):
         _use_source()
         from office import db
-        return db.connect()
+        con = db.connect()
+        self.__dict__.setdefault("_cons", []).append(con)
+        return con
+
+    def close_connections(self) -> None:
+        """Close every connection `con()` handed out: Windows cannot delete a database file that is still open."""
+        for con in self.__dict__.pop("_cons", []):
+            with contextlib.suppress(Exception):
+                con.close()
 
     def _trust_inputs(self):
         """Everything `trust()` derives its routes from. Calls with equal inputs record the same triples."""
@@ -348,8 +372,8 @@ class Env:
         found = {}  # what each adapter finds on PATH: an untouched fake of ours (by name), or whatever else it is
         for name, adapter in all_adapters.items():
             exe = shutil.which(adapters.executable(adapter) or "")
-            fake = exe and Path(exe) in self.fakes and Path(exe).read_text() == self.fakes[Path(exe)]
-            found[name] = Path(exe).name if fake else exe
+            fake = self._untouched_fake(exe)
+            found[name] = fake.name if fake else exe
         # Route identity includes the resolved harness major, which can change
         # while the executable path and adapter configuration stay the same.
         route_harnesses = {row.get("invocation_harness") for row in catalog
@@ -482,7 +506,7 @@ def _restore_dispatched(request, monkeypatch) -> Env:
             mp.undo()
         cache[key] = root
     live, snapshot = cache[key] / "env", cache[key] / "snapshot"
-    shutil.rmtree(live, ignore_errors=True)
+    _reset_dir(live)
     shutil.copytree(snapshot, live, symlinks=True)
     e = Env(live, monkeypatch, restored=True, contract=contract)
     e.approved = True
@@ -496,6 +520,17 @@ def _trust_snapshots():
     return {}
 
 
+def _reset_dir(path: Path) -> None:
+    """Remove a test home. On Windows a background `office _job` the last test started may still hold a file
+    open for a moment, and an open file cannot be deleted there, so retry until it is gone."""
+    deadline = time.monotonic() + 15
+    while True:
+        portable.rmtree(path, ignore_errors=True)
+        if not path.exists() or time.monotonic() > deadline:
+            return
+        time.sleep(0.1)
+
+
 @pytest.fixture
 def env(request, tmp_path, monkeypatch):
     """An isolated Env. With `@pytest.mark.approved`, one whose default plan is already approved."""
@@ -503,7 +538,7 @@ def env(request, tmp_path, monkeypatch):
         e = _restore_dispatched(request, monkeypatch)
     elif request.node.get_closest_marker("approved"):
         live, snapshot = request.getfixturevalue("_approved_snapshot")
-        shutil.rmtree(live, ignore_errors=True)
+        _reset_dir(live)
         shutil.copytree(snapshot, live, symlinks=True)
         e = Env(live, monkeypatch, restored=True, contract=_contract(request))
         e.approved = True
@@ -513,8 +548,20 @@ def env(request, tmp_path, monkeypatch):
     try:
         yield _activate(e, monkeypatch)
     finally:
+        # A root-wake supervisor this test's run started watches the run until it ends, so it outlives the test.
+        # Stop it: on Windows the files it holds open would keep this home from ever being removed.
+        with contextlib.suppress(Exception):
+            # Only a spawned `_wake_supervise`: a `proc` binding records the native Stop hook's own process, which
+            # an in-process test runs inside this pytest worker.
+            for (pid,) in e.con().execute("SELECT supervisor_pid FROM root_wake_bindings WHERE supervisor_pid IS NOT NULL "
+                                          "AND harness != 'proc'"):
+                if pid in (os.getpid(), os.getppid()):
+                    continue
+                with contextlib.suppress(OSError):
+                    portable.killpg(pid, portable.SIGKILL)
         # Release the disposable home explicitly; its reporter leaves with it (#501).
-        shutil.rmtree(e.state, ignore_errors=True)
+        e.close_connections()
+        portable.rmtree(e.state, ignore_errors=True)
 
 
 RETIRED_MIMO_ARCHIVE = Path(__file__).resolve().parents[2] / "catalog" / "archive" / "retired-mimo-pi-kilo-2026-10-24.yaml"

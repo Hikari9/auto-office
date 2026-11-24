@@ -223,6 +223,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/test_onboarding_harness_preference.py` | keep |  |
 | `tests/test_packet_delivery_channel.py` | retire | exercised only the Auto Office 3.0 runtime and its helper scripts, removed with the 3.0 runtime |
 | `tests/test_pane_busy.py` | keep |  |
+| `tests/test_portable.py` | keep |  |
 | `tests/test_plugin_skill_entry.py` | keep |  |
 | `tests/test_pr_report.py` | keep |  |
 | `tests/test_pr_test_selection.py` | keep |  |
@@ -594,7 +595,7 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 
-Totals: {'keep': 369, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
+Totals: {'keep': 370, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
 
 ## Left alone on purpose
 

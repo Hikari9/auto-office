@@ -34,7 +34,7 @@ def test_a_new_run_does_not_see_another_runs_draft(env):
     env.office("start", "second goal", "--planner", "inline", check=0)
     second = _runs(env)[-1]
     code, out = env.office("submit")
-    assert code != 0 and f".office/plans/{second[:8]}/PLAN.md" in out, out
+    assert code != 0 and f".office/plans/{second[:8]}/PLAN.md" in out.replace("\\", "/"), out
 
 
 def test_legacy_plan_moves_to_the_run_it_matches(env):

@@ -1168,9 +1168,9 @@ def test_a_guarded_reviewer_is_pointed_only_at_its_snapshot(env, monkeypatch):
 
 def test_retargeting_rewrites_only_paths_of_the_checkout():
     cwd, snap = Path("/r/checkouts/c-1"), Path("/r/dispatches/D1/snapshot")
-    text = "read /r/checkouts/c-1/src and /r/checkouts/c-1. not /r/checkouts/c-10 or /r/checkouts/c-1-x"
-    assert gates._retarget_text(text, cwd, snap) == ("read /r/dispatches/D1/snapshot/src and /r/dispatches/D1/snapshot. "
-                                                     "not /r/checkouts/c-10 or /r/checkouts/c-1-x")
+    near, prefixed = Path("/r/checkouts/c-10"), Path("/r/checkouts/c-1-x")  # paths spelled as this OS spells them
+    text = f"read {cwd / 'src'} and {cwd}. not {near} or {prefixed}"
+    assert gates._retarget_text(text, cwd, snap) == f"read {snap / 'src'} and {snap}. not {near} or {prefixed}"
     assert gates._retarget_path(Path("/r/checkouts/c-1/a/b"), cwd, snap) == snap / "a" / "b"
     assert gates._retarget_path(cwd, cwd, snap) == snap
     assert gates._retarget_path(Path("/elsewhere/evidence"), cwd, snap) == Path("/elsewhere/evidence")

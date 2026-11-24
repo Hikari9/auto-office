@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A stock Windows install has no working `python3` in Git Bash (it is absent, or the Microsoft Store stub):
+# use the first Python 3 that runs. Elsewhere this is `python3`, as before. OFFICE_PYTHON overrides it.
+PYTHON3="${OFFICE_PYTHON:-}"
+if [[ -z "$PYTHON3" ]]; then
+  for _py in python3 python; do
+    if "$_py" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then PYTHON3="$_py"; break; fi
+  done
+fi
+PYTHON3="${PYTHON3:-python3}"
 
 OFFICE_STATE_DIR="${OFFICE_STATE_DIR:-.office}"
-OFFICE_STATE_DIR="$(cd "$(dirname "$OFFICE_STATE_DIR")" && pwd)/$(basename "$OFFICE_STATE_DIR")"
+# Under Git Bash on Windows, `pwd -W` names the directory as C:/Users/..., which the harnesses can run from any
+# shell; plain `pwd` says /c/Users/... or /tmp/..., which only an MSYS shell resolves. Elsewhere it is `pwd`.
+native_pwd() { pwd -W 2>/dev/null || pwd; }
+OFFICE_STATE_DIR="$(cd "$(dirname "$OFFICE_STATE_DIR")" && native_pwd)/$(basename "$OFFICE_STATE_DIR")"
 HOOKS_DEST="${OFFICE_STATE_DIR}/hooks"
 MANIFEST="${OFFICE_STATE_DIR}/hook-manifest.json"
 
@@ -50,6 +62,9 @@ resolve_node() {
 if ! NODE_BIN="$(resolve_node)"; then
     NODE_BIN=:
     echo "Node.js not found; Node-based close_finished_panes hooks will be no-ops." >&2
+fi
+if [ "$NODE_BIN" != ":" ] && command -v cygpath >/dev/null 2>&1; then
+    NODE_BIN="$(cygpath -m "$NODE_BIN")"  # /c/Program Files/nodejs/node -> C:/Program Files/nodejs/node
 fi
 cp "${HOOKS_SRC}/session_end.sh" "$HOOKS_DEST/"
 cp "${HOOKS_SRC}/pre_compact.sh" "$HOOKS_DEST/"
@@ -111,10 +126,16 @@ cat > "$MANIFEST" << EOF
 }
 EOF
 
-python3 -c "
-import json, os
+"$PYTHON3" -c "
+import json, os, shlex
+# The HOME this script was given: Windows Python resolves ~ from USERPROFILE, so expanduser would
+# configure the real user's harnesses even when the caller pointed HOME elsewhere.
+home = lambda rel: os.path.join(os.environ.get('HOME') or os.path.expanduser('~'), rel)
 h = '${HOOKS_DEST}'
 node_bin = '${NODE_BIN}'
+# Each hook is a shell command: quote its words, or a path with a space (C:/Program Files/nodejs/node,
+# a home under a spaced user name) splits into two.
+q = shlex.quote
 configured = []
 
 def remove_stale_telemetry_hooks(value):
@@ -146,48 +167,51 @@ def configure_codex(path):
     with open(path, 'r') as f: d = remove_stale_telemetry_hooks(json.load(f))
     hooks = d.setdefault('hooks', {})
     hooks.update({
-        'SessionStart': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
-        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
-        'PreToolUse': [{'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}]
+        'SessionStart': [{'hooks': [{'type': 'command', 'command': q(h+'/session_end.sh'), 'timeout': 30000}]}],
+        'PreCompact': [{'hooks': [{'type': 'command', 'command': q(h+'/pre_compact.sh'), 'timeout': 30000}]}],
+        'PreToolUse': [{'hooks': [{'type': 'command', 'command': q(h+'/pre_tool_use.py'), 'timeout': 30000}]}]
     })
     with open(path, 'w') as f: json.dump(d, f, indent=2)
     return True
 # Claude
-p = os.path.expanduser('~/.claude/settings.json')
+p = home('.claude/settings.json')
 if configure(p, {}):
     with open(p, 'r') as f: d = json.load(f)
     d.setdefault('hooks', {})
     d['hooks'].update({
-        'SessionEnd': [{'hooks': [{'type': 'command', 'command': h+'/session_end.sh', 'timeout': 30000}]}],
-        'PreCompact': [{'hooks': [{'type': 'command', 'command': h+'/pre_compact.sh', 'timeout': 30000}]}],
+        'SessionEnd': [{'hooks': [{'type': 'command', 'command': q(h+'/session_end.sh'), 'timeout': 30000}]}],
+        'PreCompact': [{'hooks': [{'type': 'command', 'command': q(h+'/pre_compact.sh'), 'timeout': 30000}]}],
         'PreToolUse': [{'matcher': 'Edit|MultiEdit|Write|NotebookEdit|ApplyPatch',
-                        'hooks': [{'type': 'command', 'command': h+'/pre_tool_use.py', 'timeout': 30000}]}],
-        'Stop': [{'hooks': [{'type': 'command', 'command': h+'/close_panes.sh', 'timeout': 30000},
-                            {'type': 'command', 'command': node_bin+' '+h+'/close_finished_panes.mjs', 'timeout': 30000}]}]
+                        'hooks': [{'type': 'command', 'command': q(h+'/pre_tool_use.py'), 'timeout': 30000}]}],
+        'Stop': [{'hooks': [{'type': 'command', 'command': q(h+'/close_panes.sh'), 'timeout': 30000},
+                            {'type': 'command', 'command': q(node_bin)+' '+q(h+'/close_finished_panes.mjs'), 'timeout': 30000}]}]
     })
     with open(p, 'w') as f: json.dump(d, f, indent=2)
     configured.append('Claude')
 
 # Codex
-p = os.path.expanduser('~/.codex/hooks.json')
+p = home('.codex/hooks.json')
 if configure_codex(p):
     configured.append('Codex')
 
 # Gemini
-p = os.path.expanduser('~/.gemini/config/hooks.json')
-if configure(p, {'SessionEnd': h+'/session_end.sh',
-                 'Stop': [h+'/close_panes.sh', node_bin+' '+h+'/close_finished_panes.mjs']}):
+p = home('.gemini/config/hooks.json')
+if configure(p, {'SessionEnd': q(h+'/session_end.sh'),
+                 'Stop': [q(h+'/close_panes.sh'), q(node_bin)+' '+q(h+'/close_finished_panes.mjs')]}):
     configured.append('Gemini')
 
 if configured:
     print('Configured harnesses:', ', '.join(configured))
 "
 
-python3 -c "
+"$PYTHON3" -c "
 import os, glob, yaml
+# The HOME this script was given: Windows Python resolves ~ from USERPROFILE, so expanduser would
+# configure the real user's harnesses even when the caller pointed HOME elsewhere.
+home = lambda rel: os.path.join(os.environ.get('HOME') or os.path.expanduser('~'), rel)
 h = '${HOOKS_DEST}'
 hermes = False
-for p in glob.glob(os.path.expanduser('~/.hermes/profiles/*/config.yaml')):
+for p in glob.glob(home('.hermes/profiles/*/config.yaml')):
     with open(p, 'r') as f: d = yaml.safe_load(f) or {}
     d.setdefault('hooks', {})
     d['hooks'].update({'on_session_end': h+'/session_end.sh', 'on_session_finalize': h+'/session_end.sh'})

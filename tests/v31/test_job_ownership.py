@@ -25,8 +25,14 @@ import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run
 
+POSIX_ONLY_ORPHAN = pytest.mark.skipif(
+    sys.platform == "win32", reason="a check outlives its worker only through an inherited flock fd; on Windows "
+    "the check runs in a kill-on-close job object, so it dies with its worker")
+
+
 PROBE = r'''
-import fcntl, json, os, signal, sys, time
+import json, os, signal, sys, time
+from office import portable  # flock on POSIX, LockFileEx on Windows
 d, secs = sys.argv[1], float(sys.argv[2])
 os.makedirs(d, exist_ok=True)
 if len(sys.argv) > 3 and sys.argv[3] == "stubborn" and not os.path.exists(os.path.join(d, "stubborn.done")):
@@ -36,14 +42,14 @@ if len(sys.argv) > 3 and sys.argv[3] == "stubborn" and not os.path.exists(os.pat
 lock = open(os.path.join(d, "probe.lock"), "a")
 
 def bump(delta):
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    portable.lock_exclusive(lock)
     path = os.path.join(d, "state.json")
     st = json.load(open(path)) if os.path.exists(path) else {"now": 0, "max": 0, "runs": 0}
     st["now"] += delta
     st["max"] = max(st["max"], st["now"])
     st["runs"] += 1 if delta > 0 else 0
     json.dump(st, open(path, "w"))
-    fcntl.flock(lock, fcntl.LOCK_UN)
+    portable.unlock(lock)
 
 bump(1)
 time.sleep(secs)
@@ -55,7 +61,7 @@ def _probe_plan(env, secs: float, *extra: str) -> tuple[str, Path]:
     probe = env.tmp / "probe.py"
     probe.write_text(PROBE)
     out = env.tmp / "probe"
-    command = " ".join(["python3", str(probe), str(out), str(secs), *extra])
+    command = " ".join(["python3", probe.as_posix(), out.as_posix(), str(secs), *extra])
     return PLAN_ONE.replace('checks: python3 -c "import calc; assert calc.add(2, 3) == 5"', f"checks: {command}"), out
 
 
@@ -144,6 +150,7 @@ def jobs_log(run: dict, job_id: str) -> str:
     return jobs.log_path(run["id"], job_id).read_text()
 
 
+@POSIX_ONLY_ORPHAN
 def test_a_replacement_never_starts_beside_checks_its_dead_worker_left_running(env, monkeypatch):
     """The worker is SIGKILLed mid-check and its check command survives the
     supervisor's SIGTERM. The claim is retried, but the retry's checks cannot
@@ -320,15 +327,17 @@ def test_a_held_execution_lock_is_alive_and_a_free_one_is_dead(env, monkeypatch)
     con.execute("UPDATE outbox SET status='claimed', attempts=1, claim_token='A1', claimed_pid=1 WHERE id=?", (job["id"],))
     row = _row(con, job["id"])
     assert jobs.claim_state(row) == (util.UNKNOWN, "its execution lock file is missing")
-    holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'a'); "
-                               "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
-                               str(jobs.lock_path(run["id"], job["id"]))], stdout=subprocess.PIPE, text=True)
+    holder = subprocess.Popen([sys.executable, "-c", "import sys, time; from office import portable; f = open(sys.argv[1], 'a'); "
+                               "portable.lock_exclusive(f); print('held', flush=True); sys.stdin.read()",
+                               str(jobs.lock_path(run["id"], job["id"]))], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True)
     try:
         assert holder.stdout.readline().strip() == "held"
         assert jobs.claim_state(row)[0] == util.ALIVE
     finally:
-        holder.kill()
-        holder.wait()
+        # EOF, not kill: on Windows the venv's python.exe is a redirector whose interpreter child holds the lock.
+        holder.stdin.close()
+        holder.wait(timeout=30)
     assert jobs.claim_state(row)[0] == util.DEAD
 
 
@@ -401,6 +410,7 @@ def test_resume_settles_a_gate_an_older_runtime_left_running_after_its_job_faile
     assert guide.stalls(con, run, since="9999") == []
 
 
+@POSIX_ONLY_ORPHAN
 def test_a_live_job_is_never_reported_as_no_job_running(env, monkeypatch):
     con, run, job = _submitted(env, monkeypatch)
     from office import guide, jobs

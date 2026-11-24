@@ -84,9 +84,11 @@ def _recent(files, since: float) -> list[Path]:
 
 def _mentions(path: Path, marker: str) -> bool:
     try:
-        return marker in path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    # JSONL escapes a Windows path's backslashes; the decoded rows are checked again by `_prompted`.
+    return marker in text or json.dumps(marker)[1:-1] in text
 
 
 def _same_dir(a, b) -> bool:

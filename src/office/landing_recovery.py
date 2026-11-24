@@ -41,7 +41,7 @@ def require_current(con, run: dict, snapshot: dict) -> None:
 
 def _git(run: dict, *args: str) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(["git", "-C", run["repo_root"], *args], capture_output=True, text=True, timeout=120)
+        return subprocess.run(["git", "-C", run["repo_root"], *args], capture_output=True, text=True, encoding="utf-8", timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refused("landing-unverified", f"cannot verify the landed Git history: {exc}", preserved="the open run")
 

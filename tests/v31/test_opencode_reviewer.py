@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -264,7 +265,7 @@ def test_a_pane_hosted_opencode_reviewer_is_launched_labelled_and_fenced(opencod
     assert label and any(label in c for c in calls), (label, calls)
     # The pane's shell sources agent.env, which points opencode at this dispatch's agent file.
     env_text = (ddir / "agent.env").read_text()
-    assert f"export OPENCODE_CONFIG_DIR={ddir / 'opencode'}" in env_text
+    assert f"export OPENCODE_CONFIG_DIR={shlex.quote(str(ddir / 'opencode'))}" in env_text
     assert "OFFICE_DISPATCH_ID" not in env_text and "OFFICE_ROLE=reviewer" in env_text
     # Starting the agent as the pane would: the checkout and include dir read, only the reply file written.
     out = ddir / "reply.txt"

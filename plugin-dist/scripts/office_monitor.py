@@ -452,13 +452,9 @@ def monitor_is_stale(state_dir: Path, monitor_id: str, max_age_seconds: float, n
 # --------------------------------------------------------------------------
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, owned by someone else: still alive
-    return True
+    # Not `os.kill(pid, 0)`: on Windows signal 0 is CTRL_C_EVENT, which interrupts this whole console.
+    from office import portable
+    return portable.pid_exists(pid) is not False  # unknown (a denied probe): exists, so still alive
 
 
 def process_exit_observation(state_dir: Path, dispatch_id: str) -> dict | None:
@@ -473,6 +469,10 @@ def process_exit_observation(state_dir: Path, dispatch_id: str) -> dict | None:
     """
     dispatch_dir = Path(state_dir) / "dispatches" / dispatch_id
     pidfile = dispatch_dir / "pid"
+    # Under Git Bash on Windows, `pid` holds the MSYS pid bash knows; office-spawn.sh also records the
+    # Windows pid of the same process in `winpid`, which is the one this (native) Python can probe.
+    if sys.platform == "win32" and (dispatch_dir / "winpid").exists():
+        pidfile = dispatch_dir / "winpid"
     exit_file = dispatch_dir / "exit_code"
     if not pidfile.exists():
         return None

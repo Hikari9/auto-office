@@ -3,9 +3,11 @@
 Every probe here launches a scripted fake harness (tests/fixtures/route_probe).
 No real model is called.
 """
+import contextlib
 import copy
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -21,11 +23,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from office import adapters, config as cfg, db, route_policy, route_probe  # noqa: E402
+from office import adapters, config as cfg, db, portable, route_policy, route_probe  # noqa: E402
 from office.route_probe import Refused  # noqa: E402
 
 FAKE = ROOT / "tests" / "fixtures" / "route_probe" / "fake_harness.py"
 ROUTE = "codex/gpt-6.1-sol@high"
+# The profile builder itself: `World` stubs it out where the OS has no write boundary, but the profile text
+# is the same on every OS, so tests of what it admits read it from here.
+_REAL_BOUNDARY_ARGV = route_probe._boundary_argv
 
 @pytest.fixture(autouse=True)
 def _discovery_tests_run_without_the_shipped_executor_denies(monkeypatch):
@@ -51,7 +56,7 @@ class World:
         monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp / "state"))
         monkeypatch.setenv("OFFICE_USER_CONFIG", str(tmp / "user-config.yaml"))
         monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
-        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        system = [str(Path(sys.executable).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", *([os.path.join(os.environ["SystemRoot"], "System32"), os.path.dirname(shutil.which("git") or "")] if sys.platform == "win32" else [])]
         monkeypatch.setenv("PATH", os.pathsep.join([str(self.bin)] + system))
         for name in ("codex", "claude"):
             script = self.bin / name
@@ -306,7 +311,7 @@ def test_a_surviving_child_is_terminated_after_a_normal_exit(world):
     time.sleep(0.2)
     for pid in pids:
         with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+            portable.kill(pid, 0)  # os.kill(pid, 0) terminates on Windows
 
 
 def test_timeout_kills_the_process_group_and_closes_the_reservation(world):
@@ -321,7 +326,7 @@ def test_timeout_kills_the_process_group_and_closes_the_reservation(world):
     time.sleep(0.2)
     for pid in [int(p) for p in world.pids.read_text().split()]:
         with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+            portable.kill(pid, 0)  # os.kill(pid, 0) terminates on Windows
     assert kinds(con, "A-timeout") == ["probe-reserved", "probe-result"]
 
 
@@ -926,7 +931,11 @@ def test_a_descendant_that_leaves_the_process_group_is_still_terminated(world):
     time.sleep(0.2)
     for pid in pids:
         with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+            portable.kill(pid, 0)  # os.kill(pid, 0) terminates on Windows
+
+
+posix_ps = pytest.mark.skipif(portable.IS_WINDOWS, reason="zombies and `ps` rows are POSIX; Windows reads process state from its API")
+posix_attribution = pytest.mark.skipif(portable.IS_WINDOWS, reason="a setsid escapee, lsof and process environments are POSIX; Windows attributes by descent only")
 
 
 def _orphan(base, nonce):
@@ -935,6 +944,7 @@ def _orphan(base, nonce):
                                         env={**os.environ, route_probe.NONCE_ENV: nonce}, start_new_session=True)
 
 
+@posix_attribution
 def test_an_orphan_holding_the_workspace_is_attributed_without_its_leader(world, tmp_path):
     base, elsewhere = tmp_path / "ws", tmp_path / "other"
     base.mkdir()
@@ -971,6 +981,7 @@ def test_the_environment_tag_and_remembered_lineage_attribute_descendants(world,
     assert tracker.observe(None) == {12}
 
 
+@posix_attribution
 def test_a_setsid_escapee_with_no_workspace_handle_is_attributed_by_the_real_ps_environment(world):
     nonce = "nonce-real-ps-" + uuid.uuid4().hex
     escapee = subprocess.Popen([sys.executable, "-c", "import os, time; os.chdir('/'); time.sleep(60)"], cwd="/",
@@ -1001,6 +1012,7 @@ def test_a_recorded_workspace_outside_the_probe_temp_area_is_ignored(world, tmp_
         assert route_probe._probe_base(bad) is None
 
 
+@posix_attribution
 def test_the_next_command_kills_a_dead_owners_escaped_descendant(world, tmp_path):
     con = world.con()
     held = route_probe.reserve(con, None, cand(), attempt_id="A-orphan",
@@ -1032,6 +1044,7 @@ def test_a_cleanup_that_cannot_be_observed_is_never_reported_clean(world, monkey
     assert route_probe._terminate_tree(proc.pid, tracker, proc=proc) is False
 
 
+@posix_ps
 def test_an_unreaped_zombie_outside_the_probe_does_not_fail_cleanup(world):
     """#1296: a long-lived Claude hook daemon outside the probe starts a child for the
     probe's session and never reaps it. The exited child stays a zombie that carries
@@ -1066,7 +1079,7 @@ def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeyp
     monkeypatch.setattr(route_probe, "process_start", lambda pid: None)
     tracker = route_probe._Tracker("n-holder", tmp_path)
     assert tracker.scan(None) is None
-    gone = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
     monkeypatch.setattr(route_probe, "_workspace_pids", lambda base: {gone.pid})
     assert tracker.scan(None) == set()
@@ -1077,6 +1090,7 @@ def test_a_workspace_holder_with_no_readable_start_fails_the_scan(world, monkeyp
     assert tracker.scan(None) == set() and os.getpid() + 1_000_000 not in tracker.seen
 
 
+@posix_ps
 def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monkeypatch):
     """An unreadable ps row may be a live process, so cleanup fails closed (#1296 review)."""
     garbled = subprocess.CompletedProcess([], 0, stdout=f"{os.getpid()} S+ not-a-start-time\n", stderr="")
@@ -1086,11 +1100,11 @@ def test_a_process_row_that_cannot_be_parsed_never_confirms_cleanup(world, monke
 
 def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, monkeypatch):
     """A recovered pid whose start time no longer matches is not ours (#1296 review)."""
-    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], **portable.session_kwargs())
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-recovered", None), seed=True,
                                 start="Sat Jan  1 00:00:00 2000", term_wait=0.2, kill_wait=0.2)
@@ -1099,11 +1113,11 @@ def test_a_recovered_leader_is_rechecked_before_its_group_is_signalled(world, mo
 
 def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
     """Once the leader is reaped its group id may belong to someone else (#1296 review)."""
-    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], **portable.session_kwargs())
     proc.wait()
     sent = []
-    real = os.killpg
-    monkeypatch.setattr(route_probe.os, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
+    real = portable.killpg
+    monkeypatch.setattr(route_probe.portable, "killpg", lambda g, sig: sent.append((g, sig)) if sig else real(g, sig))
     monkeypatch.setattr(route_probe, "_group_alive", lambda g: True)  # as if the id were in use again
     route_probe._terminate_tree(proc.pid, route_probe._Tracker("n-reaped", None), proc=proc,
                                 term_wait=0.2, kill_wait=0.2)
@@ -1112,13 +1126,19 @@ def test_a_reaped_leaders_group_id_is_never_signalled(world, monkeypatch):
 
 def test_process_states_that_cannot_be_read_never_confirm_cleanup(world, monkeypatch):
     assert route_probe._running({os.getpid()}) == {os.getpid()}
-    mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()
+    if portable.IS_WINDOWS:
+        mine = portable.windows_process_start(os.getpid())
+    else:
+        mine = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip()
     assert route_probe._running({os.getpid()}, {os.getpid(): mine}) == {os.getpid()}
     # the same pid with another start time is a reused pid: not ours to wait for or signal
     assert route_probe._running({os.getpid()}, {os.getpid(): "Sat Jan  1 00:00:00 2000"}) == set()
     # a pid the tracker recorded no start time for has no identity to check: fail closed
     assert route_probe._running({os.getpid()}, {}) is None
-    monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
+    if portable.IS_WINDOWS:
+        monkeypatch.setattr(portable, "pid_exists", lambda pid: None)  # a probe that was denied
+    else:
+        monkeypatch.setattr(route_probe, "_tool", lambda *a: "/nonexistent/ps")
     assert route_probe._running({os.getpid()}) is None
 
 
@@ -1307,10 +1327,10 @@ def test_the_probe_sandbox_opens_only_the_one_claude_transcript_folder(world):
     ws = route_probe._Workspace()
     try:
         route_probe._probe_env("a", "k", ws, "claude", "n")
-        profile = " ".join(route_probe._boundary_argv(ws))
+        profile = " ".join(_REAL_BOUNDARY_ARGV(ws))
         projects = Path(os.environ["CLAUDE_CONFIG_DIR"]).resolve() / "projects"
-        assert str(ws.transcript_dir) in profile and ws.transcript_dir.parent == projects
-        assert f'(subpath "{projects}")' not in profile
+        assert route_probe._sbpl(ws.transcript_dir) in profile and ws.transcript_dir.parent == projects
+        assert f"(subpath {route_probe._sbpl(projects)})" not in profile
     finally:
         ws.remove()
 
@@ -1353,7 +1373,7 @@ def test_status_reads_same_record_with_dict_row_factory(world):
         expected = route_probe.status(con, cand())
         assert expected is not None
 
-    with sqlite3.connect(world.db_path) as con:
+    with contextlib.closing(sqlite3.connect(world.db_path)) as con:
         con.row_factory = lambda cursor, row: dict(zip((col[0] for col in cursor.description), row))
         assert route_probe.status(con, cand()) == expected
 

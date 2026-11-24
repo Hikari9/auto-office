@@ -16,6 +16,7 @@ import yaml
 
 from office import candidates, cli, discovery, onboarding
 from office import hermes_access
+from tests.v31.host_tools import host_tool_dirs
 
 OFFICE_AUTH = {"claude": "found", "codex": "found", "agy": "found", "hermes": "found"}
 VERSIONS = {"claude": "2.1.300", "codex": "0.160.0", "agy": "1.3.2", "hermes": "0.9.0"}
@@ -79,7 +80,7 @@ def h(tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_USER_CONFIG", str(t.user))
     monkeypatch.setenv("OFFICE_QUOTA_PROBE", "off")
     monkeypatch.setenv("OFFICE_AUTH_FIXTURE", json.dumps(OFFICE_AUTH))
-    monkeypatch.setenv("PATH", os.pathsep.join([str(t.bin), "/usr/bin", "/bin"]))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(t.bin), "/usr/bin", "/bin", *host_tool_dirs()]))
     monkeypatch.setattr(discovery, "process_key", lambda: None)
     monkeypatch.setattr(hermes_access, "auth_status", lambda **_: HERMES_AUTH)
     repo = tmp_path / "repo"

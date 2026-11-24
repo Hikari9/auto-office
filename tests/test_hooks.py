@@ -73,7 +73,13 @@ class TestHooks(unittest.TestCase):
         self.assertIsNotNone(stop_command, 'Stop hook must invoke close_finished_panes.mjs')
         command_parts = shlex.split(stop_command)
         self.assertGreaterEqual(len(command_parts), 2)
+        if command_parts[0] == ':':
+            # install_hooks.sh found no Node and wrote its documented no-op.
+            self.assertIsNone(shutil.which('node'), 'Node is installed but the Stop hook is a no-op')
+            return
         node_path = Path(command_parts[0])
+        if sys.platform == 'win32' and not node_path.suffix:
+            node_path = node_path.with_name(node_path.name + '.exe')  # Git Bash names it C:/Program Files/nodejs/node
         self.assertTrue(node_path.is_file(), f'Node binary does not exist: {node_path}')
         self.assertTrue(os.access(node_path, os.X_OK), f'Node binary is not executable: {node_path}')
 
@@ -456,7 +462,7 @@ class TestHooks(unittest.TestCase):
         for config_path in [fake_home / '.codex' / 'hooks.json', fake_home / '.gemini' / 'config' / 'hooks.json']:
             config = json.loads(config_path.read_text())
             self.assertNotIn('catch-up.mjs', json.dumps(config))
-            self.assertIn(str(self.state_dir / 'hooks'), json.dumps(config))
+            self.assertIn((self.state_dir / 'hooks').as_posix(), json.dumps(config))
 
         codex_config = json.loads((fake_home / '.codex' / 'hooks.json').read_text())
         self.assertIn('pre_tool_use.py', json.dumps(codex_config['hooks']['PreToolUse']))
@@ -467,7 +473,7 @@ class TestHooks(unittest.TestCase):
         for event in ('SessionEnd', 'PreCompact', 'Stop'):
             self.assertIsInstance(claude_config['hooks'][event], list,
                                    f'hooks.{event} must be a matcher array, not a bare string')
-            self.assertIn(str(self.state_dir / 'hooks'), json.dumps(claude_config['hooks'][event]))
+            self.assertIn((self.state_dir / 'hooks').as_posix(), json.dumps(claude_config['hooks'][event]))
         self.assertIn('pre_tool_use.py', json.dumps(claude_config['hooks']['PreToolUse']))
         claude_stop_commands = [
             hook['command']

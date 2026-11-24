@@ -18,11 +18,10 @@ detail rows.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
-from office import db, paths, state
+from office import db, paths, portable, state
 from office.result import Result
 from office.state import Refused, Usage
 from office.util import now_iso, pid_alive, sha256_bytes, short
@@ -71,7 +70,7 @@ def _eligibility(con, run: dict) -> str | None:
         return "a job is still executing"
     for wt in _worktrees(run):
         if (wt / ".git").exists():
-            dirty = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True)
+            dirty = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8")
             if dirty.returncode == 0 and dirty.stdout.strip() and not _recorded(con, run, wt):
                 return f"worktree {wt.name} has changes no revision recorded"
     return None
@@ -198,15 +197,15 @@ def _prune_one(con, run_id: str) -> str | None:
     problems = []
     for wt in _worktrees(run):
         proc = subprocess.run(["git", "-C", run["repo_root"], "worktree", "remove", "--force", str(wt)],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0 and wt.exists():
-            shutil.rmtree(wt, ignore_errors=True)
+            portable.rmtree(wt, ignore_errors=True)
         if wt.exists():
             problems.append(f"worktree {wt.name} not removed")
     if run.get("repo_root") and Path(run["repo_root"]).exists():
         subprocess.run(["git", "-C", run["repo_root"], "worktree", "prune"], capture_output=True)
         refs = subprocess.run(["git", "-C", run["repo_root"], "for-each-ref", "--format=%(refname)",
-                               f"refs/office/{run_id[:8]}/"], capture_output=True, text=True).stdout.split()
+                               f"refs/office/{run_id[:8]}/"], capture_output=True, text=True, encoding="utf-8").stdout.split()
         for ref in refs:
             subprocess.run(["git", "-C", run["repo_root"], "update-ref", "-d", ref], capture_output=True)
     for b in _bindings(run):
@@ -215,7 +214,7 @@ def _prune_one(con, run_id: str) -> str | None:
         except OSError:
             problems.append(f"binding {b.name} not removed")
     wt_root = paths.worktrees_dir() / run_id[:8]
-    shutil.rmtree(wt_root, ignore_errors=True)
+    portable.rmtree(wt_root, ignore_errors=True)
     sdir = Path(run["state_dir"]) if run.get("state_dir") else None
     if sdir and sdir.exists():
         # Recheck before the recursive deletion as well: close may have kept
@@ -224,7 +223,7 @@ def _prune_one(con, run_id: str) -> str | None:
             deploy_artifacts.preserve_interrupted(run)
         except (Refused, OSError, ValueError) as exc:
             return f"rollback output kept: {exc}"
-        shutil.rmtree(sdir, ignore_errors=True)
+        portable.rmtree(sdir, ignore_errors=True)
         if sdir.exists():
             problems.append("run directory not fully removed")
     with db.transaction(con):

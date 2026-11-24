@@ -47,12 +47,14 @@ ADAPTER = {
 }
 
 
+from tests.v31.host_tools import host_tool_dirs  # noqa: E402
+
 def _cli_environment(tmp_path, bindir, adapters):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     return {
         "HOME": str(home),
-        "PATH": os.pathsep.join([str(bindir), os.defpath]),
+        "PATH": os.pathsep.join([str(bindir), os.defpath, *host_tool_dirs()]),  # Windows: git lives elsewhere
         "OFFICE_USER_CONFIG": str(tmp_path / "config.yaml"),
         "OFFICE_USER_ADAPTERS": str(adapters),
         "OFFICE_DATA_HOME": str(tmp_path / "data"),
@@ -86,8 +88,9 @@ def cli_env(tmp_path, monkeypatch):
 
 def _office(cli_env, *args):
     repository = Path(__file__).resolve().parents[3]
-    command = repository / ".venv" / "bin" / "office"
-    python = repository / ".venv" / "bin" / "python3"
+    bindir = repository / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    command = bindir / ("office.exe" if os.name == "nt" else "office")
+    python = bindir / ("python.exe" if os.name == "nt" else "python3")
     assert command.is_file(), "the reviewed checkout's Office CLI must be installed for process contract tests"
     assert command.resolve().is_relative_to(repository.resolve()), "Office CLI must resolve inside the reviewed checkout"
     assert python.is_file(), "the reviewed checkout's Python environment must be installed for process contract tests"

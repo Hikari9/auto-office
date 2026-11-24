@@ -352,7 +352,7 @@ def test_a_fresh_pane_after_agent_pane_busy_is_reserved(env, monkeypatch):
 
 def test_the_cosmetic_rename_runs_outside_the_pane_lock(env, monkeypatch):
     # Review F9: a slow rename must not hold every parallel launch.
-    import fcntl
+    from office import portable
     _fake(env, monkeypatch)
     monkeypatch.setenv("HERDR_PANE_ID", "w1:pQ")
     from office import dispatch, paths
@@ -362,9 +362,9 @@ def test_the_cosmetic_rename_runs_outside_the_pane_lock(env, monkeypatch):
     def rename(pane, label):
         with open(paths.run_dir(run["id"]) / "herdr-tab.lock", "a+") as fh:
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                portable.lock_exclusive(fh, blocking=False)
                 free.append(True)
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                portable.unlock(fh)
             except OSError:
                 free.append(False)
     monkeypatch.setattr(dispatch, "_herdr_rename", rename)

@@ -4,10 +4,15 @@ quota wall is blocked at once with the wall named, never relaunched into the
 same quota (A3)."""
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run, task_row
 from office import gates
+
+NEEDS_LOADAVG = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no load average, so "
+                                   "gates.host_overloaded() never reports host load there")
 
 ORIGINAL_CHECK = 'checks: python3 -c "import calc; assert calc.add(2, 3) == 5"'
 VITEST_TIMEOUT = "Error: Test timed out in 5000ms."
@@ -36,7 +41,7 @@ def test_runner_timeout_ignores_ordinary_failures(text):
 def _failing_check_plan(env) -> str:
     script = env.tmp / "runner.sh"
     script.write_text(f"echo 'FAIL  a.test.ts > slow'\necho '{VITEST_TIMEOUT}'\nexit 1\n")
-    plan = PLAN_ONE.replace(ORIGINAL_CHECK, f"checks: sh {script}")
+    plan = PLAN_ONE.replace(ORIGINAL_CHECK, f"checks: sh {script.as_posix()}")
     assert plan != PLAN_ONE
     return plan
 
@@ -57,6 +62,7 @@ def _open_check_findings(env) -> int:
         con.close()
 
 
+@NEEDS_LOADAVG
 def test_runner_timeout_under_load_is_unavailable_not_a_finding(env, monkeypatch):
     monkeypatch.setenv("OFFICE_CHECK_LOAD_FACTOR", "0")  # any load counts as overloaded
     approved_run(env, plan=_failing_check_plan(env), executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],

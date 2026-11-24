@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A stock Windows install has no working `python3` in Git Bash (it is absent, or the Microsoft Store stub):
+# use the first Python 3 that runs. Elsewhere this is `python3`, as before. OFFICE_PYTHON overrides it.
+PYTHON3="${OFFICE_PYTHON:-}"
+if [[ -z "$PYTHON3" ]]; then
+  for _py in python3 python; do
+    if "$_py" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then PYTHON3="$_py"; break; fi
+  done
+fi
+PYTHON3="${PYTHON3:-python3}"
 # verify.sh — run verification gates against a worktree
 #
 # Usage:
@@ -99,7 +108,7 @@ run_gate() {
   # so the gate reported a pass with no row in runs.db. That row is exactly what record_landing
   # now requires before a landing can be recorded, so the evidence was lost silently.
   local val_file="$STATE_DIR/.office/validations/${kind}_${DISPATCH_ID}.json"
-  python3 -c "
+  "$PYTHON3" -c "
 import json, sys
 dispatch_id, kind, cmd, passed, kb_proven, evidence_hash, out_path = sys.argv[1:8]
 row = {
@@ -142,13 +151,13 @@ cmd_known_bad=""
 # known_bad_controls had no command for any project type and so had no constructible failing
 # case at all.
 if [[ -n "$PACKET" && -f "$PACKET" ]]; then
-  cmd_targeted=$(python3 -c "
+  cmd_targeted=$("$PYTHON3" -c "
 import json,sys
 p=json.load(open(sys.argv[1]))
 cmds=p.get('validation_commands') or []
 print(' && '.join(str(c) for c in cmds))
 " "$PACKET" 2>/dev/null || echo "")
-  cmd_known_bad=$(python3 -c "
+  cmd_known_bad=$("$PYTHON3" -c "
 import json,sys
 p=json.load(open(sys.argv[1]))
 kb=p.get('known_bad_behavior_to_exclude') or ''

@@ -9,7 +9,7 @@ from office import guide, questions
 from test_herdr_agent_launch import _calls
 from test_office_prompt import _herdr_worker
 
-WIDGET = (Path(__file__).parent / "fixtures" / "claude_ask_widget.txt").read_text()
+WIDGET = (Path(__file__).parent / "fixtures" / "claude_ask_widget.txt").read_text(encoding="utf-8")
 PLAIN = "⏺ I finished the parser.\n  Should I also widen the mock scope to the whole directory?\n\n> \n"
 BUSY_PLAIN = "⏺ Reading files\n  Is this right?\n✻ Working (3s · esc to interrupt)\n"
 
@@ -168,7 +168,7 @@ def test_the_brief_reports_exactly_the_deliveries_it_renders():
     assert "carried" in inspect.signature(briefs.worker_brief).parameters
 
 
-AGY_WIDGET = (Path(__file__).parent / "fixtures" / "agy_question_widget.txt").read_text()
+AGY_WIDGET = (Path(__file__).parent / "fixtures" / "agy_question_widget.txt").read_text(encoding="utf-8")
 
 
 def test_parse_agy_question_header_widget():

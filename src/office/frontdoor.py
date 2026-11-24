@@ -14,7 +14,7 @@ import os
 import sys
 from pathlib import Path
 
-from office import paths, version
+from office import paths, portable, version
 from office.state import OfficeError
 from office.util import atomic_write_json, now_iso
 
@@ -131,4 +131,4 @@ def ensure_runtime(run: dict) -> None:
     argv = list(entry["argv"]) + sys.argv[1:]
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execve(argv[0], argv, env)
+    portable.execve(argv, env)  # not os.execve: Windows has no exec

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from office import adapters, executor_slates, greenfield, harness_preference, model_lineages, paths, route_policy, routing, shipped_catalog, state, task_sizing
+from office import adapters, executor_slates, greenfield, harness_preference, model_lineages, paths, portable, route_policy, routing, shipped_catalog, state, task_sizing
 from office import config as office_config
 
 KIND_FOR_ROLE = {
@@ -347,8 +347,8 @@ def _run_probe(argv: list[str], unknown) -> dict:
     for attempt in (1, 2):
         try:
             # stdin is closed, so a probe that reads it gets EOF rather than blocking (#941).
-            proc = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                                  timeout=PROBE_TIMEOUT_S)
+            proc = subprocess.run(portable.resolve_argv(argv), capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=PROBE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             if attempt == 1:
                 time.sleep(PROBE_RETRY_BACKOFF_S)
@@ -547,12 +547,11 @@ def _shared_cache_put(harness: str, result: dict) -> None:
     """Read-modify-write under an flock so concurrent office processes do not
     drop each other's harness entries; the file itself is replaced atomically. A
     failed result keeps the harness's last good reading for `_shared_last_good`."""
-    import fcntl
     path = _shared_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path.with_suffix(".lock"), "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            portable.lock_exclusive(lock)
             try:
                 data = json.loads(path.read_text()) if path.exists() else {}
                 if not isinstance(data, dict):
@@ -569,7 +568,7 @@ def _shared_cache_put(harness: str, result: dict) -> None:
             data[harness] = entry
             tmp = path.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data))
-            os.replace(tmp, path)
+            portable.replace(tmp, path)
     except OSError:
         pass
 

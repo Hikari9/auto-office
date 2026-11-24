@@ -1,6 +1,7 @@
 """#1122, #1124, #1129, #1174, #1241: the self-review proof runner keeps option values, strips ambient pytest
 options, names environment failures and reverts every non-test source."""
 from __future__ import annotations
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -70,7 +71,7 @@ def test_option_value_is_not_dropped_as_a_path():
 def test_proof_environment_strips_ambient_pytest_options(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_ADDOPTS", "-k nothing_matches")
     monkeypatch.setenv("PYTEST_PLUGINS", "no_such_plugin_1174")
-    code, out = self_review_proof._run(tmp_path, f"{sys.executable} -c "
+    code, out = self_review_proof._run(tmp_path, f"{shlex.quote(Path(sys.executable).as_posix())} -c "
                                        "\"import os; print(os.environ.get('PYTEST_ADDOPTS'), "
                                        "os.environ.get('PYTEST_PLUGINS'))\"", NEW_RUN)
     assert code == 0 and out.strip() == "None None", out

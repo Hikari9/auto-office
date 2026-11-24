@@ -27,7 +27,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from office import paths
+from office import paths, portable
 from office.result import Result
 from office.state import OfficeError
 from office.web import api, launcher as launch_mod
@@ -236,7 +236,9 @@ def pid_file() -> Path:
 
 
 def _started(pid: int) -> str | None:
-    """The process start time `ps` reports (macOS and Linux), to tell a reused pid apart."""
+    """The process start time `ps` reports (macOS and Linux; the creation time on Windows), to tell a reused pid apart."""
+    if portable.IS_WINDOWS:
+        return portable.windows_process_start(pid)
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
                              env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})  # same text from any shell
@@ -253,13 +255,14 @@ def _ours(info: dict | None) -> bool:
 
 
 def _alive(pid: int) -> bool:
+    if not portable.IS_WINDOWS:
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return False  # our own child, now reaped
+        except ChildProcessError:
+            pass
     try:
-        if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False  # our own child, now reaped
-    except ChildProcessError:
-        pass
-    try:
-        os.kill(pid, 0)
+        portable.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -297,7 +300,8 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
         tmp = web_dir() / f"web.pid.{os.getpid()}.tmp"
         tmp.write_text(json.dumps({"pid": os.getpid(), "started": _started(os.getpid()),
                                    "host": httpd.server_address[0], "port": real_port, "url": url,
-                                   "fixture": fixture}), encoding="utf-8")
+                                   "fixture": fixture, "launch": os.environ.get("OFFICE_WEB_LAUNCH")}),
+                       encoding="utf-8")
         os.replace(tmp, pid_file())  # written last and atomically: a reader sees a ready server or none
         log.info("office web: serving %s%s", url, f" (fixture {fixture})" if fixture else "")
         if ready:
@@ -326,15 +330,18 @@ def start(host: str = "127.0.0.1", port: int = DEFAULT_PORT, fixture: str | None
     from office import frontdoor
     argv, extra = frontdoor.current_argv()
     cmd = [*argv, "web", "serve", "--host", host, "--port", str(port)] + (["--fixture", fixture] if fixture else [])
-    env = {**os.environ, **extra}
+    # The server names this launch in its pid file: on Windows the venv's python.exe redirector (and Office's UTF-8
+    # re-run) serve from a child process, so the pid it records is not proc.pid.
+    launch = os.urandom(8).hex()
+    env = {**os.environ, **extra, "OFFICE_WEB_LAUNCH": launch}
     with open(web_dir() / "web.log", "ab") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
-                                start_new_session=True, close_fds=True)
+                                **portable.session_kwargs(), close_fds=True)
     deadline = time.time() + wait
     while time.time() < deadline:
         info = read_pid()
-        if info and info["pid"] == proc.pid:
-            return Result(lines=[f"office web running at {info['url']} (pid {proc.pid})"], next="office web stop",
+        if info and (info.get("launch") == launch or info["pid"] == proc.pid):
+            return Result(lines=[f"office web running at {info['url']} (pid {info['pid']})"], next="office web stop",
                           data=info)
         if proc.poll() is not None:
             raise WebError("web-start-failed", f"office web exited with {proc.returncode}",
@@ -349,7 +356,7 @@ def stop(wait: float = 10.0) -> Result:
     if not _ours(info):
         pid_file().unlink(missing_ok=True)
         return Result(lines=["office web is not running"])
-    os.kill(info["pid"], signal.SIGTERM)
+    portable.kill(info["pid"], signal.SIGTERM)
     deadline = time.time() + wait
     while time.time() < deadline and _alive(info["pid"]):
         time.sleep(0.1)

@@ -76,8 +76,13 @@ def test_route_change_writes_and_replaces_size_scoped_rules(tmp_path, monkeypatc
 
 
 def test_route_policy_inspection_by_size(tmp_path, monkeypatch):
-    from office import routecmd
+    from office import adapters, routecmd
     _isolated(tmp_path, monkeypatch)
+    # The rows asserted are claude's: read claude as installed (2.x) rather than depend on the host having it.
+    real_installed, real_version = adapters.installed, adapters.harness_version
+    monkeypatch.setattr(adapters, "installed", lambda a: a.get("id") == "claude" or real_installed(a))
+    monkeypatch.setattr(adapters, "harness_version",
+                        lambda a: MAJOR["claude"] if isinstance(a, dict) and a.get("id") == "claude" else real_version(a))
     rows = {(r["route"], r["state"]) for r in routecmd.policy(role="executor", effective=True, size="XL").data["effective"]}
     assert ("claude/claude-opus-5-5@high", "allow") in rows
     # AA v5: Opus medium is the L executor and Opus high the XL one.
