@@ -1908,3 +1908,17 @@ def test_windows_missing_job_handle_without_drained_receipt_blocks_fallback(cold
     assert len(cold.dispatches()) == 1 and _live_leases(cold)[0]["id"] == lease
     assert task_row(cold)["status"] == "blocked"
     assert "could not be confirmed empty" in task_row(cold)["pause_reason"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows named job")
+def test_windows_unconfirmed_job_cannot_publish_dispatch_end(cold, monkeypatch):
+    d, wt, ddir = in_flight(cold)
+    launched(cold, d)
+    atomic_write_json(ddir / "agent.job.json", {"name": dispatch.portable.new_group_name(), "state": "active"})
+    lease = _live_leases(cold)[0]["id"]
+    monkeypatch.setattr(dispatch, "after_worker_exit", lambda *a, **kw: pytest.fail("unconfirmed worker exit"))
+    monkeypatch.setattr(dispatch, "start_stacked", lambda *a, **kw: pytest.fail("successor started"))
+    dispatch._finish(d["id"], 1, None, "supervisor_error", 0.1)
+    assert not state.get_dispatch(cold.con, d["id"])["ended_at"]
+    assert _live_leases(cold)[0]["id"] == lease
+    assert len(cold.dispatches()) == 1

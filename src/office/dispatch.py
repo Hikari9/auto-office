@@ -5386,6 +5386,11 @@ def _finish(dispatch_id: str, code, sig, classification: str, wall: float, *, em
             d = state.get_dispatch(con, dispatch_id)
             if only_if_open and d.get("ended_at"):
                 return  # another process recorded the end first; a recovery never overwrites it
+            if portable.IS_WINDOWS:
+                receipt = _agent_job_receipt(state.get_run(con, d["run_id"]), dispatch_id)
+                if receipt is not None and receipt.get("state") != "complete":
+                    _note(d.get("log_path"), "dispatch exit not recorded: Windows agent job has not drained")
+                    return  # keep the dispatch and lease; never release a successor on an unconfirmed exit
             if classification == "success" and d.get("triple"):
                 _clear_route_cooldown(con, d["triple"], d.get("harness"), d.get("invocation_model_id"))
                 keys = [routing.demotion_key(d.get("harness"), d.get("invocation_model_id"), d.get("effort"))]
