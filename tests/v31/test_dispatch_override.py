@@ -37,9 +37,10 @@ def test_as_dispatches_an_unrouted_model_and_records_the_override(env):
 @pytest.mark.approved
 def test_as_resolves_the_catalog_invocation_slug(env):
     # agy takes the combined native-Gemini slug; the user types the model and effort.
-    # Flash is retired by a shipped deny (2026-11-19), so the user lifts it to neutral first.
+    # Flash is retired by a shipped deny (2026-11-19) and the plan fixture sizes the task M, so the
+    # user allows it for executors first (an allow outranks the deny and the M-size benchmark floor).
     approved_run(env)
-    env.office("route", "neutral", "agy/gemini-3.8-flash@medium", "--role", "executor")
+    env.office("route", "allow", "agy/gemini-3.8-flash@medium", "--role", "executor")
     env.office("dispatch", "T1", "--as", "agy/gemini-3.8-flash@medium", env=EXTERNAL, check=0)
     d = _dispatch_row(env)
     assert d["model"] == "gemini-3.8-flash-medium" and d["effort"] == "medium"
