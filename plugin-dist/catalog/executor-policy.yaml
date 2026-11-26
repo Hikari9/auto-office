@@ -18,11 +18,12 @@ executor_preferred:
   # S CANARY (#1360). Rico 2026-11-26 22:32 Manila (relayed by rico-mode): "S rung: Haiku xhigh (Claude & Hermes),
   # followed by terra medium & hydrogen medium as fallbacks. Let's set it, observe for at least 10 runs (both time &
   # accuracy), then if it works let it be canonical for auto-office." Sonnet medium stays allowed at S (pin it when
-  # speed matters more than score). Restore slate (pre-canary, #1356), see docs/route-discovery.md "S canary (#1360)":
+  # speed matters more than score). canary: makes a qualifying row lead routing at S (routing.py, executor_canary);
+  # without it, adaptive scoring ranks the unscored Haiku xhigh below Terra medium. Restore slate (pre-canary, #1356), see docs/route-discovery.md "S canary (#1360)":
   #   1 claude/claude-sonnet-5-5@medium, 2 codex/gpt-6.1-terra@medium, 3 agy/gemini-4-hydrogen@medium (conditional)
   S:
-    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: claude}
-    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: hermes}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: claude, canary: haiku-xhigh-s-1360}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: hermes, canary: haiku-xhigh-s-1360}
     - {rung: 2, model_id: gpt-6.1-terra, effort: medium, harness: codex}
     - {rung: 3, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
   M:

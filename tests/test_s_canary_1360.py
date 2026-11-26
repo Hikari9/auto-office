@@ -1,8 +1,10 @@
 """S executor canary (#1360): Haiku 5.5 xhigh on claude and hermes at S only.
 Literal expectations, not derived from the YAML."""
+from pathlib import Path
+
 import pytest
 
-from office import executor_slates as slates, route_policy, shipped_catalog
+from office import executor_slates as slates, route_policy, routing, shipped_catalog
 
 MAJOR = {"claude": "2.1.332", "hermes": None, "codex": "0.170.0", "agy": "1.5.18"}
 
@@ -23,6 +25,7 @@ def state(harness, model, effort, size):
     ("hermes", "claude-haiku-5-5", "xhigh", "M", "deny"),
     ("hermes", "claude-haiku-5-5", "xhigh", "L", "deny"),
     ("claude", "claude-haiku-5-5", "xhigh", "XL", "deny"),
+    ("hermes", "claude-haiku-5-5", "xhigh", "XL", "deny"),
     ("claude", "claude-haiku-5-5", "max", "S", "deny"),
     ("hermes", "claude-haiku-5-5", "max", "S", "deny"),
     ("claude", "claude-haiku-5-5", "high", "XS", "allow"),
@@ -30,6 +33,9 @@ def state(harness, model, effort, size):
     ("claude", "claude-haiku-5-5", "high", "L", "deny"),
     # Sonnet medium stays allowed at S so it can be pinned when speed matters more than score.
     ("claude", "claude-sonnet-5-5", "medium", "S", "allow"),
+    # An unsized task keeps the xhigh deny.
+    ("claude", "claude-haiku-5-5", "xhigh", None, "deny"),
+    ("hermes", "claude-haiku-5-5", "xhigh", None, "deny"),
 ])
 def test_s_canary_executor_role_states(harness, model, effort, size, expected):
     assert state(harness, model, effort, size) == expected
@@ -68,4 +74,76 @@ def test_haiku_xhigh_catalog_rows():
     assert routes["claude/claude-haiku-5-5@xhigh"]["dispatchable"] is True
     hermes = routes["hermes/claude-haiku-5-5@xhigh"]
     assert hermes["model_id"] == "claude-haiku-5-5" and hermes["effort"] == "xhigh"
-    assert hermes["dispatchable"] == routes["hermes/claude-haiku-5-5@high"]["dispatchable"]
+    # Like every hermes Haiku row, it stays inert until a hermes conformance probe lands; the claude peer dispatches.
+    assert hermes["dispatchable"] is False
+    assert routes["hermes/claude-haiku-5-5@high"]["dispatchable"] is False
+
+
+def _pool_candidate(model, effort, harness, score):
+    return {"model_id": model, "harness": harness, "effort": effort, "invocation_model_id": model,
+            "harness_version": {"claude": "2.1.332", "codex": "0.170.0", "agy": "1.5.18"}.get(harness),
+            "capabilities": ["builder"], "invocation_source": "local-evidence: contract fixture",
+            "benchmark_indexes": {} if score is None else {slates.INDEX: score},
+            "quota": {"status": "ok", "tightest_remaining_percent": 100}, "route_status": "available",
+            "price_fields": {"input_per_mtok": 1, "output_per_mtok": 2}}
+
+
+def _route(size, seed=None):
+    seed = slates.ideal_seed(size, slates.POLICY) if seed is None else seed
+    pool = [_pool_candidate("claude-haiku-5-5", "xhigh", "claude", None),
+            _pool_candidate("gpt-6.1-terra", "medium", "codex", 44),
+            _pool_candidate("gpt-6.1-terra", "high", "codex", 50)]
+    return routing.route({
+        "role": "executor", "playbook": "Change", "preferred_seed": seed, "slate_anchor": True,
+        "allow_free_models": True,
+        "policy": {"required_capabilities": ["builder"], "floor": {"min_effort": "none", "allowed_sources": ["local-evidence:"]}},
+        "context": {"gear": size, "size_class": size}, "candidates": pool})
+
+
+def test_s_routing_selects_unscored_haiku_xhigh_first_through_the_canary_exception():
+    decision = _route("S")
+    assert decision["status"] == "selected", decision
+    assert routing.candidate_id(decision["candidate"]) == "claude@2/claude-haiku-5-5@xhigh"
+
+
+def test_m_routing_never_selects_haiku_xhigh():
+    decision = _route("M")
+    assert decision["status"] == "selected", decision
+    assert "claude-haiku-5-5" not in routing.candidate_id(decision["candidate"])
+
+
+def test_s_routing_records_the_executor_canary():
+    decision = _route("S")
+    assert decision["executor_canary"] == {"name": "haiku-xhigh-s-1360", "route": "claude@2/claude-haiku-5-5@xhigh", "size": "S"}
+    assert decision["routing"]["slate"][0]["reason"] == "executor canary haiku-xhigh-s-1360"
+
+
+def test_a_seed_not_headed_by_the_canary_row_is_ordinary_scoring():
+    """A frontend-biased task, or a run pinned to the pre-canary policy, keeps ordinary scoring."""
+    biased = slates.frontend_bias(slates.ideal_seed("S", slates.POLICY), {"domain": "ui"}, [])
+    pre_canary = [{"model_id": "claude-sonnet-5-5", "effort": "medium", "harness": "claude", "rung": 1},
+                  {"model_id": "gpt-6.1-terra", "effort": "medium", "harness": "codex", "rung": 2}]
+    for seed in (biased, pre_canary):
+        decision = _route("S", seed)
+        assert "executor_canary" not in decision
+        assert routing.candidate_id(decision["candidate"]) == "codex@0/gpt-6.1-terra@medium"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["executor_preferred"]["S"][3].update(canary="x"),  # the conditional Hydrogen row
+    lambda d: d["executor_preferred"]["S"][0].update(canary=""),
+    lambda d: d["executor_preferred"]["S"][0].update(canary=True),
+    lambda d: d["planner_preferred"]["M"][0].update(canary="x"),
+])
+def test_canary_key_is_a_nonempty_name_on_unconditional_executor_rows_only(tmp_path, mutate):
+    import shutil
+    import yaml
+    from office.executor_slates import ExecutorPolicyError
+    shutil.copytree(Path(slates.__file__).resolve().parents[2] / "catalog", tmp_path / "catalog")
+    policy = tmp_path / "catalog" / "executor-policy.yaml"
+    assert slates.load_policy(tmp_path)["executor_preferred"]["S"][0]["canary"] == "haiku-xhigh-s-1360"
+    data = yaml.safe_load(policy.read_text())
+    mutate(data)
+    policy.write_text(yaml.safe_dump(data, sort_keys=False))
+    with pytest.raises(ExecutorPolicyError):
+        slates.load_policy(tmp_path)

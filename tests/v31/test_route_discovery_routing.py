@@ -599,7 +599,6 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     # the other efforts stay discovery rows.
     assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "max")}
     assert not {label(c) for c in pool} & {"claude/claude-haiku-5-5@high", "claude/claude-haiku-5-5@xhigh"}
-    assert "claude/claude-haiku-5-5@high" not in {label(c) for c in pool}
     for c in pool:
         assert c["discovery"] is True and c["route_status"] == "discovered-unconfirmed" and c["probe_key"]
         assert c["probe_key"].split("|")[:4] == [c["harness"], "2.0.0", c["invocation_model_id"], c["effort"]]

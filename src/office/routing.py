@@ -446,6 +446,29 @@ def _daily_budget_snapshot(request: dict, con: sqlite3.Connection | None) -> Non
         c["quota"] = q
 
 
+def _executor_canary(size, preferred_seed, by_id, ranked, slate, executor_policy) -> dict | None:
+    """#1360: the qualifying route of a canary slate row at this size, when that row heads the request seed.
+
+    A seed whose head is not a canary row (a frontend-biased task, or a run pinned to a policy without the
+    canary) is left to ordinary scoring. Among qualifying canary routes the slate order decides."""
+    rows = executor_slates.canary_rows(size, executor_policy) if size else []
+    head = (preferred_seed or [{}])[0]
+
+    def same(row, c):
+        return ((c.get("alias_resolved_to") or c.get("model_id")) == row["model_id"] and c.get("effort") == row["effort"]
+                and (row.get("harness") is None or c.get("harness") == row["harness"]))
+
+    if not rows or not any(all(head.get(k) == r.get(k) for k in ("model_id", "effort", "harness")) for r in rows):
+        return None
+    order = [e["route"] for e in slate] + [rid for rid in by_id if rid not in {e["route"] for e in slate}]
+    for rid in order:
+        c = by_id.get(rid)
+        row = next((r for r in rows if c is not None and same(r, c)), None) if rid in ranked else None
+        if row:
+            return {"name": row["canary"], "route": rid, "size": size}
+    return None
+
+
 def route(request: dict, discovery_input: dict | None = None, *,
           connection: sqlite3.Connection | None = None) -> dict:
     """Route one request. `discovery_input` (#494) is the preflight's recompute handle:
@@ -1172,9 +1195,24 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(slate)]
         audit["slate"] = slate
         audit["hydrogen_canary"] = {**canary, "route": canary_id}
+    executor_canary = None
+    if role == "executor" and not trial and not canary_id and not request.get("manual_route"):
+        executor_canary = _executor_canary(size, preferred_seed, by_id, ranked, slate, executor_policy)
+    if executor_canary:
+        # #1360: a policy-declared canary rung leads its size. Like #1168 it only reorders a
+        # route that already passed every gate above; it never admits one.
+        rid = executor_canary["route"]
+        entry = next((e for e in slate if e["route"] == rid), None) or {
+            "route": rid, "label": adaptive.label(by_id[rid]), "utility": None,
+            "strength": "owner-declared canary rung", "weakness": "no local quality evidence yet"}
+        entry = {**entry, "reason": f"executor canary {executor_canary['name']}"}
+        slate = [entry, *[e for e in slate if e["route"] != rid]][:max(adaptive.SLATE_SIZE, len(slate))]
+        slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(slate)]
+        audit["slate"] = slate
+        audit["executor_canary"] = executor_canary
     if disc:
         audit["discovery"] = disc
-    preference = None if trial or canary_id or request.get("manual_route") else harness_preference.decide(
+    preference = None if trial or canary_id or executor_canary or request.get("manual_route") else harness_preference.decide(
         request, [*(by_id[e["route"]] for e in slate), *(c for rid, c in by_id.items()
                                                          if rid in ranked and rid not in {e["route"] for e in slate})])
     if preference:
@@ -1237,6 +1275,8 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         hashed["discovery"] = disc
     if canary_id:
         hashed["hydrogen_canary"] = audit["hydrogen_canary"]
+    if executor_canary:
+        hashed["executor_canary"] = executor_canary
     if preference:
         hashed["harness_preference"] = audit["harness_preference"]
     if audit.get("lineage_supersession"):
@@ -1253,5 +1293,6 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         "routing": audit,
         **({"discovery": disc} if disc else {}),
         **({"hydrogen_canary": audit["hydrogen_canary"]} if canary_id else {}),
+        **({"executor_canary": executor_canary} if executor_canary else {}),
         **({"harness_preference": audit["harness_preference"]} if preference else {}),
     }

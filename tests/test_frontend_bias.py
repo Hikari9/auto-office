@@ -56,8 +56,8 @@ def test_shared_marker_blank_and_duplicate_paths_do_not_skew_the_ratio():
     ("XS", ("agy", "gemini-4-hydrogen", "low"),
      [("agy", "gemini-4-hydrogen", "low"), ("claude", "claude-haiku-5-5", "high"), ("codex", "gpt-6.1-terra", "low")]),
     ("S", ("agy", "gemini-4-hydrogen", "medium"),
-     [("agy", "gemini-4-hydrogen", "medium"), ("claude", "claude-sonnet-5-5", "medium"),
-      ("codex", "gpt-6.1-terra", "medium")]),
+     [("agy", "gemini-4-hydrogen", "medium"), ("claude", "claude-haiku-5-5", "xhigh"),
+      ("hermes", "claude-haiku-5-5", "xhigh"), ("codex", "gpt-6.1-terra", "medium")]),
     ("M", ("agy", "gemini-4-hydrogen", "high"),
      [("agy", "gemini-4-hydrogen", "high"), ("claude", "claude-sonnet-5-5", "high"), ("codex", "gpt-6.1-terra", "high")]),
     ("XL", ("agy", "gemini-4-neon", "high"),
@@ -68,7 +68,7 @@ def test_bias_moves_the_gemini_rung_to_rung_one_and_adds_no_route(size, first, o
     biased = slates.frontend_bias(seed, {"domain": "ui"}, [])
     assert [(r["harness"], r["model_id"], r["effort"]) for r in biased] == order
     assert (biased[0]["harness"], biased[0]["model_id"], biased[0]["effort"]) == first
-    assert [r["rung"] for r in biased] == [1, 2, 3]
+    assert [r["rung"] for r in biased] == ([1, 2, 2, 3] if size == "S" else [1, 2, 3])
     assert biased[0]["frontend_bias"] == "descriptor domain is ui"
     assert sorted(map(str, ((r["harness"], r["model_id"], r["effort"]) for r in biased))) == sorted(
         map(str, ((r["harness"], r["model_id"], r["effort"]) for r in seed))), "no route added or removed"

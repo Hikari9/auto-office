@@ -92,7 +92,9 @@ def load_policy(root: Path | None = None) -> dict:
             last_rung = 0
             for item in entries:
                 if (not isinstance(item, dict) or not {"model_id", "effort"} <= set(item) or
-                        set(item) - {"model_id", "effort", "harness", "conditional", "rung"} or
+                        set(item) - {"model_id", "effort", "harness", "conditional", "rung", "canary"} or
+                        ("canary" in item and (field != "executor_preferred" or not isinstance(item["canary"], str) or
+                                               not item["canary"].strip() or item.get("conditional"))) or
                         not isinstance(item.get("model_id"), str) or not item["model_id"].strip() or
                         not isinstance(item.get("effort"), str) or item["effort"] not in EFFORTS or
                         ("conditional" in item and not isinstance(item["conditional"], bool)) or
@@ -196,6 +198,11 @@ def policy_provenance(policy: dict = POLICY) -> dict:
 
 def _seed_entry(row: dict) -> dict:
     return {key: row[key] for key in ("model_id", "effort", "harness", "rung") if row.get(key) is not None}
+
+
+def canary_rows(task_size: str | None, policy: dict = POLICY) -> list[dict]:
+    """Executor slate rows marked canary: <name> at this size (#1360). A canary row leads routing when it qualifies."""
+    return [row for row in policy["executor_preferred"].get(task_size, ()) if row.get("canary")]
 
 
 def planner_seed(gear: str | None, policy: dict = POLICY) -> list[dict]:
