@@ -1178,8 +1178,14 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         # owner-authorized floor exception in its durable routing receipt.
         if waiver := executor_slates.floor_exception(c, size, role, executor_policy):
             audit.setdefault("floor_exceptions", []).append({"candidate": tid, **waiver})
-    canary = request.get("hydrogen_canary") if role == "executor" and not trial else None
     ranked = {r["route"] for r in rec["rows"]}  # still qualifying after adaptive's own removals
+    executor_canary = None
+    if role == "executor" and not trial and not request.get("manual_route"):
+        executor_canary = _executor_canary(size, preferred_seed, by_id, ranked, slate, executor_policy)
+    # #1360 review F1: the policy canary at the head of the size seed (owner decision 2026-11-26) outranks the
+    # #1168 Hydrogen canary. Hydrogen keeps its eligibility gate and is not booked when it does not lead, so its
+    # budget is spent only on tasks it actually takes.
+    canary = request.get("hydrogen_canary") if role == "executor" and not trial and not executor_canary else None
     canary_id = next((rid for rid, c in by_id.items()
                       if rid in ranked and c.get("hydrogen_user_allow") and c.get("effort") == "medium"
                       and hydrogen_trials.is_hydrogen(c)), None) if canary else None
@@ -1195,9 +1201,6 @@ def _adaptive(request, role, playbook, policy, stage, rejected, eligibility, lea
         slate = [{**e, "rank": adaptive.RANK_LABELS[i]} for i, e in enumerate(slate)]
         audit["slate"] = slate
         audit["hydrogen_canary"] = {**canary, "route": canary_id}
-    executor_canary = None
-    if role == "executor" and not trial and not canary_id and not request.get("manual_route"):
-        executor_canary = _executor_canary(size, preferred_seed, by_id, ranked, slate, executor_policy)
     if executor_canary:
         # #1360: a policy-declared canary rung leads its size. Like #1168 it only reorders a
         # route that already passed every gate above; it never admits one.

@@ -147,3 +147,49 @@ def test_canary_key_is_a_nonempty_name_on_unconditional_executor_rows_only(tmp_p
     policy.write_text(yaml.safe_dump(data, sort_keys=False))
     with pytest.raises(ExecutorPolicyError):
         slates.load_policy(tmp_path)
+
+
+def test_the_executor_canary_outranks_an_active_hydrogen_canary(tmp_path):
+    """Review F1: with both canaries active at S, the seed-headed Haiku xhigh canary leads and the Hydrogen canary
+    is neither applied nor booked. Without the executor canary row, Hydrogen still leads as #1168 specifies."""
+    from office import db, route_probe
+    from office.util import now_iso
+    spec = "agy/gemini-4-hydrogen@medium"
+    hydro = {**route_probe.candidate_from_spec(spec), "harness_version": "1.5.18", "capabilities": ["builder"],
+             "dispatchable": True, "route_status": "available", "quota": {"status": "ok"},
+             "hydrogen_user_allow": True}
+    db_path = tmp_path / "runs.db"
+    with db.connect(db_path) as con:
+        adapter = route_probe._adapter(hydro)
+        fp = route_probe.fingerprint(hydro, adapter)
+        con.execute(
+            "INSERT OR REPLACE INTO route_probes(key, harness, harness_version, adapter_hash, profile, "
+            "invocation_model_id, effort, result, reason_class, detail, probed_at, run_id, dispatch_id, attempt_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (route_probe.key(hydro, adapter), fp["harness"], fp["harness_version"], fp["adapter_hash"], fp["profile"],
+             fp["invocation_model_id"], fp["effort"], "pass", None, "seeded", now_iso(), "r", None, "a"))
+        con.commit()
+    policy = {"denied": [], "role_rules": [{"role": "executor", "route": spec, "state": "allow"}],
+              "strict_roles": [], "ceilings": {}, "ceiling_sources": {}, "overkill": [],
+              "sources": {"role_rules": "user"}}
+
+    def decide(seed):
+        return routing.route({
+            "role": "executor", "playbook": "Change", "preferred_seed": seed, "slate_anchor": True,
+            "allow_free_models": True, "runs_db": str(db_path), "user_policies": [policy],
+            "hydrogen_canary": {"budget": 10, "spent": 3, "remaining": 7, "complete": False},
+            "policy": {"required_capabilities": ["builder"],
+                       "floor": {"min_effort": "none", "allowed_sources": ["local-evidence:", "catalog"]}},
+            "context": {"gear": "S", "size_class": "S"},
+            "candidates": [_pool_candidate("claude-haiku-5-5", "xhigh", "claude", None),
+                           _pool_candidate("gpt-6.1-terra", "medium", "codex", 44), hydro]})
+
+    both = decide(slates.ideal_seed("S", slates.POLICY))
+    assert both["status"] == "selected", both
+    assert routing.candidate_id(both["candidate"]) == "claude@2/claude-haiku-5-5@xhigh"
+    assert both["executor_canary"]["name"] == "haiku-xhigh-s-1360"
+    assert "hydrogen_canary" not in both
+    pre_canary = [{"model_id": "claude-sonnet-5-5", "effort": "medium", "harness": "claude", "rung": 1}]
+    hydrogen_only = decide(pre_canary)
+    assert "executor_canary" not in hydrogen_only
+    assert hydrogen_only["hydrogen_canary"]["route"] == routing.candidate_id(hydro), hydrogen_only
