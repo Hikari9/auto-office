@@ -44,6 +44,12 @@ def test_task_size_reads_the_descriptor_or_says_unsized(task, want):
     assert state.task_size(task) == want
 
 
+def test_task_size_never_inherits_the_run_size():
+    """F4 rebuttal: Rico's 2026-11-26 decision is to refuse unsized tasks, not to inherit the run size."""
+    import inspect
+    assert list(inspect.signature(state.task_size).parameters) == ["task"]
+
+
 @pytest.mark.parametrize("sizes, want", [
     (["S", "XL", "M"], "XL"),
     (["unsized", "XS"], "XS"),

@@ -449,7 +449,11 @@ UNSIZED = "unsized"
 
 
 def task_size(task: dict | None) -> str:
-    """A task's planned size class (XS-XL) from its descriptor, or `unsized` when it has none (#1363)."""
+    """A task's planned size class (XS-XL) from its descriptor, or `unsized` when it has none (#1363).
+
+    Never falls back to the run's intake size_class: Rico decided (2026-11-26 18:28) to refuse unsized tasks
+    at plan submit (run a462e743 T2), replacing inheriting the run size, so an unsized task is recorded as
+    such. The run's size is recorded beside it as `run_size_class`."""
     size = ((task or {}).get("descriptor") or {}).get("task_size")
     return size if size in TASK_SIZES else UNSIZED
 
