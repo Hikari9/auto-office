@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.16
+
+The vision conformance probe's dispatch record now stores `size_class` as `unsized` instead of leaving it empty (#1365). The probe has no task, so it never takes the run size.
+
 ## 3.31.15
 
 Every dispatch records the task's size (#1363). Executor, worker, planner and reviewer `packet.json` files carry `task_size` (XS-XL, or `unsized`), `task_sizes` (per task; a lane or integration review lists each task it covers and `task_size` is the largest), `run_gear`, `run_size_class` and `fastlane`. The `dispatches.size_class` column is now written for every role (a reviewer records the largest size of the tasks it reviews), `unsized` when there is none; route learning reads `unsized` as an empty column, so its descriptor and run-size fallback is unchanged. `office status` prints a `sizes:` line and `office context` shows each open task's size. Routing is unchanged.
