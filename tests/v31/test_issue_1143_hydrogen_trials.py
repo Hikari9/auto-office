@@ -78,8 +78,9 @@ def test_atomic_booking_requires_writer_transaction(database):
 
 
 def test_seed_peers_are_equal_weight_and_arrows_remain_distinct():
-    # AA v5: every size is a strict ladder (L has four rungs, #1356), so no two rungs are peers and the arrow order is the rung order.
-    expected = {size: [1, 2, 3] for size in ("XS", "S", "M", "XL")} | {"L": [1, 2, 3, 4]}
+    # AA v5: XS, M, L and XL are strict ladders (L has four rungs, #1356). The S canary (#1360) has two rung-1
+    # peers (Haiku xhigh on claude and hermes), which must weigh equally; the arrow order is the rung order.
+    expected = {size: [1, 2, 3] for size in ("XS", "M", "XL")} | {"S": [1, 1, 2, 3], "L": [1, 2, 3, 4]}
     for size, rungs in expected.items():
         seed = executor_slates.ideal_seed(size)
         assert [entry["rung"] for entry in seed] == rungs

@@ -23,9 +23,10 @@ def test_xs_slate_is_haiku_then_terra_then_conditional_hydrogen():
                            (3, "agy", "gemini-4-hydrogen", "low", True)]
 
 
-def test_s_slate_is_sonnet_then_terra_then_conditional_hydrogen():
-    assert slate("S") == [(1, "claude", "claude-sonnet-5-5", "medium", False), (2, "codex", "gpt-6.1-terra", "medium", False),
-                          (3, "agy", "gemini-4-hydrogen", "medium", True)]
+def test_s_slate_is_the_1360_haiku_xhigh_canary_then_terra_then_conditional_hydrogen():
+    """S canary (#1360) replaced the #1356 S slate (Sonnet medium, Terra medium, conditional Hydrogen)."""
+    assert slate("S") == [(1, "claude", "claude-haiku-5-5", "xhigh", False), (1, "hermes", "claude-haiku-5-5", "xhigh", False),
+                          (2, "codex", "gpt-6.1-terra", "medium", False), (3, "agy", "gemini-4-hydrogen", "medium", True)]
 
 
 def test_m_slate_is_unchanged():

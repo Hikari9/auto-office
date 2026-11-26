@@ -134,7 +134,7 @@ _SCOPED_GATE_SHA256 = {
     ".githooks/pre-push": "56374f2e62e8bf67242b8ec91eace602e55bf880cce06751022de50124502072",
     "tests/contracts/test_executor_policy.py": "574cac5b9a4c83e01742202a736b6e46b24b0bd29bdb07605cf6f24af7d8b45d",
     "tests/contracts/test_plugin_distribution.py": "0d3178f088e954a59a1b8de9fb2b4e7a2117324ce74dcd0ce00a27875034d7b4",
-    "tests/contracts/test_route_parity.py": "494e92e7b424097de7fa98aa7512cb0d82f659373a7cc6f5eba53d3c9cbb0f36",
+    "tests/contracts/test_route_parity.py": "eb35c69f94d27a2b704d01ea454a992b875ee4b3b499c97cddacbfce25e1f69d",
     "tests/contracts/test_standalone_review_rounds.py": "306c183190a5ea81ceb92b0fb4ff7c669ca44b85768b117511f72c24d2249f19",
     "tests/contracts/core/test_cli_smokes.py": "09a5af324ad2a9298f4ffc60e9bfcd30240157a89fb2ae0ec9d23d9246bf07e5",
     "tests/contracts/core/test_configuration_integrity.py": "c78a2dd1ac6431d0118d16f9a81acf55b99f666cb5b6c34f657bb110afa79d2d",
@@ -143,7 +143,7 @@ _SCOPED_GATE_SHA256 = {
     "tests/contracts/core/test_receipts_replay.py": "b68f18a9a44c2303fcf3c56daca4bda9e7f3452bc502eda97a9c0fef687bcdb9",
     "tests/contracts/core/test_runtime_selection.py": "14504c923f75b69a66f5a38763abe99ed387a53507bc89c979a5c6902ed7254f",
     "tests/contracts/core/test_safety_invariants.py": "e5c921b7259299858f45b8b3a820bdaadbaf92f803bf724ce70e6e23acf084fc",
-    "tests/contracts/test_route_policy_effective.py": "a19889bb493c3056e32ff8f22505ebc2aa2c12c4fc6e872f953d6f44265c614e",
+    "tests/contracts/test_route_policy_effective.py": "4b582e9e48c8f3d97972fece1443436876d409690d52bc3976a4391b462cb47d",
 }
 
 
