@@ -140,6 +140,21 @@ def test_a_legacy_unsized_task_survives_an_amendment_that_adds_a_sized_one(env):
 
 
 @pytest.mark.approved
+def test_resubmitting_the_unsized_plan_on_record_stays_a_no_op(env):
+    approved_run(env, executor=[{}])
+    _make_plan_legacy(env)
+    con = env.con()
+    try:
+        body = con.execute("SELECT body FROM plans ORDER BY version DESC LIMIT 1").fetchone()[0]
+    finally:
+        con.close()
+    code, out = _submit(env, body)
+    assert code == 0 and "already submitted" in out, out
+    code, out = _submit(env, body + "\n### T2: Implement mul\nscope: mul.py\ndepends: none\nchecks: none\naccept:\n- mul exists\nvisual: none\n")
+    assert code != 0 and "plan-invalid" in out, out
+
+
+@pytest.mark.approved
 def test_a_legacy_plan_still_takes_a_delta_only_amendment(env):
     approved_run(env, executor=[{}])
     _make_plan_legacy(env)

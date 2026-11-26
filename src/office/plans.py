@@ -60,7 +60,10 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
     from office import greenfield
     parsed.errors.extend(greenfield.plan_problems(run, parsed.tasks))
-    parsed.errors.extend(greenfield.sizing_problems(run, parsed.tasks))
+    # Resubmitting the plan on record is a no-op below, so a run approved before this rule keeps that no-op.
+    on_record = state.current_plan(con, run["id"])
+    same = bool(on_record) and on_record["content_hash"] == sha256_bytes(text.encode())
+    parsed.errors.extend(greenfield.sizing_problems(run, parsed.tasks, on_record["tasks"] if same else None))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
                       scope="plan", preserved=f"{plan_path} is unchanged",
