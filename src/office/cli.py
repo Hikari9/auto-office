@@ -174,6 +174,8 @@ criteria already hold). To acknowledge that they already hold: office submit --n
 Planner / orchestrator planning inline: submits .office/plans/<run>/PLAN.md (one draft per run). Format:
 
 {fmt}
+Every task declares `task_size: XS | S | M | L | XL` and `task_size_rationale:`: task_size is required, and a plan or
+amendment with an unsized task is refused as plan-invalid (greenfield runs pin one XL task and omit it).
 Checks (task `checks:` and the run-level `checks:` under Requirements):
 - Every check must be non-mutating. A check that edits the tree (a formatter
   or `lint --fix`) makes the task's checks STALE; use the check-only form.

@@ -12,7 +12,10 @@ PHASES = """phases:
 - Build the complete working core with automated tests
 - Integrate and validate the end-to-end user flow
 """
-PLAN = PLAN_ONE.replace("depends: none\n", "depends: none\n" + PHASES, 1)
+# Greenfield pins its one task to XL itself, so its plan declares no `task_size:` (the shared fixture sizes M).
+UNSIZED_ONE = "".join(line for line in PLAN_ONE.splitlines(True) if not line.startswith("task_size"))
+PLAN = UNSIZED_ONE.replace("depends: none\n", "depends: none\n" + PHASES, 1)
+SIZED_PLAN = PLAN_ONE.replace("depends: none\n", "depends: none\n" + PHASES, 1)  # non-greenfield gears need a size
 
 
 def _run(env):
@@ -140,7 +143,7 @@ def test_elevated_greenfield_build_gets_one_plan_review_and_one_convergence_revi
     ("greenfield", (), PLAN, True),
     ("greenfield", (), PLAN.replace("blast_radius: repo", "blast_radius: production"), True),
     # Other gears: an intake-required plan review survives a plan that classifies low.
-    ("XS", ("--blast-radius", "production"), PLAN, True),
+    ("XS", ("--blast-radius", "production"), SIZED_PLAN, True),
 ])
 def test_plan_review_exemption_needs_intake_declared_low_risk_on_greenfield(env, gear, extra, plan_text, expected):
     env.trust()
@@ -175,10 +178,10 @@ def test_phase_revision_is_acceptance_change_and_never_silently_reuses_prior_app
 def test_phases_only_edit_is_not_acceptance_outside_greenfield(env):
     from office import db, plans
     env.trust()
-    start_inline(env, plan=PLAN, gear="XL")
+    start_inline(env, plan=SIZED_PLAN, gear="XL")
     con, run = _run(env)
     original = state.get_task(con, run["id"], "T1")
-    new_body = PLAN.replace("Integrate and validate the end-to-end user flow",
+    new_body = SIZED_PLAN.replace("Integrate and validate the end-to-end user flow",
                             "Integrate, document and verify an end-to-end user flow")
     with db.transaction(con):
         changed = plans.sync_tasks(con, run, planfile.parse(new_body).tasks, run["plan_version"] + 1)

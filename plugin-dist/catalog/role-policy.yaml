@@ -13,27 +13,39 @@ version: 1
 
 executor:
   # Rico 2026-11-19 (AA v5 table): Haiku 5.5 high is the XS executor only. It has no allowance above XS.
+  # Scoreboard 2026-11-26 (#1356): Haiku high M 28% first-try accept. Denied at M and L.
   claude@2/claude-haiku-5-5:
     allow: {medium: [XS], high: [XS]}
-    deny: {xhigh: all, max: all}
+    deny: {medium: [M, L], high: [M, L], xhigh: all, max: all}
   # Rico 2026-11-19: Gemini 3.8 Flash is retired in every role (superseded by Gemini 4 Hydrogen).
   agy@1/gemini-3.8-flash: &retired
     deny: {"*": all}
+  # Scoreboard 2026-11-26 (#1356): Terra medium M 12% (2/17, 17 operational reroutes). A small-task model.
   codex@0/gpt-6.1-terra:
-    allow: {low: [XS], medium: [S, M], high: [M, L]}
-    deny: {high: [XS, S], xhigh: all, max: all}
+    allow: {low: [XS], medium: [S], high: [M, L]}
+    deny: {medium: [M, L], high: [XS, S], xhigh: all, max: all}
+  # Scoreboard 2026-11-26 (#1356): Sonnet medium M 26% (37/142) vs high 47% (23/49). High is the M/L executor.
   claude@2/claude-sonnet-5-5:
-    allow: {medium: [S], high: [M]}
-    deny: {high: [XS, S], xhigh: all, max: all}
+    allow: {medium: [S], high: [M, L]}
+    deny: {medium: [M, L], high: [XS, S], xhigh: all, max: all}
   agy@1/claude-sonnet-5-5:
-    allow: {medium: [S], high: [M]}
-    deny: {high: [XS, S], xhigh: all, max: all}
+    allow: {medium: [S], high: [M, L]}
+    deny: {medium: [M, L], high: [XS, S], xhigh: all, max: all}
+  hermes/claude-sonnet-5-5:
+    allow: {medium: [S], high: [M, L]}
+    deny: {medium: [M, L], high: [XS, S], xhigh: all, max: all}
+  # Scoreboard 2026-11-26 (#1356): GLM free M 22/24 operational reroutes. Only a free XS try.
   opencode/glm-5.3-flash:
-    allow: {max: [M]}
+    allow: {max: [XS]}
+    deny: {max: [M, L]}
+  # Scoreboard 2026-11-26 (#1356): Luna high executor M 0/4. It is the code reviewer, not an M/L executor.
+  codex@0/gpt-6-luna:
+    deny: {"*": [M, L]}
   # Claude Code only. An Opus executor on agy is never automatic, so its XL medium is denied too.
+  # Rico 2026-11-26 (#1356): no Opus at L ("remove Opus from the fallback"). XL is unchanged.
   claude@2/claude-opus-5-5:
-    allow: {medium: [L], high: [XL]}
-    deny: {medium: [XS, S, M], high: [XS, S, M, L], xhigh: all, max: all}
+    allow: {high: [XL]}
+    deny: {medium: [XS, S, M, L], high: [XS, S, M, L], xhigh: all, max: all}
   agy@1/claude-opus-5-5:
     deny: {medium: all, high: all, xhigh: all, max: all}
   codex@0/gpt-6.1-sol:
