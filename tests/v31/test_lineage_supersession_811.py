@@ -18,15 +18,35 @@ LINEAGES = {"sol": ("gpt-5.6-sol", "gpt-6.1-sol"), "terra": ("gpt-5.6-terra", "g
 # Built at import, before any per-test isolation, so the host's user catalog overlay (office model add) is
 # held empty here: an overlay row for another harness at the same model and effort must not replace the
 # shipped codex row cand() describes (#1361).
-with pytest.MonkeyPatch.context() as _mp:
-    _mp.setattr(user_catalog, "load", lambda **_: {"models": [], "disabled": []})
-    ROWS = {(r["model_id"], r["effort"]): r for r in candidates.catalog_rows()
-            if r.get("invocation_harness") == "codex"
-            and r["model_id"] in {m for pair in LINEAGES.values() for m in pair}}
+def _shipped_codex_rows():
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(user_catalog, "load", lambda *_, **__: {"models": [], "disabled": []})
+        rows = [r for r in candidates.catalog_rows() if r.get("invocation_harness") == "codex"
+                and r["model_id"] in {m for pair in LINEAGES.values() for m in pair}]
+    keyed = {(r["model_id"], r["effort"]): r for r in rows}
+    assert len(keyed) == len(rows), "two shipped codex rows share a model and effort"
+    return keyed
+
+
+ROWS = _shipped_codex_rows()
 # Efforts both generations of a lineage carry; 6.1 Sol has no `none` row.
 SHARED = [(name, effort) for name, (old, new) in LINEAGES.items()
           for effort in ("none", "low", "medium", "high", "xhigh", "max")
           if (old, effort) in ROWS and (new, effort) in ROWS]
+assert SHARED, "no Sol/Terra effort is shipped for both generations"
+
+
+def test_rows_ignore_a_user_catalog_overlay_for_the_same_model_and_effort(tmp_path, monkeypatch):
+    # #1361: a host overlay row for another harness at a shipped model and effort must not replace the codex row.
+    overlay = tmp_path / "catalog.yaml"
+    overlay.write_text(yaml.safe_dump({"models": [
+        {"model_id": new, "invocation_harness": "pi", "effort": effort, "invocation_model_id": new, "dispatchable": True}
+        for _, (_, new) in LINEAGES.items() for effort in ("low", "medium")]}), encoding="utf-8")
+    monkeypatch.setenv("OFFICE_USER_CATALOG", str(overlay))
+    assert any(r.get("invocation_harness") == "pi" for r in candidates.catalog_rows())
+    rows = _shipped_codex_rows()
+    assert rows == ROWS
+    assert all(r["invocation_harness"] == "codex" and r["price_fields"] for r in rows.values())
 
 
 def cand(model, effort, *, quota=60, caps=("builder",), status="available"):
