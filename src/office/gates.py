@@ -262,6 +262,17 @@ def stored_review_pin(con, run: dict, role: str, gate: dict | None = None) -> di
     return pin
 
 
+def gate_task_sizes(con, run: dict, gate: dict | None, role: str | None = None) -> dict[str, str]:
+    """The size of each task a review gate covers (#1363): its task, its lane's tasks, or, for the integration
+    reviewer whose gate names neither, every live task of the run. A plan review covers no task: {}."""
+    tids = _gate_task_ids(con, run, gate)
+    if not tids and role == "integration_reviewer":
+        from office.dispatch import PLANNER_TASK
+        tids = [r[0] for r in con.execute("SELECT id FROM tasks WHERE run_id=? AND status != 'cancelled' AND id != ?",
+                                          (run["id"], PLANNER_TASK))]
+    return {tid: state.task_size(state.get_task(con, run["id"], tid)) for tid in tids}
+
+
 def _gate_task_ids(con, run: dict, gate: dict | None) -> list[str]:
     """The tasks a task-scoped or lane review gate covers."""
     tids = [gate["task_id"]] if gate and gate.get("task_id") else []
@@ -2203,6 +2214,8 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict, *,
                  version.current(), "launching", cand["harness"], cand.get("invocation_model_id"), cand.get("effort"),
                  cand.get("adapter_id"),
                  dumps({**dispatch_mod._route_payload(decision), "review_attempt": {"epoch": epoch}}), gate["id"]))
+    con.execute("UPDATE dispatches SET size_class=? WHERE id=?",
+                (state.largest_size(gate_task_sizes(con, run, gate, role).values()), dispatch_id))
     if decision.get("override"):
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
                     (dumps({"by": "user", "declared": True, "triple": routing.candidate_id(cand),
@@ -2240,7 +2253,8 @@ def _record_reviewer_packet(con, run: dict, gate: dict, role: str, d: dict, ddir
         "task_id": gate.get("task_id"), "revision_id": gate.get("revision_id"), "scope": gate.get("scope"),
         "input_key": gate.get("input_key"), "lease_id": d.get("lease_id"), "fencing": _lease_fencing(con, d.get("lease_id")),
         "plan_version": plan["version"] if plan else 0, "requirements_version": run["requirements_version"],
-        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch})
+        "route": (d.get("route") or {}).get("selection_disclosure"), "epoch": epoch,
+        **state.size_record(run, gate_task_sizes(con, run, gate, role))})
     state.check_packet(run, packet)
     atomic_write_json(ddir / "packet.json", packet)
     with db.transaction(con):
