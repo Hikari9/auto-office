@@ -350,7 +350,8 @@ def status(con, run: dict, *, resumed: bool = False, verbose: bool = False,
     routes = effective_routes(con, run, tasks)
     if routes:
         res.add("routes: " + ", ".join(f"{tid} {r}" for tid, r in routes.items()))
-    live_tasks = [t for t in tasks if t["status"] != "cancelled"]
+    from office.dispatch import PLANNER_TASK
+    live_tasks = [t for t in tasks if t["status"] != "cancelled" and t["id"] != PLANNER_TASK]
     if live_tasks:  # #1363: every task's planned size, so a route can be read against it
         res.add("sizes: " + ", ".join(f"{t['id']} {state.task_size(t)}" for t in live_tasks))
     from office import economics

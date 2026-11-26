@@ -1498,7 +1498,7 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], executing, cand.get("invocation_model_id"), cand.get("effort"),
          executing if executing != cand["harness"] else cand.get("adapter_id"), applied, dumps(_route_payload(decision)),
-         state.task_size(task), predecessor))
+         state.column_size(state.task_size(task)), predecessor))
     if task.get("descriptor"):
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
                     (dumps(task["descriptor"]), dispatch_id))

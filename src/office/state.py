@@ -460,6 +460,12 @@ def largest_size(sizes) -> str:
     return max(known, key=TASK_SIZES.index) if known else UNSIZED
 
 
+def column_size(size: str) -> str | None:
+    """The value for dispatches.size_class: the size, or NULL when unsized. Route learning and gear rollout read a
+    NULL column as "fall back to the descriptor, then the run's size_class"; `unsized` there would change routing."""
+    return None if size == UNSIZED else size
+
+
 def size_record(run: dict, sizes: dict[str, str]) -> dict:
     """The size fields every dispatch packet carries (#1363): the size of the task, or the largest size of the
     tasks a lane review covers, the per-task sizes, the run's pinned gear and whether fastlane leads it.

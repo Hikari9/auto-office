@@ -267,7 +267,9 @@ def gate_task_sizes(con, run: dict, gate: dict | None, role: str | None = None) 
     reviewer whose gate names neither, every live task of the run. A plan review covers no task: {}."""
     tids = _gate_task_ids(con, run, gate)
     if not tids and role == "integration_reviewer":
-        tids = [r[0] for r in con.execute("SELECT id FROM tasks WHERE run_id=? AND status != 'cancelled'", (run["id"],))]
+        from office.dispatch import PLANNER_TASK
+        tids = [r[0] for r in con.execute("SELECT id FROM tasks WHERE run_id=? AND status != 'cancelled' AND id != ?",
+                                          (run["id"], PLANNER_TASK))]
     return {tid: state.task_size(state.get_task(con, run["id"], tid)) for tid in tids}
 
 
@@ -2213,7 +2215,7 @@ def _reviewer_dispatch(con, run: dict, gate: dict, role: str, decision: dict, *,
                  cand.get("adapter_id"),
                  dumps({**dispatch_mod._route_payload(decision), "review_attempt": {"epoch": epoch}}), gate["id"]))
     con.execute("UPDATE dispatches SET size_class=? WHERE id=?",
-                (state.largest_size(gate_task_sizes(con, run, gate, role).values()), dispatch_id))
+                (state.column_size(state.largest_size(gate_task_sizes(con, run, gate, role).values())), dispatch_id))
     if decision.get("override"):
         con.execute("UPDATE dispatches SET override_json=? WHERE id=?",
                     (dumps({"by": "user", "declared": True, "triple": routing.candidate_id(cand),
