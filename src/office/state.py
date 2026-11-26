@@ -444,6 +444,32 @@ def packet_envelope(run: dict, kind: str, body: dict) -> dict:
     return packet
 
 
+TASK_SIZES = ("XS", "S", "M", "L", "XL")
+UNSIZED = "unsized"
+
+
+def task_size(task: dict | None) -> str:
+    """A task's planned size class (XS-XL) from its descriptor, or `unsized` when it has none (#1363)."""
+    size = ((task or {}).get("descriptor") or {}).get("task_size")
+    return size if size in TASK_SIZES else UNSIZED
+
+
+def largest_size(sizes) -> str:
+    """The largest size class among `sizes`, ignoring `unsized`; `unsized` when none is sized."""
+    known = [s for s in sizes if s in TASK_SIZES]
+    return max(known, key=TASK_SIZES.index) if known else UNSIZED
+
+
+def size_record(run: dict, sizes: dict[str, str]) -> dict:
+    """The size fields every dispatch packet carries (#1363): the size of the task, or the largest size of the
+    tasks a lane review covers, the per-task sizes, the run's pinned gear and whether fastlane leads it.
+    The run's intake size_class is recorded beside it, never substituted for a missing task size."""
+    from office import fastlane
+    return {"task_size": largest_size(sizes.values()), "task_sizes": dict(sorted(sizes.items())),
+            "run_gear": run.get("gear"), "run_size_class": (run.get("risk") or {}).get("size_class"),
+            "fastlane": fastlane.gate(run) is not None}
+
+
 def check_packet(run: dict, packet: dict) -> None:
     """Reject a packet whose Office version is not the run's pinned version,
     and refuse to process any packet under a different runtime."""

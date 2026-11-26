@@ -1498,7 +1498,7 @@ def request_launch(con, run: dict, task_id: str, *, role: str, decision: dict | 
          version.current(), "launching", worktree, branch, base or (prior or {}).get("base_commit") or run["base_sha"],
          lease["id"], executing, cand.get("invocation_model_id"), cand.get("effort"),
          executing if executing != cand["harness"] else cand.get("adapter_id"), applied, dumps(_route_payload(decision)),
-         (task.get("descriptor") or {}).get("task_size") if executor else None, predecessor))
+         state.task_size(task), predecessor))
     if task.get("descriptor"):
         con.execute("UPDATE dispatches SET descriptor_json=? WHERE id=?",
                     (dumps(task["descriptor"]), dispatch_id))
@@ -2337,6 +2337,7 @@ def build_packet(con, run: dict, dispatch: dict, role: str, extra: dict) -> dict
         "restack": extra.get("restack"),
         "base_parents": extra.get("base_parents"),
         "context_handoff": extra.get("context_handoff"),
+        **state.size_record(run, {task["id"]: state.task_size(task)}),
     }
     return state.packet_envelope(run, f"{role}-dispatch", body)
 

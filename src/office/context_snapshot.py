@@ -86,9 +86,11 @@ def _read(con, run_id: str, since: int | None) -> dict:
     plan = state.current_plan(con, rid)
     terminal = ",".join("?" * len(state.TASK_TERMINAL))
     open_tasks = [dict(r) for r in con.execute(
-        "SELECT id, title, role, status, pause_reason, current_dispatch_id, accepted_revision_id FROM tasks "
-        f"WHERE run_id=? AND status NOT IN ({terminal}) ORDER BY id LIMIT ?",
+        "SELECT id, title, role, status, pause_reason, current_dispatch_id, accepted_revision_id, descriptor_json "
+        f"FROM tasks WHERE run_id=? AND status NOT IN ({terminal}) ORDER BY id LIMIT ?",
         (rid, *state.TASK_TERMINAL, MAX_TASKS + 1))]
+    for t in open_tasks:  # #1363: the planned size, not the raw descriptor
+        t["size"] = state.task_size({"descriptor": state.json_or(t.pop("descriptor_json"), {})})
     done_tasks = [r[0] for r in con.execute(
         f"SELECT id FROM tasks WHERE run_id=? AND status IN ({terminal}) ORDER BY id LIMIT ?",
         (rid, *state.TASK_TERMINAL, MAX_TASKS + 1))]
@@ -252,7 +254,7 @@ def render(snap: dict) -> list[str]:
     t = snap["tasks"]
     lines.append(f"tasks: {t['accepted_or_cancelled_count']}/{t['total']} accepted or cancelled")
     for task in t["open"]:
-        lines.append(f"  {task['id']} {task['status']}: {task.get('title', '')}"
+        lines.append(f"  {task['id']} {task['status']} [{task.get('size') or state.UNSIZED}]: {task.get('title', '')}"
                      + (f" (paused: {_clip(task['pause_reason'], 80)})" if task.get("pause_reason") else ""))
     for g in snap["pending_gates"]:
         lines.append(f"gate {g['id']} {g['kind']} {g['task_id'] or g['subject']} {g['status']} round {g['round']}")
