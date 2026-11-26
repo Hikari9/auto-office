@@ -9,7 +9,8 @@ from office import adapters, routecmd
 EXECUTOR_SLATES = {
     "XS": "1 claude/claude-haiku-5-5@high > 2 codex/gpt-6.1-terra@low > 3 agy/gemini-4-hydrogen@low (conditional, not "
           "dispatching without the Hydrogen gate (hydrogen_trials))",
-    "S": "1 claude/claude-sonnet-5-5@medium > 2 codex/gpt-6.1-terra@medium > 3 agy/gemini-4-hydrogen@medium (conditional, not "
+    "S": "1 claude/claude-haiku-5-5@xhigh > 1 hermes/claude-haiku-5-5@xhigh > 2 codex/gpt-6.1-terra@medium > "
+         "3 agy/gemini-4-hydrogen@medium (conditional, not "
          "dispatching without the Hydrogen gate (hydrogen_trials))",
     "M": "1 claude/claude-sonnet-5-5@high > 2 agy/gemini-4-hydrogen@high (conditional, not dispatching without the Hydrogen "
          "gate (hydrogen_trials)) > 3 codex/gpt-6.1-terra@high",

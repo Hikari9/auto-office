@@ -125,6 +125,12 @@ rows:
       notes: Anthropic applies the higher input/output/cache tier when prompt input exceeds 100k tokens; same text tokenizes
         about 30% larger than Haiku 4.5
     supersession_metadata: null
+    exact_probe:
+      result: passed
+      at: '2026-11-27'
+      command: 'office doctor --probe-route claude/claude-haiku-5-5@xhigh'
+      harness_version: claude 2.1.332
+      evidence: 'model claude-haiku-5-5 at effort xhigh read back from the harness metadata; reply, write, write boundary and process cleanup verified'
   claude/claude-haiku-5-5@high:
     price_fields:
       input_per_mtok: 0.1
@@ -1558,6 +1564,13 @@ rows:
     source_snapshot_metadata:
       kind: hermes-inherited-benchmark
       notes: score resolved at load from the canonical claude-haiku-5-5@high route under another harness; no benchmarks.tsv row
+    supersession_metadata: null
+  hermes/claude-haiku-5-5@xhigh:
+    price_fields: null
+    speed_fields: null
+    source_snapshot_metadata:
+      kind: hermes-inherited-benchmark
+      notes: score resolved at load from the canonical claude-haiku-5-5@xhigh route under another harness; no benchmarks.tsv row
     supersession_metadata: null
   hermes/gpt-6.1-sol@low:
     price_fields: null

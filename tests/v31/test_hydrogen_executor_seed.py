@@ -6,7 +6,8 @@ from office import adapters, executor_slates, model_lineages, route_policy, rout
 
 EXPECTED = {
     "XS": [("claude-haiku-5-5", "high", "claude"), ("gpt-6.1-terra", "low", "codex"), ("gemini-4-hydrogen", "low", "agy")],
-    "S": [("claude-sonnet-5-5", "medium", "claude"), ("gpt-6.1-terra", "medium", "codex"), ("gemini-4-hydrogen", "medium", "agy")],
+    "S": [("claude-haiku-5-5", "xhigh", "claude"), ("claude-haiku-5-5", "xhigh", "hermes"), ("gpt-6.1-terra", "medium", "codex"),
+          ("gemini-4-hydrogen", "medium", "agy")],
     "M": [("claude-sonnet-5-5", "high", "claude"), ("gemini-4-hydrogen", "high", "agy"), ("gpt-6.1-terra", "high", "codex")],
     "L": [("claude-sonnet-5-5", "high", "claude"), ("claude-sonnet-5-5", "high", "hermes"), ("claude-sonnet-5-5", "high", "agy"),
           ("gpt-6.1-terra", "high", "codex")],
