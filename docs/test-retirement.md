@@ -591,12 +591,13 @@ Every test module under `tests/` except `tests/contracts/`: the base commit's mo
 | `tests/v31/test_issue_1174_proof_runner.py` | keep |  |
 | `tests/v31/test_issue_1175_unrunnable_check.py` | keep |  |
 | `tests/v31/test_issue_1185_pi_alias_pin.py` | keep |  |
+| `tests/v31/test_issue_1363_dispatch_size.py` | keep |  |
 | `tests/v31/test_issue_752_recheck_next_requalifies.py` | keep |  |
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |  |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |  |
 | `tests/v31/test_plan_requires_task_size.py` | keep |  |
 
-Totals: {'keep': 371, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
+Totals: {'keep': 372, 'retire': 19, 'historical-diagnostic': 13, 'consolidate': 8}.
 
 ## Left alone on purpose
 

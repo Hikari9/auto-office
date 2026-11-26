@@ -453,6 +453,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/v31/test_issue_1174_proof_runner.py` | keep |
 | `tests/v31/test_issue_1175_unrunnable_check.py` | keep |
 | `tests/v31/test_issue_1185_pi_alias_pin.py` | keep |
+| `tests/v31/test_issue_1363_dispatch_size.py` | keep |
 | `tests/v31/test_issue_752_recheck_next_requalifies.py` | keep |
 | `tests/v31/test_issue_814_amend_records_on_route_refusal.py` | keep |
 | `tests/v31/test_issue_858_quoted_amend_route.py` | keep |
