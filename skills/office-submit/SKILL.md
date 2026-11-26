@@ -28,7 +28,7 @@ never `inline`). You cannot lower it. Do the review as the tier says:
   instruction, or make one fresh pass yourself. Security is not yours: the convergence reviewer covers it. Write
   `ROUND 1`, `LENS edge-cases reviewed`, `LENS test-strength reviewed` and a `LENS platform` line. There is no fix-diff re-review.
   Each medium or high fix names the one test that proves it (`fixed <test path> mutation=failed`). Office runs that test
-  alone on a copy of your commit with its non-test source and data files reverted (test fixtures and runner config stay): it must fail by a test failure (a collection error,
+  alone on a copy of your commit with its non-test source and data files reverted (test fixtures stay): it must fail by a test failure (a collection error,
   timeout or missing command does not count) and pass unreverted. You do not revert anything for the proof, and with no
   named test or no pytest command in the task's checks Office records an exemption instead of blocking. `office preflight`
   runs the proof and `office submit` needs its recorded result. No exemption flag exists on this tier.

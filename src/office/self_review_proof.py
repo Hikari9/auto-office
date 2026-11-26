@@ -52,28 +52,16 @@ def _sources(changed: list[str]) -> list[str]:
     from office.preflight import _is_test_path
     return sorted(p for p in changed
                   if not _is_test_path(p) and Path(p).suffix.lower() in _SOURCE_SUFFIXES)
-# Runner, build and repository configuration stays at the submitted commit: reverting it changes how the test runs
-# (markers, addopts, the resolved environment), not what it tests, and would fail a genuine proof at collection.
-_RUNNER_CONFIG = frozenset(("pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini", "uv.lock", "poetry.lock",
-                            "pipfile", "pipfile.lock", "package.json", "package-lock.json", "pnpm-lock.yaml",
-                            "yarn.lock", "bun.lockb", ".gitattributes", ".gitmodules", ".python-version"))
-
-
 def _revertible(changed: list[str]) -> list[str]:
     """#1373: the changed paths the revert returns to base: the non-test sources (as before), plus data and config
-    files (YAML, TSV, JSON, Markdown) outside test directories, whatever their suffix. A fix in a data file is then
-    reverted with the code that reads it, so a loader is never reverted without the data it validates, and a stale
-    test fixed against a data change can fail. Runner and build configuration is never reverted."""
+    and config files (YAML, TSV, JSON, Markdown, pyproject.toml) outside test directories, whatever their suffix. A fix
+    in a data file is then reverted with the code that reads it, so a loader is never reverted without the data it
+    validates, and a stale test fixed against a data change can fail. Reverting runner configuration the task changed
+    can fail a genuine proof at collection; that blocks (fails closed), it never passes a proof."""
     from office.preflight import _is_test_path
     sources = set(_sources(changed))
-    data = {p for p in changed if p not in sources and not _is_test_path(p) and not _under_test_dir(p)
-            and not _runner_config(p)}
+    data = {p for p in changed if p not in sources and not _is_test_path(p) and not _under_test_dir(p)}
     return sorted(sources | data)
-
-
-def _runner_config(rel: str) -> bool:
-    name = Path(rel.replace("\\", "/")).name.lower()
-    return name in _RUNNER_CONFIG or (name.startswith("requirements") and name.endswith(".txt"))
 
 
 def _untouchable(checkout: Path, head: str, paths_: list[str]) -> set[str]:

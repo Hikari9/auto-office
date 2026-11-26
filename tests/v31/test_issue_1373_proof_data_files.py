@@ -105,17 +105,31 @@ def test_a_fixture_under_tests_keeps_the_submitted_version(tmp_path):
     assert result["ok"] and result["status"] == "passed", result
 
 
-def test_runner_configuration_is_not_reverted(tmp_path):
-    """The task registers a marker under --strict-markers in pyproject.toml and its fix test uses it. Reverting
-    pyproject.toml would fail the test at collection; it stays at head, so the genuine proof passes."""
-    base_cfg = '[tool.pytest.ini_options]\naddopts = "--strict-markers"\nmarkers = []\n'
-    head_cfg = base_cfg.replace("markers = []", 'markers = ["canary: new marker"]')
-    test = ("import pytest\nfrom calc import add\n\n"
-            "@pytest.mark.canary\ndef test_add():\n    assert add(2, 3) == 5\n")
+def test_a_fix_in_pyproject_toml_is_reverted(tmp_path):
+    """Configuration the task changed is reverted like any other data the base had (review F1): a fix that lives in
+    pyproject.toml fails its test on the reverted checkout."""
+    test = ("import pathlib, tomllib\nfrom calc import add\n\ndef test_cfg():\n"
+            "    cfg = tomllib.loads((pathlib.Path(__file__).parents[1] / 'pyproject.toml').read_text())\n"
+            "    assert cfg['tool']['calc']['mode'] == 'sum' and add(2, 3) == 5\n")
     wt, base, head = _repo(
-        tmp_path, {"calc.py": "def add(a, b):\n    return a - b\n", "pyproject.toml": base_cfg},
-        {"calc.py": "def add(a, b):\n    return a + b\n", "pyproject.toml": head_cfg, "tests/test_policy.py": test})
+        tmp_path, {"calc.py": "def add(a, b):\n    return a + b\n", "pyproject.toml": '[tool.calc]\nmode = "diff"\n'},
+        {"calc.py": "def add(a, b):\n    return a + b\n\nX = 1\n", "pyproject.toml": '[tool.calc]\nmode = "sum"\n',
+         "tests/test_policy.py": test})
     changed = ["calc.py", "pyproject.toml", "tests/test_policy.py"]
-    assert self_review_proof._revertible(changed) == ["calc.py"]
+    assert self_review_proof._revertible(changed) == ["calc.py", "pyproject.toml"]
     result = _prove(wt, base, head, changed)
+    assert result["ok"] and result["status"] == "passed", result
+
+
+def test_a_stale_test_brought_in_line_with_a_yaml_change_is_proven(tmp_path):
+    """Review F2: the base test pins the old YAML value; the task changes the YAML, updates the test to match and
+    touches source so the proof applies. The YAML reverts, so the updated test fails reverted and passes restored."""
+    loader = ("import pathlib, yaml\n\ndef size():\n"
+              "    return yaml.safe_load((pathlib.Path(__file__).parent / 'policy.yaml').read_text())['size']\n")
+    old_test = "from loader import size\n\ndef test_size():\n    assert size() == 'M'\n"
+    wt, base, head = _repo(
+        tmp_path, {"loader.py": loader, "policy.yaml": "size: M\n", "tests/test_policy.py": old_test},
+        {"loader.py": loader + "\nVERSION = 2\n", "policy.yaml": "size: S\n",
+         "tests/test_policy.py": old_test.replace("'M'", "'S'")})
+    result = _prove(wt, base, head, ["loader.py", "policy.yaml", "tests/test_policy.py"])
     assert result["ok"] and result["status"] == "passed", result
