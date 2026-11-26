@@ -26,6 +26,8 @@ checks: python3 -c "import mul"
 accept:
 - mul.py has a docstring
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 
 

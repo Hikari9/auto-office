@@ -13,8 +13,8 @@ from office import adapters, routecmd
 INSTALLED_CLAUDE = "2.1.311"
 INSTALLED_CODEX = "0.130.0"
 SONNET = "claude/claude-sonnet-5-5@high"
-PLAIN = "codex/gpt-6-luna@low"  # no shipped executor rule, so no size scope
-SHIPPED_SONNET_BY_SIZE = "deny XS,S (shipped), allow M (shipped), neutral L,XL (default)"
+PLAIN = "codex/gpt-5.6-luna@low"  # no shipped executor rule (#1356 size-scoped gpt-6-luna), so no size scope
+SHIPPED_SONNET_BY_SIZE = "deny XS,S (shipped), allow M,L (shipped), neutral XL (default)"
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ def test_the_unsized_row_carries_by_size_as_a_map(isolated):
         "XS": {"state": "deny", "source": "shipped"},
         "S": {"state": "deny", "source": "shipped"},
         "M": {"state": "allow", "source": "shipped"},
-        "L": {"state": "neutral", "source": "default"},
+        "L": {"state": "allow", "source": "shipped"},
         "XL": {"state": "neutral", "source": "default"},
     }
 
@@ -82,7 +82,7 @@ def test_a_user_size_rule_is_named_with_its_source_and_grouped_by_state(isolated
     write_rules(isolated, {"role": "executor", "route": SONNET, "state": "allow", "sizes": ["XS"]})
     result = view()
     assert line_for(result, SONNET).endswith(
-        "; by size: allow XS (user), deny S (shipped), allow M (shipped), neutral L,XL (default)")
+        "; by size: allow XS (user), deny S (shipped), allow M,L (shipped), neutral XL (default)")
     assert row_for(result, SONNET)["by_size"]["XS"] == {"state": "allow", "source": "user"}
 
 
@@ -141,7 +141,7 @@ def test_a_route_change_that_writes_nothing_says_nothing_about_running_runs(isol
 
 def test_a_preferred_seed_allow_is_named_by_size_and_a_user_size_deny_outranks_it(isolated):
     isolated.write_text(yaml.safe_dump({
-        "roles": {"executor": {"preferred_seed": [{"harness": "codex", "model_id": "gpt-6-luna", "effort": "low"}]}},
+        "roles": {"executor": {"preferred_seed": [{"harness": "codex", "model_id": "gpt-5.6-luna", "effort": "low"}]}},
         "routing": {"user_policy": {"role_rules": [{"role": "executor", "route": PLAIN, "state": "deny", "sizes": ["S"]}]}}}))
     result = view()
     assert line_for(result, PLAIN).endswith("; by size: allow XS,M,L,XL (preferred_seed), deny S (user)")

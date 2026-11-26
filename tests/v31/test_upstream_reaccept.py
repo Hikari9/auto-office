@@ -27,6 +27,8 @@ checks: python3 -c "import sub; assert sub.sub(3, 2) == 1"
 accept:
 - sub.sub(3, 2) == 1
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 GOOD_SUB = "def sub(a, b):\n    return a - b\n"
 CONTRACTS = [pytest.param("v3.1", marks=pytest.mark.review_contract("v3.1"), id="v3.1"),

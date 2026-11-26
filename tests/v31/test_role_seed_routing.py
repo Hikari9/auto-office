@@ -80,10 +80,11 @@ def test_route_policy_inspection_by_size(tmp_path, monkeypatch):
     _isolated(tmp_path, monkeypatch)
     rows = {(r["route"], r["state"]) for r in routecmd.policy(role="executor", effective=True, size="XL").data["effective"]}
     assert ("claude/claude-opus-5-5@high", "allow") in rows
-    # AA v5: Opus medium is the L executor and Opus high the XL one.
+    # Scoreboard (#1356): no Opus at L. Opus high is the XL executor only.
     rows = {(r["route"], r["state"]) for r in routecmd.policy(role="executor", effective=True, size="L").data["effective"]}
-    assert ("claude/claude-opus-5-5@medium", "allow") in rows
+    assert ("claude/claude-opus-5-5@medium", "deny") in rows
     assert ("claude/claude-opus-5-5@high", "deny") in rows
+    assert ("claude/claude-sonnet-5-5@high", "allow") in rows
     with pytest.raises(Exception):
         routecmd.policy(role="executor", effective=True, size="XXL")
 

@@ -78,8 +78,8 @@ def test_atomic_booking_requires_writer_transaction(database):
 
 
 def test_seed_peers_are_equal_weight_and_arrows_remain_distinct():
-    # AA v5: every size is a strict three-rung ladder, so no two rungs are peers and the arrow order is the rung order.
-    expected = {size: [1, 2, 3] for size in ("XS", "S", "M", "L", "XL")}
+    # AA v5: every size is a strict ladder (L has four rungs, #1356), so no two rungs are peers and the arrow order is the rung order.
+    expected = {size: [1, 2, 3] for size in ("XS", "S", "M", "XL")} | {"L": [1, 2, 3, 4]}
     for size, rungs in expected.items():
         seed = executor_slates.ideal_seed(size)
         assert [entry["rung"] for entry in seed] == rungs
@@ -88,8 +88,9 @@ def test_seed_peers_are_equal_weight_and_arrows_remain_distinct():
                  "harness": entry.get("harness")}
             assert routing.preferred_rank(c, seed) == entry["rung"] - 1
             assert adaptive._preference_component(c, seed)[0] == 1 / entry["rung"]
-    assert [x["model_id"] for x in executor_slates.ideal_seed("L")] == [
-        "claude-opus-5-5", "gpt-6.2-sol", "gemini-4-neon"]
+    assert [(x["model_id"], x["harness"]) for x in executor_slates.ideal_seed("L")] == [
+        ("claude-sonnet-5-5", "claude"), ("claude-sonnet-5-5", "hermes"), ("claude-sonnet-5-5", "agy"),
+        ("gpt-6.1-terra", "codex")]
     assert not any("flash" in x["model_id"] for s in expected for x in executor_slates.ideal_seed(s))
     assert executor_slates.POLICY["benchmark_index"] == "Artificial Analysis Engineering Index (2026-11)"
 

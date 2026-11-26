@@ -84,6 +84,8 @@ checks: python3 -c "import calc; assert calc.add(0, 0) == 0"
 accept:
 - calc.add(0, 0) == 0
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """)
     env.office("amend", "plan", "--", "add dependent edge case verification", check=0)
     env.office("dispatch", "T2", check=0)

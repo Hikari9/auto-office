@@ -65,6 +65,7 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_db_connect.py` | keep |
 | `tests/test_derived_routing.py` | retire |
 | `tests/test_dogfood.py` | retire |
+| `tests/test_executor_scoreboard_1356.py` | keep |
 | `tests/test_families.py` | retire |
 | `tests/test_h3_hydrogen_reviewer_seed.py` | keep |
 | `tests/test_h4_agy_hydrogen_reviewer.py` | keep |
@@ -459,3 +460,4 @@ The table uses T1's module-level dispositions and lists every module in the [ret
 | `tests/test_frontend_bias.py` | keep |
 | `tests/test_issue_1282_hydrogen_gate.py` | keep |
 | `tests/v31/test_engineering_index_null_score.py` | keep |
+| `tests/v31/test_plan_requires_task_size.py` | keep |

@@ -46,6 +46,8 @@ non_goals:
 scope: calc.py
 depends: none
 checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - calc.add(2, 3) == 5
 visual: none
@@ -63,6 +65,8 @@ blast_radius: repo
 scope: calc.py
 depends: none
 checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - calc.add(2, 3) == 5
 visual: none
@@ -71,6 +75,8 @@ visual: none
 scope: mul.py
 depends: none
 checks: python3 -c "import mul; assert mul.mul(2, 3) == 6"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - mul.mul(2, 3) == 6
 visual: none

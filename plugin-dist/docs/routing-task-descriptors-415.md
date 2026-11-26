@@ -36,7 +36,7 @@ work: implementation     # mechanical | implementation | architecture
 modality: browser        # code | visual | browser | multimodal
 quality: taste           # objective | taste | mixed
 bounds: bounded          # bounded | open
-task_size: M             # S | M | L | XL; independent of run risk
+task_size: M             # XS | S | M | L | XL; required on every task (greenfield pins XL); independent of run risk
 estimated_input_tokens: 80000  # optional integer >= 0: per dispatch prompt estimate
 estimated_output_tokens: 12000 # optional integer >= 0
 ```

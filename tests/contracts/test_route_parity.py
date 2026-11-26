@@ -10,17 +10,18 @@ from office import candidates, executor_slates as slates, routing
 # not derived from policy YAML. Planner rows remain unchanged from main.
 MAIN_ROUTE_MATRIX = {
     ("executor", "XS"): [("claude", "claude-haiku-5-5", "high"),
-                         ("agy", "gemini-4-hydrogen", "low"),
-                         ("codex", "gpt-6.1-terra", "low")],
+                         ("codex", "gpt-6.1-terra", "low"),
+                         ("agy", "gemini-4-hydrogen", "low")],
     ("executor", "S"): [("claude", "claude-sonnet-5-5", "medium"),
-                        ("agy", "gemini-4-hydrogen", "medium"),
-                        ("codex", "gpt-6.1-terra", "medium")],
+                        ("codex", "gpt-6.1-terra", "medium"),
+                        ("agy", "gemini-4-hydrogen", "medium")],
     ("executor", "M"): [("claude", "claude-sonnet-5-5", "high"),
                         ("agy", "gemini-4-hydrogen", "high"),
                         ("codex", "gpt-6.1-terra", "high")],
-    ("executor", "L"): [("claude", "claude-opus-5-5", "medium"),
-                        ("codex", "gpt-6.2-sol", "medium"),
-                        ("agy", "gemini-4-neon", "medium")],
+    ("executor", "L"): [("claude", "claude-sonnet-5-5", "high"),
+                        ("hermes", "claude-sonnet-5-5", "high"),
+                        ("agy", "claude-sonnet-5-5", "high"),
+                        ("codex", "gpt-6.1-terra", "high")],
     ("executor", "XL"): [("claude", "claude-opus-5-5", "high"),
                          ("codex", "gpt-6.2-sol", "high"),
                          ("agy", "gemini-4-neon", "high")],
@@ -134,13 +135,14 @@ def test_conditional_hydrogen_m_and_planner_routes_remain_unqualified():
 
 
 def test_haiku_high_and_medium_are_executors_at_xs_only_under_the_shipped_role_policy():
-    """AA v5: Haiku 5.5 high has no executor allowance above XS (role-policy.yaml); only XS is allowed, any effort."""
+    """AA v5: Haiku 5.5 high has no executor allowance above XS (role-policy.yaml); XS is allowed, M and L are denied
+    (scoreboard #1356: Haiku high M 28% first-try accept), S and XL stay neutral."""
     from office import route_policy
     for effort in ("medium", "high"):
         cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": effort,
                 "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
         states = {size: route_policy.effective_role_state(cand, "executor", [], size)["state"] for size in route_policy.SIZES}
-        assert states == {"XS": "allow", "S": "neutral", "M": "neutral", "L": "neutral", "XL": "neutral"}, (effort, states)
+        assert states == {"XS": "allow", "S": "neutral", "M": "deny", "L": "deny", "XL": "neutral"}, (effort, states)
     for effort in ("xhigh", "max"):
         cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": effort,
                 "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}

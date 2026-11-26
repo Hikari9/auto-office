@@ -60,8 +60,6 @@ def test_shared_marker_blank_and_duplicate_paths_do_not_skew_the_ratio():
       ("codex", "gpt-6.1-terra", "medium")]),
     ("M", ("agy", "gemini-4-hydrogen", "high"),
      [("agy", "gemini-4-hydrogen", "high"), ("claude", "claude-sonnet-5-5", "high"), ("codex", "gpt-6.1-terra", "high")]),
-    ("L", ("agy", "gemini-4-neon", "medium"),
-     [("agy", "gemini-4-neon", "medium"), ("claude", "claude-opus-5-5", "medium"), ("codex", "gpt-6.2-sol", "medium")]),
     ("XL", ("agy", "gemini-4-neon", "high"),
      [("agy", "gemini-4-neon", "high"), ("claude", "claude-opus-5-5", "high"), ("codex", "gpt-6.2-sol", "high")]),
 ])
@@ -94,13 +92,13 @@ def test_bias_without_a_gemini_rung_does_nothing():
 
 
 def test_the_disclosure_says_why_and_that_no_gate_moved():
-    biased = slates.frontend_bias(slates.ideal_seed("L"), {}, _paths(6, 10))
-    chosen = {"model_id": "gemini-4-neon", "harness": "agy", "effort": "medium", "quota": {"status": "ok"}}
+    biased = slates.frontend_bias(slates.ideal_seed("XL"), {}, _paths(6, 10))
+    chosen = {"model_id": "gemini-4-neon", "harness": "agy", "effort": "high", "quota": {"status": "ok"}}
     reason = routing.selection_disclosure("executor", chosen, biased, "balanced")["reason"]
     assert "frontend-heavy task (6 of 10 declared file paths are frontend files)" in reason
-    assert "agy/gemini-4-neon@medium moved to rung 1 for this task only" in reason
+    assert "agy/gemini-4-neon@high moved to rung 1 for this task only" in reason
     assert "no route added, no gate lifted" in reason
-    plain = routing.selection_disclosure("executor", chosen, slates.ideal_seed("L"), "balanced")["reason"]
+    plain = routing.selection_disclosure("executor", chosen, slates.ideal_seed("XL"), "balanced")["reason"]
     assert "frontend-heavy" not in plain
 
 
@@ -140,12 +138,20 @@ def _first(request):
 
 
 def test_route_role_biases_a_frontend_heavy_task_and_leaves_a_backend_task_on_the_plain_slate(monkeypatch, tmp_path):
+    # M keeps an agy gemini-* rung (conditional Hydrogen), so the bias applies there.
+    heavy = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "web/b.css", "src/office/m.py"], size="M")
+    assert _first(heavy) == ("agy", "gemini-4-hydrogen", "2 of 3 declared file paths are frontend files")
+    plain = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "src/office/m.py", "src/office/n.py"], size="M")
+    assert _first(plain) == ("claude", "claude-sonnet-5-5", None)
+    assert [r["model_id"] for r in plain["preferred_seed"]] == ["claude-sonnet-5-5", "gemini-4-hydrogen", "gpt-6.1-terra"], (
+        "the plain slate keeps the table order")
+
+
+def test_route_role_has_no_frontend_bias_at_l_because_the_l_slate_has_no_gemini_rung(monkeypatch, tmp_path):
+    # AA v5 scoreboard (#1356): L is Sonnet high on claude, hermes and agy, then Terra. No agy gemini-* rung to move.
     heavy = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "web/b.css", "src/office/m.py"], size="L")
-    assert _first(heavy) == ("agy", "gemini-4-neon", "2 of 3 declared file paths are frontend files")
-    plain = _route_request(monkeypatch, tmp_path, ["web/a.tsx", "src/office/m.py", "src/office/n.py"], size="L")
-    assert _first(plain) == ("claude", "claude-opus-5-5", None)
-    assert [r["model_id"] for r in plain["preferred_seed"]] == [r["model_id"] for r in heavy["preferred_seed"]][1:2] + [
-        "gpt-6.2-sol", "gemini-4-neon"], "the plain slate keeps the table order"
+    assert _first(heavy) == ("claude", "claude-sonnet-5-5", None)
+    assert all("frontend_bias" not in row for row in heavy["preferred_seed"])
 
 
 def test_route_role_never_biases_a_users_own_seed(monkeypatch, tmp_path):

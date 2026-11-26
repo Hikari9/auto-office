@@ -247,7 +247,7 @@ def test_a_real_missing_check_command_leaves_no_hint(fresh_env):
     env = fresh_env
     plan = ("# Plan\n\n## Requirements\ndone:\n- add() returns the sum\nblast_radius: repo\n\n## Tasks\n"
             "### T1: Implement add\nscope: calc.py\ndepends: none\nchecks: office-no-such-command-xyz --run\n"
-            "accept:\n- calc.add(2, 3) == 5\nvisual: none\n")
+            "accept:\n- calc.add(2, 3) == 5\nvisual: none\ntask_size: M\ntask_size_rationale: fixture task sized M so the plan passes the unsized-task refusal\n")
     env.trust()
     env.script(executor=[{"write": {"calc.py": GOOD_ADD}, "submit": True}],
                convergence_reviewer=[{"reply": "VERDICT: APPROVED\nNEXT proceed"}])

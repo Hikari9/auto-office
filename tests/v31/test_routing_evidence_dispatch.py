@@ -103,7 +103,15 @@ def _sized(plan: str, size: str | None, run_size: str | None = None) -> str:
     (None, None, "unsized"),
 ])
 def test_an_executor_dispatch_copies_the_tasks_size_not_the_runs(env, task_size, run_size, expected):
-    _approve(env, plan=_sized(PLANNED, task_size, run_size))
+    # Plan submit now refuses an unsized task, so a task with no size is a legacy run approved
+    # before the rule: approve it sized, then drop the size from the stored descriptor.
+    _approve(env, plan=_sized(PLANNED, task_size or "M", run_size))
+    if task_size is None:
+        con = env.con()
+        descriptor = json.loads(con.execute("SELECT descriptor_json FROM tasks WHERE id='T1'").fetchone()[0])
+        assert descriptor.pop("task_size") == "M"
+        con.execute("UPDATE tasks SET descriptor_json=? WHERE id='T1'", (json.dumps(descriptor),))
+        con.close()
     run_risk = json.loads(env.con().execute("SELECT risk_json FROM runs").fetchone()[0])
     assert run_risk.get("size_class") == run_size
     code, out = env.office("dispatch", "T1", env=_quota(env))
