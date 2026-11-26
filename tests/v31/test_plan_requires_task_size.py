@@ -169,3 +169,9 @@ def test_a_legacy_plan_still_refuses_a_new_unsized_task_but_not_for_the_old_one(
     env.write_plan(_unsize(PLAN_TWO))
     code, out = env.office("amend", "plan", "--", "also add a mul task", env=EXTERNAL)
     assert code != 0 and "T2 has no" in out and "T1" not in out.split("plan has problems:", 1)[1], out
+
+
+def test_submit_help_says_task_size_is_required(env):
+    out = env.office("submit", "--help", check=0)
+    text = " ".join(str(getattr(out, "stdout", out)).split())
+    assert "task_size is required" in text
