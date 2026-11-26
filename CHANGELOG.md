@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.19
+
+The self-review revert-and-fail proof reverts every non-test file the base already had, not only source files (#1373). A medium or high fix that lives in a data or config file (YAML, TSV, JSON) can be proven. So can a stale test brought in line with a data change. A loader is reverted together with the data field it validates, so the reverted checkout no longer errors at collection. Test files and files under a test directory keep the submitted version, and added files stay in place as before. The proof cache version moves to `main-proof-8`.
+
 ## 3.31.18
 
 `office submit` refuses a plan with an unsized task (T2). On a non-greenfield run, a plan task with no `task_size:` is refused as `plan-invalid` naming every unsized task, and an amendment that adds one is refused the same way. Greenfield keeps its XL pin, and tasks an already-approved plan left unsized survive ordinary amendments.
