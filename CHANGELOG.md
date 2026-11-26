@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.31.19
 
-The self-review revert-and-fail proof reverts every non-test file the base already had, not only source files (#1373). A medium or high fix that lives in a data or config file (YAML, TSV, JSON) can be proven. So can a stale test brought in line with a data change. A loader is reverted together with the data field it validates, so the reverted checkout no longer errors at collection. Test files and files under a test directory keep the submitted version, and added files stay in place as before. The proof cache version moves to `main-proof-8`.
+The self-review revert-and-fail proof reverts data files as well as source files (#1373). It reverts the non-test sources as before, plus every data file outside a test directory that the base already had (YAML, TSV, JSON, Markdown). In a task that also changes source, which is when the proof applies at all, a medium or high fix that lives in a data file can now be proven. So can a stale test brought in line with a data change. A loader is reverted together with the data field it validates, so the reverted checkout no longer errors at collection. Several kinds of file keep the submitted version: data under a test directory (fixtures, `tests/conftest.py`), runner and build configuration (`pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini`, lockfiles, `.gitattributes`, `.gitmodules`), Git LFS files, submodule gitlinks and added files. Only an added source file earns the "fix may live in a new file" exemption. An added doc or data file does not. The proof cache version moves to `main-proof-8`.
 
 ## 3.31.18
 
