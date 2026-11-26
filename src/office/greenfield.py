@@ -12,6 +12,23 @@ def enabled(run: dict) -> bool:
             and (run.get("gates") or {}).get("gear_model_version") == "run-gear-1")
 
 
+def sizing_problems(run: dict, tasks: list[dict], carried: list[dict] | None = None) -> list[str]:
+    """Every task of a non-greenfield plan declares its `task_size:` (Rico 2026-11-26, Q3).
+
+    Greenfield pins its one cohesive task to XL itself, so it keeps its own rule in `plan_problems`.
+    `carried` is the current plan's tasks: an amendment may keep a task that plan already left unsized
+    (a run approved before this rule), but a task it adds, or one it unsizes, is refused.
+    """
+    if run.get("gear") == "greenfield":
+        return []
+    legacy = {t.get("id") for t in carried or [] if not (t.get("descriptor") or {}).get("task_size")}
+    missing = [t["id"] for t in tasks if not (t.get("descriptor") or {}).get("task_size") and t["id"] not in legacy]
+    if not missing:
+        return []
+    return [f"{', '.join(missing)} {'has' if len(missing) == 1 else 'have'} no `task_size:`; add `task_size: XS | S | M | L | XL` "
+            "and `task_size_rationale:` to every task (Office routes the executor by task size)"]
+
+
 def plan_problems(run: dict, tasks: list[dict]) -> list[str]:
     """Reject decomposition that silently recreates the handoff tax."""
     if not enabled(run):

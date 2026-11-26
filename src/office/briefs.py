@@ -88,8 +88,8 @@ phases:                     (greenfield gear: REQUIRED, 2-3 large phases in one 
 - working core plus real acceptance tests
 - integration, verification, and handoff
 Task phases are checkpoints inside one executor session, not separate Office tasks or review gates.
-task_size: XS | S | M | L | XL   (each task independently; greenfield pins a cohesive XL executor task)
-task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required for planner sizing)
+task_size: XS | S | M | L | XL   (REQUIRED on every task, each sized independently; office submit refuses an unsized task. Greenfield pins one cohesive XL executor task)
+task_size_rationale: <specific boundedness, coupling, uncertainty or API evidence>   (required with task_size)
 inline_advantage: <measured total cost-to-success estimate that beats dedicated dispatch, with the numbers>   (optional; fastlane cost check, orchestrator-led including its subagents vs Office executors)
 inline_quality: <harness>/<model>@<effort>: <why>  (the orchestrator's own route; Office checks it against this task size's executor floor)   (optional; fastlane quality check, #1297)
 """

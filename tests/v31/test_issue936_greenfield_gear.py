@@ -12,7 +12,9 @@ PHASES = """phases:
 - Build the complete working core with automated tests
 - Integrate and validate the end-to-end user flow
 """
-PLAN = PLAN_ONE.replace("depends: none\n", "depends: none\n" + PHASES, 1)
+# Greenfield pins its one task to XL itself, so its plan declares no `task_size:` (the shared fixture sizes M).
+UNSIZED_ONE = "".join(line for line in PLAN_ONE.splitlines(True) if not line.startswith("task_size"))
+PLAN = UNSIZED_ONE.replace("depends: none\n", "depends: none\n" + PHASES, 1)
 
 
 def _run(env):

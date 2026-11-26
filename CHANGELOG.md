@@ -4,6 +4,8 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.31.14
 
+`office submit` refuses a plan with an unsized task (T2). On a non-greenfield run, a plan task with no `task_size:` is refused as `plan-invalid` naming every unsized task, and an amendment that adds one is refused the same way. Greenfield keeps its XL pin, and tasks an already-approved plan left unsized survive ordinary amendments.
+
 Executor slates follow the scoreboard (#1356). XS is Haiku 5.5 high, Terra low, then conditional Hydrogen. S is Sonnet 5.5 medium, Terra medium, then conditional Hydrogen. L is Sonnet 5.5 high on Claude Code, Hermes and agy, then Terra high, with no Opus, Sol or Neon. M and XL are unchanged. Sonnet 5.5 may run on claude, agy or hermes. The shipped role policy denies Haiku medium and high at M and L, Terra medium at M and L, Sonnet medium at M and L, GLM max at M and L, the Luna executor at M and L, and Opus medium at L. A frontend-heavy L task has no agy gemini-* rung to promote.
 
 ## 3.31.13

@@ -60,6 +60,7 @@ def submit_plan(con, run: dict, plan_path: Path, *, submitter: str, dispatch_id:
     planfile.grandfather_entries(parsed, (state.current_plan(con, run["id"]) or {}).get("tasks"))
     from office import greenfield
     parsed.errors.extend(greenfield.plan_problems(run, parsed.tasks))
+    parsed.errors.extend(greenfield.sizing_problems(run, parsed.tasks))
     if parsed.errors:
         raise Refused("plan-invalid", "plan has problems: " + "; ".join(parsed.errors[:6]),
                       scope="plan", preserved=f"{plan_path} is unchanged",
