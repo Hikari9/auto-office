@@ -14,9 +14,14 @@ version: 1
 executor:
   # Rico 2026-11-19 (AA v5 table): Haiku 5.5 high is the XS executor only. It has no allowance above XS.
   # Scoreboard 2026-11-26 (#1356): Haiku high M 28% first-try accept. Denied at M and L.
+  # S canary (#1360, Rico 2026-11-26): Haiku xhigh is the S executor on Claude Code and Hermes, at S only.
+  # Pre-canary rule: allow {medium: [XS], high: [XS]}; deny {medium: [M, L], high: [M, L], xhigh: all, max: all}.
   claude@2/claude-haiku-5-5:
-    allow: {medium: [XS], high: [XS]}
-    deny: {medium: [M, L], high: [M, L], xhigh: all, max: all}
+    allow: {medium: [XS], high: [XS], xhigh: [S]}
+    deny: {medium: [M, L], high: [M, L], xhigh: [XS, M, L, XL], max: all}
+  hermes/claude-haiku-5-5:
+    allow: {xhigh: [S]}
+    deny: {xhigh: [XS, M, L, XL], max: all}
   # Rico 2026-11-19: Gemini 3.8 Flash is retired in every role (superseded by Gemini 4 Hydrogen).
   agy@1/gemini-3.8-flash: &retired
     deny: {"*": all}

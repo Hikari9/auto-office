@@ -595,8 +595,10 @@ def test_discovery_on_returns_eligible_rows_as_candidates_with_status_and_a_prob
     built, skipped = candidates.build_candidates(None, "executor", probe=False, discovery=settings, user_policies=[])
     pool = [c for c in built if c["route_status"] != "available"]
     assert {label(c) for c in pool} >= {f"codex/gpt-6.1-sol@{e}" for e in ("low", "medium", "high", "xhigh", "max")}
-    # Haiku high passed its exact probe (2026-11-20), so it is a plain candidate; the other efforts stay discovery rows.
-    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "xhigh", "max")}
+    # Haiku high (2026-11-20) and xhigh (2026-11-27, #1360) passed their exact probes, so they are plain candidates;
+    # the other efforts stay discovery rows.
+    assert {label(c) for c in pool} >= {f"claude/claude-haiku-5-5@{e}" for e in ("low", "medium", "max")}
+    assert not {label(c) for c in pool} & {"claude/claude-haiku-5-5@high", "claude/claude-haiku-5-5@xhigh"}
     assert "claude/claude-haiku-5-5@high" not in {label(c) for c in pool}
     for c in pool:
         assert c["discovery"] is True and c["route_status"] == "discovered-unconfirmed" and c["probe_key"]

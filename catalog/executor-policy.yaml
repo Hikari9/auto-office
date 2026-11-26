@@ -1,6 +1,6 @@
 # #871: Mutable executor/planner policy data. Runtime catalog route facts remain in TSV files.
 schema_version: 1
-policy_version: owner-xs-xl-scoreboard-2026-11-26-1356
+policy_version: owner-s-canary-haiku-xhigh-2026-11-27-1360
 benchmark_index: Artificial Analysis Engineering Index (2026-11)
 floors: {XS: 31, S: 37, M: 40, L: 45, XL: 52}
 # Owner-approved XS-XL advisory preference intent (not automatic model activation).
@@ -15,8 +15,14 @@ executor_preferred:
     - {rung: 1, model_id: claude-haiku-5-5, effort: high, harness: claude}
     - {rung: 2, model_id: gpt-6.1-terra, effort: low, harness: codex}
     - {rung: 3, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
+  # S CANARY (#1360). Rico 2026-11-26 22:32 Manila (relayed by rico-mode): "S rung: Haiku xhigh (Claude & Hermes),
+  # followed by terra medium & hydrogen medium as fallbacks. Let's set it, observe for at least 10 runs (both time &
+  # accuracy), then if it works let it be canonical for auto-office." Sonnet medium stays allowed at S (pin it when
+  # speed matters more than score). Restore slate (pre-canary, #1356), see docs/route-discovery.md "S canary (#1360)":
+  #   1 claude/claude-sonnet-5-5@medium, 2 codex/gpt-6.1-terra@medium, 3 agy/gemini-4-hydrogen@medium (conditional)
   S:
-    - {rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: claude}
+    - {rung: 1, model_id: claude-haiku-5-5, effort: xhigh, harness: hermes}
     - {rung: 2, model_id: gpt-6.1-terra, effort: medium, harness: codex}
     - {rung: 3, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
   M:
@@ -58,4 +64,14 @@ floor_exceptions:
     role: executor
     score_evidence: missing
     authorization: "score unpublished; no score fabricated"
+    not_waived: [registration, conformance, trust, quota, risk]
+  # S canary (#1360): Haiku 5.5 xhigh has no published AA Engineering Index score (v4.3.2 Intelligence 41).
+  # Listed after Argon: executor_slates.FLOOR_EXCEPTION is the first missing-score exception.
+  - name: haiku-xhigh-s-canary-1360
+    model_id: claude-haiku-5-5
+    effort: xhigh
+    size: S
+    role: executor
+    score_evidence: missing
+    authorization: "score unpublished; no score fabricated; owner S canary decision 2026-11-26 (#1360)"
     not_waived: [registration, conformance, trust, quota, risk]

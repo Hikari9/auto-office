@@ -12,7 +12,8 @@ MAIN_ROUTE_MATRIX = {
     ("executor", "XS"): [("claude", "claude-haiku-5-5", "high"),
                          ("codex", "gpt-6.1-terra", "low"),
                          ("agy", "gemini-4-hydrogen", "low")],
-    ("executor", "S"): [("claude", "claude-sonnet-5-5", "medium"),
+    ("executor", "S"): [("claude", "claude-haiku-5-5", "xhigh"),
+                        ("hermes", "claude-haiku-5-5", "xhigh"),
                         ("codex", "gpt-6.1-terra", "medium"),
                         ("agy", "gemini-4-hydrogen", "medium")],
     ("executor", "M"): [("claude", "claude-sonnet-5-5", "high"),
@@ -143,8 +144,11 @@ def test_haiku_high_and_medium_are_executors_at_xs_only_under_the_shipped_role_p
                 "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
         states = {size: route_policy.effective_role_state(cand, "executor", [], size)["state"] for size in route_policy.SIZES}
         assert states == {"XS": "allow", "S": "neutral", "M": "deny", "L": "deny", "XL": "neutral"}, (effort, states)
-    for effort in ("xhigh", "max"):
-        cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": effort,
-                "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
-        assert {route_policy.effective_role_state(cand, "executor", [], size)["state"]
-                for size in route_policy.SIZES} == {"deny"}
+    cand = {"harness": "claude", "model_id": "claude-haiku-5-5", "effort": "max",
+            "invocation_model_id": "claude-haiku-5-5", "harness_version": "2.1.329"}
+    assert {route_policy.effective_role_state(cand, "executor", [], size)["state"]
+            for size in route_policy.SIZES} == {"deny"}
+    # S canary (#1360): xhigh is allowed at S only.
+    cand = {**cand, "effort": "xhigh"}
+    assert {size: route_policy.effective_role_state(cand, "executor", [], size)["state"] for size in route_policy.SIZES} == {
+        "XS": "deny", "S": "allow", "M": "deny", "L": "deny", "XL": "deny"}

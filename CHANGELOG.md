@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.19
+
+S executor canary (#1360). The S slate is Haiku 5.5 xhigh on Claude Code and Hermes (rung 1 peers), then Terra medium, then conditional Hydrogen medium. The role policy allows Haiku xhigh as an executor at S only, and Sonnet 5.5 medium stays allowed at S for speed. Haiku xhigh has no published Engineering Index score and clears the S floor through the `haiku-xhigh-s-canary-1360` floor exception. `claude/claude-haiku-5-5@xhigh` passed its exact probe (2026-11-27) and is dispatchable, and `hermes/claude-haiku-5-5@xhigh` is a new catalog row. The pre-canary state and the observation and decision rule are in `docs/route-discovery.md` (S canary (#1360)).
+
 ## 3.31.18
 
 `office submit` refuses a plan with an unsized task (T2). On a non-greenfield run, a plan task with no `task_size:` is refused as `plan-invalid` naming every unsized task, and an amendment that adds one is refused the same way. Greenfield keeps its XL pin, and tasks an already-approved plan left unsized survive ordinary amendments.

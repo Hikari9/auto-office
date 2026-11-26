@@ -177,12 +177,12 @@ Pre-#494 runs retain discovery-off behavior and their old ceiling. Their 3.0 and
 
 ## Executor routing table (AA v5)
 
-Executor routing (AA v5, policy `owner-xs-xl-scoreboard-2026-11-26-1356`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
+Executor routing (AA v5, policy `owner-s-canary-haiku-xhigh-2026-11-27-1360`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
 
 | Size | Rung 1 | Rung 2 | Rung 3 |
 |---|---|---|---|
 | XS | claude Haiku 5.5 high | codex Terra low | agy Hydrogen low (conditional) |
-| S | claude Sonnet 5.5 medium | codex Terra medium | agy Hydrogen medium (conditional) |
+| S | claude and hermes Haiku 5.5 xhigh (canary, #1360) | codex Terra medium | agy Hydrogen medium (conditional) |
 | M | claude Sonnet 5.5 high | agy Hydrogen high (conditional) | codex Terra high |
 | L | claude Sonnet 5.5 high | hermes Sonnet 5.5 high | agy Sonnet 5.5 high, then codex Terra high (rung 4) |
 | XL | claude Opus 5.5 high | codex Sol high | agy Neon high |
@@ -192,3 +192,19 @@ The XS, S and L rows follow the executor scoreboard (#1356). Sonnet 5.5 high fir
 Dispatchability follows `catalog/routes.tsv`: codex Sol medium and high passed their exact probes on 2026-11-21, and claude Opus 5.5 high passed on 2026-11-22. Its 2026-11-20 `isolation-missing` failure came from an unreaped zombie child of a Claude hook daemon outside the probe, which probe cleanup now ignores because a zombie runs nothing (#1296). All three XL rungs are dispatchable.
 
 Hydrogen is conditional: it dispatches only through the Hydrogen gate, at exactly one effort per size (XS low, S medium, M high) and none for L or XL, and it is not a code reviewer (code review is Luna high then Opus low). A frontend-heavy task moves its size's agy gemini-* rung to rung 1 for that task only (the frontend bias rule); no route is added. Argon stays executor-eligible through the argon-medium-l floor exception but sits in no slate.
+
+### S canary (#1360)
+
+Rico, 2026-11-26 22:32 Manila (relayed by rico-mode): "S rung: Haiku xhigh (Claude & Hermes), followed by terra medium & hydrogen medium as fallbacks. Let's set it, observe for at least 10 runs (both time & accuracy), then if it works let it be canonical for auto-office. Now, sonnet medium would still be an option if speed is needed more than score (I'm assuming haiku xhigh would actually score better). But if speed isn't an issue, then it should be the new rung 1 if it wins. If it doesn't, keep status quo but record the result"
+
+The S slate is a canary: rung 1 is `claude/claude-haiku-5-5@xhigh` and `hermes/claude-haiku-5-5@xhigh` (adaptive peers), rung 2 `codex/gpt-6.1-terra@medium`, rung 3 `agy/gemini-4-hydrogen@medium` (conditional). The role policy allows Haiku xhigh as an executor at S only, on both harnesses. Sonnet 5.5 medium stays allowed at S, so a task that needs speed more than score can pin it with `--as claude/claude-sonnet-5-5@medium`. Haiku xhigh has no published Engineering Index score (Intelligence Index v4.3.2: 41), so it clears the S floor through the `haiku-xhigh-s-canary-1360` floor exception; no score is fabricated. `claude/claude-haiku-5-5@xhigh` passed its exact probe on 2026-11-27 (claude 2.1.332, model and effort read back) and is dispatchable. The hermes row follows the other hermes Haiku rows (inherited benchmark, not yet conformance-probed). No counted-canary engine is involved: the slate carries across runs, and routing records every dispatch's task size.
+
+Restore (the exact pre-canary state, #1356):
+
+- `catalog/executor-policy.yaml` `executor_preferred.S`: `{rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}`, `{rung: 2, model_id: gpt-6.1-terra, effort: medium, harness: codex}`, `{rung: 3, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}`; `policy_version: owner-xs-xl-scoreboard-2026-11-26-1356`; drop the `haiku-xhigh-s-canary-1360` floor exception.
+- `catalog/role-policy.yaml` executor `claude@2/claude-haiku-5-5`: `allow: {medium: [XS], high: [XS]}`, `deny: {medium: [M, L], high: [M, L], xhigh: all, max: all}`; remove the `hermes/claude-haiku-5-5` rule.
+- The catalog rows (`hermes/claude-haiku-5-5@xhigh`, the claude xhigh probe record) can stay: they are route facts, not preferences.
+
+Observation: S-sized executor dispatches in `runs.db` (`dispatches.size_class = 'S'`, `role = 'executor'`) grouped by route (`harness`, `model`, `effort`), counting wall time (`wall_clock_seconds`), first-try accept (the task's first executor revision accepted with no rerun), rework (further executor dispatches on the task) and review findings (convergence RECHECK rounds and blocking findings). The baseline is Sonnet 5.5 medium at S over the same measure.
+
+Decision after at least 10 canary S tasks: if Haiku xhigh's first-try accept is at least Sonnet medium's, it becomes the shipped S rung 1 (the decision goes to Rico; Sonnet medium stays the pin for speed). If it is not, restore the slate above and record the result here and in `CHANGELOG.md`.
