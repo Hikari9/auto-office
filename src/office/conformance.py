@@ -96,11 +96,13 @@ def probe_vision(con, run: dict, cand: dict, adapter: dict) -> dict:
     dispatch_id = "D" + uuid.uuid4().hex[:8]
     with db.transaction(con):
         con.execute("INSERT INTO dispatches(id, run_id, role, holder_id, triple, invocation_model_id, started_at, kind, "
-                    "office_version, status, harness, model, effort, adapter_id, route_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "office_version, status, harness, model, effort, adapter_id, route_json, size_class) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (dispatch_id, run["id"], "visual_reviewer", dispatch_id, routing.candidate_id(cand),
                      cand.get("invocation_model_id"), now_iso(), "conformance", version.current(), "launching",
                      cand["harness"], cand.get("invocation_model_id"), cand.get("effort"), cand.get("adapter_id"),
-                     "{}"))
+                     # The probe has no task, so it has no task size: record unsized, never the run size (#1365).
+                     "{}", state.UNSIZED))
     d = state.get_dispatch(con, dispatch_id)
     out = ddir / "reply.txt"
     dispatch_mod.launch(run, d, "vision", ddir, cwd=ddir, wait=True, output=out, images=[image], include_dirs=[ddir])

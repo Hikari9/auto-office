@@ -162,3 +162,34 @@ def test_task_code_reviewer_records_the_reviewed_task_size(env):
         assert r["size_class"] == size
         rp = _packet(env, r["id"])
         assert rp["task_size"] == size and rp["task_sizes"] == {"T1": size} and rp["run_gear"] == "S", rp
+
+
+def test_conformance_probe_dispatch_records_unsized(tmp_path, monkeypatch, request):
+    """#1365: the vision probe writes its own dispatches row (no task), so it records unsized, never NULL or the run size."""
+    import uuid
+
+    from office import conformance, db, dispatch, version
+    monkeypatch.setenv("OFFICE_STATE_HOME", str(tmp_path / "state"))
+    con = db.connect(tmp_path / "runs.db")
+    run_id = "R" + uuid.uuid4().hex[:8]
+    # A sized run: a probe that copied the run size would record L here instead of unsized.
+    con.execute("INSERT INTO runs(id, status, requirements_version, plan_version, office_version, gear, risk_json) "
+                "VALUES(?, 'executing', 1, 1, ?, 'M', ?)", (run_id, version.current(), json.dumps({"size_class": "L"})))
+    con.commit()
+    request.addfinalizer(con.close)
+    run = state.get_run(con, run_id)
+    seen = {}
+
+    def launch(run_, d, kind, ddir, *, output, **kw):
+        seen["size_class"] = d.get("size_class")
+        output.write_text("PROBE NO_IMAGE\n")
+
+    monkeypatch.setattr(dispatch, "launch", launch)
+    monkeypatch.setattr(dispatch, "reclaim_pane", lambda run_, did, **kw: "closed")
+    cand = {"harness": "agy", "invocation_model_id": "gemini-3.8-flash", "effort": "low", "adapter_id": "agy",
+            "model_id": "gemini-3.8-flash", "harness_version": "1"}
+    conformance.probe_vision(con, run, cand, {"id": "agy"})
+    rows = [dict(r) for r in con.execute(
+        "SELECT size_class FROM dispatches WHERE run_id=? AND kind='conformance'", (run_id,))]
+    assert rows == [{"size_class": state.UNSIZED}]
+    assert seen["size_class"] == state.UNSIZED
