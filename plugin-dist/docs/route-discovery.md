@@ -177,7 +177,7 @@ Pre-#494 runs retain discovery-off behavior and their old ceiling. Their 3.0 and
 
 ## Executor routing table (AA v5)
 
-Executor routing (AA v5, policy `owner-xs-xl-engineering-index-2026-11-20`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
+Executor routing (AA v5, policy `owner-xs-xl-scoreboard-2026-11-26-1356`, `catalog/executor-policy.yaml`). Size floors use the Artificial Analysis Engineering Index (2026-11): XS 31, S 37, M 40, L 45, XL 52. Preferred executors per size, rung 1 first (arrow fallbacks are soft, never eligibility guarantees):
 
 | Size | Rung 1 | Rung 2 | Rung 3 |
 |---|---|---|---|

@@ -49,10 +49,18 @@ def test_xl_slate_is_the_previous_opus_sol_neon_ladder():
         {"model_id": "gemini-4-neon", "effort": "high", "harness": "agy", "rung": 3}]
 
 
-def test_sonnet_may_run_on_claude_agy_and_hermes_only():
-    [rule] = [r for r in executor_slates.load_policy()["model_restrictions"] if r["model_id"] == "claude-sonnet-5-5"]
-    assert rule["allowed_harnesses"] == ["claude", "agy", "hermes"]
-    assert "Hermes" in rule["reason"]
+@pytest.mark.parametrize("size", ["XS", "S", "M", "L", "XL"])
+@pytest.mark.parametrize("harness, passes", [
+    ("claude", True), ("agy", True), ("hermes", True), ("codex", False), ("opencode", False)])
+def test_sonnet_restriction_passes_claude_agy_and_hermes_and_rejects_other_harnesses(harness, passes, size):
+    candidate = {"harness": harness, "model_id": "claude-sonnet-5-5", "effort": "high"}
+    assert (executor_slates.model_restriction(candidate, size) is None) is passes
+
+
+@pytest.mark.parametrize("size, passes", [("XS", False), ("S", False), ("M", False), ("L", False), ("XL", True)])
+def test_opus_restriction_is_xl_only(size, passes):
+    candidate = {"harness": "claude", "model_id": "claude-opus-5-5", "effort": "high"}
+    assert (executor_slates.model_restriction(candidate, size) is None) is passes
 
 
 @pytest.mark.parametrize("harness, model, effort, size, expected", [
@@ -78,6 +86,15 @@ def test_sonnet_may_run_on_claude_agy_and_hermes_only():
     ("claude", "claude-opus-5-5", "medium", "L", "deny"),
     ("claude", "claude-opus-5-5", "high", "L", "deny"),
     ("claude", "claude-opus-5-5", "high", "XL", "allow"),
+    ("codex", "gpt-6-luna", "high", "XS", "neutral"),
+    ("codex", "gpt-6-luna", "high", "S", "neutral"),
+    ("codex", "gpt-6-luna", "high", "XL", "neutral"),
+    ("codex", "gpt-6.1-terra", "high", "L", "allow"),
+    ("codex", "gpt-6.1-terra", "high", "M", "allow"),
+    ("claude", "claude-haiku-5-5", "medium", "L", "deny"),
+    ("claude", "claude-sonnet-5-5", "medium", "M", "deny"),
+    ("hermes", "claude-sonnet-5-5", "medium", "L", "deny"),
+    ("agy", "claude-sonnet-5-5", "medium", "L", "deny"),
 ])
 def test_executor_role_state_by_size(harness, model, effort, size, expected):
     assert state(harness, model, effort, size) == expected

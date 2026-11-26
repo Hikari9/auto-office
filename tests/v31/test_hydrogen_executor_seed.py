@@ -34,7 +34,7 @@ def test_owner_preference_intent_and_non_dispatchable_hydrogen():
         actual = [(r["model_id"], r["effort"], r.get("harness")) for r in policy["executor_preferred"][size]]
         assert actual == expected
         assert not any(item["model_id"] == "gemini-3.8-flash" for item in policy["executor_preferred"][size])
-    assert policy["model_restrictions"][0]["allowed_sizes"] == ["L", "XL"]
+    assert policy["model_restrictions"][0]["allowed_sizes"] == ["XL"]
     # Rico 2026-11-19: Flash is retired by a shipped deny in every role; its catalog rows stay as history.
     assert routes["agy/gemini-3.8-flash@medium"]["dispatchable"] is True
 
