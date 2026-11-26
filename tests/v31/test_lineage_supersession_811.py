@@ -11,12 +11,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import yaml
 
-from office import adaptive, candidates, model_lineages, paths, route_learning, route_policy, routing, scoring
+from office import adaptive, candidates, model_lineages, paths, route_learning, route_policy, routing, scoring, user_catalog
 
 IDX = "Artificial Analysis Intelligence Index v4.3.2"
 LINEAGES = {"sol": ("gpt-5.6-sol", "gpt-6.1-sol"), "terra": ("gpt-5.6-terra", "gpt-6.1-terra")}
-ROWS = {(r["model_id"], r["effort"]): r for r in candidates.catalog_rows()
-        if r["model_id"] in {m for pair in LINEAGES.values() for m in pair}}
+# Built at import, before any per-test isolation, so the host's user catalog overlay (office model add) is
+# held empty here: an overlay row for another harness at the same model and effort must not replace the
+# shipped codex row cand() describes (#1361).
+with pytest.MonkeyPatch.context() as _mp:
+    _mp.setattr(user_catalog, "load", lambda **_: {"models": [], "disabled": []})
+    ROWS = {(r["model_id"], r["effort"]): r for r in candidates.catalog_rows()
+            if r.get("invocation_harness") == "codex"
+            and r["model_id"] in {m for pair in LINEAGES.values() for m in pair}}
 # Efforts both generations of a lineage carry; 6.1 Sol has no `none` row.
 SHARED = [(name, effort) for name, (old, new) in LINEAGES.items()
           for effort in ("none", "low", "medium", "high", "xhigh", "max")

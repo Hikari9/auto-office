@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.14
+
+`tests/v31/test_lineage_supersession_811.py` builds its catalog rows with an empty user catalog overlay and keeps only codex rows (#1361). It read the host's overlay at import, so a `pi/gpt-6.1-terra` row added with `office model add` replaced the shipped codex row and 17 tests failed on that host.
+
 ## 3.31.13
 
 The agy quota probe now reads the `daily-cloudcode-pa` host agy 1.5 itself uses, falling back to `cloudcode-pa` only on failure (#1339). The production host reported idle 100% windows and no Gemini 4 bucket, so Hydrogen passed the reserve gate with about 0% left. The probe also reports a `gemini-4` family, which reads as exhausted when no bucket is reported, and agy `gemini-4*` routes gate on it.
