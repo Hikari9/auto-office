@@ -7,13 +7,13 @@ import pytest
 from office import adapters, routecmd
 
 EXECUTOR_SLATES = {
-    "XS": "1 claude/claude-haiku-5-5@high > 2 agy/gemini-4-hydrogen@low (conditional, not dispatching without the Hydrogen gate "
-          "(hydrogen_trials)) > 3 codex/gpt-6.1-terra@low",
-    "S": "1 claude/claude-sonnet-5-5@medium > 2 agy/gemini-4-hydrogen@medium (conditional, not dispatching without the Hydrogen "
-         "gate (hydrogen_trials)) > 3 codex/gpt-6.1-terra@medium",
+    "XS": "1 claude/claude-haiku-5-5@high > 2 codex/gpt-6.1-terra@low > 3 agy/gemini-4-hydrogen@low (conditional, not "
+          "dispatching without the Hydrogen gate (hydrogen_trials))",
+    "S": "1 claude/claude-sonnet-5-5@medium > 2 codex/gpt-6.1-terra@medium > 3 agy/gemini-4-hydrogen@medium (conditional, not "
+         "dispatching without the Hydrogen gate (hydrogen_trials))",
     "M": "1 claude/claude-sonnet-5-5@high > 2 agy/gemini-4-hydrogen@high (conditional, not dispatching without the Hydrogen "
          "gate (hydrogen_trials)) > 3 codex/gpt-6.1-terra@high",
-    "L": "1 claude/claude-opus-5-5@medium > 2 codex/gpt-6.2-sol@medium > 3 agy/gemini-4-neon@medium",
+    "L": "1 claude/claude-sonnet-5-5@high > 2 hermes/claude-sonnet-5-5@high > 3 agy/claude-sonnet-5-5@high > 4 codex/gpt-6.1-terra@high",
     "XL": "1 claude/claude-opus-5-5@high > 2 codex/gpt-6.2-sol@high > 3 agy/gemini-4-neon@high",
 }
 HYDROGEN_VISUAL = ("agy/gemini-4-hydrogen@low (conditional, not dispatching without the user's exact allow: "
@@ -42,7 +42,8 @@ def test_every_executor_size_slate_renders_in_rung_order(fresh_install):
         [line] = lines_with(result, f"executor slate {size}: ")
         assert line.startswith(f"  executor slate {size}: {slate}; ")
         assert "frontend-heavy task moves its agy gemini-* rung to rung 1" in line
-    assert [row["rung"] for row in result.data["executor_slates"]["L"]] == [1, 2, 3]
+    assert [row["rung"] for row in result.data["executor_slates"]["L"]] == [1, 2, 3, 4]
+    assert [row["rung"] for row in result.data["executor_slates"]["XL"]] == [1, 2, 3]
 
 
 def test_size_option_renders_only_that_slate(fresh_install):
@@ -92,6 +93,6 @@ def test_the_slate_view_is_absent_without_the_executor_role_or_the_effective_fla
 def test_the_xs_slate_data_names_each_route_and_marks_only_the_hydrogen_rung_conditional(fresh_install):
     rows = routecmd.policy(role="executor", effective=True, size="XS").data["executor_slates"]["XS"]
     assert [(r["rung"], r["route"], r["conditional"]) for r in rows] == [
-        (1, "claude/claude-haiku-5-5@high", False), (2, "agy/gemini-4-hydrogen@low", True),
-        (3, "codex/gpt-6.1-terra@low", False)]
+        (1, "claude/claude-haiku-5-5@high", False), (2, "codex/gpt-6.1-terra@low", False),
+        (3, "agy/gemini-4-hydrogen@low", True)]
 

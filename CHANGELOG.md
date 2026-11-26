@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.14
+
+Executor slates follow the scoreboard (#1356). XS is Haiku 5.5 high, Terra low, then conditional Hydrogen. S is Sonnet 5.5 medium, Terra medium, then conditional Hydrogen. L is Sonnet 5.5 high on Claude Code, Hermes and agy, then Terra high, with no Opus, Sol or Neon. M and XL are unchanged. Sonnet 5.5 may run on claude, agy or hermes. The shipped role policy denies Haiku medium and high at M and L, Terra medium at M and L, Sonnet medium at M and L, GLM max at M and L, the Luna executor at M and L, and Opus medium at L. A frontend-heavy L task has no agy gemini-* rung to promote.
+
 ## 3.31.13
 
 The agy quota probe now reads the `daily-cloudcode-pa` host agy 1.5 itself uses, falling back to `cloudcode-pa` only on failure (#1339). The production host reported idle 100% windows and no Gemini 4 bucket, so Hydrogen passed the reserve gate with about 0% left. The probe also reports a `gemini-4` family, which reads as exhausted when no bucket is reported, and agy `gemini-4*` routes gate on it.

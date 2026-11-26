@@ -444,7 +444,7 @@ The shipped config currently expresses preferences such as:
 |---|---|
 | Planner | Prefer `opus@medium`, then `astra@low`; requires planning capability and at least low effort. |
 | Plan reviewer | Prefer `luna@high`, then Claude `opus@low` (only fallback); requires review capability and benchmark index score >= 31. |
-| Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. |
+| Executor | Requires builder capability and benchmark index score >= 31; selection is shaped by task evidence, quota, policy, and cost. Preferred order per size follows the executor scoreboard (#1356): XS Haiku 5.5 high then Terra low, S Sonnet 5.5 medium then Terra medium, M Sonnet 5.5 high, L Sonnet 5.5 high on Claude Code, then Hermes, then agy, then Terra high (no Opus at L), XL Opus 5.5 high. Conditional Hydrogen is the last XS and S rung. Haiku, Terra medium, Luna and GLM are denied as M/L executors. See `docs/route-discovery.md`. |
 | Code reviewer | Reviews each lane's composed result (per task on `v3.1` runs). Prefer `luna@high`, then Claude `opus@low` (only fallback); independent from the producer's model family; benchmark score >= 31. |
 | Visual reviewer | Prefer agy `gemini-3.8-flash` routes, fallback Sonnet only; also requires a passing image-sensitive conformance proof for that exact route, unless you have allowed the route for the role. |
 | Closeout verifier | Requires verification capability and at least medium effort. |

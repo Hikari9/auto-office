@@ -181,11 +181,13 @@ Executor routing (AA v5, policy `owner-xs-xl-engineering-index-2026-11-20`, `cat
 
 | Size | Rung 1 | Rung 2 | Rung 3 |
 |---|---|---|---|
-| XS | claude Haiku 5.5 high | agy Hydrogen low (conditional) | codex Terra low |
-| S | claude Sonnet 5.5 medium | agy Hydrogen medium (conditional) | codex Terra medium |
+| XS | claude Haiku 5.5 high | codex Terra low | agy Hydrogen low (conditional) |
+| S | claude Sonnet 5.5 medium | codex Terra medium | agy Hydrogen medium (conditional) |
 | M | claude Sonnet 5.5 high | agy Hydrogen high (conditional) | codex Terra high |
-| L | claude Opus 5.5 medium | codex Sol medium | agy Neon medium |
+| L | claude Sonnet 5.5 high | hermes Sonnet 5.5 high | agy Sonnet 5.5 high, then codex Terra high (rung 4) |
 | XL | claude Opus 5.5 high | codex Sol high | agy Neon high |
+
+The XS, S and L rows follow the executor scoreboard (#1356). Sonnet 5.5 high first-try accept: M 47% (23/49), L 34% (19/56). L has no Opus, Sol or Neon rung. The shipped role policy now denies Haiku medium and high at M and L, Terra medium at M and L (Terra medium is S only), Sonnet medium at M and L, GLM max at M and L (XS only), the Luna executor at M and L, and Opus medium at L. Sonnet 5.5 may run on claude, agy or hermes. XL is unchanged.
 
 Dispatchability follows `catalog/routes.tsv`: codex Sol medium and high passed their exact probes on 2026-11-21, and claude Opus 5.5 high passed on 2026-11-22. Its 2026-11-20 `isolation-missing` failure came from an unreaped zombie child of a Claude hook daemon outside the probe, which probe cleanup now ignores because a zombie runs nothing (#1296). All three XL rungs are dispatchable.
 

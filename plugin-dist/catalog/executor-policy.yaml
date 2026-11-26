@@ -13,20 +13,23 @@ floors: {XS: 31, S: 37, M: 40, L: 45, XL: 52}
 executor_preferred:
   XS:
     - {rung: 1, model_id: claude-haiku-5-5, effort: high, harness: claude}
-    - {rung: 2, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
-    - {rung: 3, model_id: gpt-6.1-terra, effort: low, harness: codex}
+    - {rung: 2, model_id: gpt-6.1-terra, effort: low, harness: codex}
+    - {rung: 3, model_id: gemini-4-hydrogen, effort: low, harness: agy, conditional: true}
   S:
     - {rung: 1, model_id: claude-sonnet-5-5, effort: medium, harness: claude}
-    - {rung: 2, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
-    - {rung: 3, model_id: gpt-6.1-terra, effort: medium, harness: codex}
+    - {rung: 2, model_id: gpt-6.1-terra, effort: medium, harness: codex}
+    - {rung: 3, model_id: gemini-4-hydrogen, effort: medium, harness: agy, conditional: true}
   M:
     - {rung: 1, model_id: claude-sonnet-5-5, effort: high, harness: claude}
     - {rung: 2, model_id: gemini-4-hydrogen, effort: high, harness: agy, conditional: true}
     - {rung: 3, model_id: gpt-6.1-terra, effort: high, harness: codex}
+  # Rico 2026-11-26 (executor scoreboard, #1356): "Just sonnet high first, then fallback to hermes sonnet if it's
+  # available, then agy/codex". Sonnet 5.5 high: M 47% (23/49), L 34% (19/56) first-try accept. No Opus rung at L.
   L:
-    - {rung: 1, model_id: claude-opus-5-5, effort: medium, harness: claude}
-    - {rung: 2, model_id: gpt-6.2-sol, effort: medium, harness: codex}
-    - {rung: 3, model_id: gemini-4-neon, effort: medium, harness: agy}
+    - {rung: 1, model_id: claude-sonnet-5-5, effort: high, harness: claude}
+    - {rung: 2, model_id: claude-sonnet-5-5, effort: high, harness: hermes}
+    - {rung: 3, model_id: claude-sonnet-5-5, effort: high, harness: agy}
+    - {rung: 4, model_id: gpt-6.1-terra, effort: high, harness: codex}
   XL:
     - {rung: 1, model_id: claude-opus-5-5, effort: high, harness: claude}
     - {rung: 2, model_id: gpt-6.2-sol, effort: high, harness: codex}
@@ -46,7 +49,7 @@ planner_preferred:
     - {model_id: gemini-4-argon, effort: high}
 model_restrictions:
   - {model_id: claude-opus-5-5, allowed_sizes: [L, XL], reason: "Opus 5.5 is reserved for L and XL subtasks (got {size})"}
-  - {model_id: claude-sonnet-5-5, allowed_harnesses: [claude, agy], reason: "Sonnet 5.5 harness must be Claude Code or agy"}
+  - {model_id: claude-sonnet-5-5, allowed_harnesses: [claude, agy, hermes], reason: "Sonnet 5.5 harness must be Claude Code, agy or Hermes"}
 floor_exceptions:
   - name: argon-medium-l-intelligence-floor
     model_id: gemini-4-argon

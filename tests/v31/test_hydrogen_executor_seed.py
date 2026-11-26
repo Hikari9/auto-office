@@ -5,10 +5,11 @@ import pytest
 from office import adapters, executor_slates, model_lineages, route_policy, routing, shipped_catalog
 
 EXPECTED = {
-    "XS": [("claude-haiku-5-5", "high", "claude"), ("gemini-4-hydrogen", "low", "agy"), ("gpt-6.1-terra", "low", "codex")],
-    "S": [("claude-sonnet-5-5", "medium", "claude"), ("gemini-4-hydrogen", "medium", "agy"), ("gpt-6.1-terra", "medium", "codex")],
+    "XS": [("claude-haiku-5-5", "high", "claude"), ("gpt-6.1-terra", "low", "codex"), ("gemini-4-hydrogen", "low", "agy")],
+    "S": [("claude-sonnet-5-5", "medium", "claude"), ("gpt-6.1-terra", "medium", "codex"), ("gemini-4-hydrogen", "medium", "agy")],
     "M": [("claude-sonnet-5-5", "high", "claude"), ("gemini-4-hydrogen", "high", "agy"), ("gpt-6.1-terra", "high", "codex")],
-    "L": [("claude-opus-5-5", "medium", "claude"), ("gpt-6.2-sol", "medium", "codex"), ("gemini-4-neon", "medium", "agy")],
+    "L": [("claude-sonnet-5-5", "high", "claude"), ("claude-sonnet-5-5", "high", "hermes"), ("claude-sonnet-5-5", "high", "agy"),
+          ("gpt-6.1-terra", "high", "codex")],
     "XL": [("claude-opus-5-5", "high", "claude"), ("gpt-6.2-sol", "high", "codex"), ("gemini-4-neon", "high", "agy")],
 }
 ENGINEERING_INDEX = "Artificial Analysis Engineering Index (2026-11)"
