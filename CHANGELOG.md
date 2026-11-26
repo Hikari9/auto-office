@@ -4,7 +4,7 @@ One line or short list per version, newest first. The version itself lives only 
 
 ## 3.31.15
 
-Every dispatch records the task's size (#1363). Executor, worker, planner and reviewer `packet.json` files carry `task_size` (XS-XL, or `unsized`), `task_sizes` (per task; a lane or integration review lists each task it covers and `task_size` is the largest), `run_gear`, `run_size_class` and `fastlane`. The `dispatches.size_class` column is now written for reviewer dispatches too (the largest size of the tasks reviewed); it stays NULL for an unsized task, so route learning keeps its descriptor and run-size fallback. `office status` prints a `sizes:` line and `office context` shows each open task's size. Routing is unchanged.
+Every dispatch records the task's size (#1363). Executor, worker, planner and reviewer `packet.json` files carry `task_size` (XS-XL, or `unsized`), `task_sizes` (per task; a lane or integration review lists each task it covers and `task_size` is the largest), `run_gear`, `run_size_class` and `fastlane`. The `dispatches.size_class` column is now written for every role (a reviewer records the largest size of the tasks it reviews), `unsized` when there is none; route learning reads `unsized` as an empty column, so its descriptor and run-size fallback is unchanged. `office status` prints a `sizes:` line and `office context` shows each open task's size. Routing is unchanged.
 
 ## 3.31.14
 

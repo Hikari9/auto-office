@@ -12,6 +12,7 @@ import pytest
 
 from conftest import GOOD_ADD, PLAN_ONE, approved_run, task_row
 from office import state
+from test_route_learning_discovery import con, seed, outcome as learning_outcome  # noqa: F401 - fixtures
 
 SIZED_PLAN = PLAN_ONE.replace(
     "visual: none\n",
@@ -53,8 +54,23 @@ def test_largest_size_ignores_unsized(sizes, want):
     assert state.largest_size(sizes) == want
 
 
-def test_column_size_is_null_when_unsized():
-    assert state.column_size("unsized") is None and state.column_size("L") == "L"
+def test_recorded_size_reads_unsized_as_null():
+    assert state.recorded_size("unsized") is None and state.recorded_size("L") == "L" and state.recorded_size(None) is None
+
+
+def test_route_learning_reads_an_unsized_column_like_null(con, seed):
+    """The column now says `unsized` where it was NULL; route learning's size fallback must not change."""
+    seed.run("R1")
+    seed.task("R1", "T1", accepted="V1")
+    seed.dispatch("R1", "D1", "T1")
+    seed.revision("R1", "V1", "D1", "T1")
+    con.execute("UPDATE dispatches SET size_class=NULL WHERE id='D1'")
+    before = learning_outcome(con, "D1")["size_class"]
+    con.execute("UPDATE dispatches SET size_class='unsized' WHERE id='D1'")
+    after = learning_outcome(con, "D1")["size_class"]
+    assert after == before and after != "unsized"
+    con.execute("UPDATE dispatches SET size_class='L' WHERE id='D1'")
+    assert learning_outcome(con, "D1")["size_class"] == "L"
 
 
 def test_context_reads_a_null_descriptor_as_unsized(env):
@@ -118,7 +134,7 @@ def test_unsized_task_records_unsized_and_context_shows_it(env):
     con.commit()
     env.office("dispatch", "T1", env={"OFFICE_WORKER_LAUNCHER": "external"}, check=0)
     (ex,) = _rows(env, "executor")
-    assert ex["size_class"] is None  # NULL keeps route learning's descriptor/run-size fallback unchanged
+    assert ex["size_class"] == "unsized"
     pkt = _packet(env, ex["id"])
     assert pkt["task_size"] == "unsized" and pkt["task_sizes"] == {"T1": "unsized"}, pkt
     code, out = env.office("status")
@@ -137,6 +153,6 @@ def test_task_code_reviewer_records_the_reviewed_task_size(env):
     reviewers = _rows(env, "code_reviewer")
     assert reviewers
     for r in reviewers:
-        assert r["size_class"] == state.column_size(size)
+        assert r["size_class"] == size
         rp = _packet(env, r["id"])
         assert rp["task_size"] == size and rp["task_sizes"] == {"T1": size} and rp["run_gear"] == "S", rp

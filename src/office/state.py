@@ -460,10 +460,10 @@ def largest_size(sizes) -> str:
     return max(known, key=TASK_SIZES.index) if known else UNSIZED
 
 
-def column_size(size: str) -> str | None:
-    """The value for dispatches.size_class: the size, or NULL when unsized. Route learning and gear rollout read a
-    NULL column as "fall back to the descriptor, then the run's size_class"; `unsized` there would change routing."""
-    return None if size == UNSIZED else size
+def recorded_size(value: str | None) -> str | None:
+    """A dispatches.size_class value as a size: `unsized` (#1363) reads as NULL, so readers that fall back to the
+    descriptor and then the run's size_class when the column is empty keep doing so."""
+    return None if value == UNSIZED else value
 
 
 def size_record(run: dict, sizes: dict[str, str]) -> dict:
