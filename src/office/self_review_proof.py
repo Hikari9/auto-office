@@ -1,6 +1,6 @@
 """#938: the revert-and-fail proof of a new run's self-review, run by Office, never by the executor.
 Each medium or high fix in the ledger names one test. Office runs that test alone on two disposable
-checkouts of the task's commit: with the task's modified non-test source reverted it must fail (a test
+checkouts of the task's commit: with the task's modified non-test files reverted (source and data, #1373) it must fail (a test
 failure; any collection error, usage error, timeout or missing command does not count), and unreverted it must pass.
 Source files the task adds are never deleted by the revert. A fix that lives in one of them cannot be reverted,
 so when the test passes with the revert and the task adds non-test source, the proof is exempt, not passed.
@@ -45,13 +45,52 @@ _SHELL_OPERATORS = frozenset(("&&", "||", ";", "|"))
 _MAX_SECONDS = 120
 _MAX_TESTS = 5
 _PYTEST_TEST_FAILED = 1  # pytest's exit code for "tests ran and some failed"
-_VERSION = "main-proof-7"
+_VERSION = "main-proof-8"
 def applicable(run: dict) -> bool:
     return contract.is_convergence(run)
 def _sources(changed: list[str]) -> list[str]:
     from office.preflight import _is_test_path
     return sorted(p for p in changed
                   if not _is_test_path(p) and Path(p).suffix.lower() in _SOURCE_SUFFIXES)
+def _revertible(changed: list[str]) -> list[str]:
+    """#1373: the changed paths the revert returns to base: the non-test sources (as before), plus data and config
+    and config files (YAML, TSV, JSON, Markdown, pyproject.toml) outside test directories, whatever their suffix. A fix
+    in a data file is then reverted with the code that reads it, so a loader is never reverted without the data it
+    validates, and a stale test fixed against a data change can fail. Reverting runner configuration the task changed
+    can fail a genuine proof at collection; that blocks (fails closed), it never passes a proof."""
+    from office.preflight import _is_test_path
+    sources = set(_sources(changed))
+    data = {p for p in changed if p not in sources and not _is_test_path(p) and not _under_test_dir(p)}
+    return sorted(sources | data)
+
+
+def _untouchable(checkout: Path, head: str, paths_: list[str]) -> set[str]:
+    """Paths a textual reverse patch cannot restore in a disposable worktree: Git LFS pointers (the checkout holds
+    the smudged content) and submodule gitlinks. They stay in place, like added files."""
+    if not paths_:
+        return set()
+    kept = set()
+    attrs = subprocess.run(["git", "-C", str(checkout), "check-attr", "-z", "filter", "--", *paths_],
+                           capture_output=True, text=True)
+    fields = attrs.stdout.split("\0")
+    for i in range(0, len(fields) - 2, 3):
+        if fields[i + 2] == "lfs":
+            kept.add(fields[i])
+    tree = subprocess.run(["git", "-C", str(checkout), "ls-tree", "-z", head, "--", *paths_],
+                          capture_output=True, text=True)
+    for entry in tree.stdout.split("\0"):
+        meta, _, path = entry.partition("\t")
+        if meta.startswith("160000 "):
+            kept.add(path)
+    return kept
+
+
+def _under_test_dir(rel: str) -> bool:
+    from office.preflight import _TEST_DIR_SUFFIX, _TEST_DIRS
+    return any(d.lower() in _TEST_DIRS or _TEST_DIR_SUFFIX.search(d.lower())
+               for d in Path(rel.replace("\\", "/")).parent.parts)
+
+
 def named_tests(ledger_text: str | None) -> list[str]:
     """The distinct tests the ledger's medium and high fixes name, in ledger order."""
     from office.preflight import parse_ledger
@@ -153,7 +192,7 @@ def _paths_with_status(checkout: Path, base: str, head: str, paths_: list[str], 
     return [p for p in out.stdout.split("\0") if p]  # -z: names are never quoted, so they match the changed list
 def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str], tests: list[str],
           run: dict) -> dict:
-    sources = _sources(changed)
+    sources = _revertible(changed)
     parent = Path(tempfile.mkdtemp(prefix="office-proof-"))
     red_checkout, green_checkout = parent / "reverted", parent / "restored"
     attached = []
@@ -168,7 +207,10 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
         # A source the task adds stays in place. Deleting it would fail the test at collection on its import,
         # which proves nothing about the fix. Only sources the base already had are reverted.
         added = _paths_with_status(red_checkout, base, head, sources, "A")
-        reverted = [s for s in sources if s not in added]
+        kept = set(added) | _untouchable(red_checkout, head, sources)
+        reverted = [s for s in sources if s not in kept]
+        # Only an added source can hold a fix the revert cannot reach; an added doc or data file never earns an exemption.
+        added_sources = [a for a in added if a in _sources(changed)]
         if reverted:
             patch = subprocess.run(["git", "-C", str(red_checkout), "diff", "--binary", "--no-ext-diff",
                                     "--no-renames", base, head, "--", *reverted], capture_output=True)
@@ -187,7 +229,7 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
             command = " ".join(shlex.quote(w) for w in [*_resolve_interpreter(runner, wt, green_checkout), test])
             red, red_out = _run(red_checkout, command, run)
             if red != _PYTEST_TEST_FAILED:
-                if red == 0 and added:
+                if red == 0 and added_sources:
                     exempt.append(test)  # the fix may live in a file the revert cannot touch
                 else:
                     if red == 0:
