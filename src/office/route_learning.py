@@ -29,7 +29,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from office import scoring, state, task_descriptors
+from office import scoring, task_descriptors
 
 LEARNER_VERSION = "route-learner-2-task"
 
@@ -449,7 +449,7 @@ def derive_outcomes(con: sqlite3.Connection) -> list[dict]:
             "descriptor": descriptor,
             "route": route_key(harness, model, effort), "harness_major": t_major,
             "playbook": run.get("playbook"),
-            "size_class": state.recorded_size(dispatched_size) or descriptor.get("task_size") or run.get("size_class"),
+            "size_class": task_descriptors.recorded_size(dispatched_size) or descriptor.get("task_size") or run.get("size_class"),
             "kind": "fix" if len(starts.get((run_id, task_id), [])) > 1 and
                     min(starts[(run_id, task_id)]) < (started or "") else "fresh",
             "success": success, "attribution": attr, "attribution_confidence": round(conf, 2),

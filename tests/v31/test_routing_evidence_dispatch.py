@@ -99,8 +99,8 @@ def _sized(plan: str, size: str | None, run_size: str | None = None) -> str:
 @pytest.mark.parametrize("task_size,run_size,expected", [
     ("M", None, "M"),
     ("XL", "S", "XL"),   # the task's own size wins over the run's
-    (None, "L", None),   # a task without task_size gets NULL even when the run has size_class
-    (None, None, None),
+    (None, "L", "unsized"),   # a task without task_size records unsized, never the run's size_class (#1363)
+    (None, None, "unsized"),
 ])
 def test_an_executor_dispatch_copies_the_tasks_size_not_the_runs(env, task_size, run_size, expected):
     _approve(env, plan=_sized(PLANNED, task_size, run_size))

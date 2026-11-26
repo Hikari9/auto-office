@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.31.17
+
+Four tests failing on main after #1364/#1366 pass again. The task-size helpers (`task_size`, `largest_size`, `recorded_size`, `UNSIZED`) move from `state` to the dependency-free `task_descriptors` (`state` re-exports them), so `route_learning` no longer pulls in `yaml` and `scripts/routing_evidence_report.py` run from a checkout without site-packages keeps its episodes section. The dispatch-size test expects `unsized` for an unsized task, matching #1363. `tests/v31/test_issue_1363_dispatch_size.py` gets its retirement inventory and legacy table rows.
+
 ## 3.31.16
 
 The vision conformance probe's dispatch record now stores `size_class` as `unsized` instead of leaving it empty (#1365). The probe has no task, so it never takes the run size.
