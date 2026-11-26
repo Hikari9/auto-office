@@ -140,6 +140,18 @@ def test_a_legacy_unsized_task_survives_an_amendment_that_adds_a_sized_one(env):
 
 
 @pytest.mark.approved
+def test_a_changed_plan_submit_keeps_a_legacy_unsized_task_and_refuses_a_new_unsized_one(env):
+    approved_run(env, executor=[{}])
+    _make_plan_legacy(env)
+    code, out = _submit(env, _unsize(PLAN_TWO, "T1"))
+    assert "plan-invalid" not in out and "no `task_size:`" not in out, out  # sizing passed; a later gate may still block
+    assert _plan_rows(env) == 1
+    code, out = _submit(env, _unsize(PLAN_TWO))
+    assert code != 0 and "plan-invalid" in out and "T2 has no" in out, out
+    assert "T1" not in out.split("plan has problems:", 1)[1], out
+
+
+@pytest.mark.approved
 def test_resubmitting_the_unsized_plan_on_record_stays_a_no_op(env):
     approved_run(env, executor=[{}])
     _make_plan_legacy(env)
