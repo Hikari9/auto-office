@@ -13,7 +13,7 @@ from office import adapters, routecmd
 INSTALLED_CLAUDE = "2.1.311"
 INSTALLED_CODEX = "0.130.0"
 SONNET = "claude/claude-sonnet-5-5@high"
-PLAIN = "codex/gpt-6-luna@low"  # no shipped executor rule, so no size scope
+PLAIN = "codex/gpt-5.6-luna@low"  # no shipped executor rule (#1356 size-scoped gpt-6-luna), so no size scope
 SHIPPED_SONNET_BY_SIZE = "deny XS,S (shipped), allow M,L (shipped), neutral XL (default)"
 
 
@@ -141,7 +141,7 @@ def test_a_route_change_that_writes_nothing_says_nothing_about_running_runs(isol
 
 def test_a_preferred_seed_allow_is_named_by_size_and_a_user_size_deny_outranks_it(isolated):
     isolated.write_text(yaml.safe_dump({
-        "roles": {"executor": {"preferred_seed": [{"harness": "codex", "model_id": "gpt-6-luna", "effort": "low"}]}},
+        "roles": {"executor": {"preferred_seed": [{"harness": "codex", "model_id": "gpt-5.6-luna", "effort": "low"}]}},
         "routing": {"user_policy": {"role_rules": [{"role": "executor", "route": PLAIN, "state": "deny", "sizes": ["S"]}]}}}))
     result = view()
     assert line_for(result, PLAIN).endswith("; by size: allow XS,M,L,XL (preferred_seed), deny S (user)")
