@@ -75,5 +75,47 @@ def test_test_directory_data_is_not_reverted(tmp_path):
          "pkg/Calc.Tests/case.json", "spec/x.yml"]) == ["catalog/x.yaml", "docs/a.md", "src/a.py"]
 
 
-def test_the_cache_version_moved_so_earlier_results_are_not_reused():
-    assert self_review_proof._VERSION == "main-proof-8"
+def _prove(wt, base, head, changed, test="tests/test_policy.py"):
+    return self_review_proof.prove(wt, base, head, changed, RUNNER, [test], NEW_RUN)
+
+
+def test_an_added_doc_does_not_exempt_a_test_that_passes_without_the_fix(tmp_path):
+    """Only an added source can hold an unreachable fix. A task that modifies source and adds a doc, with a named
+    test that passes on the reverted checkout, is still blocked."""
+    wt, base, head = _repo(
+        tmp_path, {"calc.py": "def add(a, b):\n    return a + b\n"},
+        {"calc.py": "def add(a, b):\n    return a + b\n\nX = 1\n", "docs/new.md": "# new\n",
+         "data/new.json": "{}\n", "tests/test_policy.py": "def test_ok():\n    assert True\n"})
+    result = _prove(wt, base, head, ["calc.py", "data/new.json", "docs/new.md", "tests/test_policy.py"])
+    assert not result["ok"] and result["status"] == "blocked", result
+    assert "passes without the fix" in result["reason"]
+
+
+def test_a_fixture_under_tests_keeps_the_submitted_version(tmp_path):
+    """The test reads a new fixture key at import. If the fixture were reverted the test would error at collection
+    (never a proof). It stays at head, so only the source revert fails the test, by its assertion."""
+    test = ("import json, pathlib\nfrom calc import add\n"
+            "CASE = json.loads((pathlib.Path(__file__).parent / 'fixtures' / 'case.json').read_text())['sum']\n\n"
+            "def test_add():\n    assert add(2, 3) == CASE\n")
+    wt, base, head = _repo(
+        tmp_path, {"calc.py": "def add(a, b):\n    return a - b\n", "tests/fixtures/case.json": "{}\n"},
+        {"calc.py": "def add(a, b):\n    return a + b\n", "tests/fixtures/case.json": '{"sum": 5}\n',
+         "tests/test_policy.py": test})
+    result = _prove(wt, base, head, ["calc.py", "tests/fixtures/case.json", "tests/test_policy.py"])
+    assert result["ok"] and result["status"] == "passed", result
+
+
+def test_runner_configuration_is_not_reverted(tmp_path):
+    """The task registers a marker under --strict-markers in pyproject.toml and its fix test uses it. Reverting
+    pyproject.toml would fail the test at collection; it stays at head, so the genuine proof passes."""
+    base_cfg = '[tool.pytest.ini_options]\naddopts = "--strict-markers"\nmarkers = []\n'
+    head_cfg = base_cfg.replace("markers = []", 'markers = ["canary: new marker"]')
+    test = ("import pytest\nfrom calc import add\n\n"
+            "@pytest.mark.canary\ndef test_add():\n    assert add(2, 3) == 5\n")
+    wt, base, head = _repo(
+        tmp_path, {"calc.py": "def add(a, b):\n    return a - b\n", "pyproject.toml": base_cfg},
+        {"calc.py": "def add(a, b):\n    return a + b\n", "pyproject.toml": head_cfg, "tests/test_policy.py": test})
+    changed = ["calc.py", "pyproject.toml", "tests/test_policy.py"]
+    assert self_review_proof._revertible(changed) == ["calc.py"]
+    result = _prove(wt, base, head, changed)
+    assert result["ok"] and result["status"] == "passed", result

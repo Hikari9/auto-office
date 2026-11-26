@@ -52,12 +52,49 @@ def _sources(changed: list[str]) -> list[str]:
     from office.preflight import _is_test_path
     return sorted(p for p in changed
                   if not _is_test_path(p) and Path(p).suffix.lower() in _SOURCE_SUFFIXES)
+# Runner, build and repository configuration stays at the submitted commit: reverting it changes how the test runs
+# (markers, addopts, the resolved environment), not what it tests, and would fail a genuine proof at collection.
+_RUNNER_CONFIG = frozenset(("pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini", "uv.lock", "poetry.lock",
+                            "pipfile", "pipfile.lock", "package.json", "package-lock.json", "pnpm-lock.yaml",
+                            "yarn.lock", "bun.lockb", ".gitattributes", ".gitmodules", ".python-version"))
+
+
 def _revertible(changed: list[str]) -> list[str]:
-    """#1373: every changed path the revert returns to base: not a test file and not under a test directory, whatever
-    its suffix. A fix in a data or config file (YAML, TSV, JSON) is then reverted with the code that reads it, so a
-    loader is never reverted without the data it validates, and a stale test fixed against a data change can fail."""
+    """#1373: the changed paths the revert returns to base: the non-test sources (as before), plus data and config
+    files (YAML, TSV, JSON, Markdown) outside test directories, whatever their suffix. A fix in a data file is then
+    reverted with the code that reads it, so a loader is never reverted without the data it validates, and a stale
+    test fixed against a data change can fail. Runner and build configuration is never reverted."""
     from office.preflight import _is_test_path
-    return sorted(p for p in changed if not _is_test_path(p) and not _under_test_dir(p))
+    sources = set(_sources(changed))
+    data = {p for p in changed if p not in sources and not _is_test_path(p) and not _under_test_dir(p)
+            and not _runner_config(p)}
+    return sorted(sources | data)
+
+
+def _runner_config(rel: str) -> bool:
+    name = Path(rel.replace("\\", "/")).name.lower()
+    return name in _RUNNER_CONFIG or (name.startswith("requirements") and name.endswith(".txt"))
+
+
+def _untouchable(checkout: Path, head: str, paths_: list[str]) -> set[str]:
+    """Paths a textual reverse patch cannot restore in a disposable worktree: Git LFS pointers (the checkout holds
+    the smudged content) and submodule gitlinks. They stay in place, like added files."""
+    if not paths_:
+        return set()
+    kept = set()
+    attrs = subprocess.run(["git", "-C", str(checkout), "check-attr", "-z", "filter", "--", *paths_],
+                           capture_output=True, text=True)
+    fields = attrs.stdout.split("\0")
+    for i in range(0, len(fields) - 2, 3):
+        if fields[i + 2] == "lfs":
+            kept.add(fields[i])
+    tree = subprocess.run(["git", "-C", str(checkout), "ls-tree", "-z", head, "--", *paths_],
+                          capture_output=True, text=True)
+    for entry in tree.stdout.split("\0"):
+        meta, _, path = entry.partition("\t")
+        if meta.startswith("160000 "):
+            kept.add(path)
+    return kept
 
 
 def _under_test_dir(rel: str) -> bool:
@@ -182,7 +219,10 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
         # A source the task adds stays in place. Deleting it would fail the test at collection on its import,
         # which proves nothing about the fix. Only sources the base already had are reverted.
         added = _paths_with_status(red_checkout, base, head, sources, "A")
-        reverted = [s for s in sources if s not in added]
+        kept = set(added) | _untouchable(red_checkout, head, sources)
+        reverted = [s for s in sources if s not in kept]
+        # Only an added source can hold a fix the revert cannot reach; an added doc or data file never earns an exemption.
+        added_sources = [a for a in added if a in _sources(changed)]
         if reverted:
             patch = subprocess.run(["git", "-C", str(red_checkout), "diff", "--binary", "--no-ext-diff",
                                     "--no-renames", base, head, "--", *reverted], capture_output=True)
@@ -201,7 +241,7 @@ def prove(wt: Path, base: str, head: str, changed: list[str], runner: list[str],
             command = " ".join(shlex.quote(w) for w in [*_resolve_interpreter(runner, wt, green_checkout), test])
             red, red_out = _run(red_checkout, command, run)
             if red != _PYTEST_TEST_FAILED:
-                if red == 0 and added:
+                if red == 0 and added_sources:
                     exempt.append(test)  # the fix may live in a file the revert cannot touch
                 else:
                     if red == 0:
