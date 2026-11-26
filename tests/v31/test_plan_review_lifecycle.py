@@ -196,7 +196,7 @@ SEAM_EDITS = {
     "lane": PLAN_LANES,
     "converge": PLAN_TWO.replace("scope: mul.py\n", "scope: mul.py\nconverge: arithmetic\n").replace(
         "scope: calc.py\n", "scope: calc.py\nconverge: arithmetic\n"),
-    "task added": PLAN_TWO + "\n### T3: Docs\nscope: DOCS.md\ndepends: none\nchecks: none\naccept:\n- documented\nvisual: none\n",
+    "task added": PLAN_TWO + "\n### T3: Docs\nscope: DOCS.md\ndepends: none\nchecks: none\naccept:\n- documented\nvisual: none\ntask_size: M\ntask_size_rationale: fixture task sized M so the plan passes the unsized-task refusal\n",
     "task removed": PLAN_ONE,
 }
 

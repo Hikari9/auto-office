@@ -46,11 +46,11 @@ non_goals:
 scope: calc.py
 depends: none
 checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - calc.add(2, 3) == 5
 visual: none
-task_size: M
-task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 
 PLAN_TWO = """# Plan
@@ -65,21 +65,21 @@ blast_radius: repo
 scope: calc.py
 depends: none
 checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - calc.add(2, 3) == 5
 visual: none
-task_size: M
-task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 
 ### T2: Implement mul
 scope: mul.py
 depends: none
 checks: python3 -c "import mul; assert mul.mul(2, 3) == 6"
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 accept:
 - mul.mul(2, 3) == 6
 visual: none
-task_size: M
-task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 
 GOOD_ADD = "def add(a, b):\n    return a + b\n"

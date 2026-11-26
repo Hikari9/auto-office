@@ -76,6 +76,8 @@ blast_radius: repo
 ### T1: Header with menu
 scope: site/**
 depends: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 checks: none
 accept:
 - the menu button opens the navigation on desktop and mobile portrait

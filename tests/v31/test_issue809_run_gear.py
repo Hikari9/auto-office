@@ -511,9 +511,10 @@ def test_planner_free_text_rejects_control_characters():
 def test_plan_warns_about_unpaired_size_and_gear_fields():
     orphan = planfile.parse(_plan_with("run_gear_why: coupled interfaces across three packages\n"))
     assert any("without `run_gear:`" in w for w in orphan.warnings), orphan.warnings
-    no_why = PLAN_ONE.replace("visual: none", "visual: none\ntask_size: S", 1)
+    bare = "".join(line for line in PLAN_ONE.splitlines(True) if not line.startswith("task_size"))  # the fixture sizes M
+    no_why = bare.replace("visual: none", "visual: none\ntask_size: S", 1)
     assert any("no `task_size_rationale:`" in w for w in planfile.parse(no_why).warnings)
-    no_size = PLAN_ONE.replace("visual: none", "visual: none\ntask_size_rationale: a bounded single file change", 1)
+    no_size = bare.replace("visual: none", "visual: none\ntask_size_rationale: a bounded single file change", 1)
     assert any("without `task_size:`" in w for w in planfile.parse(no_size).warnings)
     assert planfile.parse(_plan_with("run_gear: l   (optional note)\nrun_gear_why: three coupled packages here\n")
                           ).requirements["run_gear"]["gear"] == "L"

@@ -43,6 +43,8 @@ checks: python3 -c "import calc; assert calc.add(2, 3) == 5"
 accept:
 - calc.add(2, 3) == 5
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 
 ### T2: Implement mul
 scope: mul.py
@@ -52,6 +54,8 @@ checks: python3 -c "import mul; assert mul.mul(2, 3) == 6"
 accept:
 - mul.mul(2, 3) == 6
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 
 PLAN_CHAIN = PLAN_TWO.replace("### T2: Implement mul\nscope: mul.py\ndepends: none",

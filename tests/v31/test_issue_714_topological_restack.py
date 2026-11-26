@@ -17,6 +17,8 @@ checks: none
 accept:
 - the dependency boundary is resolved
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 
 

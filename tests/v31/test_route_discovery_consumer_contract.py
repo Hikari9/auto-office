@@ -718,6 +718,8 @@ accept:
 route: {route}
 route_why: the planner wants this route for this task
 visual: none
+task_size: M
+task_size_rationale: fixture task sized M so the plan passes the unsized-task refusal
 """
 EXTERNAL = {"OFFICE_WORKER_LAUNCHER": "external"}
 CLI_DENIED = "codex/gpt-6.1-terra@high"
