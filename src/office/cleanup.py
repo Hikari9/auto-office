@@ -131,6 +131,166 @@ def _has_online_counterpart(repo: Path, head: str, tips: list[str]) -> bool:
                for tip in tips)
 
 
+def _base_ref(repo: Path) -> str | None:
+    """The default branch's remote-tracking ref (origin/HEAD, else main, else master)."""
+    head = _git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    names = [head.stdout.strip()] if head.returncode == 0 and head.stdout.strip() else []
+    for name in names + ["refs/remotes/origin/main", "refs/remotes/origin/master"]:
+        if _git(repo, "rev-parse", "--verify", "--quiet", name + "^{commit}").returncode == 0:
+            return name
+    return None
+
+
+def _live_base(repo: Path, tips: list[str]) -> str | None:
+    """The default branch ref, only when its local SHA is a live origin tip.
+
+    A stale or unverifiable remote-tracking ref proves nothing about what the
+    online default branch holds now, so content proofs need a live tip.
+    """
+    base = _base_ref(repo)
+    if not base:
+        return None
+    sha = _git(repo, "rev-parse", base + "^{commit}")
+    return base if sha.returncode == 0 and sha.stdout.strip() in tips else None
+
+
+def _patch_ids(repo: Path, patch_text: str) -> list[str]:
+    if not patch_text.strip():
+        return []
+    proc = subprocess.run(["git", "-C", str(repo), "patch-id", "--stable"], input=patch_text,
+                          capture_output=True, text=True, timeout=120)
+    return [line.split()[0] for line in proc.stdout.splitlines() if line.split()] if proc.returncode == 0 else []
+
+
+BASE_SCAN = 2000  # default-branch commits since the merge-base searched for a content match
+
+
+def _merged_by_content(repo: Path, head: str, base: str) -> str | None:
+    """Squash-aware: HEAD's work is on `base` by patch or by every commit title."""
+    mb = _git(repo, "merge-base", base, head)
+    if mb.returncode or not mb.stdout.strip():
+        return None
+    mb = mb.stdout.strip()
+    commits = _git(repo, "rev-list", "--no-merges", f"{mb}..{head}").stdout.split()
+    if not commits:
+        # Only merge commits beyond the base (a composed convergence or
+        # integration branch): merged when merging it into base changes nothing.
+        tree = _git(repo, "merge-tree", "--write-tree", base, head)
+        base_tree = _git(repo, "rev-parse", base + "^{tree}").stdout.strip()
+        if tree.returncode == 0 and tree.stdout.split()[:1] == [base_tree]:
+            return "merging it into the default branch changes nothing"
+        return None
+    base_log = _git(repo, "log", "-p", "--no-merges", f"--max-count={BASE_SCAN}", f"{mb}..{base}")
+    base_ids = set(_patch_ids(repo, base_log.stdout)) if base_log.returncode == 0 else set()
+    squash = _patch_ids(repo, _git(repo, "diff", "--full-index", mb, head).stdout)
+    if squash and squash[0] in base_ids:
+        return "squash-merged into the default branch (patch match)"
+    each = _patch_ids(repo, _git(repo, "log", "-p", "--no-merges", f"{mb}..{head}").stdout)
+    if base_ids and len(each) == len(commits) and all(pid in base_ids for pid in each):
+        return "every commit's patch is on the default branch"
+    titles = _git(repo, "log", "--no-merges", "--format=%s", f"{mb}..{head}").stdout.splitlines()
+    text = _git(repo, "log", f"--max-count={BASE_SCAN}", "--format=%s%n%b", f"{mb}..{base}").stdout
+    lines = {line.strip().lstrip("*-").strip() for line in text.splitlines() if line.strip()}
+    if titles and len(titles) == len(commits) and all(t.strip() and t.strip() in lines for t in titles):
+        return "every commit title is on the default branch"
+    return None
+
+
+def _pr_merged(repo: Path, branch: str | None, head: str) -> bool:
+    """GitHub says a MERGED PR's head is exactly this commit. Any failure is unproven."""
+    if not branch or not shutil.which("gh"):
+        return False
+    try:
+        proc = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "merged",
+                               "--json", "number,headRefOid", "--limit", "5"],
+                              cwd=str(repo), capture_output=True, text=True, timeout=20)
+        data = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return isinstance(data, list) and any(isinstance(pr, dict) and pr.get("headRefOid") == head for pr in data)
+
+
+def merge_proof(repo: Path, head: str, tips: list[str], base: str | None, branch: str | None = None,
+                *, landed: bool = False) -> str | None:
+    """Why HEAD's work is merged (or, for a landed run, superseded and online), else None.
+
+    Merged means on the live default branch: by ancestry, by patch or title
+    (squash merges), or a merged PR whose head is this commit. A landed run's
+    other commits (integration, review and check checkouts) are superseded by
+    the landing and removable once the commit itself is reachable online.
+    """
+    if base:
+        tip = _git(repo, "rev-parse", base + "^{commit}").stdout.strip()
+        if tip and _git(repo, "merge-base", "--is-ancestor", head, tip).returncode == 0:
+            return "reachable from the default branch"
+    if landed and _has_online_counterpart(repo, head, tips):
+        return "superseded by the landing; commit reachable online"
+    if base and (why := _merged_by_content(repo, head, base)):
+        return why
+    if tips and _pr_merged(repo, branch.removeprefix("refs/heads/") if branch else None, head):
+        return "its PR merged on GitHub"
+    return None
+
+
+def _live_pane_cwds() -> set[Path] | None:
+    """Every live Herdr pane's cwd; None when Herdr is installed but cannot answer."""
+    if not shutil.which("herdr"):
+        return set()
+    try:
+        proc = subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True, timeout=10)
+        start = proc.stdout.find("{")
+        data = json.loads(proc.stdout[start:]) if start >= 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    panes = (data.get("result") or {}).get("panes") if isinstance(data, dict) else None
+    if proc.returncode or not isinstance(panes, list):
+        return None
+    cwds = set()
+    for pane in panes:
+        for key in ("cwd", "foreground_cwd"):
+            value = pane.get(key) if isinstance(pane, dict) else None
+            if isinstance(value, str) and value:
+                cwds.add(Path(value).absolute())
+    return cwds
+
+
+def _pane_cwd_blocker(wt: Path) -> str | None:
+    cwds = _live_pane_cwds()
+    if cwds is None:
+        return "Herdr pane list unavailable; live pane cwds unverified"
+    targets = {wt.absolute(), wt.resolve()}
+    for cwd in cwds:
+        for c in {cwd, cwd.resolve()}:
+            if any(c == t or c.is_relative_to(t) for t in targets):
+                return f"live Herdr pane cwd {cwd}"
+    return None
+
+
+def patch_dir(run: dict) -> Path:
+    """Outside the run directory, so office prune never deletes saved work."""
+    return paths.state_home() / "worktree-patches" / run["id"][:8]
+
+
+def save_patch(run: dict, wt: Path, head: str, base: str | None) -> Path:
+    """Save HEAD's commits beyond the default branch as a git-am-able .patch."""
+    repo = Path(run["repo_root"])
+    root = patch_dir(run)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = root / f"{wt.name}-{head[:12]}.patch"
+    if target.is_file() and target.stat().st_size:
+        return target
+    base = base or _base_ref(repo)
+    proc = _git(repo, "format-patch", "--stdout", f"{base}..{head}") if base else \
+        _git(repo, "format-patch", "--stdout", "-1", head)
+    if proc.returncode:
+        raise OSError("cannot save patch: " + proc.stderr.strip()[:160])
+    body = proc.stdout or f"# {wt} HEAD {head}: no commits beyond {base}\n"
+    tmp = target.with_suffix(".patch.tmp")
+    tmp.write_text(body)
+    tmp.replace(target)
+    return target
+
+
 def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
     rows = list(con.execute(
         "SELECT id, pane_id, pid, status FROM dispatches WHERE run_id=? AND worktree=?",
@@ -170,8 +330,15 @@ def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
     return None
 
 
+UNMERGED = "commit not proven recoverable from current online origin: unmerged commits"
+
+
+def _landed(run: dict) -> bool:
+    return (run.get("landing") or {}).get("status") in ("landed", "landed-externally")
+
+
 def _safe_candidate(con, run: dict, wt: Path, registered: dict[Path, dict],
-                    tips: list[str]) -> str | None:
+                    tips: list[str], base: str | None = None, facts: dict | None = None) -> str | None:
     repo = Path(run["repo_root"]).absolute()
     root = (paths.worktrees_dir() / run["id"][:8]).absolute()
     state_dir = Path(run.get("state_dir") or paths.run_dir(run["id"])).absolute()
@@ -205,13 +372,24 @@ def _safe_candidate(con, run: dict, wt: Path, registered: dict[Path, dict],
         return "checkout is a different active run's repository"
     if (blocker := _herdr_blocker(con, run, wt)):
         return blocker
+    if (blocker := _pane_cwd_blocker(wt)):
+        return blocker
     staged = _git(wt, "diff", "--quiet", "--cached", "HEAD", "--")
     unstaged = _git(wt, "diff", "--quiet", "HEAD", "--")
     if staged.returncode or unstaged.returncode:
         return "local tracked edits not archived (preserved in worktree)"
     head = _git(wt, "rev-parse", "HEAD")
-    if head.returncode or not _has_online_counterpart(repo, head.stdout.strip(), tips):
-        return "commit not proven recoverable from current online origin"
+    if head.returncode:
+        return "commit not proven recoverable from current online origin (HEAD unreadable)"
+    if not tips:
+        return "commit not proven recoverable from current online origin (origin unreachable)"
+    sha = head.stdout.strip()
+    branch = info.get("branch") if isinstance(info.get("branch"), str) else None
+    proof = merge_proof(repo, sha, tips, base, branch, landed=_landed(run))
+    if facts is not None:
+        facts.update(head=sha, proof=proof, base=base)
+    if not proof:
+        return UNMERGED
     return None
 
 
@@ -232,10 +410,11 @@ def _eligible(con, run: dict) -> str | None:
         return "terminal transition has no recorded timestamp"
     if run["phase"] == "closed" and not run.get("archive_digest"):
         return "close archive receipt is missing; retain until recovery"
-    landing = run.get("landing") or {}
-    if run["phase"] == "closed" and (landing.get("status") not in ("landed", "landed-externally")
-                                         or landing.get("handoff") and landing.get("status") != "landed-externally"):
-        return "no verified merge; handoff worktrees must be retained"
+    # A handoff or unverified close no longer keeps every worktree: each one
+    # is removed only on its own merge proof (_safe_candidate), else kept.
+    if con.execute("SELECT 1 FROM runs WHERE substr(id,1,8)=? AND id<>? "
+                   "AND phase NOT IN ('closed','abandoned') LIMIT 1", (run["id"][:8], run["id"])).fetchone():
+        return "a live run shares this run's worktree directory prefix"
     return None
 
 
@@ -251,15 +430,19 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
     details = []
     if inspect and not why and worktrees:
         tips = _remote_tips(Path(run["repo_root"]))
+        base = _live_base(Path(run["repo_root"]), tips) if tips else None
         for wt in worktrees:
+            facts: dict = {}
             try:
-                blocker = _safe_candidate(con, run, wt, registered, tips)
+                blocker = _safe_candidate(con, run, wt, registered, tips, base, facts)
+                if blocker == UNMERGED:
+                    blocker += " (would save a .patch)"
                 modified = (datetime.fromtimestamp(wt.stat().st_mtime, tz=timezone.utc).isoformat()
                             if wt.exists() else None)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 blocker, modified = str(exc), None
             details.append({"path": str(wt), "modified_at": modified,
-                            "bytes": _size(wt), "blocker": blocker})
+                            "bytes": _size(wt), "blocker": blocker, "proof": facts.get("proof")})
     return {
         "run_id": run["id"], "repo": run.get("repo_root"), "office_version": run.get("office_version"),
         "phase": run["phase"], "issue": landing.get("issue"),
@@ -271,7 +454,7 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
     }
 
 
-def sweep(con, run: dict, *, override_decline: bool = False) -> dict:
+def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = True) -> dict:
     """One run only; persist independently of terminal lifecycle state."""
     with _lock(run):
         current = state.get_run(con, run["id"])
@@ -291,20 +474,33 @@ def sweep(con, run: dict, *, override_decline: bool = False) -> dict:
         repo = Path(current["repo_root"])
         try:
             registered = _registered(repo)
-            tips = _remote_tips(repo, refresh=True)
+            tips = _remote_tips(repo, refresh=refresh)
+            base = _live_base(repo, tips) if tips else None
             candidates = _candidates(con, current, registered)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             candidates = []
             kept.append({"path": str(repo), "reason": f"discovery failed: {exc}"})
-            registered, tips = {}, []
+            registered, tips, base = {}, [], None
+        patches = []
         for wt in candidates:
             try:
-                reason = _safe_candidate(con, current, wt, registered, tips)
+                facts: dict = {}
+                reason = _safe_candidate(con, current, wt, registered, tips, base, facts)
                 if reason == "already absent":
+                    continue
+                if reason == UNMERGED:
+                    # Unmerged work stays in its worktree, and a .patch is saved too.
+                    saved = save_patch(current, wt, facts["head"], base)
+                    patches.append(str(saved))
+                    kept.append({"path": str(wt), "reason": f"{reason} (patch saved: {saved})", "patch": str(saved)})
                     continue
                 if reason:
                     kept.append({"path": str(wt), "reason": reason})
                     continue
+                if facts.get("proof") != "reachable from the default branch":
+                    # Proven by content, PR or landing rather than by ancestry:
+                    # keep a .patch of the commits before removing the checkout.
+                    patches.append(str(save_patch(current, wt, facts["head"], base)))
                 from office import deploy_artifacts
                 # Capture and verify all nontracked and ignored files, including .env,
                 # before risking any destructive Git worktree operation.
@@ -312,7 +508,7 @@ def sweep(con, run: dict, *, override_decline: bool = False) -> dict:
                 # Re-check immediately: writers, panes or commits could change
                 # while the backup was being prepared.
                 recent = _registered(repo)
-                reason = _safe_candidate(con, current, wt, recent, _remote_tips(repo))
+                reason = _safe_candidate(con, current, wt, recent, _remote_tips(repo), base)
                 if reason:
                     kept.append({"path": str(wt), "reason": "changed since archive: " + reason})
                     continue
@@ -338,18 +534,38 @@ def sweep(con, run: dict, *, override_decline: bool = False) -> dict:
                         "kept": kept, "bytes": bytes_reclaimed})
         if removed:
             _git(repo, "worktree", "prune")
-        if not kept:
-            prefix = f"refs/heads/office/{current['id'][:8]}/"
-            refs = _git(repo, "for-each-ref", "--format=%(refname)", prefix)
-            if refs.returncode == 0:
-                for ref in refs.stdout.splitlines():
-                    name = ref.removeprefix("refs/heads/")
-                    proc = _git(repo, "branch", "-d", name)
-                    (branch_deleted if proc.returncode == 0 else branch_kept).append(name)
+        branch_deleted, branch_kept = _delete_merged_branches(current, repo, tips, base)
         report = {"removed": removed, "kept": kept, "branches": branch_deleted,
-                  "branches_kept": branch_kept, "bytes": bytes_reclaimed}
+                  "branches_kept": branch_kept, "bytes": bytes_reclaimed, "patches": patches}
         _record(con, current, "incomplete" if kept else "complete", report)
         return report
+
+
+def _delete_merged_branches(run: dict, repo: Path, tips: list[str], base: str | None) -> tuple[list[str], list[str]]:
+    """Delete local office/<run8>/* branches whose tip is merged. Never a remote branch."""
+    deleted, kept = [], []
+    if not tips:
+        return deleted, kept
+    refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)", f"refs/heads/office/{run['id'][:8]}/")
+    if refs.returncode:
+        return deleted, kept
+    try:
+        checked_out = {info.get("branch") for info in _registered(repo).values()}
+    except OSError:
+        return deleted, [line.split()[0].removeprefix("refs/heads/") for line in refs.stdout.splitlines() if line]
+    for line in refs.stdout.splitlines():
+        ref, _, sha = line.partition(" ")
+        if not ref.startswith("refs/heads/office/"):
+            continue
+        name = ref.removeprefix("refs/heads/")
+        proof = None if ref in checked_out else merge_proof(repo, sha, tips, base, name, landed=_landed(run))
+        # -D only after a merge proof (squash merges fail -d); the ref and SHA
+        # are pinned so a branch that moved since the proof is not deleted.
+        if proof and _git(repo, "update-ref", "-d", ref, sha).returncode == 0:
+            deleted.append(name)
+        else:
+            kept.append(name)
+    return deleted, kept
 
 
 def older(con, *, skip_run: str | None = None, repo_common: str | None = None,
@@ -372,6 +588,122 @@ def older(con, *, skip_run: str | None = None, repo_common: str | None = None,
         if item["worktrees"]:
             out.append(item)
     return out
+
+
+GC_BUDGET_SECONDS = 90.0  # close-time sweep of older runs; the rest waits for the next close or office gc
+
+
+def _age_days(run: dict) -> float | None:
+    try:
+        when = datetime.fromisoformat(str(run.get("terminal_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() / 86400
+
+
+def gc(con, *, dry_run: bool = False, older_than: float | None = None, skip_run: str | None = None,
+       budget: float | None = None) -> dict:
+    """Sweep worktrees of every terminal run, across all repos Office knows.
+
+    Only closed or abandoned runs are visited; _safe_candidate still keeps any
+    path another live run records or a live Herdr pane sits in. A dry run
+    fetches nothing and writes nothing.
+    """
+    import time
+    start = time.monotonic()
+    out = {"dry_run": dry_run, "runs": 0, "removed": [], "kept": [], "would_remove": [], "branches": [],
+           "patches": [], "bytes": 0, "deferred": []}
+    rows = list(con.execute(
+        "SELECT r.id FROM runs r LEFT JOIN cleanup_runs c ON c.run_id=r.id "
+        "WHERE r.office_version IS NOT NULL AND r.phase IN ('closed','abandoned') "
+        "AND (r.pruned_at IS NULL OR r.prune_status!='complete') "
+        "AND (c.status IS NULL OR c.status<>'declined') ORDER BY r.terminal_at DESC"))
+    receipts = {r["run_id"]: r["status"] for r in con.execute("SELECT run_id, status FROM cleanup_runs")}
+    fetched: set[str] = set()
+    for row in rows:
+        if row["id"] == skip_run:
+            continue
+        # The budgeted close-time pass skips runs already swept clean; an
+        # explicit office gc rechecks them for later leaks.
+        if budget is not None and receipts.get(row["id"]) == "complete":
+            continue
+        run = state.get_run(con, row["id"])
+        if older_than is not None and ((age := _age_days(run)) is None or age < older_than):
+            continue
+        if budget is not None and time.monotonic() - start > budget:
+            out["deferred"].append(run["id"])
+            continue
+        out["runs"] += 1
+        if dry_run:
+            info = preview(con, run, inspect=True)
+            if info["blocker"]:
+                out["kept"].append({"run_id": run["id"], "path": "", "reason": info["blocker"]})
+            for d in info["details"]:
+                if d["blocker"] is None:
+                    out["would_remove"].append({"run_id": run["id"], "path": d["path"], "proof": d.get("proof")})
+                    out["bytes"] += d["bytes"]
+                elif d["blocker"] != "already absent":
+                    out["kept"].append({"run_id": run["id"], "path": d["path"], "reason": d["blocker"]})
+            continue
+        common = str(run.get("git_common_dir"))
+        try:
+            report = sweep(con, run, refresh=common not in fetched)
+        except Refused as exc:
+            out["kept"].append({"run_id": run["id"], "path": "", "reason": str(exc)})
+            continue
+        fetched.add(common)
+        out["removed"].extend({"run_id": run["id"], "path": p} for p in report["removed"])
+        out["kept"].extend({"run_id": run["id"], **k} for k in report["kept"] if k.get("path"))
+        out["branches"].extend(report.get("branches", []))
+        out["patches"].extend(report.get("patches", []))
+        out["bytes"] += report["bytes"]
+    return out
+
+
+def _gc_summary(report: dict) -> str:
+    verb = "would remove" if report["dry_run"] else "removed"
+    count = len(report["would_remove"] if report["dry_run"] else report["removed"])
+    line = (f"gc: {report['runs']} finished run(s) checked; {verb} {count} worktree(s), kept {len(report['kept'])}, "
+            f"~{report['bytes']/1e9:.2f} GB {'reclaimable' if report['dry_run'] else 'freed'}")
+    if report["branches"]:
+        line += f", deleted {len(report['branches'])} merged local branch(es)"
+    if report["deferred"]:
+        line += f"; {len(report['deferred'])} run(s) left for the next close or office gc (time budget)"
+    return line
+
+
+def auto_gc(con, run: dict) -> list[str]:
+    """End of every close: sweep this run if abandoned, then older finished runs under a time budget."""
+    if os.environ.get("OFFICE_NO_AUTO_GC") == "1":
+        return ["gc: skipped (OFFICE_NO_AUTO_GC=1); run office gc"]
+    lines = []
+    try:
+        current = state.get_run(con, run["id"])
+        if current and current["phase"] == "abandoned":
+            own = sweep(con, current)
+            lines.append(f"abandoned run cleanup: removed {len(own['removed'])} worktree(s), "
+                         f"kept {len([k for k in own['kept'] if k.get('path')])}, ~{own['bytes']/1e9:.3f} GB reclaimed")
+            lines.extend(f"kept worktree {k['path']} ({k['reason']})" for k in own["kept"] if k.get("path"))
+        lines.append(_gc_summary(gc(con, skip_run=run["id"], budget=GC_BUDGET_SECONDS)))
+    except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
+        lines.append(f"gc: skipped ({str(exc)[:160]}); run office gc")
+    return lines
+
+
+def gc_command(con, *, dry_run: bool = False, older_than: float | None = None) -> Result:
+    report = gc(con, dry_run=dry_run, older_than=older_than)
+    res = Result(lines=[_gc_summary(report)])
+    for item in report["would_remove"]:
+        res.add(f"would remove {item['path']} ({item['proof']})")
+    for item in report["removed"]:
+        res.add(f"removed {item['path']}")
+    for item in report["kept"]:
+        res.add(f"kept {item['path'] or short(item['run_id'])}: {item['reason']}")
+    res.data = report
+    res.next = "office gc" if dry_run and report["would_remove"] else None
+    return res
 
 
 def offer(con, run: dict) -> list[str]:

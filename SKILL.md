@@ -246,5 +246,5 @@ Crossing the per-executor cap (`executor_context.threshold_tokens`, default 2000
 
 ## Diagnostics
 `office inspect run|plan|task|gate|evidence|events|route|learner|convergence|startup|economics [id]` and `--verbose`/`--json` show the detail default output hides (economics is opt-in: `docs/orchestrator-reference.md`).
-`office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs.
+`office doctor` checks the install, hooks, pinned runtimes, and known harness defects. `office list` and `office prune` (dry run; `-f` to delete) maintain runs. Every close sweeps merged worktrees (squash-aware; unmerged, dirty or live-pane ones kept with a `.patch`); `office gc [--dry-run] [--older-than DAYS]` sweeps all finished runs.
 Review semantics live in `docs/review-convergence.md` and the runtime design in `docs/v31-implementation.md`; you need neither to run the lifecycle.

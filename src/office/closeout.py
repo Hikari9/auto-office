@@ -300,7 +300,7 @@ def finish(con, run: dict, landing: dict, *, pr: str | None = None) -> tuple[lis
     for item in cleaned["kept"]:
         lines.append(f"kept worktree {item['path']} ({item['reason']})")
     if cleaned["branches_kept"]:
-        lines.append(f"kept branch(es) git branch -d refused (not merged locally): {', '.join(cleaned['branches_kept'][:4])}")
+        lines.append(f"kept branch(es) not proven merged: {', '.join(cleaned['branches_kept'][:4])}")
     what = f"{pr} merged" if pr else "merged"
     base_part = (f"{base} synced" if sync["synced"] else f"{base} sync skipped")
     summary = f"{what}, {base_part}, {len(cleaned['removed'])} worktree(s) removed{jobs_part}"

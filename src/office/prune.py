@@ -179,6 +179,16 @@ def force(con, run_id: str | None = None) -> Result:
 
 def _prune_one(con, run_id: str) -> str | None:
     """Delete one run's local data. Returns None on success, else a reason."""
+    # Worktrees go through the cleanup engine first: it removes merged ones and
+    # keeps (with a .patch) unmerged, dirty or live ones. Prune never deletes those.
+    from office import cleanup
+    try:
+        swept = cleanup.sweep(con, state.get_run(con, run_id), override_decline=True)
+    except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
+        return f"worktree cleanup failed, nothing pruned: {exc}"
+    held = [k for k in swept["kept"] if k.get("path")]
+    if held:
+        return "worktrees kept, nothing pruned: " + "; ".join(f"{k['path']}: {k['reason']}" for k in held)[:400]
     try:
         with db.transaction(con):
             run = state.get_run(con, run_id)
@@ -197,6 +207,15 @@ def _prune_one(con, run_id: str) -> str | None:
         return f"locked: {exc}"
     problems = []
     for wt in _worktrees(run):
+        # A worktree the engine could not judge (deferred run) still gets its
+        # commits saved as a .patch before removal; no patch, no removal.
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True)
+        if head.returncode == 0:
+            try:
+                cleanup.save_patch(run, wt, head.stdout.strip(), None)
+            except (OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"worktree {wt.name} kept: {exc}")
+                continue
         proc = subprocess.run(["git", "-C", run["repo_root"], "worktree", "remove", "--force", str(wt)],
                               capture_output=True, text=True)
         if proc.returncode != 0 and wt.exists():
@@ -215,7 +234,8 @@ def _prune_one(con, run_id: str) -> str | None:
         except OSError:
             problems.append(f"binding {b.name} not removed")
     wt_root = paths.worktrees_dir() / run_id[:8]
-    shutil.rmtree(wt_root, ignore_errors=True)
+    if not problems:
+        shutil.rmtree(wt_root, ignore_errors=True)
     sdir = Path(run["state_dir"]) if run.get("state_dir") else None
     if sdir and sdir.exists():
         # Recheck before the recursive deletion as well: close may have kept
