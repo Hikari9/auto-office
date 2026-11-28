@@ -68,7 +68,8 @@ Auto Office {ver}
   office route policy --effective --role <role> [--size XL] | allow|neutral|deny|clear <route> --role <role> [--size XS,S]
                                     role-scoped user allow/neutral/deny (no active run required)
   office route override <route> --role <role> --run <id> --reason "<why>"
-                                    user-issued one-off deny override (terminal, or --rico-quote/--quoted-at)
+                                    user-issued one-off deny override (terminal, or --rico-quote/--quoted-at); a route
+                                    without @effort (harness/model, harness, model family) takes the task size's effort
   office route migrate [--apply|--rollback]
                                     dry-run, apply or roll back the legacy trust/deny -> role policy migration
   office model add|list|disable|enable|verify|registry|policy|ceiling|unceil
@@ -450,7 +451,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="smoke: launch a form carrying a permission/trust flag when no safer form exists")
     s = sp.add_parser("route", parents=[common])
     s.add_argument("action", choices=["policy", "allow", "neutral", "deny", "clear", "override", "migrate"])
-    s.add_argument("ident", nargs="?", help="harness/model@effort or harness@major/model@effort")
+    s.add_argument("ident", nargs="?", help="harness/model@effort or harness@major/model@effort; override also takes "
+                   "harness/model, a bare harness (agy) or a model family (gemini), effort inferred from the task size")
     s.add_argument("--reason", help="override: why this denied route should run")
     s.add_argument("--ttl", help="override: lifetime of the receipt, 1m to 24h (default 30m)")
     s.add_argument("--revoke", metavar="ID", help="override: revoke a receipt")
