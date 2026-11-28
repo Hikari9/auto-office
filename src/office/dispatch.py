@@ -524,6 +524,18 @@ def enforce_effort_ceiling(task: dict, text: str, quote: str | None, *, flag: st
     return {"model": model, "effort": effort, "quote": quote} if effort else None
 
 
+def size_inferred_effort(task: dict, text: str) -> dict | None:
+    """For `--as harness/model` with no effort on a sized task: the effort size inference picks (#1378).
+
+    None when the route names its effort, names no harness or model, or the task is unsized (today's catalog
+    default applies). A sized task whose size gives no effort for that route is refused with the choices."""
+    want = candidates.parse_route_override(text)
+    size = state.task_size(task)
+    if want["effort"] or not want["harness"] or not want["model_id"] or size not in state.TASK_SIZES:
+        return None
+    return candidates.infer_route(size, "executor", want["harness"].partition("@")[0], want["model_id"])
+
+
 def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | None = None,
                          flag: str = "--as") -> dict:
     """An unquoted name is the orchestrator's selection, with ordinary safety gates.
@@ -532,11 +544,16 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
     the decision itself so queued starts and later reruns cannot upgrade authority.
     """
     validate_route_quote(quote, text)
+    inferred = size_inferred_effort(task, text) if flag == "--as" else None
+    if inferred:
+        text = f"{text}@{inferred['effort']}"
     ceiling = enforce_effort_ceiling(task, text, quote, flag=flag)
     config = state.pinned_config(run)
     actor = "user" if quote is not None else "orchestrator"
     reason = f'user override ({flag} {text}): "{quote}"' if quote is not None \
         else f"orchestrator choice ({flag} {text})"
+    if inferred:
+        reason += f"; {inferred['why']}"
     authority = {"actor": actor, "reason": reason, "flag": flag,
                  **({"quote": quote} if quote is not None else {})}
     if quote is not None:
@@ -563,6 +580,9 @@ def named_executor_route(con, run: dict, task: dict, text: str, *, quote: str | 
                 decision["selection_disclosure"]["reason"] = f"{reason}; deny overridden by user receipt {receipt}"
     decision.update(route_authority=authority, route_source="override" if quote is not None else "orchestrator",
                     _qualified=True)
+    if inferred:  # the effort is Office's inference from the task size, never the user's or orchestrator's choice
+        decision["effort_inferred"] = f"size {state.task_size(task)}"
+        authority["effort_inferred"] = decision["effort_inferred"]
     resolved = (decision.get("candidate") or {}).get("effort")
     if resolved:  # a model-only selector or catalog default can resolve above the ceiling
         ceiling = enforce_effort_ceiling(task, text, quote, flag=flag, effort=resolved)
@@ -977,7 +997,7 @@ def _route_payload(decision: dict) -> dict:
            "preferred_route": preferred, "fallback_routes": fallbacks,
            "size_decision": decision.get("size_decision")}
     for key in ("override", "launch", "benchmark_snapshot", "route_source", "fallbacks_taken", "audit_id",
-                "route_authority", "route_change", "override_ceiling"):
+                "route_authority", "route_change", "override_ceiling", "effort_inferred"):
         if decision.get(key):
             out[key] = decision[key]
     unknown = candidates.quota_unknown_record(decision.get("candidate"))

@@ -383,6 +383,8 @@ def override(*, route: str | None, role: str | None, run: str | None, reason: st
     lines = [f"{receipt['id']}: {receipt['role']} may run {receipt['route']} in run {receipt['run_id'][:8]} "
              f"until {receipt['expires_at']}. Policy is unchanged; capability, sandbox, independence and "
              "landing checks still apply."]
+    if note := route_override.effort_note(receipt, receipt["role"]):
+        lines.append(note.strip())
     if receipt["issuer"] == "quoted":
         lines.append("issued on the user's quoted words: report this override to the user")
     return Result(lines=lines,

@@ -857,6 +857,73 @@ def model_family(model_id: str | None) -> str | None:
     return _FAMILY_ALIASES.get(head, head) or None
 
 
+def infer_route(size: str | None, role: str, harness: str | None = None, model: str | None = None,
+                family: str | None = None, *, policy: dict | None = None) -> dict:
+    """The exact route a route without an effort names for a task of `size` (#1378).
+
+    Returns {harness, model_id, effort, why}. The size's executor-policy rung entry whose harness and model
+    (or model family) match gives the effort; a conditional or canary rung still gives its own. A
+    harness/model with no rung entry takes the lowest catalog effort that meets the size floor. Harness-only
+    and family-only names resolve from rung entries alone. A missing or ambiguous match is refused with the
+    choices. Only executor and worker routes are sized."""
+    policy = policy or executor_slates.POLICY
+    spec = f"{harness or '*'}/{model or family or '*'}"
+    if role not in routing.ADAPTIVE_ROLES:
+        raise state.Refused("effort-not-inferable", f"{spec} names no effort, and only executor and worker routes "
+                            f"infer one from the task size ({role} has none)",
+                            next_step=f"name the effort: {harness or '<harness>'}/{model or '<model>'}@<effort>")
+    if size not in policy["floors"]:
+        raise state.Refused("effort-not-inferable", f"{spec} names no effort, and the task has no size to infer it from",
+                            next_step="name the effort (<harness>/<model>@<effort>) or give the task a task_size")
+    entries = policy["executor_preferred"][size]
+    catalog = catalog_rows() if harness and model else []
+    rows = [r for r in catalog if r.get("invocation_harness") == harness
+            and model in (r.get("model_id"), r.get("invocation_model_id"))]
+    names = {model} | {n for r in rows for n in (r.get("model_id"), r.get("alias_resolved_to")) if n}
+    found: dict[tuple, dict] = {}
+    for entry in entries:
+        if ((not harness or entry.get("harness") in (None, harness))
+                and (not model or entry["model_id"] in names)
+                and (not family or model_family(entry["model_id"]) == family)):
+            found.setdefault((entry.get("harness") or harness, entry["model_id"], entry["effort"]), entry)
+    if len(found) == 1:
+        (h, m, effort), entry = next(iter(found.items()))
+        return {"harness": h, "model_id": m, "effort": effort,
+                "why": f"effort inferred from size {size} (executor-policy rung {entry.get('rung', '-')} {h}/{m}@{effort})"}
+    if found:
+        listed = ", ".join(f"{h or '*'}/{m}@{e}" for h, m, e in found)
+        raise state.Refused("effort-ambiguous", f"{spec} matches several {size} executor-policy rungs: {listed}",
+                            next_step="name one exact route: <harness>/<model>@<effort>")
+    index, floor = policy["benchmark_index"], policy["floors"][size]
+    if rows:
+        from office import onboarding
+        order = onboarding.EFFORT_ORDER
+        rows.sort(key=lambda r: order.index(r["effort"]) if r.get("effort") in order else len(order))
+        def scored(row: dict) -> dict:
+            # The model's score at that effort, from any harness that publishes it (pi rows carry none of their own).
+            if isinstance((row.get("benchmark_indexes") or {}).get(index), (int, float)):
+                return row
+            same = (row.get("alias_resolved_to") or row.get("model_id"), row.get("effort"))
+            score = next((s for r in catalog if (r.get("alias_resolved_to") or r.get("model_id"), r.get("effort")) == same
+                          and isinstance(s := (r.get("benchmark_indexes") or {}).get(index), (int, float))), None)
+            return {**row, "benchmark_indexes": {**(row.get("benchmark_indexes") or {}), index: score}}
+        rows = [scored(r) for r in rows]
+        for row in rows:
+            if (executor_slates.benchmark_gate(row, size, policy) is None
+                    or executor_slates.floor_exception(row, size, role, policy)):
+                return {"harness": harness, "model_id": model, "effort": row["effort"],
+                        "why": f"effort inferred from size {size} (lowest catalog effort meeting {index} >= {floor})"}
+        listed = ", ".join(f"@{r.get('effort')} ({(r.get('benchmark_indexes') or {}).get(index) or 'unscored'})"
+                           for r in rows)
+        raise state.Refused("effort-not-inferable",
+                            f"{spec} has no {size} executor-policy rung and no catalog effort meets {index} >= {floor}: "
+                            f"{listed}", next_step=f"name the effort: {harness}/{model}@<effort>")
+    listed = ", ".join(f"{e.get('harness') or '*'}/{e['model_id']}@{e['effort']}" for e in entries)
+    raise state.Refused("effort-not-inferable", f"{spec} matches no {size} executor-policy rung"
+                        + ("" if family or not model else " and no catalog row") + f"; {size} rungs: {listed}",
+                        next_step="name one of those routes, or an exact <harness>/<model>@<effort>")
+
+
 # agy's "Claude and GPT models" group shares one allowance.
 _AGY_QUOTA_FAMILY = {"gpt": "claude"}
 
@@ -963,7 +1030,7 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
     policy_override = None
     if active_policy["state"] == "deny":
         from office import route_override
-        receipt = route_override.find_valid(run_id, role, named)
+        receipt = route_override.find_valid(run_id, role, named, size=_recorded_task_size(run_id, scope))
         context = f"{role} {harness}/{named['model_id']}@{named['effort']}"
         # Validation only checks the receipt is free for this scope; a launch (claim=True) takes it atomically.
         if receipt and (route_override.record_use(receipt, context, scope=scope) if claim
@@ -1008,6 +1075,19 @@ def declared_candidate(harness: str, model: str, effort: str | None = None, *, r
         "override": True,
         **({"policy_override": policy_override} if policy_override else {}),
     }
+
+
+def _recorded_task_size(run_id: str | None, task_id: str | None) -> str | None:
+    """The task's own planned size (XS-XL), or None: a receipt without an effort infers it from this (#1378)."""
+    if not run_id or not task_id:
+        return None
+    from contextlib import closing
+    from office import db
+    try:
+        with closing(db.connect()) as con:
+            return state.task_size(state.get_task(con, run_id, task_id))
+    except sqlite3.Error:
+        return None
 
 
 def route_cooldown_until(con: sqlite3.Connection, candidate: dict) -> str | None:
@@ -1401,7 +1481,8 @@ def route_role(con: sqlite3.Connection, config: dict, run: dict, role: str, *,
             from office import route_override
             granted = {}
             for c in candidates:
-                if receipt := route_override.find_valid(run["id"], role, c, con=con):
+                if receipt := route_override.find_valid(run["id"], role, c, con=con,
+                                                        size=state.task_size(task_for_route)):
                     # A planning/inspection call only checks the receipt is free for this task; a real
                     # routing call claims it atomically so a second task cannot reuse it.
                     free = (route_override.available_for(receipt, task_id, con=con) if observe else

@@ -6,10 +6,14 @@ override`, typing 'authorize'), or by a non-worker caller relaying the user's
 verbatim words with `--rico-quote` and `--quoted-at` (the user's standing
 permission of 2026-11-15, "Any non-worker, quoted"). A worker never issues one.
 The issuer kind, quote, quote time and caller pane are recorded in the receipt and
-its HMAC. A receipt is bound to one run, one role and one exact route, is consumed by the
+its HMAC. A receipt is bound to one run, one role and one route, is consumed by the
 first dispatch that records it, expires quickly, is HMAC-signed with a per-user key, and every use is appended to an
 audit table. A receipt overrides policy only. It never widens capability,
 sandbox, reviewer-independence or landing checks, which run after it.
+
+A route may leave out its effort (`harness/model`, a bare harness, or a model family such as `gemini`, #1378).
+Such a receipt records `effort_source = size` and matches only the effort size inference picks for the dispatched
+task (candidates.infer_route), never another one.
 
 Threat model: this stops an orchestrator or repo from impersonating the user
 through the CLI, config or text. A process with the user's OS account can read
@@ -48,6 +52,10 @@ _DDL = (
 
 # Nullable columns added after #837 shipped; a receipt without `issuer` keeps its original MAC body.
 _ISSUER_COLUMNS = ("quote", "quoted_at", "issuer", "pane")
+# #1378: `size` when the route names no effort. The MAC covers it only when set, so older receipts still verify.
+_LATER_COLUMNS = (*_ISSUER_COLUMNS, "effort_source")
+EFFORT_FROM_SIZE = "size"
+ANY = "*"  # a stored partial route's wildcard: `agy/*` (harness only), `*/gemini` (model family only)
 MANILA = timezone(timedelta(hours=8))
 QUOTED_AT_FORMAT = "%Y-%m-%d %H:%M"
 MAX_QUOTE_AGE = timedelta(hours=24)
@@ -64,7 +72,7 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     for ddl in _DDL:
         con.execute(ddl)
     have = {row[1] for row in con.execute("PRAGMA table_info(route_override_receipts)")}
-    for column in _ISSUER_COLUMNS:
+    for column in _LATER_COLUMNS:
         if column not in have:
             try:
                 con.execute(f"ALTER TABLE route_override_receipts ADD COLUMN {column} TEXT")
@@ -90,6 +98,8 @@ def _mac(receipt: dict) -> str:
     body = "|".join(str(receipt[k]) for k in ("id", "nonce", "run_id", "role", "route", "issued_at", "expires_at"))
     if receipt.get("issuer") is not None:
         body += "|" + json.dumps([receipt.get(k) or "" for k in _ISSUER_COLUMNS], ensure_ascii=True)
+    if receipt.get("effort_source"):
+        body += "|effort_source=" + str(receipt["effort_source"])
     return hmac.new(_key(), body.encode(), hashlib.sha256).hexdigest()
 
 
@@ -119,7 +129,7 @@ def require_user_terminal() -> None:
                       "without an interactive terminal a policy override needs the user's verbatim words: a "
                       "non-worker caller passes --rico-quote \"<their words>\" --quoted-at \"<YYYY-MM-DD HH:MM Manila>\"; "
                       "a bare --quote, a worker or invented words cannot create one",
-                      next_step="relay the user's real words: office route override <harness/model@effort> --role <role> "
+                      next_step="relay the user's real words: office route override <harness/model[@effort]> --role <role> "
                                 "--run <run> --reason \"<why>\" --rico-quote \"<verbatim>\" --quoted-at \"<YYYY-MM-DD HH:MM>\" "
                                 "(Manila time), or the user runs it in their own terminal")
 
@@ -165,31 +175,89 @@ def issue(con: sqlite3.Connection, *, run_id: str, role: str, route: str, reason
         raise Usage("unknown-role", f"unknown routing role {role!r}")
     if not reason or len(reason.strip()) < 3:
         raise Usage("reason-required", "state why this denied route should run (--reason)")
-    want = candidates.parse_route_override(route)
-    if not want["harness"] or not want["model_id"] or not want["effort"]:
-        raise Usage("invalid-route", "an override names one exact route: <harness>/<model>@<effort>")
+    stored = _stored_route(route, role)
     run = state.find_run(con, run_id)
     if run is None:
         raise Usage("unknown-run", f"no run {run_id!r}")
     now = datetime.now(timezone.utc)
     receipt = {"id": "O" + secrets.token_hex(4), "nonce": secrets.token_hex(16), "run_id": run["id"], "role": role,
-               "route": f"{want['harness']}/{want['model_id']}@{want['effort']}", "reason": reason.strip(),
+               "route": stored, "reason": reason.strip(),
                "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                "expires_at": (now + timedelta(seconds=ttl_s)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                "quote": quote if quoted else "", "quoted_at": quoted_at if quoted else "",
-               "issuer": "quoted" if quoted else "terminal", "pane": os.environ.get("HERDR_PANE_ID", "")}
+               "issuer": "quoted" if quoted else "terminal", "pane": os.environ.get("HERDR_PANE_ID", ""),
+               "effort_source": None if "@" in stored else EFFORT_FROM_SIZE}
     summary = (f"override a role deny: {receipt['route']} as {role} in run {run['id'][:8]} for "
-               f"{ttl_s // 60} min. Capability, sandbox, reviewer independence and landing checks still apply.")
+               f"{ttl_s // 60} min.{effort_note(receipt, role)} Capability, sandbox, reviewer independence and "
+               "landing checks still apply.")
     if not quoted and not confirm(summary):
         raise Refused("override-declined", "the override was not confirmed")
     receipt["mac"] = _mac(receipt)
     with db.transaction(con):
         ensure_schema(con)
         con.execute("INSERT INTO route_override_receipts(id, nonce, run_id, role, route, reason, issued_at, expires_at, mac, "
-                    "quote, quoted_at, issuer, pane) "
+                    "quote, quoted_at, issuer, pane, effort_source) "
                     "VALUES(:id,:nonce,:run_id,:role,:route,:reason,:issued_at,:expires_at,:mac,"
-                    ":quote,:quoted_at,:issuer,:pane)", receipt)
+                    ":quote,:quoted_at,:issuer,:pane,:effort_source)", receipt)
     return receipt
+
+
+def _stored_route(route: str, role: str) -> str:
+    """The route a receipt records: an exact `harness/model@effort` byte-for-byte as before, or one without an
+    effort (#1378): `harness/model`, `harness/*` for a bare harness, `*/family` for a bare model family."""
+    from office import adapters, candidates, routing
+    want = candidates.parse_route_override(route)
+    harness, model, effort = want["harness"], want["model_id"], want["effort"]
+    if harness and model and effort:
+        return f"{harness}/{model}@{effort}"
+    shape = "an override names <harness>/<model>[@<effort>], a bare harness or a bare model family"
+    if effort or ANY in route or (not harness and "/" in route):
+        raise Usage("invalid-route", shape)
+    if role not in routing.ADAPTIVE_ROLES:
+        raise Usage("invalid-route", f"only an executor or worker override may leave out the effort (it is inferred "
+                    f"from the task size, which {role} has none of): name <harness>/<model>@<effort>")
+    known = adapters.load_all()
+    if harness:
+        if "@" in harness:
+            raise Usage("invalid-route", f"{route!r}: a harness major pin needs the exact route <harness>@<major>/<model>@<effort>")
+        if harness not in known:
+            raise Usage("unknown-harness", f"{route!r} names harness {harness!r}, which has no adapter",
+                        next_step="use one of: " + ", ".join(sorted(known)))
+        return f"{harness}/{model or ANY}"
+    if model in known:
+        return f"{model}/{ANY}"  # a harness name wins over a family of the same name (claude)
+    families = {candidates.model_family(r.get("model_id")) for r in candidates.catalog_rows()}
+    if model and model == candidates.model_family(model) and model in families:
+        return f"{ANY}/{model}"
+    raise Usage("invalid-route", f"{route!r}: {shape} (a model without its harness is neither)")
+
+
+def _partial(route: str) -> dict | None:
+    """A stored route without an effort as infer_route arguments, or None for an exact route."""
+    if "@" in route.rpartition("/")[2]:
+        return None
+    harness, _, model = route.partition("/")
+    harness = None if harness == ANY else harness
+    if model == ANY:
+        return {"harness": harness, "model": None, "family": None}
+    return {"harness": harness, "model": model if harness else None, "family": None if harness else model}
+
+
+def effort_note(receipt: dict, role: str) -> str:
+    """For a route without an effort: the effort is inferred from the task size, with what each size resolves to."""
+    if receipt.get("effort_source") != EFFORT_FROM_SIZE or (spec := _partial(receipt["route"])) is None:
+        return ""
+    from office import candidates, executor_slates
+    from office.state import Refused
+    picks = []
+    for size in executor_slates.SIZES:
+        try:
+            pick = candidates.infer_route(size, role, **spec)
+        except Refused:
+            continue
+        picks.append(f"{size} {pick['harness']}/{pick['model_id']}@{pick['effort']}")
+    return (" The effort will be inferred from the task's size at dispatch ("
+            + ("; ".join(picks) if picks else "no size resolves this route today") + ").")
 
 
 def revoke(con: sqlite3.Connection, receipt_id: str) -> bool:
@@ -206,15 +274,34 @@ def list_receipts(con: sqlite3.Connection, run_id: str | None = None) -> list[di
     return [dict(r) for r in con.execute(sql, (run_id,) if run_id else ())]
 
 
-def _route_matches(route: str, cand: dict) -> bool:
-    spec, _, effort = route.rpartition("@")
-    harness, _, model = spec.partition("/")
+def _route_matches(receipt: dict, cand: dict, size: str | None = None) -> bool:
+    route = receipt["route"]
     models = {cand.get(k) for k in ("model_id", "invocation_model_id", "alias_resolved_to")}
-    return harness == cand.get("harness") and model in models and effort == cand.get("effort")
+    spec = _partial(route)
+    if spec is None:
+        spec_text, _, effort = route.rpartition("@")
+        harness, _, model = spec_text.partition("/")
+        return harness == cand.get("harness") and model in models and effort == cand.get("effort")
+    if receipt.get("effort_source") != EFFORT_FROM_SIZE:
+        return False
+    from office import candidates
+    from office.state import Refused
+    if (spec["harness"] and spec["harness"] != cand.get("harness")) or (
+            spec["family"] and spec["family"] != candidates.model_family(cand.get("model_id"))):
+        return False  # cheap: inference reads the catalog, and routing asks once per candidate
+    try:
+        pick = candidates.infer_route(size, receipt["role"], **spec)
+    except Refused:
+        return False  # no size, no rung, or an ambiguous one: a receipt without an effort grants nothing
+    return (pick["harness"] == cand.get("harness") and pick["model_id"] in models
+            and pick["effort"] == cand.get("effort"))
 
 
-def find_valid(run_id: str | None, role: str, cand: dict, *, con: sqlite3.Connection | None = None) -> dict | None:
-    """The unexpired, unrevoked, correctly signed receipt for exactly this run, role and route."""
+def find_valid(run_id: str | None, role: str, cand: dict, *, con: sqlite3.Connection | None = None,
+               size: str | None = None) -> dict | None:
+    """The unexpired, unrevoked, correctly signed receipt for exactly this run, role and route.
+
+    `size` is the task's own size: a receipt without an effort matches only the effort it infers (#1378)."""
     if not run_id:
         return None
     own = con is None
@@ -226,7 +313,7 @@ def find_valid(run_id: str | None, role: str, cand: dict, *, con: sqlite3.Connec
                            "AND expires_at>? ORDER BY issued_at DESC", (run_id, role, now)).fetchall()
         for row in rows:
             receipt = dict(row)
-            if hmac.compare_digest(receipt["mac"], _mac(receipt)) and _route_matches(receipt["route"], cand):
+            if hmac.compare_digest(receipt["mac"], _mac(receipt)) and _route_matches(receipt, cand, size):
                 if _launched(con, receipt):
                     continue  # one-off: a dispatch that carries this receipt consumed it
                 return receipt
