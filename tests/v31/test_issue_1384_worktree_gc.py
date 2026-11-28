@@ -71,6 +71,8 @@ def test_squash_merged_branch_worktree_is_removed_with_patch_and_branch_deleted(
     assert env.git("ls-remote", "--heads", "origin", "main").strip(), "remote branches are never deleted"
     patches = list((env.state / "worktree-patches" / rid[:8]).glob("T7-*.patch"))
     assert len(patches) == 1 and "T7: first step" in patches[0].read_text(), patches
+    branch_patches = list((env.state / "worktree-patches" / rid[:8]).glob(f"office_{rid[:8]}_T7-*.patch"))
+    assert branch_patches, "a branch deleted on a content proof keeps a .patch"
 
 
 def test_unmerged_commits_are_kept_and_a_patch_is_saved(env, monkeypatch):
@@ -168,6 +170,7 @@ def test_title_match_alone_never_proves_a_merge(env, monkeypatch):
     rid = _closed(env, monkeypatch)
     _no_panes(monkeypatch)
     wt = _leftover(env, rid, "T2")
+    env.git("-C", str(wt), "reset", "-q", "--hard", "origin/main~1")  # the title is then after the merge-base
     title = env.git("log", "-1", "--format=%s", "origin/main").strip()
     _commit(env, wt, "different.txt", "content main never had\n", title)
     code, out = env.office("gc")
@@ -205,3 +208,91 @@ def test_closed_run_worktree_recorded_by_a_live_run_is_kept(env, monkeypatch):
     con.commit()
     code, out = env.office("gc")
     assert code == 0 and "in use by a different active run" in out and wt.is_dir(), out
+
+
+
+# --- unit checks of the merge proofs and guards (#1384 self-review findings) ---
+import json as _json
+import os as _os
+import subprocess as _sp
+
+
+def _g(repo, *args):
+    return _sp.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _repo(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _g(repo, "init", "-q", "-b", "main")
+    _g(repo, "config", "user.email", "t@example.test")
+    _g(repo, "config", "user.name", "t")
+    (repo / "a.txt").write_text("a\n")
+    _g(repo, "add", "a.txt")
+    _g(repo, "commit", "-qm", "base")
+    return repo
+
+
+def _fake_bin(tmp_path, monkeypatch, name, body):
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    exe = bindir / name
+    exe.write_text("#!/bin/sh\n" + body + "\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{_os.pathsep}{_os.environ['PATH']}")
+    return exe
+
+
+def test_merge_resolution_content_blocks_the_per_commit_proof(tmp_path):
+    repo = _repo(tmp_path)
+    _g(repo, "checkout", "-qb", "side")
+    (repo / "s.txt").write_text("side\n")
+    _g(repo, "add", "s.txt")
+    _g(repo, "commit", "-qm", "side work")
+    _g(repo, "checkout", "-qb", "feature", "main")
+    (repo / "f.txt").write_text("feature\n")
+    _g(repo, "add", "f.txt")
+    _g(repo, "commit", "-qm", "feature work")
+    _g(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+    (repo / "resolution.txt").write_text("only in the merge commit\n")
+    _g(repo, "add", "resolution.txt")
+    _g(repo, "commit", "-qm", "merge side")
+    head = _g(repo, "rev-parse", "HEAD")
+    _g(repo, "checkout", "-q", "main")
+    _g(repo, "cherry-pick", "side")
+    _g(repo, "cherry-pick", _g(repo, "rev-parse", "feature^1"))
+    assert cleanup._merged_by_content(repo, head, "main") is None
+
+
+def test_pr_proof_requires_the_default_branch_as_base(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    head = _g(repo, "rev-parse", "HEAD")
+    reply = _json.dumps([{"number": 1, "headRefOid": head, "baseRefName": "stack-parent"}])
+    _fake_bin(tmp_path, monkeypatch, "gh", f"echo '{reply}'")
+    assert cleanup._pr_merged(repo, "office/x/T1", head, "main") is False
+    reply = _json.dumps([{"number": 1, "headRefOid": head, "baseRefName": "main"}])
+    _fake_bin(tmp_path, monkeypatch, "gh", f"echo '{reply}'")
+    assert cleanup._pr_merged(repo, "office/x/T1", head, "main") is True
+
+
+def test_pane_without_cwd_fails_closed_and_the_pane_list_is_cached(tmp_path, monkeypatch):
+    counter = tmp_path / "calls"
+    panes = _json.dumps({"result": {"panes": [{"pane_id": "p1"}]}})
+    _fake_bin(tmp_path, monkeypatch, "herdr", f"echo x >> {counter}; echo '{panes}'")
+    monkeypatch.setattr(cleanup, "_PANES", [0.0, None])
+    assert cleanup._query_pane_cwds() is None
+    panes = _json.dumps({"result": {"panes": [{"pane_id": "p1", "cwd": str(tmp_path)}]}})
+    _fake_bin(tmp_path, monkeypatch, "herdr", f"echo x >> {counter}; echo '{panes}'")
+    counter.unlink()
+    assert cleanup._live_pane_cwds() == {tmp_path.absolute()}
+    assert cleanup._live_pane_cwds() == {tmp_path.absolute()}
+    assert counter.read_text().count("x") == 1
+
+
+def test_one_failing_run_never_stops_gc(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    def boom(*_a, **_k):
+        raise RuntimeError("simulated git timeout")
+    monkeypatch.setattr(cleanup, "sweep", boom)
+    report = cleanup.gc(env.con())
+    assert any("gc error: simulated git timeout" in k["reason"] and k["run_id"] == rid for k in report["kept"])
