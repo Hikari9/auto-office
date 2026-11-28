@@ -307,6 +307,21 @@ def patch_dir(run: dict) -> Path:
     return paths.state_home() / "worktree-patches" / run["id"][:8]
 
 
+def _save_full_diff(repo: Path, target: Path, head: str, base: str | None) -> None:
+    """format-patch omits merge commits; a full diff from the merge-base keeps
+    conflict-resolution content too. Written once, beside the .patch."""
+    out = target.with_suffix(".diff")
+    if out.is_file() and out.stat().st_size:
+        return
+    mb = _git(repo, "merge-base", base, head) if base else None
+    if mb is not None and mb.returncode == 0 and mb.stdout.strip():
+        full = _git(repo, "diff", "--binary", mb.stdout.strip(), head)
+        if full.returncode == 0 and full.stdout:
+            tmp = target.with_suffix(".diff.tmp")
+            tmp.write_text(full.stdout)
+            tmp.replace(out)
+
+
 def save_patch(run: dict, wt: Path, head: str, base: str | None, *, label: str | None = None) -> Path:
     """Save HEAD's commits beyond the default branch (else beyond every remote ref) as a .patch."""
     repo = Path(run["repo_root"])
@@ -314,9 +329,10 @@ def save_patch(run: dict, wt: Path, head: str, base: str | None, *, label: str |
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     name = (label or wt.name).replace("/", "_")
     target = root / f"{name}-{head[:12]}.patch"
-    if target.is_file() and target.stat().st_size:
-        return target
     base = base or _base_ref(repo)
+    if target.is_file() and target.stat().st_size:
+        _save_full_diff(repo, target, head, base)
+        return target
     if base:
         proc = _git(repo, "format-patch", "--stdout", f"{base}..{head}")
     else:
@@ -331,15 +347,7 @@ def save_patch(run: dict, wt: Path, head: str, base: str | None, *, label: str |
     if proc.returncode:
         raise OSError("cannot save patch: " + proc.stderr.strip()[:160])
     body = proc.stdout or f"# {wt} HEAD {head}: no commits beyond {base or 'the remotes'}\n"
-    # format-patch omits merge commits; a full diff from the merge-base keeps
-    # conflict-resolution content too.
-    mb = _git(repo, "merge-base", base, head) if base else None
-    if mb is not None and mb.returncode == 0 and mb.stdout.strip():
-        full = _git(repo, "diff", "--binary", mb.stdout.strip(), head)
-        if full.returncode == 0 and full.stdout:
-            diff_tmp = target.with_suffix(".diff.tmp")
-            diff_tmp.write_text(full.stdout)
-            diff_tmp.replace(target.with_suffix(".diff"))
+    _save_full_diff(repo, target, head, base)
     tmp = target.with_suffix(".patch.tmp")
     tmp.write_text(body)
     tmp.replace(target)

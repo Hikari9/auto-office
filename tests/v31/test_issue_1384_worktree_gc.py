@@ -356,3 +356,6 @@ def test_unmerged_merge_only_worktree_keeps_its_resolution_in_a_full_diff(env, m
     assert code == 0 and wt.is_dir() and "patch saved" in out, out
     diffs = list((env.state / "worktree-patches" / rid[:8]).glob("T5m-*.diff"))
     assert diffs and "resolution only in the merge" in diffs[0].read_text(), out
+    diffs[0].unlink()  # a retry that finds the .patch still writes the missing .diff
+    code, out = env.office("gc")
+    assert code == 0 and diffs[0].is_file() and "resolution only in the merge" in diffs[0].read_text(), out
