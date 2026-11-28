@@ -147,14 +147,21 @@ def test_close_runs_gc_over_older_finished_runs(env, monkeypatch):
     assert code == 0 and "gc:" in out and not wt.exists(), out
 
 
-def test_prune_never_force_removes_unmerged_work(env, monkeypatch):
+def test_prune_saves_a_patch_for_unmerged_work_and_keeps_dirty_trees(env, monkeypatch):
     rid = _closed(env, monkeypatch)
     _no_panes(monkeypatch)
+    dirty = _leftover(env, rid, "T3d", branch=False)
+    tracked = next(p for p in dirty.iterdir() if p.is_file() and p.name != ".git")
+    tracked.write_text("uncommitted\n")
+    code, out = env.office("prune", "-f", "--run", rid)
+    assert "pruned 0" in out and "T3d" in out and tracked.read_text() == "uncommitted\n", out
+    env.git("-C", str(dirty), "checkout", "--", tracked.name)
     wt = _leftover(env, rid, "T3")
     _commit(env, wt, "keep.txt", "keep\n", "T3: unmerged")
     code, out = env.office("prune", "-f", "--run", rid)
-    assert "worktrees kept, nothing pruned" in out and wt.is_dir() and (wt / "keep.txt").exists(), out
-    assert list((env.state / "worktree-patches" / rid[:8]).glob("T3-*.patch")), out
+    assert code == 0 and "pruned 1" in out and not wt.exists(), out
+    patches = list((env.state / "worktree-patches" / rid[:8]).glob("T3-*.patch"))
+    assert patches and "T3: unmerged" in patches[0].read_text(), out
 
 
 def test_title_match_alone_never_proves_a_merge(env, monkeypatch):

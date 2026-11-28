@@ -186,9 +186,10 @@ def _prune_one(con, run_id: str) -> str | None:
         swept = cleanup.sweep(con, state.get_run(con, run_id), override_decline=True)
     except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
         return f"worktree cleanup failed, nothing pruned: {exc}"
-    held = [k for k in swept["kept"] if k.get("path")]
-    if not held and swept["kept"] and _worktrees(state.get_run(con, run_id)):
-        held = swept["kept"]  # the engine could not judge this run: its worktrees stay unchecked
+    # prune -f is the explicit delete: unmerged commits go after a .patch is
+    # saved (below). Dirty trees and anything live, locked or in use stay.
+    held = [k for k in swept["kept"] if k.get("path")
+            and not k.get("reason", "").startswith("commit not proven recoverable")]
     if held:
         return "worktrees kept, nothing pruned: " + "; ".join(f"{k['path']}: {k['reason']}" for k in held)[:400]
     try:
@@ -211,6 +212,11 @@ def _prune_one(con, run_id: str) -> str | None:
     for wt in _worktrees(run):
         # A worktree the engine could not judge (deferred run) still gets its
         # commits saved as a .patch before removal; no patch, no removal.
+        dirty = subprocess.run(["git", "-C", str(wt), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            problems.append(f"worktree {wt.name} kept: uncommitted tracked edits")
+            continue
         head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True)
         if head.returncode == 0:
             try:

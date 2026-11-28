@@ -6,7 +6,7 @@ One focused review round by an independent subagent (Sonnet) over the diff, then
 |---|----------|---------|-------------|
 | 1 | high | Title-only proof treated unrelated work as merged when a commit subject matched any line in base history | fixed: title proof removed; replaced by a path-content proof (every changed path equals the default branch tip). Test: test_title_match_alone_never_proves_a_merge, mutation=failed (fails with the old title proof) |
 | 2 | high | Branch deletion saved no .patch before dropping a ref proven merged by content | fixed: save_patch before update-ref -d for any non-ancestry proof |
-| 3 | high | prune -f could force-remove worktrees of a run the engine deferred (unchecked) | fixed: prune refuses when the engine kept anything or deferred a run that still has worktrees. Test: test_prune_never_force_removes_unmerged_work |
+| 3 | high | prune -f could force-remove worktrees without saving unmerged commits | fixed: prune -f (the explicit delete) runs the engine first, keeps dirty, live, locked and in-use trees, and saves a .patch for every unmerged worktree before removing it; no patch, no removal. Test: test_prune_saves_a_patch_for_unmerged_work_and_keeps_dirty_trees |
 | 4 | medium | Exceptions (git timeouts) could abort gc or a close | fixed: per-run broad except in gc, auto_gc never fails a close, preview guards remote tips, merge_proof in branch deletion guarded |
 | 5 | medium | Herdr pane without a cwd failed open | fixed: fail closed (None) |
 | 6 | medium | Performance over ~700 worktrees | fixed: pane list cached 3 s, base patch ids cached per (repo, merge-base, tip), per-sweep deadline, budgeted pass orders least-recently-swept first |
