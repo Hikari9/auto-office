@@ -44,7 +44,9 @@ def test_merged_close_syncs_checked_out_clean_base_and_removes_run_worktrees(env
     assert not [w for w in _office_worktrees(env) if "/mine" not in w], out
     assert other.is_dir() and env.git("branch", "--list", "mine").strip(), "a worktree Office did not create is kept"
     assert not env.git("branch", "--list", "office/*/T*").strip(), out  # merged task branches: git branch -d
-    assert "kept branch(es) git branch -d refused" in out, out  # never -D
+    # #1384: merged branches go by squash-aware proof, including the composed
+    # convergence branch whose merge into main changes nothing.
+    assert "kept branch(es)" not in out and not env.git("branch", "--list", "office/*").strip(), out
 
 
 def test_base_not_checked_out_is_fast_forwarded_by_ref(env, monkeypatch):

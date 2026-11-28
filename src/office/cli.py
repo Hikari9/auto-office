@@ -127,6 +127,7 @@ Auto Office {ver}
   office cleanup --older            preview leftover worktrees from older finished runs
   office cleanup --run <id> --apply  opt in to one verified run's safe worktree cleanup
   office cleanup --run <id> --decline  preserve this older run; suppress future prompts
+  office gc [--dry-run] [--older-than DAYS]  remove merged worktrees of finished runs (all repos; keeps live/unmerged)
 
 Global flags: --run <id>, --json, --verbose. Every command ends with `next:`.
 Principles: MANIFESTO.md. Operating contract: SKILL.md and docs/review-convergence.md.
@@ -548,6 +549,9 @@ def _parser() -> argparse.ArgumentParser:
     choice = s.add_mutually_exclusive_group()
     choice.add_argument("--apply", action="store_true", help="opt in to cleanup of exactly one --run ID")
     choice.add_argument("--decline", action="store_true", help="retain worktrees and suppress future offers")
+    s = sp.add_parser("gc", parents=[common])
+    s.add_argument("--dry-run", action="store_true", help="list what would be removed; change nothing")
+    s.add_argument("--older-than", type=float, metavar="DAYS", help="only runs that ended at least DAYS ago")
     s = sp.add_parser("install", parents=[common])
     s.add_argument("--only", dest="only", action="append", help="limit to one harness")
     s.add_argument("--dry-run", action="store_true")
@@ -920,6 +924,13 @@ def _run(args, unknown) -> int:
         con = _con()
         try:
             return emit(cleanup.command(con, run_id=args.run_arg, apply=args.apply, decline=args.decline), args)
+        finally:
+            con.close()
+    if cmd == "gc":
+        from office import cleanup
+        con = _con()
+        try:
+            return emit(cleanup.gc_command(con, dry_run=args.dry_run, older_than=args.older_than), args)
         finally:
             con.close()
     if cmd == "route":

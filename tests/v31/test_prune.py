@@ -54,6 +54,13 @@ def test_force_prunes_terminal_only_and_keeps_tombstone(env):
     worktree_root = env.state / "worktrees" / run_id[:8]
     assert worktree_root.exists() and Path(run["state_dir"]).exists()
     code, out = env.office("prune", "-f")
+    # #1384: unmerged handoff work is never force-removed; a .patch is saved first.
+    assert "pruned 0" in out and "patch saved" in out and worktree_root.exists(), out
+    assert list((env.state / "worktree-patches" / run_id[:8]).glob("*.patch")), out
+    import shutil  # the operator discards the kept work by hand
+    shutil.rmtree(worktree_root)
+    env.git("worktree", "prune")
+    code, out = env.office("prune", "-f")
     assert code == 0 and "pruned 1" in out, out
     assert not worktree_root.exists() and not Path(run["state_dir"]).exists()
     tomb = dict(con.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())

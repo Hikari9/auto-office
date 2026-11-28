@@ -485,7 +485,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
                 res.add(f"landed after the handoff: {merged['detail']}")
         _closeout(con, run, landing, res, handoff=handoff,
                   pr=landing.get("pr") if external else None)
-        res.lines.extend(cleanup.offer(con, run))
+        res.lines.extend(cleanup.auto_gc(con, run))
         return res
     dispatch.reap_orphans(con, run)
     blockers = gates.close_blockers(con, run)
@@ -540,7 +540,7 @@ def close(con, run: dict, *, handoff: str | None = None) -> Result:
     _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, handoff=handoff)
-    res.lines.extend(cleanup.offer(con, run))
+    res.lines.extend(cleanup.auto_gc(con, run))
     return res
 
 
@@ -672,7 +672,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
         res = Result(lines=[f"{short(run['id'])} external landing verified: {pr['url']}"])
         _closeout(con, state.get_run(con, run["id"]), landing, res,
                   pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
-        res.lines.extend(cleanup.offer(con, run))
+        res.lines.extend(cleanup.auto_gc(con, run))
         return res
     from office import deploy_artifacts
     deploy_artifacts.preserve_interrupted(run)
@@ -714,7 +714,7 @@ def _close_landed_externally(con, run: dict, ref: str, quote: str | None = None)
     _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
     _append_verification_disclosure(res, receipt)
     _closeout(con, run, landing, res, pr=f"PR #{pr['number']}" if pr.get("number") else pr["url"])
-    res.lines.extend(cleanup.offer(con, run))
+    res.lines.extend(cleanup.auto_gc(con, run))
     return res
 
 
@@ -766,8 +766,10 @@ def abandon(con, run: dict, reason: str) -> Result:
         _release_all(con, run["id"], "abandoned")
         _end_bindings(con, run["id"])
     stopped_jobs = _finish_terminal(con, run, live, cancelled_jobs)
-    res = Result(lines=[f"{short(run['id'])} abandoned | work preserved in its worktrees until office prune -f"])
+    res = Result(lines=[f"{short(run['id'])} abandoned | unmerged work stays in its worktrees, with a .patch saved"])
     _append_cancelled_jobs(res, cancelled_jobs, stopped_jobs)
+    from office import cleanup
+    res.lines.extend(cleanup.auto_gc(con, run))
     return res
 
 

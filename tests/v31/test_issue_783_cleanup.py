@@ -5,8 +5,17 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from office import state, gates
 from test_closeout import _merged
+
+
+@pytest.fixture(autouse=True)
+def _no_auto_gc(env, monkeypatch):  # after env, which drops OFFICE_* vars
+    # These cover the opt-in office cleanup command; #1384's close-time gc is
+    # covered in test_issue_1384_worktree_gc.py.
+    monkeypatch.setenv("OFFICE_NO_AUTO_GC", "1")
 
 
 def _run_id(env):
