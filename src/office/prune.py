@@ -187,6 +187,8 @@ def _prune_one(con, run_id: str) -> str | None:
     except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
         return f"worktree cleanup failed, nothing pruned: {exc}"
     held = [k for k in swept["kept"] if k.get("path")]
+    if not held and swept["kept"] and _worktrees(state.get_run(con, run_id)):
+        held = swept["kept"]  # the engine could not judge this run: its worktrees stay unchecked
     if held:
         return "worktrees kept, nothing pruned: " + "; ".join(f"{k['path']}: {k['reason']}" for k in held)[:400]
     try:

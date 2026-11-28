@@ -155,3 +155,46 @@ def test_prune_never_force_removes_unmerged_work(env, monkeypatch):
     code, out = env.office("prune", "-f", "--run", rid)
     assert "worktrees kept, nothing pruned" in out and wt.is_dir() and (wt / "keep.txt").exists(), out
     assert list((env.state / "worktree-patches" / rid[:8]).glob("T3-*.patch")), out
+
+
+def test_title_match_alone_never_proves_a_merge(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    _no_panes(monkeypatch)
+    wt = _leftover(env, rid, "T2")
+    title = env.git("log", "-1", "--format=%s", "origin/main").strip()
+    _commit(env, wt, "different.txt", "content main never had\n", title)
+    code, out = env.office("gc")
+    assert code == 0 and wt.is_dir() and "unmerged commits (patch saved:" in out, out
+
+
+def test_dry_run_mutates_nothing_and_remote_office_branches_survive(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    _no_panes(monkeypatch)
+    wt = _leftover(env, rid, "T1b")
+    _commit(env, wt, "pushed.txt", "pushed\n", "T1b: pushed work")
+    env.git("-C", str(wt), "push", "-q", "origin", f"HEAD:refs/heads/office/{rid[:8]}/T1b")
+    _squash_onto_main(env, wt, "Squash of pushed work")
+    snapshot = lambda: (env.git("show-ref"), env.git("worktree", "list", "--porcelain"),  # noqa: E731
+                        list(env.con().execute("SELECT * FROM cleanup_runs")),
+                        sorted((env.state / "worktree-patches").rglob("*")) if (env.state / "worktree-patches").exists() else [])
+    before = snapshot()
+    code, out = env.office("gc", "--dry-run")
+    assert code == 0 and "would remove" in out and snapshot() == before, out
+    code, out = env.office("gc")
+    assert code == 0 and not wt.exists(), out
+    assert env.git("ls-remote", "--heads", "origin", f"office/{rid[:8]}/T1b").strip(), "remote branch kept"
+
+
+def test_closed_run_worktree_recorded_by_a_live_run_is_kept(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    _no_panes(monkeypatch)
+    wt = _leftover(env, rid, "T0", branch=False)
+    code, out = env.office("start", "still working", "--planner", "inline")
+    assert code == 0, out
+    con = env.con()
+    live = con.execute("SELECT id FROM runs WHERE id<>?", (rid,)).fetchone()[0]
+    con.execute("INSERT INTO dispatches(id, run_id, task_id, role, status, worktree, started_at) "
+                "VALUES('d-live', ?, 'T1', 'executor', 'running', ?, '2026-11-28')", (live, str(wt)))
+    con.commit()
+    code, out = env.office("gc")
+    assert code == 0 and "in use by a different active run" in out and wt.is_dir(), out

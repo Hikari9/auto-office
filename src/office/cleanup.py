@@ -165,8 +165,11 @@ def _patch_ids(repo: Path, patch_text: str) -> list[str]:
 BASE_SCAN = 2000  # default-branch commits since the merge-base searched for a content match
 
 
+_BASE_IDS: dict[tuple[str, str, str], set[str]] = {}  # (repo, merge-base, base tip) -> patch ids, per process
+
+
 def _merged_by_content(repo: Path, head: str, base: str) -> str | None:
-    """Squash-aware: HEAD's work is on `base` by patch or by every commit title."""
+    """Squash-aware: HEAD's work is on `base` by content or by patch."""
     mb = _git(repo, "merge-base", base, head)
     if mb.returncode or not mb.stdout.strip():
         return None
@@ -180,34 +183,45 @@ def _merged_by_content(repo: Path, head: str, base: str) -> str | None:
         if tree.returncode == 0 and tree.stdout.split()[:1] == [base_tree]:
             return "merging it into the default branch changes nothing"
         return None
-    base_log = _git(repo, "log", "-p", "--no-merges", f"--max-count={BASE_SCAN}", f"{mb}..{base}")
-    base_ids = set(_patch_ids(repo, base_log.stdout)) if base_log.returncode == 0 else set()
-    squash = _patch_ids(repo, _git(repo, "diff", "--full-index", mb, head).stdout)
+    # Every path HEAD changed holds HEAD's exact content on the default branch
+    # tip: the work is there however it was squashed. Nothing would be lost.
+    touched = _git(repo, "diff", "--name-only", "--no-renames", "-z", mb, head).stdout.split("\0")
+    touched = [p for p in touched if p]
+    if touched and len(touched) <= 5000 and \
+            _git(repo, "diff", "--quiet", "--no-renames", head, base, "--", *touched).returncode == 0:
+        return "its changed files match the default branch"
+    tip = _git(repo, "rev-parse", base + "^{commit}").stdout.strip()
+    key = (str(repo), mb, tip)
+    if key not in _BASE_IDS:
+        base_log = _git(repo, "log", "-p", "--no-merges", f"--max-count={BASE_SCAN}", f"{mb}..{tip}")
+        _BASE_IDS[key] = set(_patch_ids(repo, base_log.stdout)) if base_log.returncode == 0 else set()
+    base_ids = _BASE_IDS[key]
+    squash = _patch_ids(repo, _git(repo, "diff", mb, head).stdout)
     if squash and squash[0] in base_ids:
         return "squash-merged into the default branch (patch match)"
-    each = _patch_ids(repo, _git(repo, "log", "-p", "--no-merges", f"{mb}..{head}").stdout)
-    if base_ids and len(each) == len(commits) and all(pid in base_ids for pid in each):
-        return "every commit's patch is on the default branch"
-    titles = _git(repo, "log", "--no-merges", "--format=%s", f"{mb}..{head}").stdout.splitlines()
-    text = _git(repo, "log", f"--max-count={BASE_SCAN}", "--format=%s%n%b", f"{mb}..{base}").stdout
-    lines = {line.strip().lstrip("*-").strip() for line in text.splitlines() if line.strip()}
-    if titles and len(titles) == len(commits) and all(t.strip() and t.strip() in lines for t in titles):
-        return "every commit title is on the default branch"
+    # Merge commits can carry conflict-resolution content no single commit
+    # patch shows; the per-commit proof is only for linear branches.
+    merges = _git(repo, "rev-list", "--merges", f"{mb}..{head}").stdout.split()
+    if not merges:
+        each = _patch_ids(repo, _git(repo, "log", "-p", "--no-merges", f"{mb}..{head}").stdout)
+        if base_ids and len(each) == len(commits) and all(pid in base_ids for pid in each):
+            return "every commit's patch is on the default branch"
     return None
 
 
-def _pr_merged(repo: Path, branch: str | None, head: str) -> bool:
-    """GitHub says a MERGED PR's head is exactly this commit. Any failure is unproven."""
-    if not branch or not shutil.which("gh"):
+def _pr_merged(repo: Path, branch: str | None, head: str, base_branch: str | None) -> bool:
+    """GitHub says a PR from this exact commit MERGED into the default branch. Any failure is unproven."""
+    if not branch or not base_branch or not shutil.which("gh"):
         return False
     try:
-        proc = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "merged",
-                               "--json", "number,headRefOid", "--limit", "5"],
+        proc = subprocess.run(["gh", "pr", "list", "--head", branch, "--base", base_branch, "--state", "merged",
+                               "--json", "number,headRefOid,baseRefName", "--limit", "5"],
                               cwd=str(repo), capture_output=True, text=True, timeout=20)
         data = json.loads(proc.stdout) if proc.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
-    return isinstance(data, list) and any(isinstance(pr, dict) and pr.get("headRefOid") == head for pr in data)
+    return isinstance(data, list) and any(isinstance(pr, dict) and pr.get("headRefOid") == head
+                                          and pr.get("baseRefName") == base_branch for pr in data)
 
 
 def merge_proof(repo: Path, head: str, tips: list[str], base: str | None, branch: str | None = None,
@@ -227,13 +241,26 @@ def merge_proof(repo: Path, head: str, tips: list[str], base: str | None, branch
         return "superseded by the landing; commit reachable online"
     if base and (why := _merged_by_content(repo, head, base)):
         return why
-    if tips and _pr_merged(repo, branch.removeprefix("refs/heads/") if branch else None, head):
+    base_branch = base.removeprefix("refs/remotes/origin/") if base else None
+    if tips and _pr_merged(repo, branch.removeprefix("refs/heads/") if branch else None, head, base_branch):
         return "its PR merged on GitHub"
     return None
 
 
+_PANES: list = [0.0, None]  # [monotonic time, answer]: one herdr call per few seconds, not per worktree
+
+
 def _live_pane_cwds() -> set[Path] | None:
     """Every live Herdr pane's cwd; None when Herdr is installed but cannot answer."""
+    import time
+    if _PANES[1] is not None and time.monotonic() - _PANES[0] < 3:
+        return set(_PANES[1])
+    answer = _query_pane_cwds()
+    _PANES[:] = [time.monotonic(), answer]
+    return answer
+
+
+def _query_pane_cwds() -> set[Path] | None:
     if not shutil.which("herdr"):
         return set()
     try:
@@ -247,10 +274,11 @@ def _live_pane_cwds() -> set[Path] | None:
         return None
     cwds = set()
     for pane in panes:
-        for key in ("cwd", "foreground_cwd"):
-            value = pane.get(key) if isinstance(pane, dict) else None
-            if isinstance(value, str) and value:
-                cwds.add(Path(value).absolute())
+        values = [pane.get(key) for key in ("cwd", "foreground_cwd")] if isinstance(pane, dict) else []
+        values = [v for v in values if isinstance(v, str) and v]
+        if not values:
+            return None  # a pane with no known cwd could be anywhere: fail closed
+        cwds.update(Path(v).absolute() for v in values)
     return cwds
 
 
@@ -271,20 +299,30 @@ def patch_dir(run: dict) -> Path:
     return paths.state_home() / "worktree-patches" / run["id"][:8]
 
 
-def save_patch(run: dict, wt: Path, head: str, base: str | None) -> Path:
-    """Save HEAD's commits beyond the default branch as a git-am-able .patch."""
+def save_patch(run: dict, wt: Path, head: str, base: str | None, *, label: str | None = None) -> Path:
+    """Save HEAD's commits beyond the default branch (else beyond every remote ref) as a .patch."""
     repo = Path(run["repo_root"])
     root = patch_dir(run)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    target = root / f"{wt.name}-{head[:12]}.patch"
+    name = (label or wt.name).replace("/", "_")
+    target = root / f"{name}-{head[:12]}.patch"
     if target.is_file() and target.stat().st_size:
         return target
     base = base or _base_ref(repo)
-    proc = _git(repo, "format-patch", "--stdout", f"{base}..{head}") if base else \
-        _git(repo, "format-patch", "--stdout", "-1", head)
+    if base:
+        proc = _git(repo, "format-patch", "--stdout", f"{base}..{head}")
+    else:
+        own = _git(repo, "rev-list", "--reverse", head, "--not", "--remotes").stdout.split()
+        first = own[0] if own else None
+        if first and _git(repo, "rev-parse", "--verify", "--quiet", first + "^").returncode == 0:
+            proc = _git(repo, "format-patch", "--stdout", f"{first}^..{head}")
+        elif first:
+            proc = _git(repo, "format-patch", "--stdout", "--root", head)
+        else:
+            proc = subprocess.CompletedProcess([], 0, "", "")
     if proc.returncode:
         raise OSError("cannot save patch: " + proc.stderr.strip()[:160])
-    body = proc.stdout or f"# {wt} HEAD {head}: no commits beyond {base}\n"
+    body = proc.stdout or f"# {wt} HEAD {head}: no commits beyond {base or 'the remotes'}\n"
     tmp = target.with_suffix(".patch.tmp")
     tmp.write_text(body)
     tmp.replace(target)
@@ -429,8 +467,11 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
     landing = run.get("landing") or {}
     details = []
     if inspect and not why and worktrees:
-        tips = _remote_tips(Path(run["repo_root"]))
-        base = _live_base(Path(run["repo_root"]), tips) if tips else None
+        try:
+            tips = _remote_tips(Path(run["repo_root"]))
+            base = _live_base(Path(run["repo_root"]), tips) if tips else None
+        except (OSError, subprocess.SubprocessError):
+            tips, base = [], None
         for wt in worktrees:
             facts: dict = {}
             try:
@@ -454,7 +495,8 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
     }
 
 
-def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = True) -> dict:
+def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = True,
+          deadline: float | None = None) -> dict:
     """One run only; persist independently of terminal lifecycle state."""
     with _lock(run):
         current = state.get_run(con, run["id"])
@@ -482,7 +524,11 @@ def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = Tru
             kept.append({"path": str(repo), "reason": f"discovery failed: {exc}"})
             registered, tips, base = {}, [], None
         patches = []
+        import time
         for wt in candidates:
+            if deadline is not None and time.monotonic() > deadline:
+                kept.append({"path": str(wt), "reason": "time budget reached; next close or office gc"})
+                continue
             try:
                 facts: dict = {}
                 reason = _safe_candidate(con, current, wt, registered, tips, base, facts)
@@ -558,7 +604,12 @@ def _delete_merged_branches(run: dict, repo: Path, tips: list[str], base: str | 
         if not ref.startswith("refs/heads/office/"):
             continue
         name = ref.removeprefix("refs/heads/")
-        proof = None if ref in checked_out else merge_proof(repo, sha, tips, base, name, landed=_landed(run))
+        try:
+            proof = None if ref in checked_out else merge_proof(repo, sha, tips, base, name, landed=_landed(run))
+            if proof and proof != "reachable from the default branch":
+                save_patch(run, Path(name), sha, base, label=name)  # deleting the ref drops its reflog
+        except (OSError, subprocess.SubprocessError):
+            proof = None
         # -D only after a merge proof (squash merges fail -d); the ref and SHA
         # are pinned so a branch that moved since the proof is not deleted.
         if proof and _git(repo, "update-ref", "-d", ref, sha).returncode == 0:
@@ -619,7 +670,11 @@ def gc(con, *, dry_run: bool = False, older_than: float | None = None, skip_run:
         "SELECT r.id FROM runs r LEFT JOIN cleanup_runs c ON c.run_id=r.id "
         "WHERE r.office_version IS NOT NULL AND r.phase IN ('closed','abandoned') "
         "AND (r.pruned_at IS NULL OR r.prune_status!='complete') "
-        "AND (c.status IS NULL OR c.status<>'declined') ORDER BY r.terminal_at DESC"))
+        "AND (c.status IS NULL OR c.status<>'declined') ORDER BY " +
+        # The budgeted pass starts with the runs swept longest ago, so runs
+        # that keep unmerged work do not starve the rest.
+        ("(c.updated_at IS NOT NULL), c.updated_at, r.terminal_at DESC" if budget is not None
+         else "r.terminal_at DESC")))
     receipts = {r["run_id"]: r["status"] for r in con.execute("SELECT run_id, status FROM cleanup_runs")}
     fetched: set[str] = set()
     for row in rows:
@@ -636,30 +691,39 @@ def gc(con, *, dry_run: bool = False, older_than: float | None = None, skip_run:
             out["deferred"].append(run["id"])
             continue
         out["runs"] += 1
-        if dry_run:
-            info = preview(con, run, inspect=True)
-            if info["blocker"]:
-                out["kept"].append({"run_id": run["id"], "path": "", "reason": info["blocker"]})
-            for d in info["details"]:
-                if d["blocker"] is None:
-                    out["would_remove"].append({"run_id": run["id"], "path": d["path"], "proof": d.get("proof")})
-                    out["bytes"] += d["bytes"]
-                elif d["blocker"] != "already absent":
-                    out["kept"].append({"run_id": run["id"], "path": d["path"], "reason": d["blocker"]})
-            continue
-        common = str(run.get("git_common_dir"))
         try:
-            report = sweep(con, run, refresh=common not in fetched)
-        except Refused as exc:
-            out["kept"].append({"run_id": run["id"], "path": "", "reason": str(exc)})
-            continue
-        fetched.add(common)
-        out["removed"].extend({"run_id": run["id"], "path": p} for p in report["removed"])
-        out["kept"].extend({"run_id": run["id"], **k} for k in report["kept"] if k.get("path"))
-        out["branches"].extend(report.get("branches", []))
-        out["patches"].extend(report.get("patches", []))
-        out["bytes"] += report["bytes"]
+            _gc_one(con, run, out, dry_run=dry_run, fetched=fetched,
+                    deadline=start + budget if budget is not None else None)
+        except Exception as exc:  # one bad run never stops the sweep or a close
+            out["kept"].append({"run_id": run["id"], "path": "", "reason": f"gc error: {str(exc)[:200]}"})
     return out
+
+
+def _gc_one(con, run: dict, out: dict, *, dry_run: bool, fetched: set[str], deadline: float | None) -> None:
+    if dry_run:
+        info = preview(con, run, inspect=True)
+        if info["blocker"]:
+            out["kept"].append({"run_id": run["id"], "path": "", "reason": info["blocker"]})
+        for d in info["details"]:
+            if d["blocker"] is None:
+                out["would_remove"].append({"run_id": run["id"], "path": d["path"], "proof": d.get("proof")})
+                out["bytes"] += d["bytes"]
+            elif d["blocker"] != "already absent":
+                out["kept"].append({"run_id": run["id"], "path": d["path"], "reason": d["blocker"]})
+        return
+    common = str(run.get("git_common_dir"))
+    try:
+        report = sweep(con, run, refresh=common not in fetched, deadline=deadline)
+    except Refused as exc:
+        out["kept"].append({"run_id": run["id"], "path": "", "reason": str(exc)})
+        return
+    fetched.add(common)
+    out["removed"].extend({"run_id": run["id"], "path": p} for p in report["removed"])
+    out["kept"].extend({"run_id": run["id"], **k} for k in report["kept"]
+                       if k.get("path") or k.get("reason", "").startswith(("discovery failed", "close archive")))
+    out["branches"].extend(report.get("branches", []))
+    out["patches"].extend(report.get("patches", []))
+    out["bytes"] += report["bytes"]
 
 
 def _gc_summary(report: dict) -> str:
@@ -687,7 +751,7 @@ def auto_gc(con, run: dict) -> list[str]:
                          f"kept {len([k for k in own['kept'] if k.get('path')])}, ~{own['bytes']/1e9:.3f} GB reclaimed")
             lines.extend(f"kept worktree {k['path']} ({k['reason']})" for k in own["kept"] if k.get("path"))
         lines.append(_gc_summary(gc(con, skip_run=run["id"], budget=GC_BUDGET_SECONDS)))
-    except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except Exception as exc:  # a finished close never fails on housekeeping
         lines.append(f"gc: skipped ({str(exc)[:160]}); run office gc")
     return lines
 
