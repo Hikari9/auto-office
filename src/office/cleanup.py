@@ -178,7 +178,15 @@ def _merged_by_content(repo: Path, head: str, base: str) -> str | None:
     if not commits:
         # Only merge commits beyond the base (a composed convergence or
         # integration branch): merged when merging it into base changes nothing.
-        tree = _git(repo, "merge-tree", "--write-tree", base, head)
+        # merge-tree --write-tree writes tree objects: send them to a throwaway
+        # object directory so a dry run (or any proof) never touches the repo.
+        import tempfile
+        objects = _git(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects").stdout.strip()
+        with tempfile.TemporaryDirectory(prefix="office-gc-") as scratch:
+            tree = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", base, head],
+                                  capture_output=True, text=True, timeout=45,
+                                  env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OBJECT_DIRECTORY": scratch,
+                                       "GIT_ALTERNATE_OBJECT_DIRECTORIES": objects})
         base_tree = _git(repo, "rev-parse", base + "^{tree}").stdout.strip()
         if tree.returncode == 0 and tree.stdout.split()[:1] == [base_tree]:
             return "merging it into the default branch changes nothing"
@@ -369,6 +377,7 @@ def _herdr_blocker(con, run: dict, wt: Path) -> str | None:
 
 
 UNMERGED = "commit not proven recoverable from current online origin: unmerged commits"
+NO_ORIGIN = "commit not proven recoverable from current online origin (origin unreachable)"
 
 
 def _landed(run: dict) -> bool:
@@ -419,9 +428,11 @@ def _safe_candidate(con, run: dict, wt: Path, registered: dict[Path, dict],
     head = _git(wt, "rev-parse", "HEAD")
     if head.returncode:
         return "commit not proven recoverable from current online origin (HEAD unreadable)"
-    if not tips:
-        return "commit not proven recoverable from current online origin (origin unreachable)"
     sha = head.stdout.strip()
+    if not tips:
+        if facts is not None:
+            facts.update(head=sha, proof=None, base=None)
+        return NO_ORIGIN
     branch = info.get("branch") if isinstance(info.get("branch"), str) else None
     proof = merge_proof(repo, sha, tips, base, branch, landed=_landed(run))
     if facts is not None:
@@ -476,7 +487,7 @@ def preview(con, run: dict, *, inspect: bool = False) -> dict:
             facts: dict = {}
             try:
                 blocker = _safe_candidate(con, run, wt, registered, tips, base, facts)
-                if blocker == UNMERGED:
+                if blocker in (UNMERGED, NO_ORIGIN):
                     blocker += " (would save a .patch)"
                 modified = (datetime.fromtimestamp(wt.stat().st_mtime, tz=timezone.utc).isoformat()
                             if wt.exists() else None)
@@ -534,8 +545,8 @@ def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = Tru
                 reason = _safe_candidate(con, current, wt, registered, tips, base, facts)
                 if reason == "already absent":
                     continue
-                if reason == UNMERGED:
-                    # Unmerged work stays in its worktree, and a .patch is saved too.
+                if reason in (UNMERGED, NO_ORIGIN):
+                    # Unproven work stays in its worktree, and a .patch is saved too.
                     saved = save_patch(current, wt, facts["head"], base)
                     patches.append(str(saved))
                     kept.append({"path": str(wt), "reason": f"{reason} (patch saved: {saved})", "patch": str(saved)})

@@ -186,10 +186,11 @@ def _prune_one(con, run_id: str) -> str | None:
         swept = cleanup.sweep(con, state.get_run(con, run_id), override_decline=True)
     except (Refused, OSError, ValueError, subprocess.SubprocessError) as exc:
         return f"worktree cleanup failed, nothing pruned: {exc}"
-    # prune -f is the explicit delete: unmerged commits go after a .patch is
-    # saved (below). Dirty trees and anything live, locked or in use stay.
-    held = [k for k in swept["kept"] if k.get("path")
-            and not k.get("reason", "").startswith("commit not proven recoverable")]
+    # Unmerged work is never force-removed, even by prune -f: the engine kept
+    # it with a .patch, so this run is skipped until that work merges or the
+    # operator removes the worktree by hand. Dirty, live, locked and in-use
+    # trees stay for the same reason.
+    held = [k for k in swept["kept"] if k.get("path")]
     if held:
         return "worktrees kept, nothing pruned: " + "; ".join(f"{k['path']}: {k['reason']}" for k in held)[:400]
     try:

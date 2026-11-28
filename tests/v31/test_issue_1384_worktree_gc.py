@@ -161,7 +161,8 @@ def test_prune_saves_a_patch_for_unmerged_work_and_keeps_dirty_trees(env, monkey
     wt = _leftover(env, rid, "T3")
     _commit(env, wt, "keep.txt", "keep\n", "T3: unmerged")
     code, out = env.office("prune", "-f", "--run", rid)
-    assert code == 0 and "pruned 1" in out and not wt.exists(), out
+    assert "worktrees kept, nothing pruned" in out and "unmerged commits" in out, out
+    assert wt.is_dir() and (wt / "keep.txt").exists(), out
     patches = list((env.state / "worktree-patches" / rid[:8]).glob("T3-*.patch"))
     assert patches and "T3: unmerged" in patches[0].read_text(), out
 
@@ -296,3 +297,30 @@ def test_one_failing_run_never_stops_gc(env, monkeypatch):
     monkeypatch.setattr(cleanup, "sweep", boom)
     report = cleanup.gc(env.con())
     assert any("gc error: simulated git timeout" in k["reason"] and k["run_id"] == rid for k in report["kept"])
+
+
+
+def test_merge_tree_proof_writes_no_objects_into_the_repository(tmp_path):
+    repo = _repo(tmp_path)
+    _g(repo, "checkout", "-qb", "side")
+    (repo / "s.txt").write_text("side\n")
+    _g(repo, "add", "s.txt")
+    _g(repo, "commit", "-qm", "side work")
+    side = _g(repo, "rev-parse", "HEAD")
+    _g(repo, "checkout", "-q", "main")
+    _g(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+    merged = _g(repo, "rev-parse", "HEAD")
+    # A merge-only branch: one merge commit whose resolution adds content.
+    (repo / "resolution.txt").write_text("content only this merge adds\n")
+    _g(repo, "add", "resolution.txt")
+    tree = _g(repo, "write-tree")
+    head = _g(repo, "commit-tree", tree, "-p", merged, "-p", side, "-m", "merge with a resolution")
+    _g(repo, "rm", "-q", "--cached", "resolution.txt")
+    (repo / "resolution.txt").unlink()
+    (repo / "m2.txt").write_text("main moved on\n")  # so the merge result is a brand-new tree
+    _g(repo, "add", "m2.txt")
+    _g(repo, "commit", "-qm", "main moves")
+    _g(repo, "gc", "-q")
+    before = _g(repo, "count-objects", "-v")
+    assert cleanup._merged_by_content(repo, head, "main") is None
+    assert _g(repo, "count-objects", "-v") == before
