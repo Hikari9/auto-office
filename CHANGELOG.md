@@ -2,6 +2,10 @@
 
 One line or short list per version, newest first. The version itself lives only in `src/office/_version.py` (see `AGENTS.md`).
 
+## 3.32.0
+
+Adds the opt-in `office bridge` JSON protocol for a trusted local or cloud worker: externally fenced admission, mission-bound runs, durable idempotent receipts, inspection without starting jobs, cancellation and recovery through the existing Office lifecycle. It accepts no arbitrary commands, policy changes, approvals, merges or deployments.
+
 ## 3.31.21
 
 `office route override` accepts a partial route (#1378). With `--rico-quote` and `--quoted-at`, it accepts `<harness>/<model>` with no effort, a bare harness (`agy`, stored as `agy/*`) or a bare model family (`gemini`, stored as `*/gemini`). The effort is inferred at dispatch from the task's own size. It is the executor-policy rung effort for that size, otherwise the lowest catalog effort for that model that meets the size floor. An ambiguous or missing match is refused with the choices listed. A partial receipt matches only that inferred effort, never another, and an unsized task matches nothing. The receipt records `effort_source = size` in a new nullable column, which the MAC covers only when it is set, so existing receipts still verify. `--as <harness>/<model>` without an effort on a sized task resolves the same way, and the route records `effort_inferred: "size S"` so nothing treats the effort as user-chosen. Partial overrides apply to executor and worker roles only. Worker refusal and the quote rules are unchanged. An S task on `agy/gemini-4-hydrogen` now runs @medium.

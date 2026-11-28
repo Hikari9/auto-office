@@ -840,6 +840,7 @@ The README is the developer entrypoint; the detailed contracts live here:
 - [`references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md`](references/OFFICE-SKILLS-V3-LIFECYCLE-SPEC.md) — lifecycle rationale and invariants.
 - [`references/OFFICE-SKILLS-V3-SPEC.md`](references/OFFICE-SKILLS-V3-SPEC.md) — routing policy and role contracts.
 - [`docs/board-card.md`](docs/board-card.md) — the run on a display-only herdr-projects board card: key, states, routes, reviews.
+- [`docs/cloud-bridge.md`](docs/cloud-bridge.md) — the admitted stdio interface for local or cloud coordinators, with mission receipts and recovery.
 - [`CONTEXT.md`](CONTEXT.md) — project terminology and design context.
 
 ## Migrating from 3.0

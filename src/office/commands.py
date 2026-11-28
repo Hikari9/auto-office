@@ -61,11 +61,16 @@ def transition(con: sqlite3.Connection, command_id: str, status: str, *, pid: in
         return get(con, command_id)
 
 
-def recover_interrupted(con: sqlite3.Connection, alive_pids) -> list[str]:
+def recover_interrupted(con: sqlite3.Connection, alive_pids, *, origins: tuple[str, ...] | None = None) -> list[str]:
     """Mark `running` receipts whose executor is gone as `unknown`; return their ids."""
     alive = set(alive_pids)
     with db.transaction(con):
-        lost = [r["id"] for r in con.execute("SELECT id, pid FROM commands WHERE status='running'")
+        query = "SELECT id, pid FROM commands WHERE status='running'"
+        params = ()
+        if origins is not None:
+            query += " AND origin IN (" + ",".join("?" for _ in origins) + ")"
+            params = origins
+        lost = [r["id"] for r in con.execute(query, params)
                 if r["pid"] not in alive]
         at = now_iso()
         for command_id in lost:

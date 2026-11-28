@@ -76,6 +76,7 @@ Auto Office {ver}
                                     catalog, global user policy and lineage retention
 
   office list                       runs in this repository (--all for every run)
+  office bridge                     trusted-worker JSON protocol on stdin (docs/cloud-bridge.md)
   office inspect [run|task|gate|evidence|events|route|learner|trust|convergence|economics|efficiency] [id]
   office context [--since SEQ]       bounded root snapshot from runs.db (goal, plan, tasks, gates, next, stale refs)
   office card status|sync | link <card>|--create
@@ -732,6 +733,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "hook":
         from office import hooks
         return hooks.main(argv[1:])
+    if argv and argv[0] == "bridge":
+        from office import bridge
+        return bridge.main(argv[1:])
     from office.state import OfficeError
     parser = _parser()
     args, unknown = parser.parse_known_args(argv)

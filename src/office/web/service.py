@@ -280,7 +280,9 @@ class Service:
         try:
             schema = con.execute("SELECT value FROM schema_meta WHERE key='office_schema'").fetchone()
             log.info("office web: runs.db %s migrated to schema %s", self.db_path, schema[0] if schema else "?")
-            self.recovered = receipts.recover_interrupted(con, ())
+            # A web restart knows its own command workers are gone, not a
+            # separately running CLI/cloud bridge's workers in this shared DB.
+            self.recovered = receipts.recover_interrupted(con, (), origins=("web", "web-queue"))
             if self.recovered:
                 log.info("office web: %d interrupted command receipt(s) marked unknown", len(self.recovered))
         finally:
