@@ -331,6 +331,15 @@ def save_patch(run: dict, wt: Path, head: str, base: str | None, *, label: str |
     if proc.returncode:
         raise OSError("cannot save patch: " + proc.stderr.strip()[:160])
     body = proc.stdout or f"# {wt} HEAD {head}: no commits beyond {base or 'the remotes'}\n"
+    # format-patch omits merge commits; a full diff from the merge-base keeps
+    # conflict-resolution content too.
+    mb = _git(repo, "merge-base", base, head) if base else None
+    if mb is not None and mb.returncode == 0 and mb.stdout.strip():
+        full = _git(repo, "diff", "--binary", mb.stdout.strip(), head)
+        if full.returncode == 0 and full.stdout:
+            diff_tmp = target.with_suffix(".diff.tmp")
+            diff_tmp.write_text(full.stdout)
+            diff_tmp.replace(target.with_suffix(".diff"))
     tmp = target.with_suffix(".patch.tmp")
     tmp.write_text(body)
     tmp.replace(target)
@@ -565,6 +574,7 @@ def sweep(con, run: dict, *, override_decline: bool = False, refresh: bool = Tru
                 # Re-check immediately: writers, panes or commits could change
                 # while the backup was being prepared.
                 recent = _registered(repo)
+                _PANES[:] = [0.0, None]  # the destructive recheck never uses a cached pane list
                 reason = _safe_candidate(con, current, wt, recent, _remote_tips(repo), base)
                 if reason:
                     kept.append({"path": str(wt), "reason": "changed since archive: " + reason})

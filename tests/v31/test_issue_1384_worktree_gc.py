@@ -324,3 +324,35 @@ def test_merge_tree_proof_writes_no_objects_into_the_repository(tmp_path):
     before = _g(repo, "count-objects", "-v")
     assert cleanup._merged_by_content(repo, head, "main") is None
     assert _g(repo, "count-objects", "-v") == before
+
+
+
+def test_destructive_recheck_queries_herdr_fresh(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    wt = _leftover(env, rid, "T5f", branch=False)
+    calls = []
+    def query():
+        calls.append(1)
+        return set() if len(calls) == 1 else {wt}  # a pane moves in after the first check
+    monkeypatch.setattr(cleanup, "_PANES", [0.0, None])
+    monkeypatch.setattr(cleanup, "_query_pane_cwds", query)
+    code, out = env.office("gc")
+    assert code == 0 and wt.is_dir() and "live Herdr pane cwd" in out, out
+
+
+def test_unmerged_merge_only_worktree_keeps_its_resolution_in_a_full_diff(env, monkeypatch):
+    rid = _closed(env, monkeypatch)
+    _no_panes(monkeypatch)
+    wt = _leftover(env, rid, "T5m")
+    base = env.git("-C", str(wt), "rev-parse", "HEAD").strip()
+    _commit(env, wt, "side.txt", "side\n", "T5m: side")
+    side = env.git("-C", str(wt), "rev-parse", "HEAD").strip()
+    env.git("-C", str(wt), "reset", "-q", "--hard", base)
+    env.git("-C", str(wt), "merge", "-q", "--no-ff", "--no-commit", side)
+    (wt / "resolution.txt").write_text("resolution only in the merge\n")
+    env.git("-C", str(wt), "add", "resolution.txt")
+    env.git("-C", str(wt), "commit", "-qm", "T5m: merge with resolution")
+    code, out = env.office("gc")
+    assert code == 0 and wt.is_dir() and "patch saved" in out, out
+    diffs = list((env.state / "worktree-patches" / rid[:8]).glob("T5m-*.diff"))
+    assert diffs and "resolution only in the merge" in diffs[0].read_text(), out
